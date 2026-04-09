@@ -23,6 +23,7 @@ interface GitHubSyncSettings {
   mappings: RepositoryMapping[];
   syncState: SyncRunState;
   scheduleFrequencyMinutes: number;
+  paperclipApiBaseUrl?: string;
   githubTokenConfigured?: boolean;
   updatedAt?: string;
 }
@@ -1074,6 +1075,14 @@ function parseRepositoryReference(repositoryInput: string): ParsedRepositoryRefe
   }
 }
 
+function getPaperclipApiBaseUrl(): string | undefined {
+  if (typeof window === 'undefined' || !window.location?.origin) {
+    return undefined;
+  }
+
+  return window.location.origin;
+}
+
 function formatDate(value?: string, fallback = 'Never'): string {
   if (!value) {
     return fallback;
@@ -1443,6 +1452,7 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
       mappings: settings.data.mappings ?? [],
       syncState: settings.data.syncState ?? { status: 'idle' },
       scheduleFrequencyMinutes: nextScheduleFrequencyMinutes,
+      paperclipApiBaseUrl: settings.data.paperclipApiBaseUrl,
       githubTokenConfigured: settings.data.githubTokenConfigured,
       updatedAt: settings.data.updatedAt
     });
@@ -1693,7 +1703,8 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
       const result = await saveRegistration({
         mappings: resolvedMappings,
         syncState: form.syncState,
-        scheduleFrequencyMinutes
+        scheduleFrequencyMinutes,
+        paperclipApiBaseUrl: getPaperclipApiBaseUrl()
       }) as GitHubSyncSettings;
 
       setForm((current) => ({
@@ -1701,6 +1712,7 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
         mappings: result.mappings.length > 0 ? result.mappings : [createEmptyMapping(0)],
         syncState: result.syncState,
         scheduleFrequencyMinutes: normalizeScheduleFrequencyMinutes(result.scheduleFrequencyMinutes),
+        paperclipApiBaseUrl: result.paperclipApiBaseUrl,
         updatedAt: result.updatedAt
       }));
       setScheduleFrequencyDraft(String(normalizeScheduleFrequencyMinutes(result.scheduleFrequencyMinutes)));

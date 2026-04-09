@@ -1,5 +1,5 @@
 import { Octokit } from '@octokit/rest';
-import { definePlugin, runWorker } from '@paperclipai/plugin-sdk';
+import { definePlugin, runWorker, type Issue } from '@paperclipai/plugin-sdk';
 
 const SETTINGS_SCOPE = {
   scopeKind: 'instance' as const,
@@ -18,6 +18,16 @@ const IMPORT_REGISTRY_SCOPE = {
 
 const DEFAULT_SCHEDULE_FREQUENCY_MINUTES = 15;
 const GITHUB_API_VERSION = '2026-03-10';
+const DEFAULT_PAPERCLIP_LABEL_COLOR = '#6366f1';
+const PAPERCLIP_LABEL_PAGE_SIZE = 100;
+
+type PluginSetupContext = Parameters<Parameters<typeof definePlugin>[0]['setup']>[0];
+type PaperclipIssueLabel = NonNullable<Issue['labels']>[number];
+type PaperclipIssueUpdatePatchWithLabels = Parameters<PluginSetupContext['issues']['update']>[1] & {
+  labelIds?: string[];
+  labels?: PaperclipIssueLabel[];
+};
+type PaperclipLabelDirectory = Map<string, PaperclipIssueLabel[]>;
 
 interface RepositoryMapping {
   id: string;
@@ -48,6 +58,7 @@ interface GitHubSyncSettings {
   mappings: RepositoryMapping[];
   syncState: SyncRunState;
   scheduleFrequencyMinutes: number;
+  paperclipApiBaseUrl?: string;
   updatedAt?: string;
 }
 
@@ -61,8 +72,13 @@ interface GitHubIssueRecord {
   title: string;
   body: string | null;
   htmlUrl: string;
-  state: string;
+  labels: GitHubIssueLabelRecord[];
   parentIssueId?: number;
+}
+
+interface GitHubIssueLabelRecord {
+  name: string;
+  color?: string;
 }
 
 interface TokenValidationResult {
@@ -82,8 +98,16 @@ interface GitHubApiIssueRecord {
   body?: string | null;
   html_url: string;
   state: string;
+  labels?: GitHubApiIssueLabelRecord[];
   pull_request?: unknown;
 }
+
+type GitHubApiIssueLabelRecord =
+  | string
+  | {
+      name?: string | null;
+      color?: string | null;
+    };
 
 const DEFAULT_SETTINGS: GitHubSyncSettings = {
   mappings: [],
@@ -176,17 +200,36 @@ function normalizeScheduleFrequencyMinutes(value: unknown): number {
   return Math.floor(numericValue);
 }
 
+function normalizePaperclipApiBaseUrl(value: unknown): string | undefined {
+  if (typeof value !== 'string') {
+    return undefined;
+  }
+
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return undefined;
+  }
+
+  try {
+    return new URL(trimmed).origin;
+  } catch {
+    return undefined;
+  }
+}
+
 function normalizeSettings(value: unknown): GitHubSyncSettings {
   if (!value || typeof value !== 'object') {
     return DEFAULT_SETTINGS;
   }
 
   const record = value as Record<string, unknown>;
+  const paperclipApiBaseUrl = normalizePaperclipApiBaseUrl(record.paperclipApiBaseUrl);
 
   return {
     mappings: normalizeMappings(record.mappings),
     syncState: normalizeSyncState(record.syncState),
     scheduleFrequencyMinutes: normalizeScheduleFrequencyMinutes(record.scheduleFrequencyMinutes),
+    ...(paperclipApiBaseUrl ? { paperclipApiBaseUrl } : {}),
     updatedAt: typeof record.updatedAt === 'string' ? record.updatedAt : undefined
   };
 }
@@ -265,6 +308,56 @@ function parseRepositoryReference(repositoryInput: string): ParsedRepositoryRefe
   }
 }
 
+function normalizeLabelName(value: string): string {
+  return value.trim().toLowerCase();
+}
+
+function normalizeHexColor(value: string | null | undefined): string | undefined {
+  const trimmed = value?.trim();
+  if (!trimmed) {
+    return undefined;
+  }
+
+  const candidate = trimmed.startsWith('#') ? trimmed : `#${trimmed}`;
+  return /^#(?:[0-9a-fA-F]{6})$/.test(candidate) ? candidate.toLowerCase() : undefined;
+}
+
+function normalizeGitHubIssueLabels(value: GitHubApiIssueRecord['labels']): GitHubIssueLabelRecord[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  const seen = new Set<string>();
+  const labels: GitHubIssueLabelRecord[] = [];
+
+  for (const entry of value) {
+    const name =
+      typeof entry === 'string'
+        ? entry.trim()
+        : entry && typeof entry === 'object' && typeof entry.name === 'string'
+          ? entry.name.trim()
+          : '';
+
+    if (!name) {
+      continue;
+    }
+
+    const key = normalizeLabelName(name);
+    if (seen.has(key)) {
+      continue;
+    }
+
+    seen.add(key);
+    labels.push({
+      name,
+      color:
+        entry && typeof entry === 'object' && 'color' in entry ? normalizeHexColor(entry.color ?? undefined) : undefined
+    });
+  }
+
+  return labels;
+}
+
 function normalizeGitHubIssueRecord(issue: GitHubApiIssueRecord, parentIssueId?: number): GitHubIssueRecord {
   return {
     id: issue.id,
@@ -272,9 +365,329 @@ function normalizeGitHubIssueRecord(issue: GitHubApiIssueRecord, parentIssueId?:
     title: issue.title,
     body: issue.body ?? null,
     htmlUrl: issue.html_url,
-    state: issue.state,
+    labels: normalizeGitHubIssueLabels(issue.labels),
     parentIssueId
   };
+}
+
+function buildPaperclipIssueDescription(issue: GitHubIssueRecord): string {
+  const sections = [`Imported from ${issue.htmlUrl}`];
+
+  if (issue.body?.trim()) {
+    sections.push(issue.body.trim());
+  }
+
+  return sections.join('\n\n');
+}
+
+function coerceDate(value: unknown): Date {
+  if (value instanceof Date && !Number.isNaN(value.getTime())) {
+    return value;
+  }
+
+  if (typeof value === 'string' || typeof value === 'number') {
+    const parsed = new Date(value);
+    if (!Number.isNaN(parsed.getTime())) {
+      return parsed;
+    }
+  }
+
+  return new Date();
+}
+
+function parsePaperclipIssueLabel(value: unknown, expectedCompanyId?: string): PaperclipIssueLabel | null {
+  if (!value || typeof value !== 'object') {
+    return null;
+  }
+
+  const record = value as Record<string, unknown>;
+  const id = typeof record.id === 'string' ? record.id : '';
+  const companyId = typeof record.companyId === 'string' ? record.companyId : expectedCompanyId;
+  const name = typeof record.name === 'string' ? record.name.trim() : '';
+  const color = normalizeHexColor(typeof record.color === 'string' ? record.color : undefined);
+
+  if (!id || !companyId || !name || !color) {
+    return null;
+  }
+
+  return {
+    id,
+    companyId,
+    name,
+    color,
+    createdAt: coerceDate(record.createdAt),
+    updatedAt: coerceDate(record.updatedAt)
+  };
+}
+
+function addPaperclipLabelToDirectory(directory: PaperclipLabelDirectory, label: PaperclipIssueLabel) {
+  const key = normalizeLabelName(label.name);
+  if (!key) {
+    return;
+  }
+
+  const existing = directory.get(key) ?? [];
+  if (existing.some((candidate) => candidate.id === label.id)) {
+    return;
+  }
+
+  existing.push(label);
+  directory.set(key, existing);
+}
+
+function mergePaperclipLabelDirectories(target: PaperclipLabelDirectory, source: PaperclipLabelDirectory) {
+  for (const labels of source.values()) {
+    for (const label of labels) {
+      addPaperclipLabelToDirectory(target, label);
+    }
+  }
+}
+
+function selectPaperclipLabelForGitHubLabel(
+  githubLabel: GitHubIssueLabelRecord,
+  directory: PaperclipLabelDirectory
+): PaperclipIssueLabel | undefined {
+  const candidates = directory.get(normalizeLabelName(githubLabel.name)) ?? [];
+  const normalizedGithubColor = normalizeHexColor(githubLabel.color);
+
+  if (normalizedGithubColor) {
+    const exactColorMatch = candidates.find((candidate) => normalizeHexColor(candidate.color) === normalizedGithubColor);
+    if (exactColorMatch) {
+      return exactColorMatch;
+    }
+  }
+
+  return candidates[0];
+}
+
+function getPaperclipLabelsEndpoint(baseUrl: string, companyId: string): string {
+  return new URL(`/api/companies/${companyId}/labels`, baseUrl).toString();
+}
+
+async function fetchPaperclipApi(url: string, init?: RequestInit): Promise<Response> {
+  // Use direct worker-side fetch here. The host-managed `ctx.http.fetch(...)`
+  // proxy rejects loopback/private IPs such as `127.0.0.1`, but the local
+  // Paperclip REST API is intentionally served from the host machine.
+  return fetch(url, init);
+}
+
+async function listPaperclipLabelsViaApi(
+  ctx: PluginSetupContext,
+  companyId: string,
+  paperclipApiBaseUrl?: string
+): Promise<PaperclipLabelDirectory | null> {
+  if (!paperclipApiBaseUrl) {
+    return null;
+  }
+
+  try {
+    const response = await fetchPaperclipApi(getPaperclipLabelsEndpoint(paperclipApiBaseUrl, companyId), {
+      method: 'GET',
+      headers: {
+        accept: 'application/json'
+      }
+    });
+
+    if (!response.ok) {
+      if (response.status !== 404 && response.status !== 405) {
+        ctx.logger.warn('Unable to list Paperclip labels through the local API.', {
+          companyId,
+          paperclipApiBaseUrl,
+          status: response.status
+        });
+      }
+      return null;
+    }
+
+    const payload = await response.json();
+    if (!Array.isArray(payload)) {
+      return null;
+    }
+
+    const directory: PaperclipLabelDirectory = new Map();
+    for (const entry of payload) {
+      const label = parsePaperclipIssueLabel(entry, companyId);
+      if (label) {
+        addPaperclipLabelToDirectory(directory, label);
+      }
+    }
+
+    return directory;
+  } catch (error) {
+    ctx.logger.warn('Unable to list Paperclip labels through the local API.', {
+      companyId,
+      paperclipApiBaseUrl,
+      error: error instanceof Error ? error.message : String(error)
+    });
+    return null;
+  }
+}
+
+async function buildPaperclipLabelDirectory(
+  ctx: PluginSetupContext,
+  companyId: string,
+  paperclipApiBaseUrl?: string
+): Promise<PaperclipLabelDirectory> {
+  const directory: PaperclipLabelDirectory = new Map();
+  const apiDirectory = await listPaperclipLabelsViaApi(ctx, companyId, paperclipApiBaseUrl);
+  if (apiDirectory) {
+    mergePaperclipLabelDirectories(directory, apiDirectory);
+  }
+
+  if (!ctx.issues || typeof ctx.issues.list !== 'function') {
+    return directory;
+  }
+
+  for (let offset = 0; ; ) {
+    const page = await ctx.issues.list({
+      companyId,
+      limit: PAPERCLIP_LABEL_PAGE_SIZE,
+      offset
+    });
+
+    if (page.length === 0) {
+      break;
+    }
+
+    for (const issue of page) {
+      for (const label of issue.labels ?? []) {
+        addPaperclipLabelToDirectory(directory, label);
+      }
+    }
+
+    if (page.length < PAPERCLIP_LABEL_PAGE_SIZE) {
+      break;
+    }
+
+    offset += page.length;
+  }
+
+  return directory;
+}
+
+async function createPaperclipLabelViaApi(
+  ctx: PluginSetupContext,
+  companyId: string,
+  githubLabel: GitHubIssueLabelRecord,
+  paperclipApiBaseUrl?: string
+): Promise<PaperclipIssueLabel | null> {
+  if (!paperclipApiBaseUrl) {
+    return null;
+  }
+
+  const color = normalizeHexColor(githubLabel.color) ?? DEFAULT_PAPERCLIP_LABEL_COLOR;
+
+  try {
+    const response = await fetchPaperclipApi(getPaperclipLabelsEndpoint(paperclipApiBaseUrl, companyId), {
+      method: 'POST',
+      headers: {
+        accept: 'application/json',
+        'content-type': 'application/json'
+      },
+      body: JSON.stringify({
+        name: githubLabel.name,
+        color
+      })
+    });
+
+    if (!response.ok) {
+      ctx.logger.warn('Unable to create a Paperclip label through the local API.', {
+        companyId,
+        paperclipApiBaseUrl,
+        labelName: githubLabel.name,
+        color,
+        status: response.status
+      });
+      return null;
+    }
+
+    return parsePaperclipIssueLabel(await response.json(), companyId);
+  } catch (error) {
+    ctx.logger.warn('Unable to create a Paperclip label through the local API.', {
+      companyId,
+      paperclipApiBaseUrl,
+      labelName: githubLabel.name,
+      color,
+      error: error instanceof Error ? error.message : String(error)
+    });
+    return null;
+  }
+}
+
+async function ensurePaperclipLabelForGitHubLabel(
+  ctx: PluginSetupContext,
+  companyId: string,
+  githubLabel: GitHubIssueLabelRecord,
+  directory: PaperclipLabelDirectory,
+  paperclipApiBaseUrl?: string
+): Promise<PaperclipIssueLabel | null> {
+  const matchedBeforeCreate = selectPaperclipLabelForGitHubLabel(githubLabel, directory);
+  if (matchedBeforeCreate) {
+    return matchedBeforeCreate;
+  }
+
+  const createdLabel = await createPaperclipLabelViaApi(ctx, companyId, githubLabel, paperclipApiBaseUrl);
+  if (createdLabel) {
+    addPaperclipLabelToDirectory(directory, createdLabel);
+    return createdLabel;
+  }
+
+  const refreshedDirectory = await listPaperclipLabelsViaApi(ctx, companyId, paperclipApiBaseUrl);
+  if (refreshedDirectory) {
+    mergePaperclipLabelDirectories(directory, refreshedDirectory);
+  }
+
+  return selectPaperclipLabelForGitHubLabel(githubLabel, directory) ?? null;
+}
+
+async function ensurePaperclipLabelsForIssue(
+  ctx: PluginSetupContext,
+  companyId: string,
+  issue: GitHubIssueRecord,
+  directory: PaperclipLabelDirectory,
+  paperclipApiBaseUrl?: string
+): Promise<PaperclipIssueLabel[]> {
+  const matchedLabels: PaperclipIssueLabel[] = [];
+  const seenIds = new Set<string>();
+
+  for (const githubLabel of issue.labels) {
+    const selectedLabel = await ensurePaperclipLabelForGitHubLabel(
+      ctx,
+      companyId,
+      githubLabel,
+      directory,
+      paperclipApiBaseUrl
+    );
+
+    if (!selectedLabel || seenIds.has(selectedLabel.id)) {
+      continue;
+    }
+
+    seenIds.add(selectedLabel.id);
+    matchedLabels.push(selectedLabel);
+  }
+
+  return matchedLabels;
+}
+
+async function applyPaperclipLabelsToIssue(
+  ctx: PluginSetupContext,
+  companyId: string,
+  issueId: string,
+  labels: PaperclipIssueLabel[]
+): Promise<void> {
+  if (!labels.length || !ctx.issues || typeof ctx.issues.update !== 'function') {
+    return;
+  }
+
+  // `labelIds` is supported by the host issue schema, but the current SDK
+  // `ctx.issues.update(...)` type hasn't caught up yet.
+  const patch = {
+    labelIds: labels.map((label) => label.id),
+    labels
+  } as unknown as PaperclipIssueUpdatePatchWithLabels;
+
+  await ctx.issues.update(issueId, patch, companyId);
 }
 
 async function getParentIssue(
@@ -420,37 +833,43 @@ async function listRepositoryIssues(octokit: Octokit, repositoryUrl: string): Pr
 }
 
 async function createPaperclipIssue(
-  ctx: Parameters<Parameters<typeof definePlugin>[0]['setup']>[0],
+  ctx: PluginSetupContext,
   mapping: RepositoryMapping,
   issue: GitHubIssueRecord,
+  availableLabels: PaperclipLabelDirectory,
+  paperclipApiBaseUrl: string | undefined,
   parentId?: string
 ) {
   if (!mapping.companyId || !mapping.paperclipProjectId) {
     throw new Error(`Mapping ${mapping.id} is missing resolved Paperclip project identifiers.`);
   }
 
-  const title = `[GitHub] ${issue.title}`;
-  const description = [
-    `Imported from ${issue.htmlUrl}`,
-    '',
-    issue.body ?? '',
-    '',
-    `GitHub issue state: ${issue.state}`
-  ].join('\n').trim();
+  const title = issue.title;
+  const description = buildPaperclipIssueDescription(issue);
 
-  return ctx.issues.create({
+  const createdIssue = await ctx.issues.create({
     companyId: mapping.companyId,
     projectId: mapping.paperclipProjectId,
     parentId,
     title,
     description
   });
+
+  await applyPaperclipLabelsToIssue(
+    ctx,
+    mapping.companyId,
+    createdIssue.id,
+    await ensurePaperclipLabelsForIssue(ctx, mapping.companyId, issue, availableLabels, paperclipApiBaseUrl)
+  );
+  return createdIssue;
 }
 
 async function ensurePaperclipIssueImported(
-  ctx: Parameters<Parameters<typeof definePlugin>[0]['setup']>[0],
+  ctx: PluginSetupContext,
   mapping: RepositoryMapping,
   issue: GitHubIssueRecord,
+  availableLabels: PaperclipLabelDirectory,
+  paperclipApiBaseUrl: string | undefined,
   issuesById: Map<number, GitHubIssueRecord>,
   importRegistryByIssueId: Map<number, ImportedIssueRecord>,
   nextRegistry: ImportedIssueRecord[],
@@ -485,6 +904,8 @@ async function ensurePaperclipIssueImported(
         ctx,
         mapping,
         parentIssue,
+        availableLabels,
+        paperclipApiBaseUrl,
         issuesById,
         importRegistryByIssueId,
         nextRegistry,
@@ -498,7 +919,14 @@ async function ensurePaperclipIssueImported(
     }
   }
 
-  const createdIssue = await createPaperclipIssue(ctx, mapping, issue, parentPaperclipIssueId);
+  const createdIssue = await createPaperclipIssue(
+    ctx,
+    mapping,
+    issue,
+    availableLabels,
+    paperclipApiBaseUrl,
+    parentPaperclipIssueId
+  );
   const registryRecord = {
     mappingId: mapping.id,
     githubIssueId: issue.id,
@@ -513,11 +941,11 @@ async function ensurePaperclipIssueImported(
   return createdIssue.id;
 }
 
-async function getResolvedConfig(ctx: Parameters<Parameters<typeof definePlugin>[0]['setup']>[0]): Promise<GitHubSyncConfig> {
+async function getResolvedConfig(ctx: PluginSetupContext): Promise<GitHubSyncConfig> {
   return normalizeConfig(await ctx.config.get());
 }
 
-async function resolveGithubToken(ctx: Parameters<Parameters<typeof definePlugin>[0]['setup']>[0]): Promise<string> {
+async function resolveGithubToken(ctx: PluginSetupContext): Promise<string> {
   const config = await getResolvedConfig(ctx);
   const secretRef = config.githubTokenRef?.trim() ?? '';
   if (!secretRef) {
@@ -563,7 +991,7 @@ function shouldRunScheduledSync(settings: GitHubSyncSettings, scheduledAt?: stri
   return now - lastCheckedAt >= settings.scheduleFrequencyMinutes * 60_000;
 }
 
-async function performSync(ctx: Parameters<Parameters<typeof definePlugin>[0]['setup']>[0], trigger: 'manual' | 'schedule' | 'retry') {
+async function performSync(ctx: PluginSetupContext, trigger: 'manual' | 'schedule' | 'retry') {
   const settings = normalizeSettings(await ctx.state.get(SETTINGS_SCOPE));
   const importRegistry = normalizeImportRegistry(await ctx.state.get(IMPORT_REGISTRY_SCOPE));
   const token = await resolveGithubToken(ctx);
@@ -625,9 +1053,24 @@ async function performSync(ctx: Parameters<Parameters<typeof definePlugin>[0]['s
   let createdIssuesCount = 0;
   let skippedIssuesCount = 0;
   const nextRegistry = [...importRegistry];
+  const companyLabelDirectoryCache = new Map<string, PaperclipLabelDirectory>();
+  const supportsPaperclipLabelMapping =
+    typeof ctx.issues?.list === 'function' && typeof ctx.issues?.update === 'function';
 
   try {
     for (const mapping of mappings) {
+      const companyId = mapping.companyId;
+      let availableLabels = companyId ? companyLabelDirectoryCache.get(companyId) : undefined;
+      if (!availableLabels) {
+        availableLabels =
+          supportsPaperclipLabelMapping && companyId
+            ? await buildPaperclipLabelDirectory(ctx, companyId, settings.paperclipApiBaseUrl)
+            : new Map();
+        if (companyId) {
+          companyLabelDirectoryCache.set(companyId, availableLabels);
+        }
+      }
+
       const issues = await listRepositoryIssues(octokit, mapping.repositoryUrl);
       const issuesById = new Map(issues.map((issue) => [issue.id, issue]));
       const importRegistryByIssueId = new Map(
@@ -646,6 +1089,8 @@ async function performSync(ctx: Parameters<Parameters<typeof definePlugin>[0]['s
           ctx,
           mapping,
           issue,
+          availableLabels,
+          settings.paperclipApiBaseUrl,
           issuesById,
           importRegistryByIssueId,
           nextRegistry,
@@ -713,7 +1158,8 @@ const plugin = definePlugin({
       const current = normalizeSettings({
         mappings: 'mappings' in record ? record.mappings : previous.mappings,
         syncState: 'syncState' in record ? record.syncState : previous.syncState,
-        scheduleFrequencyMinutes: 'scheduleFrequencyMinutes' in record ? record.scheduleFrequencyMinutes : previous.scheduleFrequencyMinutes
+        scheduleFrequencyMinutes: 'scheduleFrequencyMinutes' in record ? record.scheduleFrequencyMinutes : previous.scheduleFrequencyMinutes,
+        paperclipApiBaseUrl: 'paperclipApiBaseUrl' in record ? record.paperclipApiBaseUrl : previous.paperclipApiBaseUrl
       });
       const next = {
         mappings: current.mappings.map((mapping, index) => ({
@@ -725,6 +1171,7 @@ const plugin = definePlugin({
         })),
         syncState: current.syncState,
         scheduleFrequencyMinutes: current.scheduleFrequencyMinutes,
+        ...(current.paperclipApiBaseUrl ? { paperclipApiBaseUrl: current.paperclipApiBaseUrl } : {}),
         updatedAt: new Date().toISOString()
       };
 

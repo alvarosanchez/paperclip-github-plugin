@@ -22,6 +22,8 @@ test('manifest exposes GitHub Sync dashboard and settings UI metadata, config sc
   assert.equal(manifest.jobs?.[0]?.jobKey, 'sync.github-issues');
   assert.equal(manifest.jobs?.[0]?.schedule, '* * * * *');
   assert.ok(manifest.capabilities.some((capability) => capability === 'ui.dashboardWidget.register'));
+  assert.ok(manifest.capabilities.includes('issues.read'));
+  assert.ok(manifest.capabilities.includes('issues.update'));
   assert.equal((manifest.instanceConfigSchema as { properties?: Record<string, unknown> }).properties?.githubTokenRef ? 'present' : 'missing', 'present');
   const settingsSlot = manifest.ui?.slots?.find((slot) => slot.type === 'settingsPage');
   const dashboardSlot = manifest.ui?.slots?.find((slot) => slot.type === 'dashboardWidget');
@@ -134,6 +136,19 @@ test('worker saves a configured schedule frequency alongside mappings', async ()
   assert.deepEqual(result.mappings, []);
 });
 
+test('worker normalizes and saves the Paperclip API base URL alongside setup', async () => {
+  const harness = createTestHarness({ manifest });
+  await plugin.definition.setup(harness.ctx);
+
+  const result = await harness.performAction('settings.saveRegistration', {
+    paperclipApiBaseUrl: ' http://127.0.0.1:63675/api/companies/company-1/labels '
+  }) as {
+    paperclipApiBaseUrl?: string;
+  };
+
+  assert.equal(result.paperclipApiBaseUrl, 'http://127.0.0.1:63675');
+});
+
 test('worker validates a GitHub token by reaching the GitHub API', async () => {
   const harness = createTestHarness({ manifest });
   await plugin.definition.setup(harness.ctx);
@@ -174,7 +189,6 @@ test('worker validates a GitHub token by reaching the GitHub API', async () => {
 test('worker imports GitHub subissues as Paperclip child issues and skips them on repeat syncs', async () => {
   const harness = createTestHarness({
     manifest,
-    capabilities: [...manifest.capabilities, 'issues.read'],
     config: {
       githubTokenRef: 'github-secret-ref'
     }
@@ -248,8 +262,8 @@ test('worker imports GitHub subissues as Paperclip child issues and skips them o
     });
 
     assert.equal(importedIssues.length, 2);
-    const importedParent = importedIssues.find((issue) => issue.title === '[GitHub] Parent issue');
-    const importedChild = importedIssues.find((issue) => issue.title === '[GitHub] Child issue');
+    const importedParent = importedIssues.find((issue) => issue.title === 'Parent issue');
+    const importedChild = importedIssues.find((issue) => issue.title === 'Child issue');
 
     assert.ok(importedParent);
     assert.ok(importedChild);
@@ -279,6 +293,115 @@ test('worker imports GitHub subissues as Paperclip child issues and skips them o
     });
 
     assert.equal(importedIssuesAfterSecondSync.length, 2);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('worker maps GitHub labels onto existing Paperclip labels, creates missing ones through the Paperclip API, and keeps imported descriptions focused on source link and body', async () => {
+  const harness = createTestHarness({
+    manifest,
+    config: {
+      githubTokenRef: 'github-secret-ref'
+    }
+  });
+  await plugin.definition.setup(harness.ctx);
+  harness.ctx.http.fetch = async () => {
+    throw new Error('Local Paperclip label API calls should use direct worker fetch, not ctx.http.fetch.');
+  };
+
+  const existingLabel = {
+    id: '00000000-0000-0000-0000-000000000001',
+    companyId: 'company-1',
+    name: 'bug',
+    color: '#d73a4a',
+    createdAt: new Date('2026-04-09T10:00:00.000Z'),
+    updatedAt: new Date('2026-04-09T10:00:00.000Z')
+  };
+  const createdLabel = {
+    id: '00000000-0000-0000-0000-000000000002',
+    companyId: 'company-1',
+    name: 'needs design',
+    color: '#0052cc',
+    createdAt: '2026-04-09T10:05:00.000Z',
+    updatedAt: '2026-04-09T10:05:00.000Z'
+  };
+
+  await harness.performAction('settings.saveRegistration', {
+    mappings: [
+      {
+        id: 'mapping-a',
+        repositoryUrl: 'paperclipai/example-repo',
+        paperclipProjectName: 'Engineering',
+        paperclipProjectId: 'project-1',
+        companyId: 'company-1'
+      }
+    ],
+    syncState: {
+      status: 'idle'
+    },
+    paperclipApiBaseUrl: 'http://127.0.0.1:63675'
+  });
+
+  const originalFetch = globalThis.fetch;
+
+  globalThis.fetch = async (input, init) => {
+    const rawUrl = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+    const url = new URL(rawUrl);
+
+    if (url.pathname === '/api/companies/company-1/labels') {
+      const method = typeof input === 'string' || input instanceof URL ? init?.method : input.method;
+      if (method === 'POST') {
+        return jsonResponse(createdLabel);
+      }
+
+      return jsonResponse([existingLabel]);
+    }
+
+    if (url.pathname === '/repos/paperclipai/example-repo/issues' && url.searchParams.get('state') === 'open') {
+      return jsonResponse([
+        {
+          id: 2001,
+          number: 20,
+          title: 'Labelled import',
+          body: 'Imported body',
+          html_url: 'https://github.com/paperclipai/example-repo/issues/20',
+          state: 'open',
+          labels: [
+            { name: 'bug', color: 'd73a4a' },
+            { name: 'needs design', color: '0052cc' }
+          ]
+        }
+      ]);
+    }
+
+    if (url.pathname === '/repos/paperclipai/example-repo/issues/20/parent') {
+      return jsonResponse({ message: 'Not Found' }, 404);
+    }
+
+    throw new Error(`Unexpected GitHub request: ${url.toString()}`);
+  };
+
+  try {
+    const sync = await harness.performAction('sync.runNow', {}) as {
+      syncState: { status: string; createdIssuesCount?: number; skippedIssuesCount?: number };
+    };
+
+    assert.equal(sync.syncState.status, 'success');
+    assert.equal(sync.syncState.createdIssuesCount, 1);
+    assert.equal(sync.syncState.skippedIssuesCount, 0);
+
+    const importedIssues = await harness.ctx.issues.list({
+      companyId: 'company-1'
+    });
+    const importedIssue = importedIssues.find((issue) => issue.title === 'Labelled import');
+
+    assert.ok(importedIssue);
+    assert.deepEqual(importedIssue?.labelIds, [existingLabel.id, createdLabel.id]);
+    assert.match(importedIssue?.description ?? '', /Imported from https:\/\/github\.com\/paperclipai\/example-repo\/issues\/20/);
+    assert.match(importedIssue?.description ?? '', /Imported body/);
+    assert.doesNotMatch(importedIssue?.description ?? '', /GitHub labels:/);
+    assert.doesNotMatch(importedIssue?.description ?? '', /GitHub issue state:/);
   } finally {
     globalThis.fetch = originalFetch;
   }

@@ -17,7 +17,9 @@ export const manifest: PaperclipPluginManifestV1 = {
     'plugin.state.read',
     'plugin.state.write',
     'instance.settings.register',
+    'issues.read',
     'issues.create',
+    'issues.update',
     'jobs.schedule',
     'http.outbound',
     'secrets.read-ref'
