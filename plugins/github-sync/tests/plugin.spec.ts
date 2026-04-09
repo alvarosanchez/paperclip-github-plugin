@@ -63,6 +63,48 @@ test('worker saves normalized mappings with resolved project identifiers supplie
   });
 });
 
+test('worker normalizes owner/repo slugs to canonical GitHub URLs when saving mappings', async () => {
+  const harness = createTestHarness({ manifest });
+  await plugin.definition.setup(harness.ctx);
+
+  const result = await harness.performAction('settings.saveRegistration', {
+    mappings: [
+      {
+        id: 'mapping-b',
+        repositoryUrl: '  paperclipai/example-repo.git  ',
+        paperclipProjectName: 'Engineering',
+        paperclipProjectId: 'project-1',
+        companyId: 'company-1'
+      }
+    ],
+    syncState: {
+      status: 'idle'
+    }
+  });
+
+  assert.deepEqual(result, {
+    mappings: [
+      {
+        id: 'mapping-b',
+        repositoryUrl: 'https://github.com/paperclipai/example-repo',
+        paperclipProjectName: 'Engineering',
+        paperclipProjectId: 'project-1',
+        companyId: 'company-1'
+      }
+    ],
+    syncState: {
+      status: 'idle',
+      message: undefined,
+      checkedAt: undefined,
+      syncedIssuesCount: undefined,
+      createdIssuesCount: undefined,
+      skippedIssuesCount: undefined,
+      lastRunTrigger: undefined
+    },
+    updatedAt: (result as { updatedAt: string }).updatedAt
+  });
+});
+
 test('worker validates a GitHub token by reaching the GitHub API', async () => {
   const harness = createTestHarness({ manifest });
   await plugin.definition.setup(harness.ctx);

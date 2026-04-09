@@ -10,6 +10,10 @@ coverage
 .env
 .env.*
 
+.playwright-cli/
+plugins/*/mockups/
+plugins/*/tests/e2e/results/
+
 plugins/*/.paperclip-sdk
 plugins/*/dist
 plugins/*/build

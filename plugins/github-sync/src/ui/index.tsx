@@ -30,6 +30,12 @@ interface TokenValidationResult {
   login: string;
 }
 
+interface ParsedRepositoryReference {
+  owner: string;
+  repo: string;
+  url: string;
+}
+
 type ThemeMode = 'light' | 'dark';
 type Tone = 'neutral' | 'success' | 'warning' | 'info' | 'danger';
 type TokenStatus = 'required' | 'valid' | 'invalid';
@@ -939,6 +945,49 @@ function getComparableMappings(mappings: RepositoryMapping[]): RepositoryMapping
     .filter((mapping) => mapping.repositoryUrl !== '' || mapping.paperclipProjectName !== '');
 }
 
+function parseRepositoryReference(repositoryInput: string): ParsedRepositoryReference | null {
+  const trimmed = repositoryInput.trim();
+  if (!trimmed) {
+    return null;
+  }
+
+  const slugMatch = trimmed.match(/^([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+?)(?:\.git)?$/);
+  if (slugMatch) {
+    const [, owner, repo] = slugMatch;
+    return {
+      owner,
+      repo,
+      url: `https://github.com/${owner}/${repo}`
+    };
+  }
+
+  try {
+    const url = new URL(trimmed);
+    if (url.hostname !== 'github.com' && url.hostname !== 'www.github.com') {
+      return null;
+    }
+
+    const pathSegments = url.pathname.split('/').filter(Boolean);
+    if (pathSegments.length !== 2) {
+      return null;
+    }
+
+    const [owner, rawRepo] = pathSegments;
+    const repo = rawRepo.replace(/\.git$/, '');
+    if (!owner || !repo) {
+      return null;
+    }
+
+    return {
+      owner,
+      repo,
+      url: `https://github.com/${owner}/${repo}`
+    };
+  } catch {
+    return null;
+  }
+}
+
 function formatDate(value?: string, fallback = 'Never'): string {
   if (!value) {
     return fallback;
@@ -1505,26 +1554,31 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
 
       const resolvedMappings: RepositoryMapping[] = [];
       for (const mapping of form.mappings) {
-        const repositoryUrl = mapping.repositoryUrl.trim();
+        const repositoryInput = mapping.repositoryUrl.trim();
         const paperclipProjectName = mapping.paperclipProjectName.trim();
 
-        if (!repositoryUrl && !paperclipProjectName) {
+        if (!repositoryInput && !paperclipProjectName) {
           continue;
         }
 
-        if (!repositoryUrl || !paperclipProjectName) {
-          throw new Error('Each repository needs both a GitHub URL and a Paperclip project name.');
+        if (!repositoryInput || !paperclipProjectName) {
+          throw new Error('Each repository needs both a GitHub repository and a Paperclip project name.');
+        }
+
+        const parsedRepository = parseRepositoryReference(repositoryInput);
+        if (!parsedRepository) {
+          throw new Error(`Invalid GitHub repository: ${repositoryInput}. Use owner/repo or https://github.com/owner/repo.`);
         }
 
         const project = mapping.paperclipProjectId && mapping.companyId === companyId
           ? { id: mapping.paperclipProjectId, name: paperclipProjectName }
           : await resolveOrCreateProject(companyId, paperclipProjectName);
 
-        await bindProjectRepo(project.id, repositoryUrl);
+        await bindProjectRepo(project.id, parsedRepository.url);
 
         resolvedMappings.push({
           ...mapping,
-          repositoryUrl,
+          repositoryUrl: parsedRepository.url,
           paperclipProjectName: project.name,
           paperclipProjectId: project.id,
           companyId
@@ -1705,7 +1759,7 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
             <div className="ghsync__section-head">
               <div className="ghsync__section-copy">
                 <h4>Repositories</h4>
-                <p>{repositoriesUnlocked ? 'Map each GitHub repository to a Paperclip project.' : 'Unlocks after the token is valid.'}</p>
+                <p>{repositoriesUnlocked ? 'Map each GitHub repository to a Paperclip project. Use owner/repo or a full GitHub URL.' : 'Unlocks after the token is valid.'}</p>
               </div>
               <span className={`ghsync__badge ${getToneClass(!repositoriesUnlocked ? 'neutral' : savedMappingCount > 0 ? 'success' : 'info')}`}>
                 {!repositoriesUnlocked ? 'Locked' : savedMappingCount > 0 ? `${savedMappingCount} saved` : 'Open'}
@@ -1746,14 +1800,14 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
 
                         <div className="ghsync__mapping-grid">
                           <div className="ghsync__field">
-                            <label htmlFor={`repository-url-${mapping.id}`}>GitHub repository URL</label>
+                            <label htmlFor={`repository-url-${mapping.id}`}>GitHub repository</label>
                             <input
                               id={`repository-url-${mapping.id}`}
                               className="ghsync__input"
-                              type="url"
+                              type="text"
                               value={mapping.repositoryUrl}
                               onChange={(event) => updateMapping(mapping.id, 'repositoryUrl', event.currentTarget.value)}
-                              placeholder="https://github.com/owner/repository"
+                              placeholder="owner/repository or https://github.com/owner/repository"
                               autoComplete="off"
                             />
                           </div>

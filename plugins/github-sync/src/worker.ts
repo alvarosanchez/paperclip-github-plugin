@@ -64,6 +64,12 @@ interface TokenValidationResult {
   login: string;
 }
 
+interface ParsedRepositoryReference {
+  owner: string;
+  repo: string;
+  url: string;
+}
+
 const DEFAULT_SETTINGS: GitHubSyncSettings = {
   mappings: [],
   syncState: {
@@ -114,14 +120,15 @@ function normalizeMappings(value: unknown): RepositoryMapping[] {
   return value.map((entry, index) => {
     const record = entry && typeof entry === 'object' ? entry as Record<string, unknown> : {};
     const id = typeof record.id === 'string' && record.id.trim() ? record.id.trim() : createMappingId(index);
-    const repositoryUrl = typeof record.repositoryUrl === 'string' ? record.repositoryUrl : '';
+    const repositoryInput = typeof record.repositoryUrl === 'string' ? record.repositoryUrl : '';
     const paperclipProjectName = typeof record.paperclipProjectName === 'string' ? record.paperclipProjectName : '';
     const paperclipProjectId = typeof record.paperclipProjectId === 'string' ? record.paperclipProjectId : undefined;
     const companyId = typeof record.companyId === 'string' ? record.companyId : undefined;
+    const parsedRepository = parseRepositoryReference(repositoryInput);
 
     return {
       id,
-      repositoryUrl,
+      repositoryUrl: parsedRepository?.url ?? repositoryInput.trim(),
       paperclipProjectName,
       paperclipProjectId,
       companyId
@@ -174,21 +181,43 @@ function normalizeImportRegistry(value: unknown): ImportedIssueRecord[] {
     .filter((entry): entry is ImportedIssueRecord => entry !== null);
 }
 
-function parseRepositoryUrl(repositoryUrl: string): { owner: string; repo: string } | null {
+function parseRepositoryReference(repositoryInput: string): ParsedRepositoryReference | null {
+  const trimmed = repositoryInput.trim();
+  if (!trimmed) {
+    return null;
+  }
+
+  const slugMatch = trimmed.match(/^([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+?)(?:\.git)?$/);
+  if (slugMatch) {
+    const [, owner, repo] = slugMatch;
+    return {
+      owner,
+      repo,
+      url: `https://github.com/${owner}/${repo}`
+    };
+  }
+
   try {
-    const url = new URL(repositoryUrl);
-    if (url.hostname !== 'github.com') {
+    const url = new URL(trimmed);
+    if (url.hostname !== 'github.com' && url.hostname !== 'www.github.com') {
       return null;
     }
 
-    const [owner, repo] = url.pathname.split('/').filter(Boolean);
+    const pathSegments = url.pathname.split('/').filter(Boolean);
+    if (pathSegments.length !== 2) {
+      return null;
+    }
+
+    const [owner, rawRepo] = pathSegments;
+    const repo = rawRepo.replace(/\.git$/, '');
     if (!owner || !repo) {
       return null;
     }
 
     return {
       owner,
-      repo: repo.replace(/\.git$/, '')
+      repo,
+      url: `https://github.com/${owner}/${repo}`
     };
   } catch {
     return null;
@@ -196,9 +225,9 @@ function parseRepositoryUrl(repositoryUrl: string): { owner: string; repo: strin
 }
 
 async function listRepositoryIssues(octokit: Octokit, repositoryUrl: string): Promise<GitHubIssueRecord[]> {
-  const parsed = parseRepositoryUrl(repositoryUrl);
+  const parsed = parseRepositoryReference(repositoryUrl);
   if (!parsed) {
-    throw new Error(`Invalid GitHub repository URL: ${repositoryUrl}`);
+    throw new Error(`Invalid GitHub repository: ${repositoryUrl}. Use owner/repo or https://github.com/owner/repo.`);
   }
 
   const issues = await octokit.paginate(octokit.rest.issues.listForRepo, {
@@ -415,7 +444,7 @@ const plugin = definePlugin({
       const next = {
         mappings: current.mappings.map((mapping, index) => ({
           id: mapping.id.trim() || createMappingId(index),
-          repositoryUrl: mapping.repositoryUrl.trim(),
+          repositoryUrl: parseRepositoryReference(mapping.repositoryUrl)?.url ?? mapping.repositoryUrl.trim(),
           paperclipProjectName: mapping.paperclipProjectName.trim(),
           paperclipProjectId: mapping.paperclipProjectId,
           companyId: mapping.companyId
