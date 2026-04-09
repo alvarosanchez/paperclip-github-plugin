@@ -1,5 +1,7 @@
 import type { PaperclipPluginManifestV1 } from '@paperclipai/plugin-sdk';
 
+const DASHBOARD_WIDGET_CAPABILITY = 'ui.dashboardWidget.register' as unknown as PaperclipPluginManifestV1['capabilities'][number];
+
 export const manifest: PaperclipPluginManifestV1 = {
   id: 'github-sync',
   apiVersion: 1,
@@ -10,6 +12,7 @@ export const manifest: PaperclipPluginManifestV1 = {
   categories: ['workspace'],
   capabilities: [
     'ui.page.register',
+    DASHBOARD_WIDGET_CAPABILITY,
     'plugin.state.read',
     'plugin.state.write',
     'instance.settings.register',
@@ -42,6 +45,12 @@ export const manifest: PaperclipPluginManifestV1 = {
   },
   ui: {
     slots: [
+      {
+        type: 'dashboardWidget',
+        id: 'github-sync-dashboard-widget',
+        displayName: 'GitHub Sync',
+        exportName: 'GitHubSyncDashboardWidget'
+      },
       {
         type: 'settingsPage',
         id: 'github-sync-settings-page',

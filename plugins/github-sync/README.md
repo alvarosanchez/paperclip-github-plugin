@@ -7,6 +7,7 @@ Paperclip plugin for synchronizing GitHub issues into Paperclip.
 This package now includes:
 
 - a valid Paperclip plugin manifest
+- a dashboard widget UI mounted inside Paperclip for setup and sync readiness
 - a worker that persists repository mappings and sync state in plugin state
 - a token flow that stores the GitHub credential as a Paperclip company secret and persists only its secret reference in plugin config
 - a settings page UI mounted inside Paperclip for configuring GitHub sync
@@ -27,9 +28,9 @@ This package now includes:
 
 ## Current package layout
 
-- `src/manifest.ts` - plugin manifest source, including the scheduled job declaration and config schema
+- `src/manifest.ts` - plugin manifest source, including dashboard/settings UI slots, the scheduled job declaration, and config schema
 - `src/worker.ts` - worker logic for persisted mappings, sync state, scheduled sync, GitHub issue fetching, and deduplication
-- `src/ui/index.tsx` - settings page UI for token secret creation, mappings, and sync status
+- `src/ui/index.tsx` - dashboard widget and settings page UI for token secret creation, mappings, and sync status
 - `dist/` - built plugin artifacts consumed by Paperclip
 - `tests/plugin.spec.ts` - package-level tests
 - `scripts/build.mjs` - package build script powered by esbuild
@@ -38,4 +39,4 @@ This package now includes:
 
 ## Notes
 
-The package now has a real build step so `dist/` stays aligned with `src/` before manual verification or plugin installation. Saving a token creates or reuses a company secret and stores only the returned secret UUID in plugin config. Saving a mapping creates or reuses the target Paperclip project and binds the GitHub repository URL to the project workspace. Repeated sync runs keep a plugin-owned import registry so previously imported GitHub issues are skipped instead of being recreated.
+The package now has a real build step so `dist/` stays aligned with `src/` before manual verification or plugin installation. The dashboard widget surfaces the current blocker or readiness state and links back to plugin setup. Saving a token validates it against the GitHub API, creates or reuses a company secret, and stores only the returned secret UUID in plugin config. Saving a mapping creates or reuses the target Paperclip project and binds the GitHub repository URL to the project workspace. Repeated sync runs keep a plugin-owned import registry so previously imported GitHub issues are skipped instead of being recreated.

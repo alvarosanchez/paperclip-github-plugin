@@ -38,6 +38,8 @@ The plugin MUST persist repository mappings and sync state in plugin state.
 ## Host integration requirements
 
 - The plugin MUST register successfully in Paperclip.
+- The plugin MUST expose a dashboard widget contribution.
 - The plugin MUST expose a settings page contribution.
+- The dashboard widget MUST summarize the current GitHub sync readiness and link to setup.
 - The settings page MUST render inside the real Paperclip host.
 - The plugin MUST include end-to-end automation that boots a disposable Paperclip instance, installs the plugin, and verifies the settings page renders.

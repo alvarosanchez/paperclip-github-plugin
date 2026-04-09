@@ -345,7 +345,7 @@ async function main() {
   await waitForReady(baseUrl, 180000);
   log(`Paperclip server is ready at ${baseUrl}.`);
 
-  await ensureCompanySeeded();
+  const company = await ensureCompanySeeded();
 
   await runCommand(
     'npx',
@@ -375,10 +375,18 @@ async function main() {
 
     await page.getByRole('heading', { name: 'GitHub Sync' }).waitFor({ timeout: 120000 });
     await page.getByText('GitHub Sync settings', { exact: true }).waitFor({ timeout: 120000 });
-    await page.getByRole('tab', { name: 'GitHub token' }).waitFor({ timeout: 120000 });
-    await page.getByRole('tab', { name: 'Repository mappings' }).waitFor({ timeout: 120000 });
-    await page.getByRole('tab', { name: 'Sync' }).waitFor({ timeout: 120000 });
-    await page.getByRole('tab', { name: 'Repository mappings' }).click();
+    await page.getByRole('heading', { name: 'Connect GitHub', exact: true }).waitFor({ timeout: 120000 });
+    await page.getByRole('heading', { name: 'GitHub access', exact: true }).waitFor({ timeout: 120000 });
+    await page.getByRole('heading', { name: 'Repositories', exact: true }).waitFor({ timeout: 120000 });
+    await page.getByRole('heading', { name: 'Sync', exact: true }).waitFor({ timeout: 120000 });
+    await page.getByLabel('GitHub token').waitFor({ timeout: 120000 });
+
+    const dashboardUrl = company?.prefix ? new URL(`/${company.prefix}`, baseUrl).toString() : baseUrl;
+    await gotoWithTimeout(page, dashboardUrl);
+    log(`Opened Paperclip dashboard page: ${dashboardUrl}`);
+
+    await page.getByText('Finish setup to start syncing', { exact: true }).waitFor({ timeout: 120000 });
+    await page.getByRole('link', { name: 'Open settings' }).first().waitFor({ timeout: 120000 });
 
     await page.screenshot({ path: join(pluginRoot, 'tests/e2e/results/last-run.png'), fullPage: true });
     const bodyText = await page.locator('body').textContent();
@@ -388,6 +396,7 @@ async function main() {
         {
           baseUrl,
           settingsUrl,
+          dashboardUrl,
           bodyText
         },
         null,

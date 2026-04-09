@@ -1,5 +1,5 @@
-import React, { useEffect, useMemo, useState } from 'react';
-import { useHostContext, usePluginAction, usePluginData } from '@paperclipai/plugin-sdk/ui';
+import React, { useEffect, useState } from 'react';
+import { useHostContext, usePluginAction, usePluginData, usePluginToast } from '@paperclipai/plugin-sdk/ui';
 
 interface RepositoryMapping {
   id: string;
@@ -26,106 +26,120 @@ interface GitHubSyncSettings {
   updatedAt?: string;
 }
 
-type ActiveTab = 'token' | 'mappings' | 'sync';
+interface TokenValidationResult {
+  login: string;
+}
+
 type ThemeMode = 'light' | 'dark';
+type Tone = 'neutral' | 'success' | 'warning' | 'info' | 'danger';
+type TokenStatus = 'required' | 'valid' | 'invalid';
 
 interface ThemePalette {
-  pageText: string;
+  text: string;
   title: string;
   muted: string;
-  badgeBg: string;
-  badgeBorder: string;
-  badgeText: string;
-  cardBg: string;
-  cardBorder: string;
-  cardDivider: string;
+  surface: string;
+  surfaceAlt: string;
+  surfaceRaised: string;
+  border: string;
+  borderSoft: string;
   inputBg: string;
   inputBorder: string;
   inputText: string;
-  secondaryButtonBg: string;
-  secondaryButtonBorder: string;
-  secondaryButtonText: string;
-  primaryButtonBg: string;
-  primaryButtonBorder: string;
-  primaryButtonText: string;
-  dangerButtonBg: string;
-  dangerButtonBorder: string;
-  dangerButtonText: string;
-  tabText: string;
-  tabActiveText: string;
-  tabUnderline: string;
+  badgeBg: string;
+  badgeBorder: string;
+  badgeText: string;
+  primaryBg: string;
+  primaryBorder: string;
+  primaryText: string;
+  secondaryBg: string;
+  secondaryBorder: string;
+  secondaryText: string;
+  dangerBg: string;
+  dangerBorder: string;
+  dangerText: string;
   successBg: string;
   successBorder: string;
   successText: string;
-  errorBg: string;
-  errorBorder: string;
-  errorText: string;
+  warningBg: string;
+  warningBorder: string;
+  warningText: string;
+  infoBg: string;
+  infoBorder: string;
+  infoText: string;
+  shadow: string;
 }
 
 const LIGHT_PALETTE: ThemePalette = {
-  pageText: '#18181b',
+  text: '#18181b',
   title: '#09090b',
   muted: '#71717a',
-  badgeBg: '#fafafa',
-  badgeBorder: '#e4e4e7',
-  badgeText: '#3f3f46',
-  cardBg: '#ffffff',
-  cardBorder: '#e4e4e7',
-  cardDivider: '#f4f4f5',
+  surface: '#ffffff',
+  surfaceAlt: '#fafafa',
+  surfaceRaised: '#f5f5f5',
+  border: '#e4e4e7',
+  borderSoft: '#f4f4f5',
   inputBg: '#ffffff',
   inputBorder: '#d4d4d8',
   inputText: '#18181b',
-  secondaryButtonBg: '#fafafa',
-  secondaryButtonBorder: '#d4d4d8',
-  secondaryButtonText: '#27272a',
-  primaryButtonBg: '#18181b',
-  primaryButtonBorder: '#18181b',
-  primaryButtonText: '#fafafa',
-  dangerButtonBg: '#fff1f2',
-  dangerButtonBorder: '#fecdd3',
-  dangerButtonText: '#be123c',
-  tabText: '#71717a',
-  tabActiveText: '#18181b',
-  tabUnderline: '#18181b',
+  badgeBg: '#fafafa',
+  badgeBorder: '#e4e4e7',
+  badgeText: '#3f3f46',
+  primaryBg: '#18181b',
+  primaryBorder: '#18181b',
+  primaryText: '#fafafa',
+  secondaryBg: '#ffffff',
+  secondaryBorder: '#d4d4d8',
+  secondaryText: '#27272a',
+  dangerBg: '#fff1f2',
+  dangerBorder: '#fecdd3',
+  dangerText: '#be123c',
   successBg: '#f0fdf4',
   successBorder: '#bbf7d0',
   successText: '#166534',
-  errorBg: '#fff1f2',
-  errorBorder: '#fecdd3',
-  errorText: '#be123c'
+  warningBg: '#fffbeb',
+  warningBorder: '#fde68a',
+  warningText: '#a16207',
+  infoBg: '#eff6ff',
+  infoBorder: '#bfdbfe',
+  infoText: '#1d4ed8',
+  shadow: '0 12px 30px rgba(15, 23, 42, 0.05)'
 };
 
 const DARK_PALETTE: ThemePalette = {
-  pageText: '#f5f5f5',
+  text: '#f5f5f5',
   title: '#fafafa',
   muted: '#a1a1aa',
-  badgeBg: 'rgba(24, 24, 27, 0.9)',
-  badgeBorder: 'rgba(63, 63, 70, 1)',
-  badgeText: '#d4d4d8',
-  cardBg: 'rgba(10, 10, 11, 0.96)',
-  cardBorder: 'rgba(63, 63, 70, 0.9)',
-  cardDivider: 'rgba(39, 39, 42, 1)',
+  surface: 'rgba(10, 10, 11, 0.96)',
+  surfaceAlt: 'rgba(15, 15, 17, 1)',
+  surfaceRaised: 'rgba(19, 19, 24, 1)',
+  border: 'rgba(63, 63, 70, 0.92)',
+  borderSoft: 'rgba(39, 39, 42, 1)',
   inputBg: 'rgba(15, 15, 17, 1)',
   inputBorder: 'rgba(63, 63, 70, 1)',
   inputText: '#fafafa',
-  secondaryButtonBg: 'rgba(24, 24, 27, 1)',
-  secondaryButtonBorder: 'rgba(63, 63, 70, 1)',
-  secondaryButtonText: '#e4e4e7',
-  primaryButtonBg: '#f4f4f5',
-  primaryButtonBorder: 'rgba(82, 82, 91, 1)',
-  primaryButtonText: '#111113',
-  dangerButtonBg: 'rgba(69, 10, 10, 0.28)',
-  dangerButtonBorder: 'rgba(127, 29, 29, 0.8)',
-  dangerButtonText: '#fca5a5',
-  tabText: '#a1a1aa',
-  tabActiveText: '#fafafa',
-  tabUnderline: '#fafafa',
+  badgeBg: 'rgba(24, 24, 27, 0.9)',
+  badgeBorder: 'rgba(63, 63, 70, 1)',
+  badgeText: '#d4d4d8',
+  primaryBg: '#f4f4f5',
+  primaryBorder: 'rgba(82, 82, 91, 1)',
+  primaryText: '#111113',
+  secondaryBg: 'rgba(24, 24, 27, 1)',
+  secondaryBorder: 'rgba(63, 63, 70, 1)',
+  secondaryText: '#e4e4e7',
+  dangerBg: 'rgba(69, 10, 10, 0.24)',
+  dangerBorder: 'rgba(127, 29, 29, 0.8)',
+  dangerText: '#fca5a5',
   successBg: 'rgba(20, 83, 45, 0.16)',
   successBorder: 'rgba(34, 197, 94, 0.25)',
   successText: '#bbf7d0',
-  errorBg: 'rgba(127, 29, 29, 0.18)',
-  errorBorder: 'rgba(239, 68, 68, 0.25)',
-  errorText: '#fecaca'
+  warningBg: 'rgba(146, 64, 14, 0.2)',
+  warningBorder: 'rgba(245, 158, 11, 0.24)',
+  warningText: '#fcd34d',
+  infoBg: 'rgba(29, 78, 216, 0.2)',
+  infoBorder: 'rgba(96, 165, 250, 0.24)',
+  infoText: '#93c5fd',
+  shadow: '0 18px 40px rgba(0, 0, 0, 0.24)'
 };
 
 const EMPTY_SETTINGS: GitHubSyncSettings = {
@@ -135,12 +149,807 @@ const EMPTY_SETTINGS: GitHubSyncSettings = {
   }
 };
 
+const PAGE_STYLES = `
+.ghsync {
+  display: grid;
+  gap: 16px;
+  color: var(--ghsync-text);
+  font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+.ghsync * {
+  box-sizing: border-box;
+}
+
+.ghsync button,
+.ghsync input {
+  font: inherit;
+}
+
+.ghsync__header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.ghsync__header-copy {
+  min-width: 0;
+}
+
+.ghsync__header-copy h2 {
+  margin: 0;
+  font-size: 20px;
+  line-height: 1.2;
+  font-weight: 700;
+  color: var(--ghsync-title);
+}
+
+.ghsync__header-copy p {
+  margin: 8px 0 0;
+  max-width: 760px;
+  color: var(--ghsync-muted);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.ghsync__layout {
+  display: grid;
+  gap: 16px;
+  align-items: start;
+  grid-template-columns: minmax(0, 1.45fr) minmax(260px, 0.8fr);
+}
+
+.ghsync__card {
+  overflow: hidden;
+  border-radius: 12px;
+  border: 1px solid var(--ghsync-border);
+  background: var(--ghsync-surface);
+  box-shadow: var(--ghsync-shadow);
+}
+
+.ghsync__card-header {
+  padding: 16px 18px;
+  border-bottom: 1px solid var(--ghsync-border-soft);
+}
+
+.ghsync__card-header h3 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--ghsync-title);
+}
+
+.ghsync__card-header p {
+  margin: 6px 0 0;
+  color: var(--ghsync-muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.ghsync__loading,
+.ghsync__message {
+  margin: 0 18px;
+}
+
+.ghsync__loading {
+  margin-top: 16px;
+  color: var(--ghsync-muted);
+  font-size: 12px;
+}
+
+.ghsync__message {
+  margin-top: 16px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--ghsync-border-soft);
+  background: var(--ghsync-surfaceAlt);
+  color: var(--ghsync-text);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.ghsync__message--error {
+  border-color: var(--ghsync-danger-border);
+  background: var(--ghsync-danger-bg);
+  color: var(--ghsync-danger-text);
+}
+
+.ghsync__section {
+  display: grid;
+  gap: 14px;
+  padding: 18px;
+  border-top: 1px solid var(--ghsync-border-soft);
+}
+
+.ghsync__section-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.ghsync__section-copy {
+  min-width: 0;
+}
+
+.ghsync__section-copy h4 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--ghsync-title);
+}
+
+.ghsync__section-copy p {
+  margin: 6px 0 0;
+  color: var(--ghsync-muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.ghsync__badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 24px;
+  padding: 0 10px;
+  border-radius: 999px;
+  border: 1px solid var(--ghsync-badge-border);
+  background: var(--ghsync-badge-bg);
+  color: var(--ghsync-badge-text);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.ghsync__badge--success {
+  border-color: var(--ghsync-success-border);
+  background: var(--ghsync-success-bg);
+  color: var(--ghsync-success-text);
+}
+
+.ghsync__badge--warning {
+  border-color: var(--ghsync-warning-border);
+  background: var(--ghsync-warning-bg);
+  color: var(--ghsync-warning-text);
+}
+
+.ghsync__badge--info {
+  border-color: var(--ghsync-info-border);
+  background: var(--ghsync-info-bg);
+  color: var(--ghsync-info-text);
+}
+
+.ghsync__badge--danger {
+  border-color: var(--ghsync-danger-border);
+  background: var(--ghsync-danger-bg);
+  color: var(--ghsync-danger-text);
+}
+
+.ghsync__badge--neutral {
+  border-color: var(--ghsync-border);
+  background: transparent;
+  color: var(--ghsync-muted);
+}
+
+.ghsync__badge-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: currentColor;
+}
+
+.ghsync__stack,
+.ghsync__mapping-list,
+.ghsync__side-body,
+.ghsync__detail-list {
+  display: grid;
+  gap: 12px;
+}
+
+.ghsync__field {
+  display: grid;
+  gap: 8px;
+}
+
+.ghsync__field label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ghsync-title);
+}
+
+.ghsync__input {
+  width: 100%;
+  min-height: 40px;
+  border-radius: 10px;
+  border: 1px solid var(--ghsync-input-border);
+  background: var(--ghsync-input-bg);
+  color: var(--ghsync-input-text);
+  padding: 0 12px;
+  outline: none;
+}
+
+.ghsync__input::placeholder {
+  color: var(--ghsync-muted);
+}
+
+.ghsync__input:focus {
+  border-color: var(--ghsync-border);
+}
+
+.ghsync__input[readonly] {
+  opacity: 0.78;
+}
+
+.ghsync__hint,
+.ghsync__note,
+.ghsync__check span {
+  margin: 0;
+  color: var(--ghsync-muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.ghsync__actions,
+.ghsync__section-footer,
+.ghsync__connected,
+.ghsync__locked,
+.ghsync__sync-summary,
+.ghsync__mapping-head,
+.ghsync__check-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.ghsync__connected,
+.ghsync__locked,
+.ghsync__sync-summary,
+.ghsync__check {
+  border: 1px solid var(--ghsync-border-soft);
+  border-radius: 10px;
+  background: var(--ghsync-surfaceAlt);
+  padding: 14px;
+}
+
+.ghsync__connected strong,
+.ghsync__locked strong,
+.ghsync__sync-summary strong {
+  display: block;
+  font-size: 13px;
+  color: var(--ghsync-title);
+}
+
+.ghsync__connected span,
+.ghsync__locked span,
+.ghsync__sync-summary span {
+  display: block;
+  margin-top: 4px;
+  color: var(--ghsync-muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.ghsync__sync-summary--success {
+  border-color: var(--ghsync-success-border);
+  background: var(--ghsync-success-bg);
+}
+
+.ghsync__sync-summary--success strong,
+.ghsync__sync-summary--success span {
+  color: var(--ghsync-success-text);
+}
+
+.ghsync__sync-summary--danger {
+  border-color: var(--ghsync-danger-border);
+  background: var(--ghsync-danger-bg);
+}
+
+.ghsync__sync-summary--danger strong,
+.ghsync__sync-summary--danger span {
+  color: var(--ghsync-danger-text);
+}
+
+.ghsync__sync-summary--info {
+  border-color: var(--ghsync-info-border);
+  background: var(--ghsync-info-bg);
+}
+
+.ghsync__sync-summary--info strong,
+.ghsync__sync-summary--info span {
+  color: var(--ghsync-info-text);
+}
+
+.ghsync__button-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.ghsync__button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 40px;
+  padding: 0 14px;
+  border-radius: 10px;
+  border: 1px solid transparent;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.ghsync__button:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.ghsync__button--primary {
+  border-color: var(--ghsync-primaryBorder);
+  background: var(--ghsync-primaryBg);
+  color: var(--ghsync-primaryText);
+}
+
+.ghsync__button--secondary {
+  border-color: var(--ghsync-secondaryBorder);
+  background: var(--ghsync-secondaryBg);
+  color: var(--ghsync-secondaryText);
+}
+
+.ghsync__button--danger {
+  min-height: 36px;
+  border-color: var(--ghsync-dangerBorder);
+  background: var(--ghsync-dangerBg);
+  color: var(--ghsync-dangerText);
+}
+
+.ghsync__mapping-card,
+.ghsync__stat {
+  border: 1px solid var(--ghsync-border-soft);
+  border-radius: 10px;
+  background: var(--ghsync-surfaceRaised);
+}
+
+.ghsync__mapping-card {
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+}
+
+.ghsync__mapping-title strong {
+  display: block;
+  font-size: 13px;
+  color: var(--ghsync-title);
+}
+
+.ghsync__mapping-title span {
+  display: block;
+  margin-top: 4px;
+  color: var(--ghsync-muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.ghsync__mapping-grid {
+  display: grid;
+  align-items: start;
+  gap: 12px;
+  grid-template-columns: minmax(0, 1.15fr) minmax(220px, 0.85fr);
+}
+
+.ghsync__stats {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.ghsync__stat {
+  padding: 12px;
+}
+
+.ghsync__stat span {
+  display: block;
+  color: var(--ghsync-muted);
+  font-size: 11px;
+}
+
+.ghsync__stat strong {
+  display: block;
+  margin-top: 8px;
+  color: var(--ghsync-title);
+  font-size: 20px;
+  line-height: 1;
+}
+
+.ghsync__side-body {
+  padding: 16px 18px;
+}
+
+.ghsync__check {
+  display: grid;
+  gap: 6px;
+}
+
+.ghsync__check strong {
+  font-size: 12px;
+  color: var(--ghsync-title);
+}
+
+.ghsync__detail-list {
+  padding-top: 2px;
+}
+
+.ghsync__detail {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--ghsync-border-soft);
+}
+
+.ghsync__detail:last-child {
+  padding-bottom: 0;
+  border-bottom: 0;
+}
+
+.ghsync__detail-label {
+  color: var(--ghsync-muted);
+  font-size: 12px;
+}
+
+.ghsync__detail-value {
+  color: var(--ghsync-title);
+  font-size: 12px;
+  text-align: right;
+}
+
+@media (max-width: 980px) {
+  .ghsync__layout,
+  .ghsync__mapping-grid,
+  .ghsync__stats {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 640px) {
+  .ghsync__header,
+  .ghsync__section-head,
+  .ghsync__actions,
+  .ghsync__section-footer,
+  .ghsync__connected,
+  .ghsync__locked,
+  .ghsync__sync-summary,
+  .ghsync__mapping-head,
+  .ghsync__check-top {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .ghsync__button-row {
+    width: 100%;
+  }
+
+  .ghsync__button {
+    flex: 1 1 auto;
+  }
+
+  .ghsync__detail {
+    display: grid;
+    gap: 4px;
+  }
+
+  .ghsync__detail-value {
+    text-align: left;
+  }
+}
+`;
+
+const WIDGET_STYLES = `
+.ghsync-widget {
+  color: var(--ghsync-text);
+  font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+.ghsync-widget * {
+  box-sizing: border-box;
+}
+
+.ghsync-widget a,
+.ghsync-widget button {
+  font: inherit;
+}
+
+.ghsync-widget__card {
+  display: grid;
+  gap: 14px;
+  padding: 16px;
+  border-radius: 12px;
+  border: 1px solid var(--ghsync-border-soft);
+  background: var(--ghsync-surface);
+  box-shadow: none;
+}
+
+.ghsync-widget__top,
+.ghsync-widget__actions {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.ghsync-widget__eyebrow {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ghsync-muted);
+}
+
+.ghsync-widget__top h3 {
+  margin: 4px 0 0;
+  font-size: 16px;
+  line-height: 1.25;
+  color: var(--ghsync-title);
+}
+
+.ghsync-widget__top p {
+  margin: 4px 0 0;
+  max-width: 440px;
+  color: var(--ghsync-muted);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.ghsync-widget__meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  color: var(--ghsync-muted);
+  font-size: 11px;
+}
+
+.ghsync-widget__meta-dot {
+  width: 3px;
+  height: 3px;
+  border-radius: 999px;
+  background: var(--ghsync-muted);
+  opacity: 0.75;
+}
+
+.ghsync-widget__stats {
+  display: grid;
+  gap: 0;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  border-top: 1px solid var(--ghsync-border-soft);
+  padding-top: 14px;
+}
+
+.ghsync-widget__stat,
+.ghsync-widget__summary,
+.ghsync-widget__message {
+  border-radius: 0;
+}
+
+.ghsync-widget__stat {
+  padding: 0 12px;
+  background: transparent;
+  border-left: 1px solid var(--ghsync-border-soft);
+}
+
+.ghsync-widget__stat:first-child {
+  padding-left: 0;
+  border-left: 0;
+}
+
+.ghsync-widget__stat span {
+  display: block;
+  font-size: 11px;
+  color: var(--ghsync-muted);
+}
+
+.ghsync-widget__stat strong {
+  display: block;
+  margin-top: 6px;
+  font-size: 22px;
+  line-height: 1;
+  color: var(--ghsync-title);
+}
+
+.ghsync-widget__summary {
+  display: grid;
+  gap: 4px;
+  padding-top: 2px;
+}
+
+.ghsync-widget__summary strong {
+  font-size: 13px;
+  color: var(--ghsync-title);
+}
+
+.ghsync-widget__summary span {
+  color: var(--ghsync-muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.ghsync-widget__message {
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--ghsync-danger-border);
+  background: var(--ghsync-danger-bg);
+  color: var(--ghsync-danger-text);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.ghsync-widget__actions {
+  align-items: center;
+  justify-content: space-between;
+  padding-top: 2px;
+}
+
+.ghsync-widget__button-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.ghsync-widget__link {
+  text-decoration: none;
+}
+
+.ghsync__badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 24px;
+  padding: 0 10px;
+  border-radius: 999px;
+  border: 1px solid var(--ghsync-badge-border);
+  background: var(--ghsync-badge-bg);
+  color: var(--ghsync-badge-text);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.ghsync__badge--success {
+  border-color: var(--ghsync-success-border);
+  background: var(--ghsync-success-bg);
+  color: var(--ghsync-success-text);
+}
+
+.ghsync__badge--warning {
+  border-color: var(--ghsync-warning-border);
+  background: var(--ghsync-warning-bg);
+  color: var(--ghsync-warning-text);
+}
+
+.ghsync__badge--info {
+  border-color: var(--ghsync-info-border);
+  background: var(--ghsync-info-bg);
+  color: var(--ghsync-info-text);
+}
+
+.ghsync__badge--danger {
+  border-color: var(--ghsync-danger-border);
+  background: var(--ghsync-danger-bg);
+  color: var(--ghsync-danger-text);
+}
+
+.ghsync__badge--neutral {
+  border-color: var(--ghsync-border);
+  background: transparent;
+  color: var(--ghsync-muted);
+}
+
+.ghsync__badge-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: currentColor;
+}
+
+.ghsync__button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 38px;
+  padding: 0 14px;
+  border-radius: 10px;
+  border: 1px solid transparent;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.ghsync__button:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.ghsync__button--primary {
+  border-color: var(--ghsync-primaryBorder);
+  background: var(--ghsync-primaryBg);
+  color: var(--ghsync-primaryText);
+}
+
+.ghsync__button--secondary {
+  border-color: var(--ghsync-secondaryBorder);
+  background: var(--ghsync-secondaryBg);
+  color: var(--ghsync-secondaryText);
+}
+
+@media (max-width: 720px) {
+  .ghsync-widget__stats {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 12px;
+  }
+
+  .ghsync-widget__top,
+  .ghsync-widget__actions {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .ghsync-widget__stat {
+    padding-left: 0;
+    border-left: 0;
+  }
+
+  .ghsync-widget__button-row {
+    width: 100%;
+  }
+
+  .ghsync__button,
+  .ghsync-widget__link {
+    flex: 1 1 auto;
+  }
+}
+`;
+
 function createEmptyMapping(index: number): RepositoryMapping {
   return {
     id: `mapping-${index + 1}`,
     repositoryUrl: '',
     paperclipProjectName: ''
   };
+}
+
+function getComparableMappings(mappings: RepositoryMapping[]): RepositoryMapping[] {
+  return mappings
+    .map((mapping, index) => ({
+      id: mapping.id.trim() || `mapping-${index + 1}`,
+      repositoryUrl: mapping.repositoryUrl.trim(),
+      paperclipProjectName: mapping.paperclipProjectName.trim(),
+      paperclipProjectId: mapping.paperclipProjectId,
+      companyId: mapping.companyId
+    }))
+    .filter((mapping) => mapping.repositoryUrl !== '' || mapping.paperclipProjectName !== '');
+}
+
+function formatDate(value?: string, fallback = 'Never'): string {
+  if (!value) {
+    return fallback;
+  }
+
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    return fallback;
+  }
+
+  return parsed.toLocaleString();
 }
 
 function getPluginIdFromLocation(): string | null {
@@ -186,24 +995,42 @@ function getThemeMode(): ThemeMode {
     return colorScheme;
   }
 
-  const backgroundColor = window.getComputedStyle(body).backgroundColor || window.getComputedStyle(root).backgroundColor;
-  const match = backgroundColor.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)/i) || backgroundColor.match(/oklch\(([^\s]+)\s/);
-  if (match) {
-    if (match.length === 4) {
-      const red = Number(match[1]);
-      const green = Number(match[2]);
-      const blue = Number(match[3]);
-      const brightness = (red * 299 + green * 587 + blue * 114) / 1000;
-      return brightness > 186 ? 'light' : 'dark';
-    }
-
-    const lightness = Number(match[1]);
-    if (!Number.isNaN(lightness)) {
-      return lightness >= 0.7 ? 'light' : 'dark';
-    }
-  }
-
   return window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+}
+
+function useResolvedThemeMode(): ThemeMode {
+  const [themeMode, setThemeMode] = useState<ThemeMode>(() => getThemeMode());
+
+  useEffect(() => {
+    if (typeof window === 'undefined' || typeof document === 'undefined') {
+      return;
+    }
+
+    const matcher = window.matchMedia('(prefers-color-scheme: light)');
+    const handleChange = () => {
+      setThemeMode(getThemeMode());
+    };
+
+    handleChange();
+    matcher.addEventListener('change', handleChange);
+
+    const observer = new MutationObserver(handleChange);
+    observer.observe(document.documentElement, {
+      attributes: true,
+      attributeFilter: ['class', 'data-theme', 'data-color-mode', 'data-mode']
+    });
+    observer.observe(document.body, {
+      attributes: true,
+      attributeFilter: ['class', 'data-theme', 'data-color-mode', 'data-mode']
+    });
+
+    return () => {
+      matcher.removeEventListener('change', handleChange);
+      observer.disconnect();
+    };
+  }, []);
+
+  return themeMode;
 }
 
 async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
@@ -256,8 +1083,14 @@ async function bindProjectRepo(projectId: string, repositoryUrl: string): Promis
 async function resolveOrCreateCompanySecret(companyId: string, name: string, value: string): Promise<{ id: string; name: string }> {
   const existingSecrets = await fetchJson<Array<{ id: string; name: string }>>(`/api/companies/${companyId}/secrets`);
   const existing = existingSecrets.find((secret) => secret.name.trim().toLowerCase() === name.trim().toLowerCase());
+
   if (existing) {
-    return existing;
+    return fetchJson<{ id: string; name: string }>(`/api/secrets/${existing.id}/rotate`, {
+      method: 'POST',
+      body: JSON.stringify({
+        value
+      })
+    });
   }
 
   return fetchJson<{ id: string; name: string }>(`/api/companies/${companyId}/secrets`, {
@@ -269,350 +1102,197 @@ async function resolveOrCreateCompanySecret(companyId: string, name: string, val
   });
 }
 
-function buildStyles(theme: ThemePalette): Record<string, React.CSSProperties> {
-  return {
-    page: {
-      display: 'grid',
-      gap: 16,
-      color: theme.pageText,
-      fontFamily: 'ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif'
-    },
-    header: {
-      display: 'grid',
-      gap: 8
-    },
-    titleRow: {
-      display: 'flex',
-      alignItems: 'center',
-      justifyContent: 'space-between',
-      gap: 12,
-      flexWrap: 'wrap'
-    },
-    title: {
-      margin: 0,
-      fontSize: 20,
-      lineHeight: 1.2,
-      fontWeight: 700,
-      color: theme.title
-    },
-    description: {
-      margin: 0,
-      maxWidth: 760,
-      fontSize: 14,
-      lineHeight: 1.6,
-      color: theme.muted
-    },
-    badge: {
-      display: 'inline-flex',
-      alignItems: 'center',
-      borderRadius: 999,
-      border: `1px solid ${theme.badgeBorder}`,
-      background: theme.badgeBg,
-      color: theme.badgeText,
-      padding: '6px 10px',
-      fontSize: 12,
-      fontWeight: 600
-    },
-    layout: {
-      display: 'grid',
-      gap: 16,
-      gridTemplateColumns: 'minmax(0, 1.7fr) minmax(280px, 0.95fr)'
-    },
-    card: {
-      borderRadius: 12,
-      border: `1px solid ${theme.cardBorder}`,
-      background: theme.cardBg,
-      overflow: 'hidden'
-    },
-    cardHeader: {
-      display: 'grid',
-      gap: 10,
-      padding: '16px 18px',
-      borderBottom: `1px solid ${theme.cardDivider}`
-    },
-    cardTitle: {
-      margin: 0,
-      fontSize: 14,
-      fontWeight: 600,
-      color: theme.title
-    },
-    cardDescription: {
-      margin: 0,
-      fontSize: 13,
-      lineHeight: 1.5,
-      color: theme.muted
-    },
-    tabList: {
-      display: 'flex',
-      alignItems: 'center',
-      gap: 18,
-      borderBottom: `1px solid ${theme.cardDivider}`,
-      paddingBottom: 2,
-      flexWrap: 'wrap'
-    },
-    tab: {
-      appearance: 'none',
-      border: 'none',
-      background: 'transparent',
-      color: theme.tabText,
-      padding: '0 0 10px',
-      marginBottom: -3,
-      fontSize: 13,
-      fontWeight: 600,
-      cursor: 'pointer',
-      borderBottom: '2px solid transparent'
-    },
-    tabActive: {
-      color: theme.tabActiveText,
-      borderBottom: `2px solid ${theme.tabUnderline}`
-    },
-    cardBody: {
-      display: 'grid',
-      gap: 16,
-      padding: 18
-    },
-    loading: {
-      margin: 0,
-      fontSize: 13,
-      color: theme.muted
-    },
-    fieldGroup: {
-      display: 'grid',
-      gap: 8
-    },
-    fieldLabel: {
-      fontSize: 13,
-      fontWeight: 600,
-      color: theme.title
-    },
-    fieldHint: {
-      margin: 0,
-      fontSize: 12,
-      color: theme.muted,
-      lineHeight: 1.5
-    },
-    input: {
-      width: '100%',
-      boxSizing: 'border-box',
-      borderRadius: 10,
-      border: `1px solid ${theme.inputBorder}`,
-      background: theme.inputBg,
-      color: theme.inputText,
-      fontSize: 14,
-      lineHeight: 1.4,
-      padding: '10px 12px',
-      outline: 'none'
-    },
-    tokenActions: {
-      display: 'flex',
-      alignItems: 'center',
-      gap: 10,
-      flexWrap: 'wrap'
-    },
-    secondaryButton: {
-      borderRadius: 10,
-      border: `1px solid ${theme.secondaryButtonBorder}`,
-      background: theme.secondaryButtonBg,
-      color: theme.secondaryButtonText,
-      padding: '9px 12px',
-      fontSize: 13,
-      fontWeight: 600,
-      cursor: 'pointer'
-    },
-    primaryButton: {
-      borderRadius: 10,
-      border: `1px solid ${theme.primaryButtonBorder}`,
-      background: theme.primaryButtonBg,
-      color: theme.primaryButtonText,
-      padding: '10px 14px',
-      fontSize: 13,
-      fontWeight: 700,
-      cursor: 'pointer'
-    },
-    dangerButton: {
-      borderRadius: 10,
-      border: `1px solid ${theme.dangerButtonBorder}`,
-      background: theme.dangerButtonBg,
-      color: theme.dangerButtonText,
-      padding: '8px 10px',
-      fontSize: 12,
-      fontWeight: 600,
-      cursor: 'pointer'
-    },
-    buttonDisabled: {
-      opacity: 0.5,
-      cursor: 'default'
-    },
-    validationMessageSuccess: {
-      margin: 0,
-      borderRadius: 10,
-      border: `1px solid ${theme.successBorder}`,
-      background: theme.successBg,
-      color: theme.successText,
-      padding: '10px 12px',
-      fontSize: 13,
-      lineHeight: 1.5
-    },
-    validationMessageError: {
-      margin: 0,
-      borderRadius: 10,
-      border: `1px solid ${theme.errorBorder}`,
-      background: theme.errorBg,
-      color: theme.errorText,
-      padding: '10px 12px',
-      fontSize: 13,
-      lineHeight: 1.5
-    },
-    mappingList: {
-      display: 'grid',
-      gap: 12
-    },
-    mappingCard: {
-      display: 'grid',
-      gap: 12,
-      borderRadius: 12,
-      border: `1px solid ${theme.cardDivider}`,
-      background: theme.inputBg,
-      padding: 14
-    },
-    mappingHeader: {
-      display: 'flex',
-      alignItems: 'center',
-      justifyContent: 'space-between',
-      gap: 12,
-      flexWrap: 'wrap'
-    },
-    mappingTitle: {
-      margin: 0,
-      fontSize: 13,
-      fontWeight: 600,
-      color: theme.title
-    },
-    mappingMeta: {
-      fontSize: 12,
-      color: theme.muted
-    },
-    mappingFields: {
-      display: 'grid',
-      gap: 12,
-      gridTemplateColumns: 'minmax(0, 1.15fr) minmax(220px, 0.85fr)'
-    },
-    footerRow: {
-      display: 'flex',
-      alignItems: 'center',
-      justifyContent: 'space-between',
-      gap: 12,
-      flexWrap: 'wrap'
-    },
-    metaText: {
-      fontSize: 12,
-      color: theme.muted
-    },
-    success: {
-      margin: 0,
-      borderRadius: 10,
-      border: `1px solid ${theme.successBorder}`,
-      background: theme.successBg,
-      color: theme.successText,
-      padding: '10px 12px',
-      fontSize: 13,
-      lineHeight: 1.5
-    },
-    sidebarStack: {
-      display: 'grid',
-      gap: 10
-    },
-    detailList: {
-      display: 'grid',
-      gap: 10
-    },
-    detailItem: {
-      display: 'grid',
-      gap: 4,
-      paddingBottom: 10,
-      borderBottom: `1px solid ${theme.cardDivider}`
-    },
-    detailItemLast: {
-      borderBottom: 'none',
-      paddingBottom: 0
-    },
-    detailLabel: {
-      fontSize: 12,
-      color: theme.muted
-    },
-    detailValue: {
-      fontSize: 13,
-      color: theme.title
-    },
-    syncMetrics: {
-      display: 'grid',
-      gap: 12,
-      gridTemplateColumns: 'repeat(2, minmax(0, 1fr))'
-    },
-    metricCard: {
-      display: 'grid',
-      gap: 4,
-      borderRadius: 12,
-      border: `1px solid ${theme.cardDivider}`,
-      background: theme.inputBg,
-      padding: 14
-    },
-    metricLabel: {
-      fontSize: 12,
-      color: theme.muted
-    },
-    metricValue: {
-      fontSize: 20,
-      fontWeight: 700,
-      color: theme.title
+function getSyncStatus(syncState: SyncRunState, runningSync: boolean, syncUnlocked: boolean): { label: string; tone: Tone } {
+  if (!syncUnlocked) {
+    return { label: 'Locked', tone: 'neutral' };
+  }
+
+  if (runningSync || syncState.status === 'running') {
+    return { label: 'Running', tone: 'info' };
+  }
+
+  if (syncState.status === 'error') {
+    return { label: 'Needs attention', tone: 'danger' };
+  }
+
+  if (syncState.status === 'success') {
+    return { label: 'Ready', tone: 'success' };
+  }
+
+  return { label: 'Ready', tone: 'info' };
+}
+
+function getToneClass(tone: Tone): string {
+  switch (tone) {
+    case 'success':
+      return 'ghsync__badge--success';
+    case 'warning':
+      return 'ghsync__badge--warning';
+    case 'info':
+      return 'ghsync__badge--info';
+    case 'danger':
+      return 'ghsync__badge--danger';
+    default:
+      return 'ghsync__badge--neutral';
+  }
+}
+
+const SETTINGS_INDEX_HREF = '/instance/settings/plugins';
+
+function getStringValue(record: Record<string, unknown>, key: string): string | null {
+  const value = record[key];
+  return typeof value === 'string' && value.trim() ? value.trim() : null;
+}
+
+function resolvePluginSettingsHref(records: unknown): string {
+  if (!Array.isArray(records)) {
+    return SETTINGS_INDEX_HREF;
+  }
+
+  for (const entry of records) {
+    if (!entry || typeof entry !== 'object') {
+      continue;
     }
+
+    const record = entry as Record<string, unknown>;
+    const manifest = record.manifest && typeof record.manifest === 'object' ? record.manifest as Record<string, unknown> : null;
+    const id =
+      getStringValue(record, 'id') ??
+      getStringValue(record, 'pluginId');
+    const key =
+      getStringValue(record, 'pluginKey') ??
+      getStringValue(record, 'key') ??
+      getStringValue(record, 'packageName') ??
+      getStringValue(record, 'name') ??
+      (manifest ? getStringValue(manifest, 'id') : null);
+    const displayName =
+      getStringValue(record, 'displayName') ??
+      (manifest ? getStringValue(manifest, 'displayName') : null);
+
+    if (id && (key === 'github-sync' || displayName === 'GitHub Sync')) {
+      return `${SETTINGS_INDEX_HREF}/${id}`;
+    }
+  }
+
+  return SETTINGS_INDEX_HREF;
+}
+
+function getDashboardSummary(
+  tokenValid: boolean,
+  savedMappingCount: number,
+  syncState: SyncRunState,
+  runningSync: boolean
+): { label: string; tone: Tone; title: string; body: string } {
+  if (!tokenValid) {
+    return {
+      label: 'Setup required',
+      tone: 'warning',
+      title: 'Finish setup to start syncing',
+      body: 'Open settings to validate GitHub access and configure your first repository.'
+    };
+  }
+
+  if (savedMappingCount === 0) {
+    return {
+      label: 'Setup required',
+      tone: 'warning',
+      title: 'Add your first repository',
+      body: 'Open settings to connect one repository to a Paperclip project.'
+    };
+  }
+
+  if (runningSync || syncState.status === 'running') {
+    return {
+      label: 'Syncing',
+      tone: 'info',
+      title: 'Sync in progress',
+      body: 'GitHub issues are being checked right now.'
+    };
+  }
+
+  if (syncState.status === 'error') {
+    return {
+      label: 'Needs attention',
+      tone: 'danger',
+      title: 'Last sync needs attention',
+      body: syncState.message ?? 'Open settings to review the latest GitHub sync issue.'
+    };
+  }
+
+  if (syncState.checkedAt) {
+    return {
+      label: 'Ready',
+      tone: syncState.status === 'success' ? 'success' : 'info',
+      title: 'GitHub sync activity',
+      body: syncState.message ?? 'Run a sync now or let the schedule keep issues current.'
+    };
+  }
+
+  return {
+    label: 'Ready',
+    tone: 'info',
+    title: 'Ready for first sync',
+    body: 'Your repository mapping is in place. Run the first sync when you are ready.'
   };
+}
+
+function buildThemeVars(theme: ThemePalette, themeMode: ThemeMode): React.CSSProperties {
+  return {
+    colorScheme: themeMode,
+    ['--ghsync-text' as string]: theme.text,
+    ['--ghsync-title' as string]: theme.title,
+    ['--ghsync-muted' as string]: theme.muted,
+    ['--ghsync-surface' as string]: theme.surface,
+    ['--ghsync-surfaceAlt' as string]: theme.surfaceAlt,
+    ['--ghsync-surfaceRaised' as string]: theme.surfaceRaised,
+    ['--ghsync-border' as string]: theme.border,
+    ['--ghsync-border-soft' as string]: theme.borderSoft,
+    ['--ghsync-input-bg' as string]: theme.inputBg,
+    ['--ghsync-input-border' as string]: theme.inputBorder,
+    ['--ghsync-input-text' as string]: theme.inputText,
+    ['--ghsync-badge-bg' as string]: theme.badgeBg,
+    ['--ghsync-badge-border' as string]: theme.badgeBorder,
+    ['--ghsync-badge-text' as string]: theme.badgeText,
+    ['--ghsync-primaryBg' as string]: theme.primaryBg,
+    ['--ghsync-primaryBorder' as string]: theme.primaryBorder,
+    ['--ghsync-primaryText' as string]: theme.primaryText,
+    ['--ghsync-secondaryBg' as string]: theme.secondaryBg,
+    ['--ghsync-secondaryBorder' as string]: theme.secondaryBorder,
+    ['--ghsync-secondaryText' as string]: theme.secondaryText,
+    ['--ghsync-dangerBg' as string]: theme.dangerBg,
+    ['--ghsync-dangerBorder' as string]: theme.dangerBorder,
+    ['--ghsync-dangerText' as string]: theme.dangerText,
+    ['--ghsync-success-bg' as string]: theme.successBg,
+    ['--ghsync-success-border' as string]: theme.successBorder,
+    ['--ghsync-success-text' as string]: theme.successText,
+    ['--ghsync-warning-bg' as string]: theme.warningBg,
+    ['--ghsync-warning-border' as string]: theme.warningBorder,
+    ['--ghsync-warning-text' as string]: theme.warningText,
+    ['--ghsync-info-bg' as string]: theme.infoBg,
+    ['--ghsync-info-border' as string]: theme.infoBorder,
+    ['--ghsync-info-text' as string]: theme.infoText,
+    ['--ghsync-shadow' as string]: theme.shadow
+  } as React.CSSProperties;
 }
 
 export function GitHubSyncSettingsPage(): React.JSX.Element {
   const hostContext = useHostContext();
+  const toast = usePluginToast();
   const pluginIdFromLocation = getPluginIdFromLocation();
   const settings = usePluginData<GitHubSyncSettings>('settings.registration', {});
   const saveRegistration = usePluginAction('settings.saveRegistration');
+  const validateToken = usePluginAction('settings.validateToken');
   const runSyncNow = usePluginAction('sync.runNow');
   const [form, setForm] = useState<GitHubSyncSettings>(EMPTY_SETTINGS);
-  const [submitting, setSubmitting] = useState(false);
+  const [submittingToken, setSubmittingToken] = useState(false);
+  const [submittingMappings, setSubmittingMappings] = useState(false);
   const [runningSync, setRunningSync] = useState(false);
-  const [savedMessage, setSavedMessage] = useState<string | null>(null);
+  const [tokenStatusOverride, setTokenStatusOverride] = useState<TokenStatus | null>(null);
+  const [validatedLogin, setValidatedLogin] = useState<string | null>(null);
   const [tokenDraft, setTokenDraft] = useState('');
-  const [tokenDirty, setTokenDirty] = useState(false);
   const [showSavedTokenHint, setShowSavedTokenHint] = useState(false);
-  const [activeTab, setActiveTab] = useState<ActiveTab>('token');
-  const [themeMode, setThemeMode] = useState<ThemeMode>(() => getThemeMode());
-
-  useEffect(() => {
-    if (typeof window === 'undefined' || typeof document === 'undefined') {
-      return;
-    }
-
-    const matcher = window.matchMedia('(prefers-color-scheme: light)');
-    const handleChange = () => {
-      setThemeMode(getThemeMode());
-    };
-
-    handleChange();
-    matcher.addEventListener('change', handleChange);
-
-    const observer = new MutationObserver(handleChange);
-    observer.observe(document.documentElement, {
-      attributes: true,
-      attributeFilter: ['class', 'data-theme', 'data-color-mode', 'data-mode']
-    });
-    observer.observe(document.body, {
-      attributes: true,
-      attributeFilter: ['class', 'data-theme', 'data-color-mode', 'data-mode']
-    });
-
-    return () => {
-      matcher.removeEventListener('change', handleChange);
-      observer.disconnect();
-    };
-  }, []);
+  const [showTokenEditor, setShowTokenEditor] = useState(false);
+  const themeMode = useResolvedThemeMode();
 
   useEffect(() => {
     if (!settings.data) {
@@ -626,46 +1306,87 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
       updatedAt: settings.data.updatedAt
     });
     setTokenDraft('');
-    setTokenDirty(false);
-    setShowSavedTokenHint(false);
-  }, [settings.data]);
 
-  const hasNonEmptyMappings = form.mappings.some((mapping) => mapping.repositoryUrl.trim() !== '' || mapping.paperclipProjectName.trim() !== '');
-
-  const isDirty = useMemo(() => {
-    if (!settings.data) {
-      return tokenDirty || hasNonEmptyMappings;
+    if (settings.data.githubTokenConfigured) {
+      setShowSavedTokenHint(true);
+      setShowTokenEditor(false);
+      setTokenStatusOverride('valid');
+    } else if (!showSavedTokenHint) {
+      setShowTokenEditor(true);
+      setValidatedLogin(null);
     }
-
-    const currentMappings = JSON.stringify(form.mappings);
-    const savedMappings = JSON.stringify(settings.data.mappings ?? []);
-    return tokenDirty || currentMappings !== savedMappings || (settings.data.mappings?.length ?? 0) === 0 && hasNonEmptyMappings;
-  }, [form.mappings, settings.data, tokenDirty, hasNonEmptyMappings]);
+  }, [settings.data, showSavedTokenHint]);
 
   useEffect(() => {
-    if (activeTab !== 'mappings') {
+    const hasSavedToken = Boolean(form.githubTokenConfigured || showSavedTokenHint);
+    const tokenStatus = tokenStatusOverride ?? (hasSavedToken ? 'valid' : 'required');
+    if (tokenStatus !== 'valid' || form.mappings.length > 0) {
       return;
     }
 
-    setForm((current) => current.mappings.length > 0 ? current : {
-      ...current,
-      mappings: [createEmptyMapping(0)]
-    });
-  }, [activeTab]);
-
-  const theme = themeMode === 'light' ? LIGHT_PALETTE : DARK_PALETTE;
-  const styles = useMemo(() => buildStyles(theme), [theme]);
-
-  function updateMapping(mappingId: string, field: keyof RepositoryMapping, value: string) {
-    setSavedMessage(null);
     setForm((current) => ({
       ...current,
-      mappings: current.mappings.map((mapping) => (mapping.id === mappingId ? { ...mapping, [field]: value } : mapping))
+      mappings: [createEmptyMapping(0)]
     }));
+  }, [form.githubTokenConfigured, form.mappings.length, showSavedTokenHint, tokenStatusOverride]);
+
+  const theme = themeMode === 'light' ? LIGHT_PALETTE : DARK_PALETTE;
+  const themeVars = buildThemeVars(theme, themeMode);
+  const hasSavedToken = Boolean(form.githubTokenConfigured || showSavedTokenHint);
+  const tokenStatus = tokenStatusOverride ?? (hasSavedToken ? 'valid' : 'required');
+  const tokenTone: Tone = tokenStatus === 'valid' ? 'success' : tokenStatus === 'invalid' ? 'danger' : 'warning';
+  const tokenBannerLabel = tokenStatus === 'valid' ? 'Token valid' : tokenStatus === 'invalid' ? 'Token invalid' : 'Token required';
+  const tokenBadgeLabel = tokenStatus === 'valid' ? 'Valid' : tokenStatus === 'invalid' ? 'Invalid' : 'Required';
+  const tokenDescription =
+    tokenStatus === 'valid'
+      ? validatedLogin
+        ? `Authenticated as ${validatedLogin}. Stored as a company secret.`
+        : 'Validated with GitHub and stored as a company secret.'
+      : tokenStatus === 'invalid'
+        ? 'GitHub rejected the last token. Save a valid token to continue.'
+        : 'Save a token once, then get it out of the way.';
+  const repositoriesUnlocked = tokenStatus === 'valid';
+  const savedMappingsSource = settings.data ? settings.data.mappings ?? [] : form.mappings;
+  const savedMappings = getComparableMappings(savedMappingsSource);
+  const draftMappings = getComparableMappings(form.mappings);
+  const savedMappingCount = savedMappings.length;
+  const syncUnlocked = tokenStatus === 'valid' && savedMappingCount > 0;
+  const mappingsDirty = JSON.stringify(draftMappings) !== JSON.stringify(savedMappings);
+  const mappings = form.mappings.length > 0 ? form.mappings : [createEmptyMapping(0)];
+  const syncStatus = getSyncStatus(form.syncState, runningSync, syncUnlocked);
+  const canSaveToken = !submittingToken && !settings.loading && tokenDraft.trim().length > 0;
+  const canSaveMappings = repositoriesUnlocked && !submittingMappings && !settings.loading && mappingsDirty;
+  const showTokenForm = tokenStatus !== 'valid' || showTokenEditor;
+  const lastUpdated = formatDate(form.updatedAt ?? settings.data?.updatedAt, 'Not saved yet');
+  const lastSync = formatDate(form.syncState.checkedAt, 'Never');
+  const syncSummaryClass =
+    syncStatus.tone === 'success'
+      ? 'ghsync__sync-summary ghsync__sync-summary--success'
+      : syncStatus.tone === 'danger'
+        ? 'ghsync__sync-summary ghsync__sync-summary--danger'
+        : 'ghsync__sync-summary ghsync__sync-summary--info';
+
+  function updateMapping(mappingId: string, field: keyof RepositoryMapping, value: string) {
+    setForm((current) => {
+      const hasMapping = current.mappings.some((mapping) => mapping.id === mappingId);
+      const nextMappings = hasMapping
+        ? current.mappings
+        : [
+            ...current.mappings,
+            {
+              ...createEmptyMapping(current.mappings.length),
+              id: mappingId
+            }
+          ];
+
+      return {
+        ...current,
+        mappings: nextMappings.map((mapping) => (mapping.id === mappingId ? { ...mapping, [field]: value } : mapping))
+      };
+    });
   }
 
   function addMapping() {
-    setSavedMessage(null);
     setForm((current) => ({
       ...current,
       mappings: [...current.mappings, createEmptyMapping(current.mappings.length)]
@@ -673,7 +1394,6 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
   }
 
   function removeMapping(mappingId: string) {
-    setSavedMessage(null);
     setForm((current) => {
       const remaining = current.mappings.filter((mapping) => mapping.id !== mappingId);
       return {
@@ -683,22 +1403,104 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
     });
   }
 
-  async function handleSave(event: React.FormEvent<HTMLFormElement>) {
+  async function handleSaveToken(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    setSubmitting(true);
-    setSavedMessage(null);
+    setSubmittingToken(true);
+
+    let validation: TokenValidationResult;
+
+    try {
+      const trimmedToken = tokenDraft.trim();
+      if (!trimmedToken) {
+        throw new Error('Enter a GitHub token.');
+      }
+
+      validation = await validateToken({
+        token: trimmedToken
+      }) as TokenValidationResult;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'GitHub rejected this token.';
+      if (!hasSavedToken) {
+        setTokenStatusOverride('invalid');
+      }
+      setValidatedLogin(null);
+
+      toast({
+        title: 'GitHub token invalid',
+        body: message,
+        tone: 'error'
+      });
+      setSubmittingToken(false);
+      return;
+    }
 
     try {
       const companyId = hostContext.companyId;
       if (!companyId) {
-        throw new Error('Company context is required to save mappings.');
+        throw new Error('Company context is required to save the GitHub token.');
       }
 
-      let githubTokenRef = '';
-      if (tokenDirty) {
-        const secretName = `github_sync_${companyId.replace(/[^a-z0-9]+/gi, '_').toLowerCase()}`;
-        const secret = await resolveOrCreateCompanySecret(companyId, secretName, tokenDraft);
-        githubTokenRef = secret.id;
+      if (!pluginIdFromLocation) {
+        throw new Error('Plugin id is required to save the GitHub token.');
+      }
+
+      const trimmedToken = tokenDraft.trim();
+
+      const secretName = `github_sync_${companyId.replace(/[^a-z0-9]+/gi, '_').toLowerCase()}`;
+      const secret = await resolveOrCreateCompanySecret(companyId, secretName, trimmedToken);
+
+      await fetchJson(`/api/plugins/${pluginIdFromLocation}/config`, {
+        method: 'POST',
+        body: JSON.stringify({
+          configJson: {
+            githubTokenRef: secret.id
+          }
+        })
+      });
+
+      setForm((current) => ({
+        ...current,
+        githubTokenConfigured: true
+      }));
+      setShowSavedTokenHint(true);
+      setShowTokenEditor(false);
+      setTokenStatusOverride('valid');
+      setValidatedLogin(validation.login);
+      setTokenDraft('');
+      toast({
+        title: `Authenticated as ${validation.login}`,
+        body: 'GitHub token valid and stored as a company secret.',
+        tone: 'success'
+      });
+
+      try {
+        await settings.refresh();
+      } catch {
+        return;
+      }
+    } catch (error) {
+      toast({
+        title: 'GitHub token could not be saved',
+        body: error instanceof Error ? error.message : 'Paperclip could not save the validated token.',
+        tone: 'error'
+      });
+    } finally {
+      setSubmittingToken(false);
+    }
+  }
+
+  async function handleSaveMappings(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setSubmittingMappings(true);
+
+    try {
+      const companyId = hostContext.companyId;
+      if (!companyId) {
+        throw new Error('Company context is required to save repositories.');
+      }
+
+      if (tokenStatus !== 'valid') {
+        throw new Error('Validate a GitHub token first.');
       }
 
       const resolvedMappings: RepositoryMapping[] = [];
@@ -710,17 +1512,15 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
           continue;
         }
 
-        if (!paperclipProjectName) {
-          throw new Error('Each mapping needs a project name before saving.');
+        if (!repositoryUrl || !paperclipProjectName) {
+          throw new Error('Each repository needs both a GitHub URL and a Paperclip project name.');
         }
 
         const project = mapping.paperclipProjectId && mapping.companyId === companyId
           ? { id: mapping.paperclipProjectId, name: paperclipProjectName }
           : await resolveOrCreateProject(companyId, paperclipProjectName);
 
-        if (repositoryUrl) {
-          await bindProjectRepo(project.id, repositoryUrl);
-        }
+        await bindProjectRepo(project.id, repositoryUrl);
 
         resolvedMappings.push({
           ...mapping,
@@ -731,214 +1531,534 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
         });
       }
 
-      if (githubTokenRef) {
-        const pluginId = pluginIdFromLocation;
-        if (!pluginId) {
-          throw new Error('Plugin id is required to save the token secret reference.');
-        }
-
-        await fetchJson(`/api/plugins/${pluginId}/config`, {
-          method: 'POST',
-          body: JSON.stringify({
-            configJson: { githubTokenRef }
-          })
-        });
-      }
-
-      await saveRegistration({
+      const result = await saveRegistration({
         mappings: resolvedMappings,
         syncState: form.syncState
-      });
+      }) as GitHubSyncSettings;
+
       setForm((current) => ({
         ...current,
-        mappings: resolvedMappings
+        mappings: result.mappings.length > 0 ? result.mappings : [createEmptyMapping(0)],
+        syncState: result.syncState,
+        updatedAt: result.updatedAt
       }));
-      settings.refresh();
-      setTokenDraft('');
-      setTokenDirty(false);
-      await settings.refresh();
-      setShowSavedTokenHint(true);
-      setSavedMessage(
-        activeTab === 'token'
-          ? 'GitHub token secret saved.'
-          : activeTab === 'mappings'
-            ? 'Mappings saved.'
-            : 'Settings saved.'
-      );
+
+      toast({
+        title: resolvedMappings.length > 0 ? 'Repositories saved' : 'Repositories cleared',
+        tone: 'success'
+      });
+
+      try {
+        await settings.refresh();
+      } catch {
+        return;
+      }
+    } catch (error) {
+      toast({
+        title: 'Repositories could not be saved',
+        body: error instanceof Error ? error.message : 'Unable to save repositories.',
+        tone: 'error'
+      });
     } finally {
-      setSubmitting(false);
+      setSubmittingMappings(false);
     }
   }
 
   async function handleRunSyncNow() {
     setRunningSync(true);
-    setSavedMessage(null);
 
     try {
+      if (!syncUnlocked) {
+        throw new Error('Save at least one repository before running sync.');
+      }
+
       const result = await runSyncNow({}) as GitHubSyncSettings;
+
       setForm((current) => ({
         ...current,
         syncState: result.syncState
       }));
-      settings.refresh();
+
+      toast({
+        title: result.syncState.status === 'error' ? 'GitHub sync needs attention' : 'GitHub sync finished',
+        body: result.syncState.message ?? 'GitHub sync completed.',
+        tone: result.syncState.status === 'error' ? 'error' : 'success'
+      });
+
+      try {
+        await settings.refresh();
+      } catch {
+        return;
+      }
+    } catch (error) {
+      toast({
+        title: 'Unable to run GitHub sync',
+        body: error instanceof Error ? error.message : 'Unable to run sync.',
+        tone: 'error'
+      });
     } finally {
       setRunningSync(false);
     }
   }
 
-  const mappings = form.mappings.length > 0 ? form.mappings : [createEmptyMapping(0)];
-  const actualMappingCount = settings.data?.mappings?.length ?? form.mappings.filter((mapping) => mapping.repositoryUrl.trim() !== '' || mapping.paperclipProjectName.trim() !== '').length;
-  const lastUpdated = settings.data?.updatedAt
-    ? new Date(settings.data.updatedAt).toLocaleString()
-    : 'Not saved yet';
-
   return (
-    <div style={styles.page}>
-      <section style={styles.header}>
-        <div style={styles.titleRow}>
-          <h2 style={styles.title}>GitHub Sync settings</h2>
-          <span style={styles.badge}>{actualMappingCount} mapping{actualMappingCount === 1 ? '' : 's'}</span>
+    <div className="ghsync" style={themeVars}>
+      <style>{PAGE_STYLES}</style>
+
+      <section className="ghsync__header">
+        <div className="ghsync__header-copy">
+          <h2>GitHub Sync settings</h2>
+          <p>Validate a GitHub token first. Repositories and sync stay locked until GitHub access is valid.</p>
         </div>
-        <p style={styles.description}>
-          Configure access to GitHub, define the repository mappings, and run or monitor synchronization.
-        </p>
+        <span className={`ghsync__badge ${getToneClass(tokenTone)}`}>
+          <span className="ghsync__badge-dot" aria-hidden="true" />
+          {tokenBannerLabel}
+        </span>
       </section>
 
-      <div style={styles.layout}>
-        <section style={styles.card}>
-          <div style={styles.cardHeader}>
-            <div>
-              <h3 style={styles.cardTitle}>Configuration</h3>
-              <p style={styles.cardDescription}>Everything needed to fetch GitHub issues and import them into Paperclip.</p>
-            </div>
-            <div role="tablist" aria-label="GitHub Sync settings sections" style={styles.tabList}>
-              <button type="button" role="tab" aria-selected={activeTab === 'token'} style={{ ...styles.tab, ...(activeTab === 'token' ? styles.tabActive : null) }} onClick={() => setActiveTab('token')}>GitHub token</button>
-              <button type="button" role="tab" aria-selected={activeTab === 'mappings'} style={{ ...styles.tab, ...(activeTab === 'mappings' ? styles.tabActive : null) }} onClick={() => setActiveTab('mappings')}>Repository mappings</button>
-              <button type="button" role="tab" aria-selected={activeTab === 'sync'} style={{ ...styles.tab, ...(activeTab === 'sync' ? styles.tabActive : null) }} onClick={() => setActiveTab('sync')}>Sync</button>
-            </div>
+      <div className="ghsync__layout">
+        <section className="ghsync__card">
+          <div className="ghsync__card-header">
+            <h3>Connect GitHub</h3>
+            <p>The token is the only prerequisite. After that, the rest of this page stays compact.</p>
           </div>
-          <div style={styles.cardBody}>
-            {settings.loading ? <p style={styles.loading}>Loading saved settings…</p> : null}
-            <form onSubmit={handleSave} style={styles.cardBody}>
-              {activeTab === 'token' ? (
-                <>
-                  <div style={styles.fieldGroup}>
-                    <label htmlFor="github-token" style={styles.fieldLabel}>GitHub token</label>
-                    <input
-                      id="github-token"
-                      type="password"
-                      value={tokenDirty ? tokenDraft : ''}
-                      onChange={(event) => {
-                        setSavedMessage(null);
-                        const nextValue = event.currentTarget.value;
-                        setTokenDraft(nextValue);
-                        setTokenDirty(true);
-                        setShowSavedTokenHint(false);
-                      }}
-                      placeholder="ghp_..."
-                      autoComplete="off"
-                      style={styles.input}
-                    />
-                    <p style={styles.fieldHint}>{showSavedTokenHint ? 'A GitHub token secret is already configured. Type here only if you want to replace it.' : 'Saving this field creates a company secret and stores only its reference in the plugin.'}</p>
-                  </div>
-                  <div style={styles.tokenActions}>
-                    <button type="submit" style={{ ...styles.primaryButton, ...((submitting || settings.loading || !isDirty) ? styles.buttonDisabled : null) }} disabled={submitting || settings.loading || !isDirty}>{submitting ? 'Saving…' : 'Save token'}</button>
-                  </div>
-                </>
-              ) : null}
 
-              {activeTab === 'mappings' ? (
-                <>
-                  <div style={styles.mappingList}>
-                    {mappings.map((mapping, index) => (
-                      <section key={mapping.id} style={styles.mappingCard}>
-                        <div style={styles.mappingHeader}>
-                          <div>
-                            <h4 style={styles.mappingTitle}>Mapping {index + 1}</h4>
-                            <span style={styles.mappingMeta}>One repository, one destination project name.</span>
+          {settings.loading ? <p className="ghsync__loading">Loading saved settings…</p> : null}
+
+          <section className="ghsync__section">
+            <div className="ghsync__section-head">
+              <div className="ghsync__section-copy">
+                <h4>GitHub access</h4>
+                <p>{tokenDescription}</p>
+              </div>
+              <span className={`ghsync__badge ${getToneClass(tokenTone)}`}>
+                {tokenBadgeLabel}
+              </span>
+            </div>
+
+            {showTokenForm ? (
+              <form className="ghsync__stack" onSubmit={handleSaveToken}>
+                <div className="ghsync__field">
+                  <label htmlFor="github-token">GitHub token</label>
+                  <input
+                    id="github-token"
+                    className="ghsync__input"
+                    type="password"
+                    value={tokenDraft}
+                    onChange={(event) => {
+                      setTokenDraft(event.currentTarget.value);
+                      setTokenStatusOverride(hasSavedToken ? 'valid' : null);
+                    }}
+                    placeholder="ghp_..."
+                    autoComplete="new-password"
+                  />
+                </div>
+
+                <div className="ghsync__actions">
+                  <p className="ghsync__hint">We validate the token with the GitHub API before saving it as a company secret.</p>
+                  <div className="ghsync__button-row">
+                    {hasSavedToken ? (
+                      <button
+                        type="button"
+                        className="ghsync__button ghsync__button--secondary"
+                        onClick={() => {
+                          setShowTokenEditor(false);
+                          setTokenDraft('');
+                          setTokenStatusOverride('valid');
+                        }}
+                      >
+                        Cancel
+                      </button>
+                    ) : null}
+                    <button
+                      type="submit"
+                      className="ghsync__button ghsync__button--primary"
+                      disabled={!canSaveToken}
+                    >
+                      {submittingToken ? 'Validating…' : 'Validate & save token'}
+                    </button>
+                  </div>
+                </div>
+              </form>
+            ) : (
+                <div className="ghsync__connected">
+                  <div>
+                  <strong>{validatedLogin ? `Authenticated as ${validatedLogin}` : 'GitHub token valid'}</strong>
+                  <span>{validatedLogin ? 'Validated with GitHub and stored as a company secret.' : 'Validated with GitHub and stored as a company secret.'}</span>
+                  </div>
+                <button
+                  type="button"
+                  className="ghsync__button ghsync__button--secondary"
+                  onClick={() => {
+                    setShowTokenEditor(true);
+                    setTokenDraft('');
+                    setTokenStatusOverride('valid');
+                  }}
+                >
+                  Replace token
+                </button>
+              </div>
+            )}
+          </section>
+
+          <section className="ghsync__section">
+            <div className="ghsync__section-head">
+              <div className="ghsync__section-copy">
+                <h4>Repositories</h4>
+                <p>{repositoriesUnlocked ? 'Map each GitHub repository to a Paperclip project.' : 'Unlocks after the token is valid.'}</p>
+              </div>
+              <span className={`ghsync__badge ${getToneClass(!repositoriesUnlocked ? 'neutral' : savedMappingCount > 0 ? 'success' : 'info')}`}>
+                {!repositoriesUnlocked ? 'Locked' : savedMappingCount > 0 ? `${savedMappingCount} saved` : 'Open'}
+              </span>
+            </div>
+
+            {!repositoriesUnlocked ? (
+              <div className="ghsync__locked">
+                <div>
+                  <strong>Repositories are locked</strong>
+                  <span>{tokenStatus === 'invalid' ? 'Save a valid GitHub token to continue.' : 'Validate the token to unlock repository mapping.'}</span>
+                </div>
+                <span className="ghsync__badge ghsync__badge--neutral">Locked</span>
+              </div>
+            ) : (
+              <form className="ghsync__stack" onSubmit={handleSaveMappings}>
+                <div className="ghsync__mapping-list">
+                  {mappings.map((mapping, index) => {
+                    const canRemove = mappings.length > 1 || mapping.repositoryUrl.trim() !== '' || mapping.paperclipProjectName.trim() !== '';
+
+                    return (
+                      <section key={mapping.id} className="ghsync__mapping-card">
+                        <div className="ghsync__mapping-head">
+                          <div className="ghsync__mapping-title">
+                            <strong>Repository {index + 1}</strong>
+                            <span>{mapping.paperclipProjectId ? 'Linked project saved.' : 'One repository, one Paperclip project.'}</span>
                           </div>
-                          <button type="button" style={styles.dangerButton} onClick={() => removeMapping(mapping.id)}>Remove</button>
+                          {canRemove ? (
+                            <button
+                              type="button"
+                              className="ghsync__button ghsync__button--danger"
+                              onClick={() => removeMapping(mapping.id)}
+                            >
+                              Remove
+                            </button>
+                          ) : null}
                         </div>
-                        <div style={styles.mappingFields}>
-                          <div style={styles.fieldGroup}>
-                            <label htmlFor={`repository-url-${mapping.id}`} style={styles.fieldLabel}>GitHub repository URL</label>
-                            <input id={`repository-url-${mapping.id}`} type="url" value={mapping.repositoryUrl} onChange={(event) => updateMapping(mapping.id, 'repositoryUrl', event.currentTarget.value)} placeholder="https://github.com/owner/repository" autoComplete="off" style={styles.input} />
+
+                        <div className="ghsync__mapping-grid">
+                          <div className="ghsync__field">
+                            <label htmlFor={`repository-url-${mapping.id}`}>GitHub repository URL</label>
+                            <input
+                              id={`repository-url-${mapping.id}`}
+                              className="ghsync__input"
+                              type="url"
+                              value={mapping.repositoryUrl}
+                              onChange={(event) => updateMapping(mapping.id, 'repositoryUrl', event.currentTarget.value)}
+                              placeholder="https://github.com/owner/repository"
+                              autoComplete="off"
+                            />
                           </div>
-                          <div style={styles.fieldGroup}>
-                            <label htmlFor={`project-name-${mapping.id}`} style={styles.fieldLabel}>Project name</label>
-                            <input id={`project-name-${mapping.id}`} type="text" value={mapping.paperclipProjectName} onChange={(event) => updateMapping(mapping.id, 'paperclipProjectName', event.currentTarget.value)} placeholder="Engineering" autoComplete="off" style={styles.input} readOnly={Boolean(mapping.paperclipProjectId)} />
-                            {mapping.paperclipProjectId ? <p style={styles.fieldHint}>Project created and linked.</p> : null}
+
+                          <div className="ghsync__field">
+                            <label htmlFor={`project-name-${mapping.id}`}>Paperclip project</label>
+                            <input
+                              id={`project-name-${mapping.id}`}
+                              className="ghsync__input"
+                              type="text"
+                              value={mapping.paperclipProjectName}
+                              onChange={(event) => updateMapping(mapping.id, 'paperclipProjectName', event.currentTarget.value)}
+                              placeholder="Engineering"
+                              autoComplete="off"
+                              readOnly={Boolean(mapping.paperclipProjectId)}
+                            />
+                            {!mapping.paperclipProjectId ? <p className="ghsync__hint">A project with this name will be created if it does not exist.</p> : null}
                           </div>
                         </div>
                       </section>
-                    ))}
-                  </div>
-                  <div style={styles.footerRow}>
-                    <button type="button" style={styles.secondaryButton} onClick={addMapping}>Add mapping</button>
-                    <button type="submit" style={{ ...styles.primaryButton, ...((submitting || settings.loading) ? styles.buttonDisabled : null) }} disabled={submitting || settings.loading}>{submitting ? 'Saving…' : 'Save mappings'}</button>
-                  </div>
-                </>
-              ) : null}
+                    );
+                  })}
+                </div>
 
-              {activeTab === 'sync' ? (
-                <>
-                  <div style={styles.syncMetrics}>
-                    <div style={styles.metricCard}>
-                      <span style={styles.metricLabel}>Issues fetched</span>
-                      <span style={styles.metricValue}>{form.syncState.syncedIssuesCount ?? 0}</span>
-                    </div>
-                    <div style={styles.metricCard}>
-                      <span style={styles.metricLabel}>Issues created</span>
-                      <span style={styles.metricValue}>{form.syncState.createdIssuesCount ?? 0}</span>
-                    </div>
+                <div className="ghsync__section-footer">
+                  <div className="ghsync__button-row">
+                    <button
+                      type="button"
+                      className="ghsync__button ghsync__button--secondary"
+                      onClick={addMapping}
+                    >
+                      Add repository
+                    </button>
+                    <button
+                      type="submit"
+                      className="ghsync__button ghsync__button--primary"
+                      disabled={!canSaveMappings}
+                    >
+                      {submittingMappings ? 'Saving…' : 'Save repositories'}
+                    </button>
                   </div>
-                  <div style={styles.fieldGroup}>
-                    <span style={styles.fieldLabel}>Sync status</span>
-                    <p style={styles.fieldHint}>{form.syncState.message ?? 'No sync has run yet.'}</p>
-                    <p style={styles.fieldHint}>Last trigger: {form.syncState.lastRunTrigger ?? 'none'} · Last checked: {form.syncState.checkedAt ? new Date(form.syncState.checkedAt).toLocaleString() : 'never'}</p>
-                  </div>
-                  <div style={styles.tokenActions}>
-                    <button type="button" style={{ ...styles.primaryButton, ...((runningSync || settings.loading) ? styles.buttonDisabled : null) }} onClick={handleRunSyncNow} disabled={runningSync || settings.loading}>{runningSync ? 'Running sync…' : 'Run sync now'}</button>
-                  </div>
-                  {form.syncState.status === 'success' && form.syncState.message ? <p style={styles.validationMessageSuccess}>{form.syncState.message}</p> : null}
-                  {form.syncState.status === 'error' && form.syncState.message ? <p style={styles.validationMessageError}>{form.syncState.message}</p> : null}
-                </>
-              ) : null}
-            </form>
-            {savedMessage ? <p style={styles.success}>{savedMessage}</p> : null}
-          </div>
-        </section>
+                  <p className="ghsync__note">
+                    {savedMappingCount > 0 ? `${savedMappingCount} saved.` : 'Save at least one repository to unlock sync.'}
+                  </p>
+                </div>
+              </form>
+            )}
+          </section>
 
-        <aside style={styles.sidebarStack}>
-          <section style={styles.card}>
-            <div style={styles.cardHeader}>
-              <h3 style={styles.cardTitle}>Summary</h3>
-              <p style={styles.cardDescription}>Current state at a glance.</p>
+          <section className="ghsync__section">
+            <div className="ghsync__section-head">
+              <div className="ghsync__section-copy">
+                <h4>Sync</h4>
+                <p>{syncUnlocked ? 'Run sync when you need it and keep the status compact.' : tokenStatus === 'valid' ? 'Unlocks after at least one repository is saved.' : 'Unlocks after the token is valid and repository setup is complete.'}</p>
+              </div>
+              <span className={`ghsync__badge ${getToneClass(syncStatus.tone)}`}>{syncStatus.label}</span>
             </div>
-            <div style={styles.cardBody}>
-              <div style={styles.detailList}>
-                <div style={styles.detailItem}>
-                  <span style={styles.detailLabel}>Token</span>
-                  <span style={styles.detailValue}>{form.githubTokenConfigured || showSavedTokenHint ? 'Secret configured' : 'Missing'}</span>
+
+            {!syncUnlocked ? (
+              <div className="ghsync__locked">
+                <div>
+                  <strong>Sync is locked</strong>
+                  <span>{tokenStatus === 'valid' ? 'Save at least one repository mapping first.' : tokenStatus === 'invalid' ? 'Save a valid GitHub token first.' : 'Validate the token first.'}</span>
                 </div>
-                <div style={styles.detailItem}>
-                  <span style={styles.detailLabel}>Mappings</span>
-                  <span style={styles.detailValue}>{actualMappingCount}</span>
+                <span className="ghsync__badge ghsync__badge--neutral">Locked</span>
+              </div>
+            ) : (
+              <div className="ghsync__stack">
+                <div className="ghsync__stats">
+                  <div className="ghsync__stat">
+                    <span>Checked</span>
+                    <strong>{form.syncState.syncedIssuesCount ?? 0}</strong>
+                  </div>
+                  <div className="ghsync__stat">
+                    <span>Created</span>
+                    <strong>{form.syncState.createdIssuesCount ?? 0}</strong>
+                  </div>
+                  <div className="ghsync__stat">
+                    <span>Skipped</span>
+                    <strong>{form.syncState.skippedIssuesCount ?? 0}</strong>
+                  </div>
                 </div>
-                <div style={styles.detailItem}>
-                  <span style={styles.detailLabel}>Last sync</span>
-                  <span style={styles.detailValue}>{form.syncState.checkedAt ? new Date(form.syncState.checkedAt).toLocaleString() : 'Never'}</span>
-                </div>
-                <div style={{ ...styles.detailItem, ...styles.detailItemLast }}>
-                  <span style={styles.detailLabel}>Last saved</span>
-                  <span style={styles.detailValue}>{lastUpdated}</span>
+
+                <div className={syncSummaryClass}>
+                  <div>
+                    <strong>{form.syncState.message ?? 'Ready to sync.'}</strong>
+                    <span>
+                      Last trigger: {form.syncState.lastRunTrigger ?? 'none'}
+                      {' · '}
+                      Last checked: {form.syncState.checkedAt ? formatDate(form.syncState.checkedAt) : 'never'}
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    className="ghsync__button ghsync__button--primary"
+                    onClick={handleRunSyncNow}
+                    disabled={runningSync || settings.loading}
+                  >
+                    {runningSync ? 'Running…' : 'Run sync now'}
+                  </button>
                 </div>
               </div>
-            </div>
+            )}
           </section>
+        </section>
+
+        <aside className="ghsync__card">
+          <div className="ghsync__card-header">
+            <h3>Setup</h3>
+            <p>Only the blockers stay visible.</p>
+          </div>
+
+          <div className="ghsync__side-body">
+            <div className="ghsync__check">
+              <div className="ghsync__check-top">
+                <strong>GitHub token</strong>
+                <span className={`ghsync__badge ${getToneClass(tokenTone)}`}>
+                  {tokenBadgeLabel}
+                </span>
+              </div>
+              <span>{tokenStatus === 'valid' ? (validatedLogin ? `Authenticated as ${validatedLogin}.` : 'Validated and saved as a company secret.') : tokenStatus === 'invalid' ? 'The last token validation failed.' : 'Needed before anything else.'}</span>
+            </div>
+
+            <div className="ghsync__check">
+              <div className="ghsync__check-top">
+                <strong>Repositories</strong>
+                <span className={`ghsync__badge ${getToneClass(!repositoriesUnlocked ? 'neutral' : savedMappingCount > 0 ? 'success' : 'info')}`}>
+                  {!repositoriesUnlocked ? 'Locked' : savedMappingCount > 0 ? 'Ready' : 'Open'}
+                </span>
+              </div>
+              <span>{!repositoriesUnlocked ? 'Opens after token setup.' : savedMappingCount > 0 ? `${savedMappingCount} saved.` : 'Add and save a repository.'}</span>
+            </div>
+
+            <div className="ghsync__check">
+              <div className="ghsync__check-top">
+                <strong>Sync</strong>
+                <span className={`ghsync__badge ${getToneClass(syncStatus.tone)}`}>{syncStatus.label}</span>
+              </div>
+              <span>{!syncUnlocked ? (tokenStatus === 'valid' ? 'Waiting for a saved repository.' : 'Waiting for valid GitHub access.') : form.syncState.checkedAt ? `Last run ${lastSync}.` : 'Ready to run on demand.'}</span>
+            </div>
+
+            <div className="ghsync__detail-list">
+              <div className="ghsync__detail">
+                <span className="ghsync__detail-label">Last saved</span>
+                <strong className="ghsync__detail-value">{lastUpdated}</strong>
+              </div>
+              <div className="ghsync__detail">
+                <span className="ghsync__detail-label">Last sync</span>
+                <strong className="ghsync__detail-value">{lastSync}</strong>
+              </div>
+            </div>
+          </div>
         </aside>
       </div>
     </div>
+  );
+}
+
+export function GitHubSyncDashboardWidget(): React.JSX.Element {
+  useHostContext();
+  const toast = usePluginToast();
+  const settings = usePluginData<GitHubSyncSettings>('settings.registration', {});
+  const runSyncNow = usePluginAction('sync.runNow');
+  const [runningSync, setRunningSync] = useState(false);
+  const [settingsHref, setSettingsHref] = useState(SETTINGS_INDEX_HREF);
+  const themeMode = useResolvedThemeMode();
+
+  const theme = themeMode === 'light' ? LIGHT_PALETTE : DARK_PALETTE;
+  const themeVars = buildThemeVars(theme, themeMode);
+  const current = settings.data ?? EMPTY_SETTINGS;
+  const syncState = current.syncState ?? EMPTY_SETTINGS.syncState;
+  const tokenValid = Boolean(current.githubTokenConfigured);
+  const savedMappingCount = getComparableMappings(current.mappings ?? []).length;
+  const syncUnlocked = tokenValid && savedMappingCount > 0;
+  const summary = getDashboardSummary(tokenValid, savedMappingCount, syncState, runningSync);
+  const lastSync = formatDate(syncState.checkedAt, 'Never');
+  const syncedIssuesCount = syncState.syncedIssuesCount ?? 0;
+  const createdIssuesCount = syncState.createdIssuesCount ?? 0;
+  const skippedIssuesCount = syncState.skippedIssuesCount ?? 0;
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadSettingsHref(): Promise<void> {
+      try {
+        const plugins = await fetchJson<unknown>('/api/plugins');
+        if (!cancelled) {
+          setSettingsHref(resolvePluginSettingsHref(plugins));
+        }
+      } catch {
+        if (!cancelled) {
+          setSettingsHref(SETTINGS_INDEX_HREF);
+        }
+      }
+    }
+
+    void loadSettingsHref();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  async function handleRunSync(): Promise<void> {
+    setRunningSync(true);
+
+    try {
+      const result = await runSyncNow({}) as GitHubSyncSettings;
+      const nextSyncState = result.syncState ?? EMPTY_SETTINGS.syncState;
+
+      toast({
+        title: nextSyncState.status === 'error' ? 'GitHub sync needs attention' : 'GitHub sync started',
+        body: nextSyncState.message ?? 'GitHub sync completed.',
+        tone: nextSyncState.status === 'error' ? 'error' : 'success'
+      });
+
+      await settings.refresh();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unable to run GitHub sync.';
+      toast({
+        title: 'Unable to run GitHub sync',
+        body: message,
+        tone: 'error'
+      });
+    } finally {
+      setRunningSync(false);
+    }
+  }
+
+  return (
+    <section className="ghsync-widget" style={themeVars}>
+      <style>{WIDGET_STYLES}</style>
+
+      <div className="ghsync-widget__card">
+        <div className="ghsync-widget__top">
+          <div>
+            <div className="ghsync-widget__eyebrow">GitHub Sync</div>
+            <h3>{summary.title}</h3>
+            <p>{summary.body}</p>
+            <div className="ghsync-widget__meta">
+              <span>{savedMappingCount} {savedMappingCount === 1 ? 'repository' : 'repositories'}</span>
+              <span className="ghsync-widget__meta-dot" aria-hidden="true" />
+              <span>Last sync {lastSync}</span>
+            </div>
+          </div>
+          <span className={`ghsync__badge ${getToneClass(summary.tone)}`}>
+            <span className="ghsync__badge-dot" aria-hidden="true" />
+            {summary.label}
+          </span>
+        </div>
+
+        {settings.error ? <div className="ghsync-widget__message">{settings.error.message}</div> : null}
+
+        <div className="ghsync-widget__stats">
+          <div className="ghsync-widget__stat">
+            <span>Checked</span>
+            <strong>{syncedIssuesCount}</strong>
+          </div>
+          <div className="ghsync-widget__stat">
+            <span>Imported</span>
+            <strong>{createdIssuesCount}</strong>
+          </div>
+          <div className="ghsync-widget__stat">
+            <span>Skipped</span>
+            <strong>{skippedIssuesCount}</strong>
+          </div>
+        </div>
+
+        <div className="ghsync-widget__summary">
+          <strong>{settings.loading ? 'Loading sync status…' : syncUnlocked ? 'Latest result' : 'Next step'}</strong>
+          <span>
+            {settings.loading
+              ? 'Fetching the latest GitHub sync state from the worker.'
+              : !tokenValid
+                ? 'Open settings to validate GitHub access.'
+                : savedMappingCount === 0
+                  ? 'Open settings and add a repository. The Paperclip project will be created if it does not exist.'
+                  : syncState.checkedAt
+                    ? `Last checked ${lastSync}.`
+                    : 'Everything is configured. Run the first sync when you are ready.'}
+          </span>
+        </div>
+
+        <div className="ghsync-widget__actions">
+          <div className="ghsync-widget__button-row">
+            <a
+              href={settingsHref}
+              className={`ghsync__button ${syncUnlocked ? 'ghsync__button--secondary' : 'ghsync__button--primary'} ghsync-widget__link`}
+            >
+              Open settings
+            </a>
+            {syncUnlocked ? (
+              <button
+                type="button"
+                className="ghsync__button ghsync__button--primary"
+                onClick={handleRunSync}
+                disabled={runningSync || settings.loading}
+              >
+                {runningSync ? 'Running…' : 'Run sync now'}
+              </button>
+            ) : null}
+          </div>
+        </div>
+      </div>
+    </section>
   );
 }
 

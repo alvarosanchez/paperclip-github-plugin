@@ -16,11 +16,6 @@ const IMPORT_REGISTRY_SCOPE = {
   stateKey: 'github-sync-import-registry'
 };
 
-const CONFIG_CACHE_SCOPE = {
-  scopeKind: 'instance' as const,
-  stateKey: 'github-sync-config-cache'
-};
-
 interface RepositoryMapping {
   id: string;
   repositoryUrl: string;
@@ -63,6 +58,10 @@ interface GitHubIssueRecord {
   body: string | null;
   htmlUrl: string;
   state: string;
+}
+
+interface TokenValidationResult {
+  login: string;
 }
 
 const DEFAULT_SETTINGS: GitHubSyncSettings = {
@@ -244,16 +243,7 @@ async function createPaperclipIssue(ctx: Parameters<Parameters<typeof definePlug
 }
 
 async function getResolvedConfig(ctx: Parameters<Parameters<typeof definePlugin>[0]['setup']>[0]): Promise<GitHubSyncConfig> {
-  const cached = normalizeConfig(await ctx.state.get(CONFIG_CACHE_SCOPE));
-  if (cached.githubTokenRef) {
-    return cached;
-  }
-
-  const live = normalizeConfig(await ctx.config.get());
-  if (live.githubTokenRef) {
-    await ctx.state.set(CONFIG_CACHE_SCOPE, live);
-  }
-  return live;
+  return normalizeConfig(await ctx.config.get());
 }
 
 async function resolveGithubToken(ctx: Parameters<Parameters<typeof definePlugin>[0]['setup']>[0]): Promise<string> {
@@ -264,6 +254,26 @@ async function resolveGithubToken(ctx: Parameters<Parameters<typeof definePlugin
   }
 
   return ctx.secrets.resolve(secretRef);
+}
+
+async function validateGithubToken(token: string): Promise<TokenValidationResult> {
+  const octokit = new Octokit({ auth: token.trim() });
+
+  try {
+    const response = await octokit.rest.users.getAuthenticated();
+    return {
+      login: response.data.login
+    };
+  } catch (error) {
+    const status = typeof error === 'object' && error && 'status' in error ? (error as { status?: unknown }).status : undefined;
+
+    if (status === 401 || status === 403) {
+      throw new Error('GitHub rejected this token. Check that it is valid and has API access.');
+    }
+
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`Unable to reach GitHub with this token. ${message}`);
+  }
 }
 
 async function performSync(ctx: Parameters<Parameters<typeof definePlugin>[0]['setup']>[0], trigger: 'manual' | 'schedule' | 'retry') {
@@ -390,10 +400,6 @@ async function performSync(ctx: Parameters<Parameters<typeof definePlugin>[0]['s
 }
 
 const plugin = definePlugin({
-  async onConfigChanged(newConfig) {
-    return;
-  },
-
   async setup(ctx) {
     ctx.data.register('settings.registration', async () => {
       const saved = await ctx.state.get(SETTINGS_SCOPE);
@@ -422,6 +428,17 @@ const plugin = definePlugin({
       return next;
     });
 
+    ctx.actions.register('settings.validateToken', async (input) => {
+      const token = input && typeof input === 'object' && 'token' in input ? (input as { token?: unknown }).token : undefined;
+      const trimmedToken = typeof token === 'string' ? token.trim() : '';
+
+      if (!trimmedToken) {
+        throw new Error('Enter a GitHub token.');
+      }
+
+      return validateGithubToken(trimmedToken);
+    });
+
     ctx.actions.register('sync.runNow', async () => {
       return performSync(ctx, 'manual');
     });
@@ -429,9 +446,6 @@ const plugin = definePlugin({
     ctx.jobs.register('sync.github-issues', async (job) => {
       await performSync(ctx, job.trigger === 'retry' ? 'retry' : 'schedule');
     });
-
-    const initialConfig = normalizeConfig(await ctx.config.get());
-    await ctx.state.set(CONFIG_CACHE_SCOPE, initialConfig);
   }
 });
 
