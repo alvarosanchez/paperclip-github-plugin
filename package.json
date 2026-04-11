@@ -2,6 +2,7 @@
   "name": "paperclip-github",
   "version": "0.1.2",
   "description": "Paperclip plugin for synchronizing GitHub issues into Paperclip projects.",
+  "license": "Apache-2.0",
   "type": "module",
   "packageManager": "pnpm@10.17.1",
   "engines": {
@@ -17,7 +18,8 @@
   },
   "files": [
     "dist",
-    "README.md"
+    "README.md",
+    "LICENSE"
   ],
   "publishConfig": {
     "access": "public"
