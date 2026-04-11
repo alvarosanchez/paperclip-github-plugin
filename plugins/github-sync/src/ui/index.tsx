@@ -427,6 +427,35 @@ function getSyncToastTone(syncState: SyncRunState): 'info' | 'error' | 'success'
   return syncState.status === 'error' ? 'error' : 'success';
 }
 
+function useSyncCompletionToast(
+  syncState: SyncRunState,
+  toast: ReturnType<typeof usePluginToast>
+): (nextSyncState: SyncRunState) => void {
+  const completionToastArmedRef = useRef(false);
+  const previousStatusRef = useRef<SyncRunState['status']>(syncState.status);
+
+  useEffect(() => {
+    const previousStatus = previousStatusRef.current;
+    previousStatusRef.current = syncState.status;
+
+    if (!completionToastArmedRef.current || previousStatus !== 'running' || syncState.status === 'running') {
+      return;
+    }
+
+    completionToastArmedRef.current = false;
+    toast({
+      title: getSyncToastTitle(syncState),
+      body: getSyncToastBody(syncState),
+      tone: getSyncToastTone(syncState)
+    });
+  }, [syncState, toast]);
+
+  return (nextSyncState: SyncRunState) => {
+    completionToastArmedRef.current = nextSyncState.status === 'running';
+    previousStatusRef.current = nextSyncState.status;
+  };
+}
+
 const SHARED_PROGRESS_STYLES = `
 .ghsync-progress {
   display: grid;
@@ -2666,6 +2695,7 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
   const [showTokenEditor, setShowTokenEditor] = useState(false);
   const [cachedSettings, setCachedSettings] = useState<GitHubSyncSettings | null>(null);
   const themeMode = useResolvedThemeMode();
+  const armSyncCompletionToast = useSyncCompletionToast(form.syncState, toast);
 
   const currentSettings = settings.data ?? cachedSettings;
   const showInitialLoadingState = settings.loading && !settings.data && !cachedSettings;
@@ -3079,6 +3109,7 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
         body: getSyncToastBody(result.syncState),
         tone: getSyncToastTone(result.syncState)
       });
+      armSyncCompletionToast(result.syncState);
 
       try {
         await settings.refresh();
@@ -3497,6 +3528,7 @@ export function GitHubSyncDashboardWidget(): React.JSX.Element {
     savedMappingCount
   });
   const lastSync = formatDate(displaySyncState.checkedAt, 'Never');
+  const armSyncCompletionToast = useSyncCompletionToast(displaySyncState, toast);
 
   useEffect(() => {
     if (settings.data) {
@@ -3567,6 +3599,7 @@ export function GitHubSyncDashboardWidget(): React.JSX.Element {
         body: getSyncToastBody(nextSyncState),
         tone: getSyncToastTone(nextSyncState)
       });
+      armSyncCompletionToast(nextSyncState);
 
       await settings.refresh();
     } catch (error) {
@@ -3751,6 +3784,7 @@ function GitHubSyncToolbarButtonSurface(props: {
     savedMappingCount: 0
   };
   const syncInFlight = runningSync || state.syncState.status === 'running';
+  const armSyncCompletionToast = useSyncCompletionToast(state.syncState, toast);
 
   useEffect(() => {
     if (state.syncState.status !== 'running') {
@@ -3851,6 +3885,7 @@ function GitHubSyncToolbarButtonSurface(props: {
         body: getSyncToastBody(nextSyncState),
         tone: getSyncToastTone(nextSyncState)
       });
+      armSyncCompletionToast(nextSyncState);
       toolbarState.refresh();
     } catch (error) {
       toast({
@@ -3936,16 +3971,6 @@ function GitHubSyncIssueDetailTabContent(props: {
   return (
     <section className="ghsync-issue-detail" style={props.themeVars}>
       <style>{EXTENSION_SURFACE_STYLES}</style>
-
-      <header className="ghsync-issue-detail__intro">
-        <div>
-          <div className="ghsync-issue-detail__title">
-            <GitHubMarkIcon className="h-4 w-4" />
-            <h3>GitHub context</h3>
-          </div>
-          <p>Paperclip keeps the synced issue body clean and surfaces repository metadata here instead.</p>
-        </div>
-      </header>
 
       {props.loadingIssueId || (details.loading && !issueDetails) ? <p className="ghsync-extension-empty">Loading GitHub sync details…</p> : null}
       {details.error ? <p className="ghsync-extension-empty">{details.error.message}</p> : null}
