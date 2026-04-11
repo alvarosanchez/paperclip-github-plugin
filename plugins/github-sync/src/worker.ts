@@ -29,6 +29,8 @@ const MISSING_GITHUB_TOKEN_SYNC_ACTION = 'Open settings, add a GitHub token secr
 const MISSING_MAPPING_SYNC_MESSAGE = 'Save at least one mapping with a created Paperclip project before running sync.';
 const MISSING_MAPPING_SYNC_ACTION =
   'Open settings, add a repository mapping, let Paperclip create the target project, and then retry sync.';
+const ISSUE_LINK_ENTITY_TYPE = 'github-sync.issue-link';
+const COMMENT_ANNOTATION_ENTITY_TYPE = 'github-sync.comment-annotation';
 
 type PluginSetupContext = Parameters<Parameters<typeof definePlugin>[0]['setup']>[0];
 type PaperclipIssueStatus = Issue['status'];
@@ -126,11 +128,80 @@ interface ImportedIssueRecord {
   companyId?: string;
 }
 
+interface GitHubIssueLinkEntityData {
+  companyId?: string;
+  paperclipProjectId?: string;
+  repositoryUrl: string;
+  githubIssueId: number;
+  githubIssueNumber: number;
+  githubIssueUrl: string;
+  githubIssueState: 'open' | 'closed';
+  githubIssueStateReason?: GitHubIssueStateReason;
+  commentsCount: number;
+  linkedPullRequestNumbers: number[];
+  labels: GitHubIssueLabelRecord[];
+  syncedAt: string;
+}
+
+interface GitHubIssueLinkRecord {
+  paperclipIssueId: string;
+  createdAt?: string;
+  updatedAt?: string;
+  title?: string;
+  status?: string;
+  data: GitHubIssueLinkEntityData;
+}
+
+interface ResolvedPaperclipIssueGitHubLink {
+  source: 'entity' | 'import_registry' | 'description';
+  companyId?: string;
+  paperclipProjectId?: string;
+  repositoryUrl: string;
+  githubIssueId?: number;
+  githubIssueNumber: number;
+  githubIssueUrl: string;
+  linkedPullRequestNumbers: number[];
+}
+
+interface StoredStatusTransitionCommentAnnotation {
+  companyId?: string;
+  paperclipIssueId: string;
+  repositoryUrl: string;
+  githubIssueNumber: number;
+  githubIssueUrl: string;
+  linkedPullRequestNumbers: number[];
+  previousStatus: PaperclipIssueStatus;
+  nextStatus: PaperclipIssueStatus;
+  reason: string;
+  createdAt: string;
+}
+
+interface StatusTransitionCommentAnnotationInput {
+  repository: ParsedRepositoryReference;
+  snapshot: GitHubIssueStatusSnapshot;
+  previousStatus: PaperclipIssueStatus;
+  nextStatus: PaperclipIssueStatus;
+  reason: string;
+}
+
+interface ResolvedSyncTarget {
+  kind: 'project' | 'issue';
+  companyId: string;
+  projectId?: string;
+  issueId?: string;
+  repositoryUrl?: string;
+  githubIssueId?: number;
+  githubIssueNumber?: number;
+  githubIssueUrl?: string;
+  displayLabel: string;
+}
+
 interface GitHubSyncSettings {
   mappings: RepositoryMapping[];
   syncState: SyncRunState;
   scheduleFrequencyMinutes: number;
   paperclipApiBaseUrl?: string;
+  githubTokenRef?: string;
   totalSyncedIssuesCount?: number;
   updatedAt?: string;
 }
@@ -643,6 +714,10 @@ function parseRetryAfterTimestamp(value: string | undefined, now = Date.now()): 
   return Number.isFinite(timestamp) ? timestamp : undefined;
 }
 
+function normalizeGitHubTokenRef(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim() ? value.trim() : undefined;
+}
+
 function formatUtcTimestamp(value: string): string {
   const parsed = new Date(value);
   if (Number.isNaN(parsed.getTime())) {
@@ -1123,6 +1198,491 @@ function getSyncableMappings(mappings: RepositoryMapping[]): RepositoryMapping[]
   return mappings.filter((mapping) => mapping.repositoryUrl.trim() && mapping.paperclipProjectId && mapping.companyId);
 }
 
+function getSyncableMappingsForTarget(
+  mappings: RepositoryMapping[],
+  target?: ResolvedSyncTarget
+): RepositoryMapping[] {
+  const syncableMappings = getSyncableMappings(mappings);
+
+  if (!target) {
+    return syncableMappings;
+  }
+
+  switch (target.kind) {
+    case 'project':
+      return syncableMappings.filter((mapping) =>
+        mapping.companyId === target.companyId &&
+        mapping.paperclipProjectId === target.projectId
+      );
+    case 'issue':
+      return syncableMappings.filter((mapping) => {
+        if (mapping.companyId !== target.companyId) {
+          return false;
+        }
+
+        if (target.projectId && mapping.paperclipProjectId !== target.projectId) {
+          return false;
+        }
+
+        if (target.repositoryUrl && getNormalizedMappingRepositoryUrl(mapping) !== target.repositoryUrl) {
+          return false;
+        }
+
+        return true;
+      });
+    default:
+      return syncableMappings;
+  }
+}
+
+function doesGitHubIssueMatchTarget(
+  issue: Pick<GitHubIssueRecord, 'id' | 'number' | 'htmlUrl'>,
+  target?: ResolvedSyncTarget
+): boolean {
+  if (!target || target.kind !== 'issue') {
+    return true;
+  }
+
+  const normalizedIssueUrl = normalizeGitHubIssueHtmlUrl(issue.htmlUrl) ?? issue.htmlUrl;
+  return (target.githubIssueId !== undefined && issue.id === target.githubIssueId) ||
+    (target.githubIssueNumber !== undefined && issue.number === target.githubIssueNumber) ||
+    (target.githubIssueUrl !== undefined && normalizedIssueUrl === target.githubIssueUrl);
+}
+
+function doesImportedIssueMatchTarget(
+  issue: ImportedIssueRecord,
+  target?: ResolvedSyncTarget
+): boolean {
+  if (!target || target.kind !== 'issue') {
+    return true;
+  }
+
+  return (target.issueId !== undefined && issue.paperclipIssueId === target.issueId) ||
+    (target.githubIssueId !== undefined && issue.githubIssueId === target.githubIssueId) ||
+    (target.githubIssueNumber !== undefined && issue.githubIssueNumber === target.githubIssueNumber);
+}
+
+async function resolvePaperclipIssueGitHubLink(
+  ctx: PluginSetupContext,
+  issueId: string,
+  companyId: string
+): Promise<ResolvedPaperclipIssueGitHubLink | null> {
+  const linkRecords = await listGitHubIssueLinkRecords(ctx, {
+    paperclipIssueId: issueId
+  });
+  const entityMatch = linkRecords.find((record) => !record.data.companyId || record.data.companyId === companyId);
+  if (entityMatch) {
+    return {
+      source: 'entity',
+      companyId: entityMatch.data.companyId,
+      paperclipProjectId: entityMatch.data.paperclipProjectId,
+      repositoryUrl: entityMatch.data.repositoryUrl,
+      githubIssueId: entityMatch.data.githubIssueId,
+      githubIssueNumber: entityMatch.data.githubIssueNumber,
+      githubIssueUrl: entityMatch.data.githubIssueUrl,
+      linkedPullRequestNumbers: entityMatch.data.linkedPullRequestNumbers
+    };
+  }
+
+  const importRegistry = normalizeImportRegistry(await ctx.state.get(IMPORT_REGISTRY_SCOPE));
+  const registryMatch = importRegistry.find((entry) =>
+    entry.paperclipIssueId === issueId &&
+    entry.githubIssueNumber !== undefined &&
+    entry.repositoryUrl &&
+    (!entry.companyId || entry.companyId === companyId)
+  );
+  if (registryMatch?.repositoryUrl && registryMatch.githubIssueNumber !== undefined) {
+    const githubIssueUrl = buildGitHubIssueUrlFromRepository(
+      registryMatch.repositoryUrl,
+      registryMatch.githubIssueNumber
+    );
+    if (githubIssueUrl) {
+      return {
+        source: 'import_registry',
+        companyId: registryMatch.companyId,
+        paperclipProjectId: registryMatch.paperclipProjectId,
+        repositoryUrl: registryMatch.repositoryUrl,
+        githubIssueId: registryMatch.githubIssueId,
+        githubIssueNumber: registryMatch.githubIssueNumber,
+        githubIssueUrl,
+        linkedPullRequestNumbers: []
+      };
+    }
+  }
+
+  const issue = await ctx.issues.get(issueId, companyId);
+  const githubIssueUrl = extractImportedGitHubIssueUrlFromDescription(issue?.description);
+  const githubIssueReference = githubIssueUrl ? parseGitHubIssueHtmlUrl(githubIssueUrl) : null;
+  if (!githubIssueReference) {
+    return null;
+  }
+
+  return {
+    source: 'description',
+    companyId,
+    paperclipProjectId: issue?.projectId ?? undefined,
+    repositoryUrl: githubIssueReference.repositoryUrl,
+    githubIssueNumber: githubIssueReference.issueNumber,
+    githubIssueUrl: githubIssueReference.issueUrl,
+    linkedPullRequestNumbers: []
+  };
+}
+
+async function resolveManualSyncTarget(
+  ctx: PluginSetupContext,
+  settings: GitHubSyncSettings,
+  input: {
+    companyId?: string;
+    projectId?: string;
+    issueId?: string;
+  }
+): Promise<ResolvedSyncTarget | undefined> {
+  if (input.issueId) {
+    const companyId = input.companyId?.trim();
+    if (!companyId) {
+      throw new Error('A company id is required to sync a specific issue.');
+    }
+
+    const link = await resolvePaperclipIssueGitHubLink(ctx, input.issueId, companyId);
+    if (!link) {
+      throw new Error('This Paperclip issue is not linked to a GitHub issue yet. Run a broader sync first.');
+    }
+
+    const candidateMappings = getSyncableMappingsForTarget(settings.mappings, {
+      kind: 'issue',
+      companyId,
+      projectId: link.paperclipProjectId,
+      repositoryUrl: link.repositoryUrl,
+      issueId: input.issueId,
+      githubIssueId: link.githubIssueId,
+      githubIssueNumber: link.githubIssueNumber,
+      githubIssueUrl: link.githubIssueUrl,
+      displayLabel: `issue #${link.githubIssueNumber}`
+    });
+    if (candidateMappings.length === 0) {
+      throw new Error('No saved GitHub repository mapping matches this Paperclip issue.');
+    }
+
+    return {
+      kind: 'issue',
+      companyId,
+      projectId: link.paperclipProjectId,
+      issueId: input.issueId,
+      repositoryUrl: link.repositoryUrl,
+      githubIssueId: link.githubIssueId,
+      githubIssueNumber: link.githubIssueNumber,
+      githubIssueUrl: link.githubIssueUrl,
+      displayLabel: `issue #${link.githubIssueNumber}`
+    };
+  }
+
+  if (input.projectId) {
+    const companyId = input.companyId?.trim();
+    if (!companyId) {
+      throw new Error('A company id is required to sync a specific project.');
+    }
+
+    const candidateMappings = getSyncableMappingsForTarget(settings.mappings, {
+      kind: 'project',
+      companyId,
+      projectId: input.projectId,
+      displayLabel: 'project'
+    });
+    if (candidateMappings.length === 0) {
+      throw new Error('No saved GitHub repository mapping matches this Paperclip project.');
+    }
+
+    return {
+      kind: 'project',
+      companyId,
+      projectId: input.projectId,
+      displayLabel: candidateMappings.length === 1 ? 'project' : `${candidateMappings.length} repositories`
+    };
+  }
+
+  return undefined;
+}
+
+function getSyncTargetRunningMessage(target?: ResolvedSyncTarget): string {
+  if (!target) {
+    return RUNNING_SYNC_MESSAGE;
+  }
+
+  if (target.kind === 'issue' && target.githubIssueNumber !== undefined) {
+    return `GitHub sync is running for issue #${target.githubIssueNumber}. This page will update when it finishes.`;
+  }
+
+  if (target.kind === 'project') {
+    return 'GitHub sync is running for this project. This page will update when it finishes.';
+  }
+
+  return RUNNING_SYNC_MESSAGE;
+}
+
+function buildCommentAnnotationLinksFromStoredData(annotation: StoredStatusTransitionCommentAnnotation): Array<{
+  type: 'issue' | 'pull_request';
+  label: string;
+  href: string;
+}> {
+  const links: Array<{
+    type: 'issue' | 'pull_request';
+    label: string;
+    href: string;
+  }> = [
+    {
+      type: 'issue',
+      label: `Issue #${annotation.githubIssueNumber}`,
+      href: annotation.githubIssueUrl
+    }
+  ];
+
+  for (const pullRequestNumber of annotation.linkedPullRequestNumbers) {
+    links.push({
+      type: 'pull_request',
+      label: `PR #${pullRequestNumber}`,
+      href: `${annotation.repositoryUrl}/pull/${pullRequestNumber}`
+    });
+  }
+
+  return links;
+}
+
+function extractGitHubLinksFromCommentBody(body: string): Array<{
+  type: 'issue' | 'pull_request';
+  label: string;
+  href: string;
+}> {
+  const matches = [...body.matchAll(/https:\/\/github\.com\/([^/\s)]+)\/([^/\s)]+)\/(issues|pull)\/(\d+)/gi)];
+  const links = new Map<string, {
+    type: 'issue' | 'pull_request';
+    label: string;
+    href: string;
+  }>();
+
+  for (const match of matches) {
+    const href = `https://github.com/${match[1]}/${match[2]}/${match[3]}/${match[4]}`;
+    const type = match[3].toLowerCase() === 'pull' ? 'pull_request' : 'issue';
+    links.set(href, {
+      type,
+      label: `${type === 'pull_request' ? 'PR' : 'Issue'} #${match[4]}`,
+      href
+    });
+  }
+
+  return [...links.values()];
+}
+
+async function buildToolbarSyncState(
+  ctx: PluginSetupContext,
+  input: Record<string, unknown>
+): Promise<Record<string, unknown>> {
+  const settings = normalizeSettings(await ctx.state.get(SETTINGS_SCOPE));
+  const config = await getResolvedConfig(ctx);
+  const githubTokenConfigured = hasConfiguredGithubToken(settings, config);
+  const savedMappingCount = getSyncableMappings(settings.mappings).length;
+  const companyId = typeof input.companyId === 'string' && input.companyId.trim() ? input.companyId.trim() : undefined;
+  const entityId = typeof input.entityId === 'string' && input.entityId.trim() ? input.entityId.trim() : undefined;
+  const entityType = typeof input.entityType === 'string' && input.entityType.trim() ? input.entityType.trim() : undefined;
+
+  if (entityType === 'project' && entityId && companyId) {
+    const mappings = getSyncableMappingsForTarget(settings.mappings, {
+      kind: 'project',
+      companyId,
+      projectId: entityId,
+      displayLabel: 'project'
+    });
+
+    return {
+      kind: 'project',
+      visible: mappings.length > 0,
+      canRun: githubTokenConfigured && mappings.length > 0,
+      label: 'Sync project',
+      message: mappings.length > 0 ? `Sync ${mappings.length === 1 ? 'the mapped repository' : `${mappings.length} mapped repositories`} for this project.` : 'No GitHub repository is mapped to this Paperclip project.',
+      syncState: settings.syncState,
+      githubTokenConfigured,
+      savedMappingCount
+    };
+  }
+
+  if (entityType === 'issue' && entityId && companyId) {
+    const link = await resolvePaperclipIssueGitHubLink(ctx, entityId, companyId);
+    const mappings = link
+      ? getSyncableMappingsForTarget(settings.mappings, {
+          kind: 'issue',
+          companyId,
+          projectId: link.paperclipProjectId,
+          issueId: entityId,
+          repositoryUrl: link.repositoryUrl,
+          githubIssueId: link.githubIssueId,
+          githubIssueNumber: link.githubIssueNumber,
+          githubIssueUrl: link.githubIssueUrl,
+          displayLabel: `issue #${link.githubIssueNumber}`
+        })
+      : [];
+
+    return {
+      kind: 'issue',
+      visible: Boolean(link),
+      canRun: githubTokenConfigured && mappings.length > 0,
+      label: link?.githubIssueNumber ? `Sync #${link.githubIssueNumber}` : 'Sync issue',
+      message: link
+        ? `Sync ${link.repositoryUrl.replace(/^https:\/\/github\.com\//, '')} issue #${link.githubIssueNumber}.`
+        : 'This Paperclip issue is not linked to GitHub yet.',
+      syncState: settings.syncState,
+      githubTokenConfigured,
+      savedMappingCount
+    };
+  }
+
+  return {
+    kind: 'global',
+    visible: true,
+    canRun: githubTokenConfigured && savedMappingCount > 0,
+    label: 'Sync GitHub',
+    message: !githubTokenConfigured
+      ? MISSING_GITHUB_TOKEN_SYNC_MESSAGE
+      : savedMappingCount === 0
+        ? MISSING_MAPPING_SYNC_MESSAGE
+        : 'Run a GitHub sync across every saved repository mapping.',
+    syncState: settings.syncState,
+    githubTokenConfigured,
+    savedMappingCount
+  };
+}
+
+async function buildIssueGitHubDetails(
+  ctx: PluginSetupContext,
+  input: Record<string, unknown>
+): Promise<Record<string, unknown> | null> {
+  const issueId = typeof input.issueId === 'string' && input.issueId.trim() ? input.issueId.trim() : undefined;
+  const companyId = typeof input.companyId === 'string' && input.companyId.trim() ? input.companyId.trim() : undefined;
+  if (!issueId || !companyId) {
+    return null;
+  }
+
+  const linkRecords = await listGitHubIssueLinkRecords(ctx, {
+    paperclipIssueId: issueId
+  });
+  const entityMatch = linkRecords.find((record) => !record.data.companyId || record.data.companyId === companyId);
+  if (entityMatch) {
+    return {
+      paperclipIssueId: issueId,
+      source: 'entity',
+      githubIssueNumber: entityMatch.data.githubIssueNumber,
+      githubIssueUrl: entityMatch.data.githubIssueUrl,
+      repositoryUrl: entityMatch.data.repositoryUrl,
+      githubIssueState: entityMatch.data.githubIssueState,
+      githubIssueStateReason: entityMatch.data.githubIssueStateReason,
+      commentsCount: entityMatch.data.commentsCount,
+      linkedPullRequestNumbers: entityMatch.data.linkedPullRequestNumbers,
+      labels: entityMatch.data.labels,
+      syncedAt: entityMatch.data.syncedAt
+    };
+  }
+
+  const fallbackLink = await resolvePaperclipIssueGitHubLink(ctx, issueId, companyId);
+  if (!fallbackLink) {
+    return null;
+  }
+
+  return {
+    paperclipIssueId: issueId,
+    source: fallbackLink.source,
+    githubIssueNumber: fallbackLink.githubIssueNumber,
+    githubIssueUrl: fallbackLink.githubIssueUrl,
+    repositoryUrl: fallbackLink.repositoryUrl,
+    linkedPullRequestNumbers: fallbackLink.linkedPullRequestNumbers
+  };
+}
+
+async function resolveIssueByIdentifier(
+  ctx: PluginSetupContext,
+  input: Record<string, unknown>
+): Promise<Record<string, unknown> | null> {
+  const companyId = typeof input.companyId === 'string' && input.companyId.trim() ? input.companyId.trim() : undefined;
+  const projectId = typeof input.projectId === 'string' && input.projectId.trim() ? input.projectId.trim() : undefined;
+  const issueIdentifier =
+    typeof input.issueIdentifier === 'string' && input.issueIdentifier.trim() ? input.issueIdentifier.trim() : undefined;
+
+  if (!companyId || !issueIdentifier) {
+    return null;
+  }
+
+  const normalizedIdentifier = issueIdentifier.toLowerCase();
+
+  for (let offset = 0; ; ) {
+    const issues = await ctx.issues.list({
+      companyId,
+      ...(projectId ? { projectId } : {}),
+      limit: PAPERCLIP_LABEL_PAGE_SIZE,
+      offset
+    });
+
+    const match = issues.find((issue) => issue.identifier?.trim().toLowerCase() === normalizedIdentifier);
+    if (match) {
+      return {
+        issueId: match.id,
+        issueIdentifier: match.identifier ?? issueIdentifier
+      };
+    }
+
+    if (issues.length < PAPERCLIP_LABEL_PAGE_SIZE) {
+      break;
+    }
+
+    offset += issues.length;
+  }
+
+  return null;
+}
+
+async function buildCommentAnnotationData(
+  ctx: PluginSetupContext,
+  input: Record<string, unknown>
+): Promise<Record<string, unknown> | null> {
+  const parentIssueId =
+    typeof input.parentIssueId === 'string' && input.parentIssueId.trim() ? input.parentIssueId.trim() : undefined;
+  const commentId = typeof input.commentId === 'string' && input.commentId.trim() ? input.commentId.trim() : undefined;
+  const companyId = typeof input.companyId === 'string' && input.companyId.trim() ? input.companyId.trim() : undefined;
+  if (!parentIssueId || !commentId) {
+    return null;
+  }
+
+  const annotation = await findStoredStatusTransitionCommentAnnotation(ctx, {
+    issueId: parentIssueId,
+    commentId
+  });
+  if (annotation) {
+    return {
+      source: 'entity',
+      links: buildCommentAnnotationLinksFromStoredData(annotation),
+      previousStatus: annotation.previousStatus,
+      nextStatus: annotation.nextStatus,
+      reason: annotation.reason
+    };
+  }
+
+  if (!companyId || !ctx.issues || typeof ctx.issues.listComments !== 'function') {
+    return null;
+  }
+
+  const comments = await ctx.issues.listComments(parentIssueId, companyId);
+  const comment = comments.find((entry) => entry.id === commentId);
+  if (!comment) {
+    return null;
+  }
+
+  const links = extractGitHubLinksFromCommentBody(comment.body);
+  if (links.length === 0) {
+    return null;
+  }
+
+  return {
+    source: 'comment_body',
+    links
+  };
+}
+
 function getLegacySyncConfigurationIssue(syncState: SyncRunState): SyncConfigurationIssue | null {
   if (syncState.status !== 'error' || syncState.errorDetails?.phase !== 'configuration') {
     return null;
@@ -1183,6 +1743,11 @@ function sanitizeSettingsForCurrentSetup(
         ...settings,
         syncState
       };
+}
+
+function getPublicSettings(settings: GitHubSyncSettings): Omit<GitHubSyncSettings, 'githubTokenRef'> {
+  const { githubTokenRef: _githubTokenRef, ...publicSettings } = settings;
+  return publicSettings;
 }
 
 function createSetupConfigurationErrorSyncState(
@@ -1468,12 +2033,14 @@ function normalizeSettings(value: unknown): GitHubSyncSettings {
 
   const record = value as Record<string, unknown>;
   const paperclipApiBaseUrl = resolvePaperclipApiBaseUrl(record.paperclipApiBaseUrl);
+  const githubTokenRef = normalizeGitHubTokenRef(record.githubTokenRef);
 
   return {
     mappings: normalizeMappings(record.mappings),
     syncState: normalizeSyncState(record.syncState),
     scheduleFrequencyMinutes: normalizeScheduleFrequencyMinutes(record.scheduleFrequencyMinutes),
     ...(paperclipApiBaseUrl ? { paperclipApiBaseUrl } : {}),
+    ...(githubTokenRef ? { githubTokenRef } : {}),
     updatedAt: typeof record.updatedAt === 'string' ? record.updatedAt : undefined
   };
 }
@@ -1877,56 +2444,88 @@ function formatPaperclipIssueStatus(status: PaperclipIssueStatus): string {
   }
 }
 
+function normalizePaperclipIssueStatus(value: unknown): PaperclipIssueStatus | undefined {
+  switch (value) {
+    case 'backlog':
+    case 'todo':
+    case 'in_progress':
+    case 'in_review':
+    case 'done':
+    case 'blocked':
+    case 'cancelled':
+      return value;
+    default:
+      return undefined;
+  }
+}
+
 function describeGitHubStatusTransitionReason(params: {
-  repository: ParsedRepositoryReference;
   snapshot: GitHubIssueStatusSnapshot;
   previousCommentCount?: number;
 }): string {
-  const { repository, snapshot, previousCommentCount } = params;
-  const issueLink = `GitHub issue ${buildGitHubIssueMarkdownLinkForRepository(repository, snapshot.issueNumber)}`;
-  const pullRequestReferences = formatGitHubPullRequestReferences(repository, snapshot.linkedPullRequests);
+  const { snapshot, previousCommentCount } = params;
 
   if (snapshot.state === 'closed') {
     switch (snapshot.stateReason) {
       case 'duplicate':
-        return `${issueLink} was closed as a duplicate`;
+        return 'the GitHub issue was closed as a duplicate';
       case 'not_planned':
-        return `${issueLink} was closed as not planned`;
+        return 'the GitHub issue was closed as not planned';
       default:
-        return `${issueLink} was closed as completed work`;
+        return 'the GitHub issue was closed as completed work';
     }
   }
 
   const baselineCommentCount = previousCommentCount ?? snapshot.commentCount;
   if (snapshot.commentCount > baselineCommentCount) {
-    return `a new comment was added to ${issueLink}`;
+    return 'a new GitHub comment was added';
   }
 
   if (snapshot.linkedPullRequests.length === 0) {
-    return `${issueLink} is open and has no linked pull requests`;
+    return 'the GitHub issue is open with no linked pull requests';
   }
 
+  const linkedPullRequestSubject = snapshot.linkedPullRequests.length === 1 ? 'the linked pull request' : 'linked pull requests';
+  const linkedPullRequestVerb = snapshot.linkedPullRequests.length === 1 ? 'has' : 'have';
   const hasRedCi = snapshot.linkedPullRequests.some((pullRequest) => pullRequest.ciState === 'red');
   const hasUnresolvedReviewThreads = snapshot.linkedPullRequests.some((pullRequest) => pullRequest.hasUnresolvedReviewThreads);
   const hasUnfinishedCi = snapshot.linkedPullRequests.some((pullRequest) => pullRequest.ciState === 'unfinished');
 
   if (hasRedCi && hasUnresolvedReviewThreads) {
-    return `${issueLink} has linked ${pullRequestReferences} with failing CI and unresolved review threads`;
+    return `${linkedPullRequestSubject} ${linkedPullRequestVerb} failing CI with unresolved review threads`;
   }
 
   if (hasRedCi) {
-    return `${issueLink} has linked ${pullRequestReferences} with failing CI`;
+    return `${linkedPullRequestSubject} ${linkedPullRequestVerb} failing CI`;
   }
 
   if (hasUnresolvedReviewThreads) {
-    return `${issueLink} has linked ${pullRequestReferences} with unresolved review threads`;
+    return `${linkedPullRequestSubject} ${linkedPullRequestVerb} unresolved review threads`;
   }
 
   if (hasUnfinishedCi) {
-    return `${issueLink} has linked ${pullRequestReferences} that still have unfinished CI jobs`;
+    return `${linkedPullRequestSubject} still ${linkedPullRequestVerb} unfinished CI jobs`;
   }
 
-  return `${issueLink} has linked ${pullRequestReferences} with green CI and all review threads resolved`;
+  return `${linkedPullRequestSubject} ${linkedPullRequestVerb} green CI with all review threads resolved`;
+}
+
+function buildStatusTransitionCommentAnnotation(params: StatusTransitionCommentAnnotationInput): StoredStatusTransitionCommentAnnotation {
+  const { repository, snapshot, previousStatus, nextStatus, reason } = params;
+
+  return {
+    repositoryUrl: repository.url,
+    githubIssueNumber: snapshot.issueNumber,
+    githubIssueUrl: `${repository.url}/issues/${snapshot.issueNumber}`,
+    linkedPullRequestNumbers: normalizeLinkedPullRequestNumbers(
+      snapshot.linkedPullRequests.map((pullRequest) => pullRequest.number)
+    ),
+    previousStatus,
+    nextStatus,
+    reason,
+    createdAt: new Date().toISOString(),
+    paperclipIssueId: ''
+  };
 }
 
 function buildPaperclipIssueStatusTransitionComment(params: {
@@ -1935,15 +2534,26 @@ function buildPaperclipIssueStatusTransitionComment(params: {
   repository: ParsedRepositoryReference;
   snapshot: GitHubIssueStatusSnapshot;
   previousCommentCount?: number;
-}): string {
+}): {
+  body: string;
+  annotation: StoredStatusTransitionCommentAnnotation;
+} {
   const { previousStatus, nextStatus, repository, snapshot, previousCommentCount } = params;
   const reason = describeGitHubStatusTransitionReason({
-    repository,
     snapshot,
     previousCommentCount
   });
 
-  return `GitHub Sync changed the Paperclip issue status from \`${formatPaperclipIssueStatus(previousStatus)}\` to \`${formatPaperclipIssueStatus(nextStatus)}\` because ${reason}.`;
+  return {
+    body: `GitHub Sync updated the status from \`${formatPaperclipIssueStatus(previousStatus)}\` to \`${formatPaperclipIssueStatus(nextStatus)}\` because ${reason}.`,
+    annotation: buildStatusTransitionCommentAnnotation({
+      repository,
+      snapshot,
+      previousStatus,
+      nextStatus,
+      reason
+    })
+  };
 }
 
 function resolvePaperclipIssueStatus(params: {
@@ -2457,15 +3067,17 @@ function formatGitHubPullRequestReferences(
   repository: Pick<ParsedRepositoryReference, 'url'>,
   pullRequests: Array<Pick<GitHubPullRequestStatusSnapshot, 'number'>>
 ): string {
-  const numbers = [...new Set(
-    pullRequests
-      .map((pullRequest) => pullRequest.number)
-      .filter((pullRequestNumber) => Number.isInteger(pullRequestNumber) && pullRequestNumber > 0)
-  )].sort((left, right) => left - right);
+  const numbers = normalizeLinkedPullRequestNumbers(pullRequests.map((pullRequest) => pullRequest.number));
   const noun = numbers.length === 1 ? 'pull request' : 'pull requests';
   const links = numbers.map((pullRequestNumber) => buildGitHubPullRequestMarkdownLink(repository, pullRequestNumber));
 
   return `${noun} ${formatMarkdownLinkList(links)}`;
+}
+
+function normalizeLinkedPullRequestNumbers(values: number[]): number[] {
+  return [...new Set(
+    values.filter((pullRequestNumber) => Number.isInteger(pullRequestNumber) && pullRequestNumber > 0)
+  )].sort((left, right) => left - right);
 }
 
 function extractImportedGitHubIssueUrlFromDescription(description: string | null | undefined): string | undefined {
@@ -2486,7 +3098,15 @@ function extractImportedGitHubIssueUrlFromDescription(description: string | null
   return normalizeGitHubIssueHtmlUrl(legacyMatch[1]);
 }
 
-function compareIssueCreatedAt(left: Issue, right: Issue): number {
+interface ImportedPaperclipIssueReference {
+  id: string;
+  createdAt?: unknown;
+}
+
+function compareImportedPaperclipIssueCreatedAt(
+  left: ImportedPaperclipIssueReference,
+  right: ImportedPaperclipIssueReference
+): number {
   const leftTime = Date.parse(String(left.createdAt ?? ''));
   const rightTime = Date.parse(String(right.createdAt ?? ''));
 
@@ -2508,7 +3128,7 @@ function compareIssueCreatedAt(left: Issue, right: Issue): number {
 async function listImportedPaperclipIssuesForMapping(
   ctx: PluginSetupContext,
   mapping: RepositoryMapping
-): Promise<Map<string, Issue>> {
+): Promise<Map<string, ImportedPaperclipIssueReference>> {
   if (
     !mapping.companyId ||
     !mapping.paperclipProjectId ||
@@ -2518,7 +3138,28 @@ async function listImportedPaperclipIssuesForMapping(
     return new Map();
   }
 
-  const importedIssuesByGitHubUrl = new Map<string, Issue>();
+  const importedIssuesByGitHubUrl = new Map<string, ImportedPaperclipIssueReference>();
+  const normalizedRepositoryUrl = getNormalizedMappingRepositoryUrl(mapping);
+  const linkedIssueRecords = await listGitHubIssueLinkRecords(ctx);
+
+  for (const record of linkedIssueRecords) {
+    if (record.data.repositoryUrl !== normalizedRepositoryUrl) {
+      continue;
+    }
+
+    if (record.data.companyId && record.data.companyId !== mapping.companyId) {
+      continue;
+    }
+
+    if (record.data.paperclipProjectId && record.data.paperclipProjectId !== mapping.paperclipProjectId) {
+      continue;
+    }
+
+    importedIssuesByGitHubUrl.set(record.data.githubIssueUrl, {
+      id: record.paperclipIssueId,
+      createdAt: record.createdAt
+    });
+  }
 
   for (let offset = 0; ; ) {
     const page = await ctx.issues.list({
@@ -2542,8 +3183,11 @@ async function listImportedPaperclipIssuesForMapping(
       }
 
       const existing = importedIssuesByGitHubUrl.get(githubIssueUrl);
-      if (!existing || compareIssueCreatedAt(issue, existing) < 0) {
-        importedIssuesByGitHubUrl.set(githubIssueUrl, issue);
+      if (!existing || compareImportedPaperclipIssueCreatedAt(issue, existing) < 0) {
+        importedIssuesByGitHubUrl.set(githubIssueUrl, {
+          id: issue.id,
+          createdAt: issue.createdAt
+        });
       }
     }
 
@@ -2633,40 +3277,307 @@ function normalizeGitHubIssueBodyForPaperclip(body: string | null | undefined): 
 }
 
 function buildPaperclipIssueDescription(issue: GitHubIssueRecord, linkedPullRequestNumbers: number[] = []): string {
-  const issueReference = parseGitHubIssueHtmlUrl(issue.htmlUrl);
-  const sections: string[] = [];
-  const metadataLines = [
-    `* GitHub issue: ${issueReference ? buildGitHubIssueMarkdownLink(issueReference) : issue.htmlUrl}`
-  ];
-
-  if (issueReference && linkedPullRequestNumbers.length > 0) {
-    const uniquePullRequestNumbers = [...new Set(
-      linkedPullRequestNumbers.filter((pullRequestNumber) => Number.isInteger(pullRequestNumber) && pullRequestNumber > 0)
-    )].sort((left, right) => left - right);
-
-    if (uniquePullRequestNumbers.length > 0) {
-      const pullRequestLinks = uniquePullRequestNumbers.map((pullRequestNumber) =>
-        buildGitHubPullRequestMarkdownLink(
-          {
-            url: issueReference.repositoryUrl
-          },
-          pullRequestNumber
-        )
-      );
-      metadataLines.push(
-        `* PR${pullRequestLinks.length === 1 ? '' : 's'}: ${formatMarkdownLinkList(pullRequestLinks)}`
-      );
-    }
-  }
-
-  sections.push(`${metadataLines.join('\n')}\n\n---`);
-
   const normalizedBody = normalizeGitHubIssueBodyForPaperclip(issue.body);
-  if (normalizedBody) {
-    sections.push(normalizedBody);
+  void linkedPullRequestNumbers;
+  return normalizedBody ?? '';
+}
+
+function normalizeIssueDescriptionValue(value: string | null | undefined): string {
+  return typeof value === 'string' ? value : '';
+}
+
+function buildGitHubIssueUrlFromRepository(repositoryUrl: string, issueNumber: number): string | undefined {
+  const repository = parseRepositoryReference(repositoryUrl);
+  if (!repository || !Number.isInteger(issueNumber) || issueNumber <= 0) {
+    return undefined;
   }
 
-  return sections.join('\n\n');
+  return `${repository.url}/issues/${issueNumber}`;
+}
+
+function normalizeStoredGitHubIssueLabels(value: unknown): GitHubIssueLabelRecord[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value
+    .map((entry) => {
+      if (!entry || typeof entry !== 'object') {
+        return null;
+      }
+
+      const record = entry as Record<string, unknown>;
+      const name = typeof record.name === 'string' ? record.name.trim() : '';
+      if (!name) {
+        return null;
+      }
+
+      const color = normalizeHexColor(typeof record.color === 'string' ? record.color : undefined);
+      return {
+        name,
+        ...(color ? { color } : {})
+      };
+    })
+    .filter((entry): entry is GitHubIssueLabelRecord => entry !== null);
+}
+
+function normalizeGitHubIssueLinkEntityData(value: unknown): GitHubIssueLinkEntityData | null {
+  if (!value || typeof value !== 'object') {
+    return null;
+  }
+
+  const record = value as Record<string, unknown>;
+  const repositoryUrl =
+    typeof record.repositoryUrl === 'string' && record.repositoryUrl.trim()
+      ? getNormalizedMappingRepositoryUrl({
+          repositoryUrl: record.repositoryUrl
+        })
+      : undefined;
+  const githubIssueId = typeof record.githubIssueId === 'number' && record.githubIssueId > 0 ? Math.floor(record.githubIssueId) : undefined;
+  const githubIssueNumber =
+    typeof record.githubIssueNumber === 'number' && record.githubIssueNumber > 0 ? Math.floor(record.githubIssueNumber) : undefined;
+  const githubIssueUrl =
+    typeof record.githubIssueUrl === 'string' ? normalizeGitHubIssueHtmlUrl(record.githubIssueUrl) : undefined;
+  const githubIssueState = record.githubIssueState === 'closed' ? 'closed' : record.githubIssueState === 'open' ? 'open' : undefined;
+  const commentsCount =
+    typeof record.commentsCount === 'number' && record.commentsCount >= 0 ? Math.floor(record.commentsCount) : 0;
+  const syncedAt = typeof record.syncedAt === 'string' && record.syncedAt.trim() ? record.syncedAt.trim() : undefined;
+  const githubIssueStateReason =
+    typeof record.githubIssueStateReason === 'string'
+      ? normalizeGitHubIssueStateReason(record.githubIssueStateReason)
+      : undefined;
+
+  if (!repositoryUrl || githubIssueId === undefined || githubIssueNumber === undefined || !githubIssueUrl || !githubIssueState || !syncedAt) {
+    return null;
+  }
+
+  return {
+    ...(typeof record.companyId === 'string' && record.companyId.trim() ? { companyId: record.companyId.trim() } : {}),
+    ...(typeof record.paperclipProjectId === 'string' && record.paperclipProjectId.trim()
+      ? { paperclipProjectId: record.paperclipProjectId.trim() }
+      : {}),
+    repositoryUrl,
+    githubIssueId,
+    githubIssueNumber,
+    githubIssueUrl,
+    githubIssueState,
+    ...(githubIssueStateReason ? { githubIssueStateReason } : {}),
+    commentsCount,
+    linkedPullRequestNumbers: normalizeLinkedPullRequestNumbers(
+      Array.isArray(record.linkedPullRequestNumbers)
+        ? record.linkedPullRequestNumbers.filter((entry): entry is number => typeof entry === 'number')
+        : []
+    ),
+    labels: normalizeStoredGitHubIssueLabels(record.labels),
+    syncedAt
+  };
+}
+
+function normalizeStoredStatusTransitionCommentAnnotation(value: unknown): StoredStatusTransitionCommentAnnotation | null {
+  if (!value || typeof value !== 'object') {
+    return null;
+  }
+
+  const record = value as Record<string, unknown>;
+  const repositoryUrl =
+    typeof record.repositoryUrl === 'string' && record.repositoryUrl.trim()
+      ? getNormalizedMappingRepositoryUrl({
+          repositoryUrl: record.repositoryUrl
+        })
+      : undefined;
+  const githubIssueNumber =
+    typeof record.githubIssueNumber === 'number' && record.githubIssueNumber > 0 ? Math.floor(record.githubIssueNumber) : undefined;
+  const githubIssueUrl =
+    typeof record.githubIssueUrl === 'string' ? normalizeGitHubIssueHtmlUrl(record.githubIssueUrl) : undefined;
+  const previousStatus = normalizePaperclipIssueStatus(record.previousStatus);
+  const nextStatus = normalizePaperclipIssueStatus(record.nextStatus);
+  const reason = typeof record.reason === 'string' && record.reason.trim() ? record.reason.trim() : undefined;
+  const createdAt = typeof record.createdAt === 'string' && record.createdAt.trim() ? record.createdAt.trim() : undefined;
+  const paperclipIssueId =
+    typeof record.paperclipIssueId === 'string' && record.paperclipIssueId.trim() ? record.paperclipIssueId.trim() : undefined;
+
+  if (!repositoryUrl || githubIssueNumber === undefined || !githubIssueUrl || !previousStatus || !nextStatus || !reason || !createdAt || !paperclipIssueId) {
+    return null;
+  }
+
+  return {
+    ...(typeof record.companyId === 'string' && record.companyId.trim() ? { companyId: record.companyId.trim() } : {}),
+    paperclipIssueId,
+    repositoryUrl,
+    githubIssueNumber,
+    githubIssueUrl,
+    linkedPullRequestNumbers: normalizeLinkedPullRequestNumbers(
+      Array.isArray(record.linkedPullRequestNumbers)
+        ? record.linkedPullRequestNumbers.filter((entry): entry is number => typeof entry === 'number')
+        : []
+    ),
+    previousStatus,
+    nextStatus,
+    reason,
+    createdAt
+  };
+}
+
+async function listGitHubIssueLinkRecords(
+  ctx: PluginSetupContext,
+  query: {
+    paperclipIssueId?: string;
+  } = {}
+): Promise<GitHubIssueLinkRecord[]> {
+  const records: GitHubIssueLinkRecord[] = [];
+  const requestedIssueId = query.paperclipIssueId?.trim() || undefined;
+
+  for (let offset = 0; ; ) {
+    const page = await ctx.entities.list({
+      entityType: ISSUE_LINK_ENTITY_TYPE,
+      scopeKind: 'issue',
+      ...(requestedIssueId ? { scopeId: requestedIssueId } : {}),
+      limit: PAPERCLIP_LABEL_PAGE_SIZE,
+      offset
+    });
+
+    if (page.length === 0) {
+      break;
+    }
+
+    for (const entry of page) {
+      if (entry.scopeKind !== 'issue' || !entry.scopeId) {
+        continue;
+      }
+
+      if (requestedIssueId && entry.scopeId !== requestedIssueId) {
+        continue;
+      }
+
+      const data = normalizeGitHubIssueLinkEntityData(entry.data);
+      if (!data) {
+        continue;
+      }
+
+      records.push({
+        paperclipIssueId: entry.scopeId,
+        ...(typeof entry.createdAt === 'string' ? { createdAt: entry.createdAt } : {}),
+        ...(typeof entry.updatedAt === 'string' ? { updatedAt: entry.updatedAt } : {}),
+        ...(typeof entry.title === 'string' && entry.title.trim() ? { title: entry.title.trim() } : {}),
+        ...(typeof entry.status === 'string' && entry.status.trim() ? { status: entry.status.trim() } : {}),
+        data
+      });
+    }
+
+    if (page.length < PAPERCLIP_LABEL_PAGE_SIZE || (requestedIssueId && records.length > 0)) {
+      break;
+    }
+
+    offset += page.length;
+  }
+
+  return records;
+}
+
+async function findStoredStatusTransitionCommentAnnotation(
+  ctx: PluginSetupContext,
+  params: {
+    issueId: string;
+    commentId: string;
+  }
+): Promise<StoredStatusTransitionCommentAnnotation | null> {
+  const issueId = params.issueId.trim();
+  const commentId = params.commentId.trim();
+
+  for (let offset = 0; ; ) {
+    const page = await ctx.entities.list({
+      entityType: COMMENT_ANNOTATION_ENTITY_TYPE,
+      scopeKind: 'issue',
+      scopeId: issueId,
+      externalId: commentId,
+      limit: PAPERCLIP_LABEL_PAGE_SIZE,
+      offset
+    });
+
+    if (page.length === 0) {
+      break;
+    }
+
+    const match = page.find((entry) => {
+      if (entry.scopeKind !== 'issue' || entry.scopeId !== issueId) {
+        return false;
+      }
+
+      const externalId =
+        'externalId' in entry && typeof (entry as { externalId?: unknown }).externalId === 'string'
+          ? (entry as { externalId?: string }).externalId
+          : undefined;
+      return externalId === commentId;
+    });
+    const annotation = match ? normalizeStoredStatusTransitionCommentAnnotation(match.data) : null;
+    if (annotation) {
+      return annotation;
+    }
+
+    if (page.length < PAPERCLIP_LABEL_PAGE_SIZE) {
+      break;
+    }
+
+    offset += page.length;
+  }
+
+  return null;
+}
+
+async function upsertGitHubIssueLinkRecord(
+  ctx: PluginSetupContext,
+  mapping: RepositoryMapping,
+  issueId: string,
+  githubIssue: GitHubIssueRecord,
+  linkedPullRequestNumbers: number[]
+): Promise<void> {
+  const githubIssueUrl = normalizeGitHubIssueHtmlUrl(githubIssue.htmlUrl) ?? githubIssue.htmlUrl;
+
+  await ctx.entities.upsert({
+    entityType: ISSUE_LINK_ENTITY_TYPE,
+    scopeKind: 'issue',
+    scopeId: issueId,
+    externalId: githubIssueUrl,
+    title: `GitHub issue #${githubIssue.number}`,
+    status: githubIssue.state,
+    data: {
+      ...(mapping.companyId ? { companyId: mapping.companyId } : {}),
+      ...(mapping.paperclipProjectId ? { paperclipProjectId: mapping.paperclipProjectId } : {}),
+      repositoryUrl: getNormalizedMappingRepositoryUrl(mapping),
+      githubIssueId: githubIssue.id,
+      githubIssueNumber: githubIssue.number,
+      githubIssueUrl,
+      githubIssueState: githubIssue.state,
+      ...(githubIssue.stateReason ? { githubIssueStateReason: githubIssue.stateReason } : {}),
+      commentsCount: githubIssue.commentsCount,
+      linkedPullRequestNumbers: normalizeLinkedPullRequestNumbers(linkedPullRequestNumbers),
+      labels: githubIssue.labels,
+      syncedAt: new Date().toISOString()
+    }
+  });
+}
+
+async function upsertStatusTransitionCommentAnnotation(
+  ctx: PluginSetupContext,
+  params: {
+    issueId: string;
+    commentId: string;
+    annotation: StoredStatusTransitionCommentAnnotation;
+  }
+): Promise<void> {
+  const { issueId, commentId, annotation } = params;
+
+  await ctx.entities.upsert({
+    entityType: COMMENT_ANNOTATION_ENTITY_TYPE,
+    scopeKind: 'issue',
+    scopeId: issueId,
+    externalId: commentId,
+    title: `GitHub Sync status transition for issue #${annotation.githubIssueNumber}`,
+    status: annotation.nextStatus,
+    data: {
+      ...annotation
+    }
+  });
 }
 
 function coerceDate(value: unknown): Date {
@@ -3432,7 +4343,7 @@ async function synchronizePaperclipIssueDescription(
   }
 
   const nextDescription = buildPaperclipIssueDescription(githubIssue, linkedPullRequestNumbers);
-  if ((currentDescription ?? '') === nextDescription) {
+  if (normalizeIssueDescriptionValue(currentDescription) === nextDescription) {
     return false;
   }
 
@@ -3574,11 +4485,13 @@ async function updatePaperclipIssueStatus(
     issueId: string;
     nextStatus: PaperclipIssueStatus;
     transitionComment: string;
+    transitionCommentAnnotation?: StoredStatusTransitionCommentAnnotation;
     paperclipApiBaseUrl?: string;
   }
 ): Promise<void> {
-  const { companyId, issueId, nextStatus, transitionComment, paperclipApiBaseUrl } = params;
+  const { companyId, issueId, nextStatus, transitionComment, transitionCommentAnnotation, paperclipApiBaseUrl } = params;
   const trimmedTransitionComment = transitionComment.trim();
+  let statusUpdated = false;
 
   if (paperclipApiBaseUrl) {
     try {
@@ -3589,16 +4502,15 @@ async function updatePaperclipIssueStatus(
           'content-type': 'application/json'
         },
         body: JSON.stringify({
-          status: nextStatus,
-          ...(trimmedTransitionComment ? { comment: trimmedTransitionComment } : {})
+          status: nextStatus
         })
       });
 
       if (response.ok) {
-        return;
+        statusUpdated = true;
       }
 
-      if (response.status !== 404 && response.status !== 405) {
+      if (!response.ok && response.status !== 404 && response.status !== 405) {
         logPaperclipIssueStatusUpdateFailure(ctx, {
           companyId,
           issueId,
@@ -3619,9 +4531,22 @@ async function updatePaperclipIssueStatus(
     }
   }
 
-  await ctx.issues.update(issueId, { status: nextStatus }, companyId);
+  if (!statusUpdated) {
+    await ctx.issues.update(issueId, { status: nextStatus }, companyId);
+  }
   if (trimmedTransitionComment && typeof ctx.issues.createComment === 'function') {
-    await ctx.issues.createComment(issueId, trimmedTransitionComment, companyId);
+    const createdComment = await ctx.issues.createComment(issueId, trimmedTransitionComment, companyId);
+    if (transitionCommentAnnotation) {
+      await upsertStatusTransitionCommentAnnotation(ctx, {
+        issueId,
+        commentId: createdComment.id,
+        annotation: {
+          ...transitionCommentAnnotation,
+          companyId,
+          paperclipIssueId: issueId
+        }
+      });
+    }
   }
 }
 
@@ -3704,7 +4629,7 @@ async function createPaperclipIssue(
         body: JSON.stringify({
           projectId: mapping.paperclipProjectId,
           title,
-          description
+          ...(description ? { description } : {})
         })
       });
 
@@ -3724,14 +4649,14 @@ async function createPaperclipIssue(
       companyId: mapping.companyId,
       projectId: mapping.paperclipProjectId,
       title,
-      description
+      ...(description ? { description } : {})
     });
     createdIssueId = createdIssue.id;
     createdIssueDescription = createdIssue.description;
     createPath = 'sdk';
   }
 
-  if (createdIssueDescription !== description) {
+  if (normalizeIssueDescriptionValue(createdIssueDescription) !== description) {
     logIssueDescriptionDiagnostic(
       ctx,
       'warn',
@@ -3763,6 +4688,8 @@ async function createPaperclipIssue(
     );
   }
 
+  await upsertGitHubIssueLinkRecord(ctx, mapping, createdIssueId, issue, []);
+
   await applyPaperclipLabelsToIssue(
     ctx,
     mapping.companyId,
@@ -3782,7 +4709,7 @@ async function ensurePaperclipIssueImported(
   availableLabels: PaperclipLabelDirectory,
   paperclipApiBaseUrl: string | undefined,
   importRegistryByIssueId: Map<number, ImportedIssueRecord>,
-  existingImportedPaperclipIssuesByUrl: Map<string, Issue>,
+  existingImportedPaperclipIssuesByUrl: Map<string, ImportedPaperclipIssueReference>,
   nextRegistry: ImportedIssueRecord[],
   ensuredPaperclipIssueIds: Map<number, string>,
   createdIssueIds: Set<number>,
@@ -3812,13 +4739,20 @@ async function ensurePaperclipIssueImported(
     normalizeGitHubIssueHtmlUrl(issue.htmlUrl) ?? issue.htmlUrl
   );
   if (existingImportedPaperclipIssue) {
+    await upsertGitHubIssueLinkRecord(
+      ctx,
+      mapping,
+      existingImportedPaperclipIssue.id,
+      issue,
+      []
+    );
     const repairedRecord = upsertImportedIssueRecord(
       nextRegistry,
       buildImportedIssueRecord(
         mapping,
         issue,
         existingImportedPaperclipIssue.id,
-        coerceDate(existingImportedPaperclipIssue.createdAt).toISOString()
+        coerceDate(existingImportedPaperclipIssue.createdAt ?? new Date()).toISOString()
       )
     );
 
@@ -3995,6 +4929,19 @@ async function synchronizePaperclipIssueStatuses(
           continue;
         }
 
+      await upsertGitHubIssueLinkRecord(
+        ctx,
+        mapping,
+        importedIssue.paperclipIssueId,
+        {
+          ...githubIssue,
+          state: snapshot.state,
+          stateReason: snapshot.stateReason,
+          commentsCount: snapshot.commentCount
+        },
+        snapshotLinkedPullRequestNumbers
+      );
+
       const previousCommentCount = importedIssue.lastSeenCommentCount;
       const nextStatus = resolvePaperclipIssueStatus({
         currentStatus: paperclipIssue.status,
@@ -4027,7 +4974,8 @@ async function synchronizePaperclipIssueStatuses(
         companyId: mapping.companyId,
         issueId: importedIssue.paperclipIssueId,
         nextStatus,
-        transitionComment,
+        transitionComment: transitionComment.body,
+        transitionCommentAnnotation: transitionComment.annotation,
         paperclipApiBaseUrl
       });
       updatedStatusesCount += 1;
@@ -4063,13 +5011,24 @@ async function getResolvedConfig(ctx: PluginSetupContext): Promise<GitHubSyncCon
   return normalizeConfig(await ctx.config.get());
 }
 
-function hasConfiguredGithubToken(config: GitHubSyncConfig): boolean {
-  return Boolean(config.githubTokenRef?.trim());
+function getConfiguredGithubTokenRef(
+  settings: Pick<GitHubSyncSettings, 'githubTokenRef'> | null | undefined,
+  config: GitHubSyncConfig
+): string | undefined {
+  return normalizeGitHubTokenRef(config.githubTokenRef) ?? normalizeGitHubTokenRef(settings?.githubTokenRef);
+}
+
+function hasConfiguredGithubToken(
+  settings: Pick<GitHubSyncSettings, 'githubTokenRef'> | null | undefined,
+  config: GitHubSyncConfig
+): boolean {
+  return Boolean(getConfiguredGithubTokenRef(settings, config));
 }
 
 async function resolveGithubToken(ctx: PluginSetupContext): Promise<string> {
+  const settings = normalizeSettings(await ctx.state.get(SETTINGS_SCOPE));
   const config = await getResolvedConfig(ctx);
-  const secretRef = config.githubTokenRef?.trim() ?? '';
+  const secretRef = getConfiguredGithubTokenRef(settings, config) ?? '';
   if (!secretRef) {
     return '';
   }
@@ -4124,12 +5083,15 @@ function shouldRunScheduledSync(settings: GitHubSyncSettings, scheduledAt?: stri
 async function performSync(
   ctx: PluginSetupContext,
   trigger: 'manual' | 'schedule' | 'retry',
-  resolvedToken?: string
+  options: {
+    resolvedToken?: string;
+    target?: ResolvedSyncTarget;
+  } = {}
 ) {
   const settings = normalizeSettings(await ctx.state.get(SETTINGS_SCOPE));
   const importRegistry = normalizeImportRegistry(await ctx.state.get(IMPORT_REGISTRY_SCOPE));
-  const token = typeof resolvedToken === 'string' ? resolvedToken : await resolveGithubToken(ctx);
-  const mappings = getSyncableMappings(settings.mappings);
+  const token = typeof options.resolvedToken === 'string' ? options.resolvedToken : await resolveGithubToken(ctx);
+  const mappings = getSyncableMappingsForTarget(settings.mappings, options.target);
   const failureContext: SyncFailureContext = {
     phase: 'configuration'
   };
@@ -4258,8 +5220,10 @@ async function performSync(
     for (const [mappingIndex, mapping] of mappings.entries()) {
       try {
         const repository = requireRepositoryReference(mapping.repositoryUrl);
-        const importedIssueRecords = nextRegistry.filter((entry) => doesImportedIssueRecordMatchMapping(entry, mapping));
-        const shouldLoadClosedIssues = importedIssueRecords.length > 0;
+        const importedIssueRecords = nextRegistry
+          .filter((entry) => doesImportedIssueRecordMatchMapping(entry, mapping))
+          .filter((entry) => doesImportedIssueMatchTarget(entry, options.target));
+        const shouldLoadClosedIssues = options.target?.kind === 'issue' || importedIssueRecords.length > 0;
         currentProgress = {
           phase: 'preparing',
           totalRepositoryCount: mappings.length,
@@ -4311,7 +5275,9 @@ async function performSync(
         updateSyncFailureContext(failureContext, {
           phase: 'building_import_plan'
         });
-        const issues = await listRepositoryIssuesForImport(allIssues);
+        const issues = (await listRepositoryIssuesForImport(allIssues)).filter((issue) =>
+          doesGitHubIssueMatchTarget(issue, options.target)
+        );
         const allIssuesById = new Map(allIssues.map((issue) => [issue.id, issue] as const));
         const importRegistryByIssueId = new Map(
           importedIssueRecords.map((entry) => [entry.githubIssueId, entry])
@@ -4398,6 +5364,7 @@ async function performSync(
         const importRegistryByIssueId = new Map(
           nextRegistry
             .filter((entry) => doesImportedIssueRecordMatchMapping(entry, mapping))
+            .filter((entry) => doesImportedIssueMatchTarget(entry, options.target))
             .map((entry) => [entry.githubIssueId, entry])
         );
         const ensuredPaperclipIssueIds = new Map<number, string>();
@@ -4498,7 +5465,8 @@ async function performSync(
         }
 
         const importedIssuesForSynchronization = [...importRegistryByIssueId.values()].filter((importedIssue) =>
-          allIssuesById.has(importedIssue.githubIssueId)
+          allIssuesById.has(importedIssue.githubIssueId) &&
+          doesImportedIssueMatchTarget(importedIssue, options.target)
         );
         currentProgress = {
           phase: 'syncing',
@@ -4584,7 +5552,7 @@ async function performSync(
       ...currentSettings,
       syncState: {
         status: 'success' as const,
-        message: `Sync complete. Imported ${createdIssuesCount} issues, updated ${updatedStatusesCount} issue status${updatedStatusesCount === 1 ? '' : 'es'}, updated ${updatedLabelsCount} issue label set${updatedLabelsCount === 1 ? '' : 's'}, updated ${updatedDescriptionsCount} issue description${updatedDescriptionsCount === 1 ? '' : 's'}, and skipped ${skippedIssuesCount} already-synced issue${skippedIssuesCount === 1 ? '' : 's'}.`,
+        message: `${options.target ? `GitHub sync for ${options.target.displayLabel} is complete. ` : 'Sync complete. '}Imported ${createdIssuesCount} issues, updated ${updatedStatusesCount} issue status${updatedStatusesCount === 1 ? '' : 'es'}, updated ${updatedLabelsCount} issue label set${updatedLabelsCount === 1 ? '' : 's'}, updated ${updatedDescriptionsCount} issue description${updatedDescriptionsCount === 1 ? '' : 's'}, and skipped ${skippedIssuesCount} already-synced issue${skippedIssuesCount === 1 ? '' : 's'}.`,
         checkedAt: new Date().toISOString(),
         syncedIssuesCount,
         createdIssuesCount,
@@ -4625,6 +5593,7 @@ async function startSync(
   options: {
     awaitCompletion?: boolean;
     paperclipApiBaseUrl?: string;
+    target?: ResolvedSyncTarget;
   } = {}
 ): Promise<GitHubSyncSettings> {
   if (activeSyncPromise) {
@@ -4670,17 +5639,22 @@ async function startSync(
     return currentSettings;
   }
 
-  if (trigger !== 'manual' && (!token.trim() || getSyncableMappings(currentSettings.mappings).length === 0)) {
+  if (trigger !== 'manual' && getSyncableMappingsForTarget(currentSettings.mappings, options.target).length === 0) {
+    return currentSettings;
+  }
+
+  if (trigger !== 'manual' && !token.trim()) {
     return currentSettings;
   }
 
   const runningStatePromise = (async () => {
-    const syncableMappings = getSyncableMappings(currentSettings.mappings);
+    const syncableMappings = getSyncableMappingsForTarget(currentSettings.mappings, options.target);
     const syncState = createRunningSyncState(currentSettings.syncState, trigger, {
       syncedIssuesCount: 0,
       createdIssuesCount: 0,
       skippedIssuesCount: 0,
       erroredIssuesCount: 0,
+      message: getSyncTargetRunningMessage(options.target),
       progress: {
         phase: 'preparing',
         totalRepositoryCount: syncableMappings.length
@@ -4696,7 +5670,10 @@ async function startSync(
   activeSyncPromise = (async () => {
     try {
       await runningStatePromise;
-      return await performSync(ctx, trigger, token);
+      return await performSync(ctx, trigger, {
+        resolvedToken: token,
+        target: options.target
+      });
     } catch (error) {
       return await createUnexpectedSyncErrorResult(ctx, trigger, error);
     } finally {
@@ -4736,10 +5713,17 @@ const plugin = definePlugin({
       const importRegistry = normalizeImportRegistry(await ctx.state.get(IMPORT_REGISTRY_SCOPE));
       const normalizedSettings = normalizeSettings(saved);
       const config = await getResolvedConfig(ctx);
-      const githubTokenConfigured = hasConfiguredGithubToken(config);
-      const settingsForResponse = sanitizeSettingsForCurrentSetup(normalizedSettings, {
+      const githubTokenRef = getConfiguredGithubTokenRef(normalizedSettings, config);
+      const settingsWithResolvedToken = githubTokenRef === normalizedSettings.githubTokenRef
+        ? normalizedSettings
+        : {
+            ...normalizedSettings,
+            ...(githubTokenRef ? { githubTokenRef } : {})
+          };
+      const githubTokenConfigured = Boolean(githubTokenRef);
+      const settingsForResponse = sanitizeSettingsForCurrentSetup(settingsWithResolvedToken, {
         hasToken: githubTokenConfigured,
-        hasMappings: getSyncableMappings(normalizedSettings.mappings).length > 0
+        hasMappings: getSyncableMappings(settingsWithResolvedToken.mappings).length > 0
       });
 
       if (settingsForResponse !== normalizedSettings) {
@@ -4747,22 +5731,46 @@ const plugin = definePlugin({
       }
 
       return {
-        ...settingsForResponse,
+        ...getPublicSettings(settingsForResponse),
         totalSyncedIssuesCount: countImportedIssuesForMappings(importRegistry, settingsForResponse.mappings),
         githubTokenConfigured
       };
     });
 
+    ctx.data.register('sync.toolbarState', async (input) => {
+      const record = input && typeof input === 'object' ? input as Record<string, unknown> : {};
+      return buildToolbarSyncState(ctx, record);
+    });
+
+    ctx.data.register('issue.githubDetails', async (input) => {
+      const record = input && typeof input === 'object' ? input as Record<string, unknown> : {};
+      return buildIssueGitHubDetails(ctx, record);
+    });
+
+    ctx.data.register('issue.resolveByIdentifier', async (input) => {
+      const record = input && typeof input === 'object' ? input as Record<string, unknown> : {};
+      return resolveIssueByIdentifier(ctx, record);
+    });
+
+    ctx.data.register('comment.annotation', async (input) => {
+      const record = input && typeof input === 'object' ? input as Record<string, unknown> : {};
+      return buildCommentAnnotationData(ctx, record);
+    });
+
     ctx.actions.register('settings.saveRegistration', async (input) => {
       const previous = normalizeSettings(await ctx.state.get(SETTINGS_SCOPE));
       const config = await getResolvedConfig(ctx);
-      const githubTokenConfigured = hasConfiguredGithubToken(config);
       const record = input && typeof input === 'object' ? input as Record<string, unknown> : {};
+      const githubTokenRef =
+        'githubTokenRef' in record
+          ? normalizeGitHubTokenRef(record.githubTokenRef)
+          : normalizeGitHubTokenRef(previous.githubTokenRef) ?? normalizeGitHubTokenRef(config.githubTokenRef);
       const current = normalizeSettings({
         mappings: 'mappings' in record ? record.mappings : previous.mappings,
         syncState: previous.syncState,
         scheduleFrequencyMinutes: 'scheduleFrequencyMinutes' in record ? record.scheduleFrequencyMinutes : previous.scheduleFrequencyMinutes,
-        paperclipApiBaseUrl: 'paperclipApiBaseUrl' in record ? record.paperclipApiBaseUrl : previous.paperclipApiBaseUrl
+        paperclipApiBaseUrl: 'paperclipApiBaseUrl' in record ? record.paperclipApiBaseUrl : previous.paperclipApiBaseUrl,
+        ...(githubTokenRef ? { githubTokenRef } : {})
       });
       const nextMappings = current.mappings.map((mapping, index) => ({
         id: mapping.id.trim() || createMappingId(index),
@@ -4776,15 +5784,16 @@ const plugin = definePlugin({
         syncState: previous.syncState,
         scheduleFrequencyMinutes: current.scheduleFrequencyMinutes,
         ...(current.paperclipApiBaseUrl ? { paperclipApiBaseUrl: current.paperclipApiBaseUrl } : {}),
+        ...(githubTokenRef ? { githubTokenRef } : {}),
         updatedAt: new Date().toISOString()
       }, {
-        hasToken: githubTokenConfigured,
+        hasToken: Boolean(normalizeGitHubTokenRef(config.githubTokenRef) ?? githubTokenRef),
         hasMappings: getSyncableMappings(nextMappings).length > 0
       });
 
       await ctx.state.set(SETTINGS_SCOPE, next);
       await ctx.state.set(SYNC_STATE_SCOPE, next.syncState);
-      return next;
+      return getPublicSettings(next);
     });
 
     ctx.actions.register('settings.validateToken', async (input) => {
@@ -4807,10 +5816,29 @@ const plugin = definePlugin({
         input && typeof input === 'object' && 'paperclipApiBaseUrl' in input
           ? (input as { paperclipApiBaseUrl?: unknown }).paperclipApiBaseUrl
           : undefined;
+      const companyId =
+        input && typeof input === 'object' && 'companyId' in input && typeof (input as { companyId?: unknown }).companyId === 'string'
+          ? (input as { companyId?: string }).companyId
+          : undefined;
+      const projectId =
+        input && typeof input === 'object' && 'projectId' in input && typeof (input as { projectId?: unknown }).projectId === 'string'
+          ? (input as { projectId?: string }).projectId
+          : undefined;
+      const issueId =
+        input && typeof input === 'object' && 'issueId' in input && typeof (input as { issueId?: unknown }).issueId === 'string'
+          ? (input as { issueId?: string }).issueId
+          : undefined;
+      const currentSettings = normalizeSettings(await ctx.state.get(SETTINGS_SCOPE));
+      const target = await resolveManualSyncTarget(ctx, currentSettings, {
+        ...(companyId ? { companyId } : {}),
+        ...(projectId ? { projectId } : {}),
+        ...(issueId ? { issueId } : {})
+      });
 
       return startSync(ctx, 'manual', {
         awaitCompletion: waitForCompletion,
-        ...(typeof paperclipApiBaseUrl === 'string' ? { paperclipApiBaseUrl } : {})
+        ...(typeof paperclipApiBaseUrl === 'string' ? { paperclipApiBaseUrl } : {}),
+        ...(target ? { target } : {})
       });
     });
 

@@ -1,5 +1,60 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { useHostContext, usePluginAction, usePluginData, usePluginToast } from '@paperclipai/plugin-sdk/ui';
+
+const HOST_BUTTON_BASE_CLASSNAME = [
+  'inline-flex items-center justify-center whitespace-nowrap text-sm font-medium',
+  'transition-[color,background-color,border-color,box-shadow,opacity]',
+  'disabled:pointer-events-none disabled:opacity-50',
+  "[&_svg]:pointer-events-none [&_svg:not([class*='size-'])]:size-4",
+  '[&_svg]:shrink-0 outline-none focus-visible:border-ring',
+  'focus-visible:ring-ring/50 focus-visible:ring-[3px]',
+  'aria-invalid:ring-destructive/20 dark:aria-invalid:ring-destructive/40 aria-invalid:border-destructive',
+  'rounded-md gap-1.5 shrink-0 shadow-xs'
+].join(' ');
+const HOST_DEFAULT_BUTTON_CLASSNAME = [
+  HOST_BUTTON_BASE_CLASSNAME,
+  'bg-primary text-primary-foreground hover:bg-primary/90'
+].join(' ');
+const HOST_OUTLINE_BUTTON_CLASSNAME = [
+  HOST_BUTTON_BASE_CLASSNAME,
+  'border bg-background shadow-xs hover:bg-accent hover:text-accent-foreground',
+  'dark:bg-input/30 dark:border-input dark:hover:bg-input/50'
+].join(' ');
+const HOST_DESTRUCTIVE_BUTTON_CLASSNAME = [
+  HOST_BUTTON_BASE_CLASSNAME,
+  'bg-destructive text-white hover:bg-destructive/90',
+  'focus-visible:ring-destructive/20 dark:focus-visible:ring-destructive/40'
+].join(' ');
+const HOST_TOOLBAR_BUTTON_SIZE_CLASSNAME = 'px-3 has-[>svg]:px-2.5';
+const HOST_ACTION_BUTTON_SIZE_CLASSNAME = 'h-9 px-4 py-2 has-[>svg]:px-3';
+const HOST_INLINE_BUTTON_SIZE_CLASSNAME = 'h-8 px-3 has-[>svg]:px-2.5';
+const HOST_ENTITY_BUTTON_CLASSNAME = `${HOST_OUTLINE_BUTTON_CLASSNAME} ${HOST_TOOLBAR_BUTTON_SIZE_CLASSNAME} h-9`;
+const HOST_GLOBAL_BUTTON_CLASSNAME = `${HOST_OUTLINE_BUTTON_CLASSNAME} ${HOST_TOOLBAR_BUTTON_SIZE_CLASSNAME} h-8`;
+const GITHUB_MARK_PATH_D =
+  'M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.5-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82a7.62 7.62 0 0 1 4 0c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z';
+const GITHUB_MARK_MASK_DATA_URI =
+  'url("data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxNiAxNiI+PHBhdGggZmlsbD0iYmxhY2siIGQ9Ik04IDBDMy41OCAwIDAgMy41OCAwIDhjMCAzLjU0IDIuMjkgNi41MyA1LjQ3IDcuNTkuNC4wNy41NS0uMTcuNTUtLjM4IDAtLjE5LS4wMS0uODItLjAxLTEuNDktMi4wMS4zNy0yLjUzLS40OS0yLjY5LS45NC0uMDktLjIzLS40OC0uOTQtLjgyLTEuMTMtLjI4LS4xNS0uNjgtLjUyLS4wMS0uNTMuNjMtLjAxIDEuMDguNTggMS4yMy44Mi43MiAxLjIxIDEuODcuODcgMi4zMy42Ni4wNy0uNTIuMjgtLjg3LjUtMS4wNy0xLjc4LS4yLTMuNjQtLjg5LTMuNjQtMy45NSAwLS44Ny4zMS0xLjU5LjgyLTIuMTUtLjA4LS4yLS4zNi0xLjAyLjA4LTIuMTIgMCAwIC42Ny0uMjEgMi4yLjgyYTcuNjIgNy42MiAwIDAgMSA0IDBjMS41My0xLjA0IDIuMi0uODIgMi4yLS44Mi40NCAxLjEuMTYgMS45Mi4wOCAyLjEyLjUxLjU2LjgyIDEuMjcuODIgMi4xNSAwIDMuMDctMS44NyAzLjc1LTMuNjUgMy45NS4yOS4yNS41NC43My41NCAxLjQ4IDAgMS4wNy0uMDEgMS45My0uMDEgMi4yIDAgLjIxLjE1LjQ2LjU1LjM4QTguMDEgOC4wMSAwIDAgMCAxNiA4YzAtNC40Mi0zLjU4LTgtOC04WiIvPjwvc3ZnPg==")';
+
+type PluginActionButtonVariant = 'primary' | 'secondary' | 'danger';
+type PluginActionButtonSize = 'default' | 'sm';
+
+function getPluginActionClassName(options?: {
+  variant?: PluginActionButtonVariant;
+  size?: PluginActionButtonSize;
+  extraClassName?: string;
+}): string {
+  const variant = options?.variant ?? 'secondary';
+  const size = options?.size ?? 'default';
+  const variantClassName =
+    variant === 'primary'
+      ? HOST_DEFAULT_BUTTON_CLASSNAME
+      : variant === 'danger'
+        ? HOST_DESTRUCTIVE_BUTTON_CLASSNAME
+        : HOST_OUTLINE_BUTTON_CLASSNAME;
+  const sizeClassName = size === 'sm' ? HOST_INLINE_BUTTON_SIZE_CLASSNAME : HOST_ACTION_BUTTON_SIZE_CLASSNAME;
+
+  return ['ghsync__button', variantClassName, sizeClassName, options?.extraClassName].filter(Boolean).join(' ');
+}
 
 interface RepositoryMapping {
   id: string;
@@ -66,6 +121,51 @@ interface GitHubSyncSettings {
   githubTokenConfigured?: boolean;
   totalSyncedIssuesCount?: number;
   updatedAt?: string;
+}
+
+interface SyncToolbarStateData {
+  kind: 'global' | 'project' | 'issue';
+  visible: boolean;
+  canRun: boolean;
+  label: string;
+  message?: string;
+  syncState: SyncRunState;
+  githubTokenConfigured: boolean;
+  savedMappingCount: number;
+}
+
+interface GitHubIssueDetailsData {
+  paperclipIssueId: string;
+  source: 'entity' | 'import_registry' | 'description';
+  githubIssueNumber: number;
+  githubIssueUrl: string;
+  repositoryUrl: string;
+  githubIssueState?: 'open' | 'closed';
+  githubIssueStateReason?: 'completed' | 'not_planned' | 'duplicate';
+  commentsCount?: number;
+  linkedPullRequestNumbers: number[];
+  labels?: Array<{
+    name: string;
+    color?: string;
+  }>;
+  syncedAt?: string;
+}
+
+interface IssueIdentifierResolutionData {
+  issueId: string;
+  issueIdentifier: string;
+}
+
+interface CommentAnnotationData {
+  source: 'entity' | 'comment_body';
+  links: Array<{
+    type: 'issue' | 'pull_request';
+    label: string;
+    href: string;
+  }>;
+  previousStatus?: string;
+  nextStatus?: string;
+  reason?: string;
 }
 
 interface TokenValidationResult {
@@ -449,7 +549,7 @@ const PAGE_STYLES = `
 
 .ghsync button,
 .ghsync input {
-  font: inherit;
+  font-family: inherit;
 }
 
 .ghsync__header {
@@ -837,37 +937,14 @@ const PAGE_STYLES = `
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-height: 40px;
-  padding: 0 14px;
-  border-radius: 10px;
-  border: 1px solid transparent;
-  font-size: 12px;
-  font-weight: 700;
+  gap: 6px;
+  white-space: nowrap;
+  text-decoration: none;
   cursor: pointer;
 }
 
 .ghsync__button:disabled {
-  opacity: 0.55;
-  cursor: default;
-}
-
-.ghsync__button--primary {
-  border-color: var(--ghsync-primaryBorder);
-  background: var(--ghsync-primaryBg);
-  color: var(--ghsync-primaryText);
-}
-
-.ghsync__button--secondary {
-  border-color: var(--ghsync-secondaryBorder);
-  background: var(--ghsync-secondaryBg);
-  color: var(--ghsync-secondaryText);
-}
-
-.ghsync__button--danger {
-  min-height: 36px;
-  border-color: var(--ghsync-dangerBorder);
-  background: var(--ghsync-dangerBg);
-  color: var(--ghsync-dangerText);
+  cursor: not-allowed;
 }
 
 .ghsync__mapping-card,
@@ -1066,7 +1143,7 @@ const WIDGET_STYLES = `
 
 .ghsync-widget a,
 .ghsync-widget button {
-  font: inherit;
+  font-family: inherit;
 }
 
 .ghsync-widget__card {
@@ -1340,30 +1417,14 @@ const WIDGET_STYLES = `
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-height: 38px;
-  padding: 0 14px;
-  border-radius: 10px;
-  border: 1px solid transparent;
-  font-size: 12px;
-  font-weight: 700;
+  gap: 6px;
+  white-space: nowrap;
+  text-decoration: none;
   cursor: pointer;
 }
 
 .ghsync__button:disabled {
-  opacity: 0.55;
-  cursor: default;
-}
-
-.ghsync__button--primary {
-  border-color: var(--ghsync-primaryBorder);
-  background: var(--ghsync-primaryBg);
-  color: var(--ghsync-primaryText);
-}
-
-.ghsync__button--secondary {
-  border-color: var(--ghsync-secondaryBorder);
-  background: var(--ghsync-secondaryBg);
-  color: var(--ghsync-secondaryText);
+  cursor: not-allowed;
 }
 
 @media (max-width: 720px) {
@@ -1394,6 +1455,200 @@ const WIDGET_STYLES = `
 }
 
 ${SHARED_PROGRESS_STYLES}
+`;
+
+const EXTENSION_SURFACE_STYLES = `
+  button[role="tab"][id$="trigger-plugin:github-sync:github-sync-issue-detail-tab"],
+  button[role="tab"][aria-controls$="content-plugin:github-sync:github-sync-issue-detail-tab"] {
+    gap: 6px;
+  }
+
+  button[role="tab"][id$="trigger-plugin:github-sync:github-sync-issue-detail-tab"]::before,
+  button[role="tab"][aria-controls$="content-plugin:github-sync:github-sync-issue-detail-tab"]::before {
+    content: '';
+    display: inline-block;
+    width: 14px;
+    height: 14px;
+    flex: none;
+    background-color: currentColor;
+    -webkit-mask-image: ${GITHUB_MARK_MASK_DATA_URI};
+    -webkit-mask-position: center;
+    -webkit-mask-repeat: no-repeat;
+    -webkit-mask-size: contain;
+    mask-image: ${GITHUB_MARK_MASK_DATA_URI};
+    mask-position: center;
+    mask-repeat: no-repeat;
+    mask-size: contain;
+  }
+
+  .ghsync-extension-card {
+    display: grid;
+    gap: 14px;
+    padding: 16px;
+    border: 1px solid var(--ghsync-border);
+    border-radius: 18px;
+    background: linear-gradient(180deg, var(--ghsync-surfaceRaised) 0%, var(--ghsync-surface) 100%);
+    color: var(--ghsync-text);
+    box-shadow: var(--ghsync-shadow);
+    font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  }
+
+  .ghsync-extension-card--compact {
+    gap: 10px;
+    padding: 0;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+    box-shadow: none;
+  }
+
+  .ghsync-extension-heading {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    align-items: start;
+  }
+
+  .ghsync-extension-heading h3,
+  .ghsync-extension-heading h4 {
+    margin: 0;
+    color: var(--ghsync-title);
+    font-size: 16px;
+    line-height: 1.25;
+  }
+
+  .ghsync-extension-heading p,
+  .ghsync-extension-empty,
+  .ghsync-extension-copy {
+    margin: 0;
+    color: var(--ghsync-muted);
+    font-size: 13px;
+    line-height: 1.55;
+  }
+
+  .ghsync-extension-grid {
+    display: grid;
+    gap: 12px;
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  }
+
+  .ghsync-extension-metric {
+    display: grid;
+    gap: 4px;
+    padding: 12px;
+    border-radius: 14px;
+    border: 1px solid var(--ghsync-border-soft);
+    background: var(--ghsync-surfaceAlt);
+  }
+
+  .ghsync-extension-metric span {
+    color: var(--ghsync-muted);
+    font-size: 11px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+
+  .ghsync-extension-metric strong {
+    color: var(--ghsync-title);
+    font-size: 14px;
+  }
+
+  .ghsync-extension-links,
+  .ghsync-extension-labels,
+  .ghsync-comment-annotation,
+  .ghsync-toolbar-button {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: center;
+  }
+
+  .inline-flex:has(> .ghsync-toolbar-button--entity) {
+    margin-left: auto;
+    margin-inline-start: auto;
+  }
+
+  .ghsync-toolbar-button--entity {
+    width: 100%;
+    justify-content: flex-end;
+  }
+
+  .ghsync-extension-link {
+    text-decoration: none;
+    white-space: nowrap;
+  }
+
+  .ghsync-extension-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 7px 10px;
+    border-radius: 999px;
+    border: 1px solid var(--ghsync-border);
+    background: var(--ghsync-surfaceAlt);
+    color: var(--ghsync-title);
+    font-size: 12px;
+    font-weight: 600;
+    text-decoration: none;
+  }
+
+  .ghsync-extension-pill {
+    font-weight: 500;
+  }
+
+  .ghsync-comment-annotation__label {
+    color: var(--ghsync-muted);
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+
+  .ghsync-extension-note {
+    padding: 12px;
+    border-radius: 14px;
+    border: 1px solid var(--ghsync-info-border);
+    background: var(--ghsync-info-bg);
+    color: var(--ghsync-info-text);
+    font-size: 12px;
+    line-height: 1.5;
+  }
+
+  .ghsync-issue-detail {
+    display: grid;
+    gap: 16px;
+    color: var(--ghsync-text);
+    font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  }
+
+  .ghsync-issue-detail__intro,
+  .ghsync-issue-detail__section {
+    display: grid;
+    gap: 8px;
+  }
+
+  .ghsync-issue-detail__intro {
+    padding-bottom: 12px;
+    border-bottom: 1px solid var(--ghsync-border-soft);
+  }
+
+  .ghsync-issue-detail__section-heading {
+    color: var(--ghsync-muted);
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+
+  .ghsync-issue-detail__title {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .ghsync-issue-detail__title h3 {
+    margin: 0;
+  }
 `;
 
 function createEmptyMapping(index: number): RepositoryMapping {
@@ -1750,10 +2005,77 @@ function getToneClass(tone: Tone): string {
 }
 
 const SETTINGS_INDEX_HREF = '/instance/settings/plugins';
+const GITHUB_SYNC_SETTINGS_UPDATED_EVENT = 'github-sync:settings-updated';
 
 function getStringValue(record: Record<string, unknown>, key: string): string | null {
   const value = record[key];
   return typeof value === 'string' && value.trim() ? value.trim() : null;
+}
+
+function notifyGitHubSyncSettingsChanged(): void {
+  if (typeof window === 'undefined') {
+    return;
+  }
+
+  window.dispatchEvent(new CustomEvent(GITHUB_SYNC_SETTINGS_UPDATED_EVENT));
+}
+
+function getIssueIdentifierFromLocation(pathname: string): string | null {
+  const match = pathname.match(/\/issues\/([^/?#]+)/i);
+  if (!match?.[1]) {
+    return null;
+  }
+
+  try {
+    return decodeURIComponent(match[1]);
+  } catch {
+    return match[1];
+  }
+}
+
+function useResolvedIssueId(params: {
+  companyId?: string | null;
+  projectId?: string | null;
+  entityId?: string | null;
+  entityType?: string | null;
+}): {
+  issueId: string | null;
+  issueIdentifier: string | null;
+  loading: boolean;
+} {
+  const pathname = typeof window === 'undefined' ? '' : window.location.pathname;
+  const issueIdentifier = params.entityType === 'issue' ? getIssueIdentifierFromLocation(pathname) : null;
+  const resolution = usePluginData<IssueIdentifierResolutionData | null>('issue.resolveByIdentifier', {
+    ...(params.companyId && issueIdentifier ? { companyId: params.companyId } : {}),
+    ...(params.projectId && issueIdentifier ? { projectId: params.projectId } : {}),
+    ...(issueIdentifier ? { issueIdentifier } : {})
+  });
+
+  useEffect(() => {
+    if (!params.companyId || !issueIdentifier) {
+      return;
+    }
+
+    try {
+      resolution.refresh();
+    } catch {
+      return;
+    }
+  }, [issueIdentifier, params.companyId, params.projectId, resolution.refresh]);
+
+  if (issueIdentifier) {
+    return {
+      issueId: resolution.data?.issueId ?? null,
+      issueIdentifier,
+      loading: resolution.loading && !resolution.data
+    };
+  }
+
+  return {
+    issueId: params.entityId ?? null,
+    issueIdentifier: null,
+    loading: false
+  };
 }
 
 function resolvePluginSettingsHref(records: unknown): string {
@@ -2082,6 +2404,29 @@ function buildThemeVars(theme: ThemePalette, themeMode: ThemeMode): React.CSSPro
     ['--ghsync-info-text' as string]: theme.infoText,
     ['--ghsync-shadow' as string]: theme.shadow
   } as React.CSSProperties;
+}
+
+function formatGitHubRepositoryLabel(repositoryUrl: string): string {
+  return repositoryUrl.replace(/^https:\/\/github\.com\//, '');
+}
+
+function formatGitHubIssueState(state?: 'open' | 'closed', reason?: 'completed' | 'not_planned' | 'duplicate'): string {
+  if (!state) {
+    return 'Pending refresh';
+  }
+
+  if (state !== 'closed') {
+    return 'Open';
+  }
+
+  switch (reason) {
+    case 'duplicate':
+      return 'Closed as duplicate';
+    case 'not_planned':
+      return 'Closed as not planned';
+    default:
+      return 'Closed';
+  }
 }
 
 function formatSyncFailurePhase(phase?: SyncFailurePhase): string | null {
@@ -2583,6 +2928,9 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
           }
         })
       });
+      await saveRegistration({
+        githubTokenRef: secret.id
+      });
 
       setForm((current) => ({
         ...current,
@@ -2598,6 +2946,7 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
         body: 'Token saved.',
         tone: 'success'
       });
+      notifyGitHubSyncSettingsChanged();
 
       try {
         await settings.refresh();
@@ -2688,6 +3037,7 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
         body: `Automatic sync runs ${scheduleDescription}.`,
         tone: 'success'
       });
+      notifyGitHubSyncSettingsChanged();
 
       try {
         await settings.refresh();
@@ -2813,7 +3163,7 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
                     {hasSavedToken ? (
                       <button
                         type="button"
-                        className="ghsync__button ghsync__button--secondary"
+                        className={getPluginActionClassName({ variant: 'secondary' })}
                         disabled={settingsMutationsLocked}
                         onClick={() => {
                           setShowTokenEditor(false);
@@ -2826,7 +3176,7 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
                     ) : null}
                     <button
                       type="submit"
-                      className="ghsync__button ghsync__button--primary"
+                      className={getPluginActionClassName({ variant: 'primary' })}
                       disabled={!canSaveToken}
                     >
                       {submittingToken ? 'Saving…' : 'Save token'}
@@ -2842,7 +3192,7 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
                 </div>
                 <button
                   type="button"
-                  className="ghsync__button ghsync__button--secondary"
+                  className={getPluginActionClassName({ variant: 'secondary' })}
                   disabled={settingsMutationsLocked}
                   onClick={() => {
                     setShowTokenEditor(true);
@@ -2890,7 +3240,7 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
                           {canRemove ? (
                             <button
                               type="button"
-                              className="ghsync__button ghsync__button--danger"
+                              className={getPluginActionClassName({ variant: 'danger' })}
                               disabled={settingsMutationsLocked}
                               onClick={() => removeMapping(mapping.id)}
                             >
@@ -2937,7 +3287,7 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
                   <div className="ghsync__button-row">
                     <button
                       type="button"
-                      className="ghsync__button ghsync__button--secondary"
+                      className={getPluginActionClassName({ variant: 'secondary' })}
                       disabled={settingsMutationsLocked}
                       onClick={addMapping}
                     >
@@ -3026,7 +3376,7 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
                       </div>
                       <button
                         type="button"
-                        className="ghsync__button ghsync__button--primary"
+                        className={getPluginActionClassName({ variant: 'primary' })}
                         onClick={handleRunSyncNow}
                         disabled={syncInFlight || showInitialLoadingState}
                       >
@@ -3045,7 +3395,7 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
                   <div className="ghsync__button-row">
                     <button
                       type="submit"
-                      className="ghsync__button ghsync__button--primary"
+                      className={getPluginActionClassName({ variant: 'primary' })}
                       disabled={!canSaveSetup}
                     >
                       {submittingSetup ? 'Saving…' : 'Save setup'}
@@ -3321,14 +3671,17 @@ export function GitHubSyncDashboardWidget(): React.JSX.Element {
           <div className="ghsync-widget__button-row">
             <a
               href={settingsHref}
-              className={`ghsync__button ${syncUnlocked ? 'ghsync__button--secondary' : 'ghsync__button--primary'} ghsync-widget__link`}
+              className={getPluginActionClassName({
+                variant: syncUnlocked ? 'secondary' : 'primary',
+                extraClassName: 'ghsync-widget__link'
+              })}
             >
               Open settings
             </a>
             {syncUnlocked ? (
               <button
                 type="button"
-                className="ghsync__button ghsync__button--primary"
+                className={getPluginActionClassName({ variant: 'primary' })}
                 onClick={handleRunSync}
                 disabled={syncInFlight || showInitialLoadingState}
               >
@@ -3339,6 +3692,423 @@ export function GitHubSyncDashboardWidget(): React.JSX.Element {
         </div>
       </div>
     </section>
+  );
+}
+
+function GitHubMarkIcon(props: {
+  className?: string;
+}): React.JSX.Element {
+  return (
+    <svg
+      viewBox="0 0 16 16"
+      aria-hidden="true"
+      focusable="false"
+      className={props.className}
+    >
+      <path
+        fill="currentColor"
+        d={GITHUB_MARK_PATH_D}
+      />
+    </svg>
+  );
+}
+
+function GitHubSyncToolbarButtonSurface(props: {
+  entityType?: 'project' | 'issue';
+  entityId?: string | null;
+  companyId?: string | null;
+  projectId?: string | null;
+}): React.JSX.Element | null {
+  const toast = usePluginToast();
+  const runSyncNow = usePluginAction('sync.runNow');
+  const surfaceRef = useRef<HTMLDivElement | null>(null);
+  const resolvedIssue = useResolvedIssueId({
+    companyId: props.companyId,
+    projectId: props.projectId,
+    entityId: props.entityId,
+    entityType: props.entityType
+  });
+  const effectiveEntityId =
+    props.entityType === 'issue'
+      ? resolvedIssue.issueId ?? '__ghsync_unresolved_issue__'
+      : props.entityId;
+  const toolbarState = usePluginData<SyncToolbarStateData>('sync.toolbarState', {
+    ...(props.companyId ? { companyId: props.companyId } : {}),
+    ...(effectiveEntityId ? { entityId: effectiveEntityId } : {}),
+    ...(props.entityType ? { entityType: props.entityType } : {})
+  });
+  const [runningSync, setRunningSync] = useState(false);
+  const themeMode = useResolvedThemeMode();
+  const theme = themeMode === 'light' ? LIGHT_PALETTE : DARK_PALETTE;
+  const themeVars = buildThemeVars(theme, themeMode);
+  const state = toolbarState.data ?? {
+    kind: props.entityType ?? 'global',
+    visible: !props.entityType,
+    canRun: false,
+    label: props.entityType === 'issue' ? 'Sync issue' : props.entityType === 'project' ? 'Sync project' : 'Sync GitHub',
+    syncState: EMPTY_SETTINGS.syncState,
+    githubTokenConfigured: false,
+    savedMappingCount: 0
+  };
+  const syncInFlight = runningSync || state.syncState.status === 'running';
+
+  useEffect(() => {
+    if (state.syncState.status !== 'running') {
+      return;
+    }
+
+    const intervalId = globalThis.setInterval(() => {
+      try {
+        toolbarState.refresh();
+      } catch {
+        return;
+      }
+    }, SYNC_POLL_INTERVAL_MS);
+
+    return () => {
+      globalThis.clearInterval(intervalId);
+    };
+  }, [state.syncState.status, toolbarState.refresh]);
+
+  useEffect(() => {
+    const refreshToolbarState = () => {
+      try {
+        toolbarState.refresh();
+      } catch {
+        return;
+      }
+    };
+
+    refreshToolbarState();
+
+    if (typeof window === 'undefined' || typeof document === 'undefined') {
+      return;
+    }
+
+    const handleSettingsUpdated = () => {
+      refreshToolbarState();
+    };
+    const handleWindowFocus = () => {
+      refreshToolbarState();
+    };
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        refreshToolbarState();
+      }
+    };
+
+    window.addEventListener(GITHUB_SYNC_SETTINGS_UPDATED_EVENT, handleSettingsUpdated);
+    window.addEventListener('focus', handleWindowFocus);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+
+    return () => {
+      window.removeEventListener(GITHUB_SYNC_SETTINGS_UPDATED_EVENT, handleSettingsUpdated);
+      window.removeEventListener('focus', handleWindowFocus);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
+  }, [toolbarState.refresh, props.companyId, effectiveEntityId, props.entityType]);
+
+  useEffect(() => {
+    if (!props.entityType) {
+      return;
+    }
+
+    const hostWrapper = surfaceRef.current?.parentElement;
+    if (!hostWrapper) {
+      return;
+    }
+
+    const previousMarginLeft = hostWrapper.style.marginLeft;
+    const previousMarginInlineStart = hostWrapper.style.marginInlineStart;
+    hostWrapper.style.marginLeft = 'auto';
+    hostWrapper.style.marginInlineStart = 'auto';
+
+    return () => {
+      hostWrapper.style.marginLeft = previousMarginLeft;
+      hostWrapper.style.marginInlineStart = previousMarginInlineStart;
+    };
+  });
+
+  if (!state.visible) {
+    return null;
+  }
+
+  async function handleRunSync(): Promise<void> {
+    try {
+      setRunningSync(true);
+      const result = await runSyncNow({
+        waitForCompletion: false,
+        ...(props.companyId ? { companyId: props.companyId } : {}),
+        ...(props.entityType === 'project' && props.entityId ? { projectId: props.entityId } : {}),
+        ...(props.entityType === 'issue' && resolvedIssue.issueId ? { issueId: resolvedIssue.issueId } : {})
+      }) as {
+        syncState?: SyncRunState;
+      };
+      const nextSyncState = result.syncState ?? EMPTY_SETTINGS.syncState;
+
+      toast({
+        title: getSyncToastTitle(nextSyncState),
+        body: getSyncToastBody(nextSyncState),
+        tone: getSyncToastTone(nextSyncState)
+      });
+      toolbarState.refresh();
+    } catch (error) {
+      toast({
+        title: 'Unable to run GitHub sync',
+        body: error instanceof Error ? error.message : 'Unable to run GitHub sync.',
+        tone: 'error'
+      });
+    } finally {
+      setRunningSync(false);
+    }
+  }
+
+  return (
+    <div
+      ref={surfaceRef}
+      className={`ghsync-toolbar-button${props.entityType ? ' ghsync-toolbar-button--entity' : ''}`}
+      style={themeVars}
+      title={toolbarState.error?.message ?? state.message}
+    >
+      <style>{EXTENSION_SURFACE_STYLES}</style>
+      <button
+        type="button"
+        data-slot="button"
+        data-variant="outline"
+        data-size="sm"
+        className={props.entityType ? HOST_ENTITY_BUTTON_CLASSNAME : HOST_GLOBAL_BUTTON_CLASSNAME}
+        disabled={!state.canRun || syncInFlight || toolbarState.loading}
+        onClick={handleRunSync}
+      >
+        <GitHubMarkIcon className="mr-1.5 h-3.5 w-3.5" />
+        <span>{syncInFlight ? 'Syncing…' : state.label}</span>
+      </button>
+    </div>
+  );
+}
+
+export function GitHubSyncGlobalToolbarButton(): React.JSX.Element | null {
+  const context = useHostContext();
+  return <GitHubSyncToolbarButtonSurface companyId={context.companyId} />;
+}
+
+export function GitHubSyncEntityToolbarButton(): React.JSX.Element | null {
+  const context = useHostContext();
+
+  if ((context.entityType !== 'issue' && context.entityType !== 'project') || !context.entityId) {
+    return null;
+  }
+
+  return (
+    <GitHubSyncToolbarButtonSurface
+      companyId={context.companyId}
+      entityId={context.entityId}
+      entityType={context.entityType}
+      projectId={context.projectId}
+    />
+  );
+}
+
+function GitHubSyncIssueDetailTabContent(props: {
+  companyId?: string | null;
+  issueId?: string | null;
+  loadingIssueId?: boolean;
+  themeVars: React.CSSProperties;
+}): React.JSX.Element {
+  const details = usePluginData<GitHubIssueDetailsData | null>('issue.githubDetails', {
+    ...(props.companyId ? { companyId: props.companyId } : {}),
+    ...(props.issueId ? { issueId: props.issueId } : {})
+  });
+  const issueDetails = details.data?.paperclipIssueId === props.issueId ? details.data : null;
+
+  useEffect(() => {
+    if (!props.companyId || !props.issueId) {
+      return;
+    }
+
+    try {
+      details.refresh();
+    } catch {
+      return;
+    }
+  }, [details.refresh, props.companyId, props.issueId]);
+
+  return (
+    <section className="ghsync-issue-detail" style={props.themeVars}>
+      <style>{EXTENSION_SURFACE_STYLES}</style>
+
+      <header className="ghsync-issue-detail__intro">
+        <div>
+          <div className="ghsync-issue-detail__title">
+            <GitHubMarkIcon className="h-4 w-4" />
+            <h3>GitHub context</h3>
+          </div>
+          <p>Paperclip keeps the synced issue body clean and surfaces repository metadata here instead.</p>
+        </div>
+      </header>
+
+      {props.loadingIssueId || (details.loading && !issueDetails) ? <p className="ghsync-extension-empty">Loading GitHub sync details…</p> : null}
+      {details.error ? <p className="ghsync-extension-empty">{details.error.message}</p> : null}
+      {!props.loadingIssueId && !details.loading && !details.error && !issueDetails ? (
+        <p className="ghsync-extension-empty">GitHub Sync has not linked this Paperclip issue to a GitHub issue yet.</p>
+      ) : null}
+
+      {issueDetails ? (
+        <>
+          <div className="ghsync-extension-heading">
+            <div>
+              <h4>Issue #{issueDetails.githubIssueNumber}</h4>
+              <p>{formatGitHubRepositoryLabel(issueDetails.repositoryUrl)}</p>
+            </div>
+            <a
+              href={issueDetails.githubIssueUrl}
+              target="_blank"
+              rel="noreferrer"
+              className={getPluginActionClassName({
+                variant: 'secondary',
+                size: 'sm',
+                extraClassName: 'ghsync-extension-link'
+              })}
+            >
+              Open on GitHub
+            </a>
+          </div>
+
+          <div className="ghsync-extension-grid">
+            <div className="ghsync-extension-metric">
+              <span>State</span>
+              <strong>{formatGitHubIssueState(issueDetails.githubIssueState, issueDetails.githubIssueStateReason)}</strong>
+            </div>
+            <div className="ghsync-extension-metric">
+              <span>Comments</span>
+              <strong>{issueDetails.commentsCount ?? 'Unknown'}</strong>
+            </div>
+            <div className="ghsync-extension-metric">
+              <span>Linked PRs</span>
+              <strong>{issueDetails.linkedPullRequestNumbers.length}</strong>
+            </div>
+            <div className="ghsync-extension-metric">
+              <span>Last synced</span>
+              <strong>{issueDetails.syncedAt ? formatDate(issueDetails.syncedAt, 'Unknown') : 'Pending refresh'}</strong>
+            </div>
+          </div>
+
+          {issueDetails.linkedPullRequestNumbers.length > 0 ? (
+            <div className="ghsync-issue-detail__section">
+              <div className="ghsync-issue-detail__section-heading">Linked pull requests</div>
+              <div className="ghsync-extension-links">
+                {issueDetails.linkedPullRequestNumbers.map((pullRequestNumber) => (
+                  <a
+                    key={pullRequestNumber}
+                    href={`${issueDetails.repositoryUrl}/pull/${pullRequestNumber}`}
+                    target="_blank"
+                    rel="noreferrer"
+                    className={getPluginActionClassName({
+                      variant: 'secondary',
+                      size: 'sm',
+                      extraClassName: 'ghsync-extension-link'
+                    })}
+                  >
+                    PR #{pullRequestNumber}
+                  </a>
+                ))}
+              </div>
+            </div>
+          ) : null}
+
+          {issueDetails.labels && issueDetails.labels.length > 0 ? (
+            <div className="ghsync-issue-detail__section">
+              <div className="ghsync-issue-detail__section-heading">Labels</div>
+              <div className="ghsync-extension-labels">
+                {issueDetails.labels.map((label) => (
+                  <span
+                    key={`${label.name}:${label.color ?? 'none'}`}
+                    className="ghsync-extension-pill"
+                    style={label.color ? { borderColor: label.color, boxShadow: `inset 0 0 0 1px ${label.color}` } : undefined}
+                  >
+                    {label.name}
+                  </span>
+                ))}
+              </div>
+            </div>
+          ) : null}
+
+          {issueDetails.source !== 'entity' ? (
+            <div className="ghsync-extension-note">
+              GitHub Sync recovered this link from older sync metadata. Run sync once to refresh GitHub state, labels, and linked PRs in this panel.
+            </div>
+          ) : null}
+        </>
+      ) : null}
+    </section>
+  );
+}
+
+export function GitHubSyncIssueDetailTab(): React.JSX.Element {
+  const context = useHostContext();
+  const themeMode = useResolvedThemeMode();
+  const theme = themeMode === 'light' ? LIGHT_PALETTE : DARK_PALETTE;
+  const themeVars = buildThemeVars(theme, themeMode);
+  const resolvedIssue = useResolvedIssueId({
+    companyId: context.companyId,
+    projectId: context.projectId,
+    entityId: context.entityId,
+    entityType: context.entityType
+  });
+  const detailKey = `${context.companyId ?? 'company-none'}:${resolvedIssue.issueIdentifier ?? context.entityId ?? 'issue-none'}`;
+
+  return (
+    <GitHubSyncIssueDetailTabContent
+      key={detailKey}
+      companyId={context.companyId}
+      issueId={resolvedIssue.issueId}
+      loadingIssueId={resolvedIssue.loading}
+      themeVars={themeVars}
+    />
+  );
+}
+
+export function GitHubSyncCommentAnnotation(): React.JSX.Element | null {
+  const context = useHostContext();
+  const themeMode = useResolvedThemeMode();
+  const theme = themeMode === 'light' ? LIGHT_PALETTE : DARK_PALETTE;
+  const themeVars = buildThemeVars(theme, themeMode);
+  const annotation = usePluginData<CommentAnnotationData | null>('comment.annotation', {
+    ...(context.companyId ? { companyId: context.companyId } : {}),
+    ...(context.entityId ? { commentId: context.entityId } : {}),
+    ...(context.parentEntityId ? { parentIssueId: context.parentEntityId } : {})
+  });
+
+  if (annotation.loading && !annotation.data) {
+    return null;
+  }
+
+  if (annotation.error || !annotation.data || annotation.data.links.length === 0) {
+    return null;
+  }
+
+  return (
+    <div className="ghsync-extension-card ghsync-extension-card--compact" style={themeVars}>
+      <style>{EXTENSION_SURFACE_STYLES}</style>
+      <div className="ghsync-comment-annotation">
+        <span className="ghsync-comment-annotation__label">GitHub refs</span>
+        {annotation.data.links.map((link) => (
+          <a
+            key={`${link.type}:${link.href}`}
+            href={link.href}
+            target="_blank"
+            rel="noreferrer"
+            className={getPluginActionClassName({
+              variant: 'secondary',
+              size: 'sm',
+              extraClassName: 'ghsync-extension-link'
+            })}
+          >
+            {link.label}
+          </a>
+        ))}
+      </div>
+    </div>
   );
 }
 

@@ -6,7 +6,7 @@ const SCHEDULE_TICK_CRON = '* * * * *';
 export const manifest: PaperclipPluginManifestV1 = {
   id: 'github-sync',
   apiVersion: 1,
-  version: '0.1.0',
+  version: '0.1.2',
   displayName: 'GitHub Sync',
   description: 'Synchronize GitHub issues into Paperclip projects.',
   author: 'Álvaro Sánchez-Mariscal',
@@ -14,12 +14,16 @@ export const manifest: PaperclipPluginManifestV1 = {
   capabilities: [
     'ui.page.register',
     DASHBOARD_WIDGET_CAPABILITY,
+    'ui.detailTab.register',
+    'ui.commentAnnotation.register',
+    'ui.action.register',
     'plugin.state.read',
     'plugin.state.write',
     'instance.settings.register',
     'issues.read',
     'issues.create',
     'issues.update',
+    'issue.comments.read',
     'issue.comments.create',
     'jobs.schedule',
     'http.outbound',
@@ -54,6 +58,33 @@ export const manifest: PaperclipPluginManifestV1 = {
         id: 'github-sync-dashboard-widget',
         displayName: 'GitHub Sync',
         exportName: 'GitHubSyncDashboardWidget'
+      },
+      {
+        type: 'detailTab',
+        id: 'github-sync-issue-detail-tab',
+        displayName: 'GitHub',
+        exportName: 'GitHubSyncIssueDetailTab',
+        entityTypes: ['issue']
+      },
+      {
+        type: 'commentAnnotation',
+        id: 'github-sync-comment-annotation',
+        displayName: 'GitHub Sync Links',
+        exportName: 'GitHubSyncCommentAnnotation',
+        entityTypes: ['comment']
+      },
+      {
+        type: 'globalToolbarButton',
+        id: 'github-sync-global-toolbar-button',
+        displayName: 'GitHub Sync',
+        exportName: 'GitHubSyncGlobalToolbarButton'
+      },
+      {
+        type: 'toolbarButton',
+        id: 'github-sync-toolbar-button',
+        displayName: 'GitHub Sync',
+        exportName: 'GitHubSyncEntityToolbarButton',
+        entityTypes: ['project', 'issue']
       },
       {
         type: 'settingsPage',

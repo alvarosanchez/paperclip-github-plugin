@@ -227,10 +227,7 @@ async function waitFor(condition: () => boolean, timeoutMs = 2_000, intervalMs =
 }
 
 function assertNormalizedPublicGitHubIssueDescription(description: string): void {
-  assert.match(
-    description,
-    /\* GitHub issue: \[#3\]\(https:\/\/github\.com\/alvarosanchez\/ocp\/issues\/3\)/
-  );
+  assert.doesNotMatch(description, /^\*\s+GitHub issue:/m);
   assert.match(description, /This issue lists Renovate updates and detected dependencies\./);
   assert.match(description, /## PR Edited \(Blocked\)/);
   assert.match(description, /## Detected Dependencies/);
@@ -249,16 +246,412 @@ test('manifest exposes GitHub Sync dashboard and settings UI metadata, config sc
   assert.equal(manifest.jobs?.[0]?.jobKey, 'sync.github-issues');
   assert.equal(manifest.jobs?.[0]?.schedule, '* * * * *');
   assert.ok(manifest.capabilities.some((capability) => capability === 'ui.dashboardWidget.register'));
+  assert.ok(manifest.capabilities.includes('ui.detailTab.register'));
+  assert.ok(manifest.capabilities.includes('ui.commentAnnotation.register'));
+  assert.ok(manifest.capabilities.includes('ui.action.register'));
   assert.ok(manifest.capabilities.includes('issues.read'));
   assert.ok(manifest.capabilities.includes('issues.update'));
+  assert.ok(manifest.capabilities.includes('issue.comments.read'));
   assert.ok(manifest.capabilities.includes('issue.comments.create'));
   assert.equal((manifest.instanceConfigSchema as { properties?: Record<string, unknown> }).properties?.githubTokenRef ? 'present' : 'missing', 'present');
   const settingsSlot = manifest.ui?.slots?.find((slot) => slot.type === 'settingsPage');
   const dashboardSlot = manifest.ui?.slots?.find((slot) => slot.type === 'dashboardWidget');
+  const issueDetailSlot = manifest.ui?.slots?.find((slot) => slot.type === 'detailTab');
+  const commentAnnotationSlot = manifest.ui?.slots?.find((slot) => slot.type === 'commentAnnotation');
+  const globalToolbarSlot = manifest.ui?.slots?.find((slot) => slot.type === 'globalToolbarButton');
+  const entityToolbarSlot = manifest.ui?.slots?.find((slot) => slot.type === 'toolbarButton');
   assert.ok(settingsSlot);
   assert.ok(dashboardSlot);
+  assert.ok(issueDetailSlot);
+  assert.ok(commentAnnotationSlot);
+  assert.ok(globalToolbarSlot);
+  assert.ok(entityToolbarSlot);
   assert.equal(settingsSlot?.exportName, 'GitHubSyncSettingsPage');
   assert.equal(dashboardSlot?.exportName, 'GitHubSyncDashboardWidget');
+  assert.equal(issueDetailSlot?.exportName, 'GitHubSyncIssueDetailTab');
+  assert.equal(commentAnnotationSlot?.exportName, 'GitHubSyncCommentAnnotation');
+  assert.equal(globalToolbarSlot?.exportName, 'GitHubSyncGlobalToolbarButton');
+  assert.equal(entityToolbarSlot?.exportName, 'GitHubSyncEntityToolbarButton');
+});
+
+test('worker exposes toolbar sync state for global, project, and issue surfaces', async () => {
+  const harness = createTestHarness({
+    manifest,
+    config: {
+      githubTokenRef: 'github-secret-ref'
+    }
+  });
+  await plugin.definition.setup(harness.ctx);
+
+  await harness.performAction('settings.saveRegistration', {
+    mappings: [
+      {
+        id: 'mapping-a',
+        repositoryUrl: 'paperclipai/example-repo',
+        paperclipProjectName: 'Engineering',
+        paperclipProjectId: 'project-1',
+        companyId: 'company-1'
+      }
+    ],
+    syncState: {
+      status: 'idle'
+    }
+  });
+
+  const issue = await harness.ctx.issues.create({
+    companyId: 'company-1',
+    projectId: 'project-1',
+    title: 'Toolbar target'
+  });
+
+  await harness.ctx.entities.upsert({
+    entityType: 'github-sync.issue-link',
+    scopeKind: 'issue',
+    scopeId: issue.id,
+    externalId: 'https://github.com/paperclipai/example-repo/issues/77',
+    data: {
+      companyId: 'company-1',
+      paperclipProjectId: 'project-1',
+      repositoryUrl: 'https://github.com/paperclipai/example-repo',
+      githubIssueId: 7701,
+      githubIssueNumber: 77,
+      githubIssueUrl: 'https://github.com/paperclipai/example-repo/issues/77',
+      githubIssueState: 'open',
+      commentsCount: 3,
+      linkedPullRequestNumbers: [770],
+      labels: [
+        {
+          name: 'bug',
+          color: '#ff0000'
+        }
+      ],
+      syncedAt: '2026-04-10T08:00:00.000Z'
+    }
+  });
+
+  const globalState = await harness.getData<{
+    kind: string;
+    visible: boolean;
+    canRun: boolean;
+  }>('sync.toolbarState', {});
+  const projectState = await harness.getData<{
+    kind: string;
+    visible: boolean;
+    canRun: boolean;
+    label: string;
+  }>('sync.toolbarState', {
+    companyId: 'company-1',
+    entityType: 'project',
+    entityId: 'project-1'
+  });
+  const issueState = await harness.getData<{
+    kind: string;
+    visible: boolean;
+    canRun: boolean;
+    label: string;
+  }>('sync.toolbarState', {
+    companyId: 'company-1',
+    entityType: 'issue',
+    entityId: issue.id
+  });
+
+  assert.equal(globalState.kind, 'global');
+  assert.equal(globalState.visible, true);
+  assert.equal(globalState.canRun, true);
+  assert.equal(projectState.kind, 'project');
+  assert.equal(projectState.visible, true);
+  assert.equal(projectState.canRun, true);
+  assert.equal(projectState.label, 'Sync project');
+  assert.equal(issueState.kind, 'issue');
+  assert.equal(issueState.visible, true);
+  assert.equal(issueState.canRun, true);
+  assert.equal(issueState.label, 'Sync #77');
+});
+
+test('worker uses the saved githubTokenRef fallback for toolbar state when config is stale', async () => {
+  const harness = createTestHarness({ manifest });
+  await plugin.definition.setup(harness.ctx);
+
+  await harness.performAction('settings.saveRegistration', {
+    githubTokenRef: 'github-secret-ref',
+    mappings: [
+      {
+        id: 'mapping-a',
+        repositoryUrl: 'paperclipai/example-repo',
+        paperclipProjectName: 'Engineering',
+        paperclipProjectId: 'project-1',
+        companyId: 'company-1'
+      }
+    ],
+    syncState: {
+      status: 'idle'
+    }
+  });
+
+  const settingsResult = await harness.getData<{
+    githubTokenConfigured?: boolean;
+  }>('settings.registration');
+  const globalState = await harness.getData<{
+    canRun: boolean;
+    message?: string;
+  }>('sync.toolbarState', {});
+
+  assert.equal(settingsResult.githubTokenConfigured, true);
+  assert.equal(globalState.canRun, true);
+  assert.equal(globalState.message, 'Run a GitHub sync across every saved repository mapping.');
+});
+
+test('worker issue.githubDetails returns issue-scoped GitHub detail payloads', async () => {
+  const harness = createTestHarness({ manifest });
+  await plugin.definition.setup(harness.ctx);
+
+  const firstIssue = await harness.ctx.issues.create({
+    companyId: 'company-1',
+    projectId: 'project-1',
+    title: 'First detail target'
+  });
+  const secondIssue = await harness.ctx.issues.create({
+    companyId: 'company-1',
+    projectId: 'project-1',
+    title: 'Second detail target'
+  });
+
+  await harness.ctx.entities.upsert({
+    entityType: 'github-sync.issue-link',
+    scopeKind: 'issue',
+    scopeId: firstIssue.id,
+    externalId: 'https://github.com/paperclipai/example-repo/issues/101',
+    data: {
+      companyId: 'company-1',
+      paperclipProjectId: 'project-1',
+      repositoryUrl: 'https://github.com/paperclipai/example-repo',
+      githubIssueId: 10101,
+      githubIssueNumber: 101,
+      githubIssueUrl: 'https://github.com/paperclipai/example-repo/issues/101',
+      githubIssueState: 'open',
+      commentsCount: 1,
+      linkedPullRequestNumbers: [1010],
+      labels: [],
+      syncedAt: '2026-04-10T08:00:00.000Z'
+    }
+  });
+  await harness.ctx.entities.upsert({
+    entityType: 'github-sync.issue-link',
+    scopeKind: 'issue',
+    scopeId: secondIssue.id,
+    externalId: 'https://github.com/paperclipai/example-repo/issues/202',
+    data: {
+      companyId: 'company-1',
+      paperclipProjectId: 'project-1',
+      repositoryUrl: 'https://github.com/paperclipai/example-repo',
+      githubIssueId: 20202,
+      githubIssueNumber: 202,
+      githubIssueUrl: 'https://github.com/paperclipai/example-repo/issues/202',
+      githubIssueState: 'closed',
+      githubIssueStateReason: 'completed',
+      commentsCount: 4,
+      linkedPullRequestNumbers: [2020, 2021],
+      labels: [],
+      syncedAt: '2026-04-10T09:00:00.000Z'
+    }
+  });
+
+  const firstDetails = await harness.getData<{
+    paperclipIssueId: string;
+    githubIssueNumber: number;
+    linkedPullRequestNumbers: number[];
+  } | null>('issue.githubDetails', {
+    companyId: 'company-1',
+    issueId: firstIssue.id
+  });
+  const secondDetails = await harness.getData<{
+    paperclipIssueId: string;
+    githubIssueNumber: number;
+    linkedPullRequestNumbers: number[];
+  } | null>('issue.githubDetails', {
+    companyId: 'company-1',
+    issueId: secondIssue.id
+  });
+
+  assert.equal(firstDetails?.paperclipIssueId, firstIssue.id);
+  assert.equal(firstDetails?.githubIssueNumber, 101);
+  assert.deepEqual(firstDetails?.linkedPullRequestNumbers, [1010]);
+  assert.equal(secondDetails?.paperclipIssueId, secondIssue.id);
+  assert.equal(secondDetails?.githubIssueNumber, 202);
+  assert.deepEqual(secondDetails?.linkedPullRequestNumbers, [2020, 2021]);
+});
+
+test('worker filters issue-scoped GitHub link records even when entities.list ignores scopeId', async () => {
+  const harness = createTestHarness({
+    manifest,
+    config: {
+      githubTokenRef: 'github-secret-ref'
+    }
+  });
+  await plugin.definition.setup(harness.ctx);
+
+  await harness.performAction('settings.saveRegistration', {
+    mappings: [
+      {
+        id: 'mapping-a',
+        repositoryUrl: 'paperclipai/example-repo',
+        paperclipProjectName: 'Engineering',
+        paperclipProjectId: 'project-1',
+        companyId: 'company-1'
+      }
+    ],
+    syncState: {
+      status: 'idle'
+    }
+  });
+
+  const firstIssue = await harness.ctx.issues.create({
+    companyId: 'company-1',
+    projectId: 'project-1',
+    title: 'First detail target'
+  });
+  const secondIssue = await harness.ctx.issues.create({
+    companyId: 'company-1',
+    projectId: 'project-1',
+    title: 'Second detail target'
+  });
+
+  await harness.ctx.entities.upsert({
+    entityType: 'github-sync.issue-link',
+    scopeKind: 'issue',
+    scopeId: firstIssue.id,
+    externalId: 'https://github.com/paperclipai/example-repo/issues/101',
+    data: {
+      companyId: 'company-1',
+      paperclipProjectId: 'project-1',
+      repositoryUrl: 'https://github.com/paperclipai/example-repo',
+      githubIssueId: 10101,
+      githubIssueNumber: 101,
+      githubIssueUrl: 'https://github.com/paperclipai/example-repo/issues/101',
+      githubIssueState: 'open',
+      commentsCount: 1,
+      linkedPullRequestNumbers: [],
+      labels: [],
+      syncedAt: '2026-04-10T08:00:00.000Z'
+    }
+  });
+  await harness.ctx.entities.upsert({
+    entityType: 'github-sync.issue-link',
+    scopeKind: 'issue',
+    scopeId: secondIssue.id,
+    externalId: 'https://github.com/paperclipai/example-repo/issues/202',
+    data: {
+      companyId: 'company-1',
+      paperclipProjectId: 'project-1',
+      repositoryUrl: 'https://github.com/paperclipai/example-repo',
+      githubIssueId: 20202,
+      githubIssueNumber: 202,
+      githubIssueUrl: 'https://github.com/paperclipai/example-repo/issues/202',
+      githubIssueState: 'closed',
+      githubIssueStateReason: 'completed',
+      commentsCount: 4,
+      linkedPullRequestNumbers: [2020],
+      labels: [],
+      syncedAt: '2026-04-10T09:00:00.000Z'
+    }
+  });
+
+  const originalList = harness.ctx.entities.list;
+  harness.ctx.entities.list = async (input) => {
+    if (
+      input &&
+      typeof input === 'object' &&
+      'entityType' in input &&
+      (input as { entityType?: unknown }).entityType === 'github-sync.issue-link' &&
+      'scopeKind' in input &&
+      (input as { scopeKind?: unknown }).scopeKind === 'issue' &&
+      'scopeId' in input
+    ) {
+      const { scopeId: _scopeId, ...rest } = input as Record<string, unknown>;
+      return originalList(rest as Parameters<typeof originalList>[0]);
+    }
+
+    return originalList(input);
+  };
+
+  const details = await harness.getData<{
+    paperclipIssueId: string;
+    githubIssueNumber: number;
+  } | null>('issue.githubDetails', {
+    companyId: 'company-1',
+    issueId: secondIssue.id
+  });
+  const toolbarState = await harness.getData<{
+    label: string;
+  }>('sync.toolbarState', {
+    companyId: 'company-1',
+    entityType: 'issue',
+    entityId: secondIssue.id
+  });
+
+  assert.equal(details?.paperclipIssueId, secondIssue.id);
+  assert.equal(details?.githubIssueNumber, 202);
+  assert.equal(toolbarState.label, 'Sync #202');
+});
+
+test('worker issue.resolveByIdentifier returns the current Paperclip issue id from an issue identifier', async () => {
+  const harness = createTestHarness({ manifest });
+  await plugin.definition.setup(harness.ctx);
+
+  const firstIssue = await harness.ctx.issues.create({
+    companyId: 'company-1',
+    projectId: 'project-1',
+    title: 'First issue'
+  });
+  const secondIssue = await harness.ctx.issues.create({
+    companyId: 'company-1',
+    projectId: 'project-1',
+    title: 'Second issue'
+  });
+
+  const originalList = harness.ctx.issues.list;
+  harness.ctx.issues.list = async (input) => {
+    const issues = await originalList(input);
+    return issues.map((issue) => {
+      if (issue.id === firstIssue.id) {
+        return {
+          ...issue,
+          identifier: 'DUM-4'
+        };
+      }
+
+      if (issue.id === secondIssue.id) {
+        return {
+          ...issue,
+          identifier: 'DUM-5'
+        };
+      }
+
+      return issue;
+    });
+  };
+
+  const firstResolution = await harness.getData<{
+    issueId: string;
+    issueIdentifier: string;
+  } | null>('issue.resolveByIdentifier', {
+    companyId: 'company-1',
+    projectId: 'project-1',
+    issueIdentifier: 'DUM-4'
+  });
+  const secondResolution = await harness.getData<{
+    issueId: string;
+    issueIdentifier: string;
+  } | null>('issue.resolveByIdentifier', {
+    companyId: 'company-1',
+    projectId: 'project-1',
+    issueIdentifier: 'DUM-5'
+  });
+
+  assert.equal(firstResolution?.issueId, firstIssue.id);
+  assert.equal(firstResolution?.issueIdentifier, 'DUM-4');
+  assert.equal(secondResolution?.issueId, secondIssue.id);
+  assert.equal(secondResolution?.issueIdentifier, 'DUM-5');
 });
 
 test('worker saves normalized mappings with resolved project identifiers supplied by UI', async () => {
@@ -789,7 +1182,11 @@ test('worker imports GitHub issues as top-level Paperclip issues and skips them 
     );
     assert.match(
       statusTransitionComments.find((comment) => comment.issueId === importedParent?.id)?.body ?? '',
-      /GitHub issue \[#10\]\(https:\/\/github\.com\/paperclipai\/example-repo\/issues\/10\) is open and has no linked pull requests/
+      /the GitHub issue is open with no linked pull requests/
+    );
+    assert.doesNotMatch(
+      statusTransitionComments.find((comment) => comment.issueId === importedParent?.id)?.body ?? '',
+      /paperclipai\/example-repo#10/
     );
     assert.match(
       statusTransitionComments.find((comment) => comment.issueId === importedChild?.id)?.body ?? '',
@@ -797,7 +1194,7 @@ test('worker imports GitHub issues as top-level Paperclip issues and skips them 
     );
     assert.match(
       statusTransitionComments.find((comment) => comment.issueId === importedChild?.id)?.body ?? '',
-      /GitHub issue \[#11\]\(https:\/\/github\.com\/paperclipai\/example-repo\/issues\/11\) is open and has no linked pull requests/
+      /the GitHub issue is open with no linked pull requests/
     );
 
     const importRegistryAfterFirstSync = harness.getState({
@@ -1256,13 +1653,10 @@ test('worker maps GitHub labels onto existing Paperclip labels, creates missing 
     assert.match(statusTransitionComments[0]?.body ?? '', /from `todo` to `backlog`/);
     assert.match(
       statusTransitionComments[0]?.body ?? '',
-      /GitHub issue \[#20\]\(https:\/\/github\.com\/paperclipai\/example-repo\/issues\/20\) is open and has no linked pull requests/
+      /the GitHub issue is open with no linked pull requests/
     );
-    assert.match(
-      importedIssue?.description ?? '',
-      /\* GitHub issue: \[#20\]\(https:\/\/github\.com\/paperclipai\/example-repo\/issues\/20\)/
-    );
-    assert.match(importedIssue?.description ?? '', /\n\n---\n\nImported body/);
+    assert.doesNotMatch(statusTransitionComments[0]?.body ?? '', /paperclipai\/example-repo#20/);
+    assert.doesNotMatch(importedIssue?.description ?? '', /^\*\s+GitHub issue:/m);
     assert.match(importedIssue?.description ?? '', /Imported body/);
     assert.doesNotMatch(importedIssue?.description ?? '', /GitHub labels:/);
     assert.doesNotMatch(importedIssue?.description ?? '', /GitHub issue state:/);
@@ -1899,17 +2293,20 @@ test('worker resyncs imported issue descriptions when the GitHub body changes la
     })).find((issue) => issue.title === 'Description sync after import');
 
     assert.ok(importedIssue);
-    assert.match(
-      importedIssue?.description ?? '',
-      /\* GitHub issue: \[#26\]\(https:\/\/github\.com\/paperclipai\/example-repo\/issues\/26\)/
-    );
-    assert.match(
-      importedIssue?.description ?? '',
-      /\* PR: \[#260\]\(https:\/\/github\.com\/paperclipai\/example-repo\/pull\/260\)/
-    );
-    assert.match(importedIssue?.description ?? '', /\n\n---\n\nOriginal body/);
+    assert.doesNotMatch(importedIssue?.description ?? '', /^\*\s+GitHub issue:/m);
     assert.match(importedIssue?.description ?? '', /Original body/);
     assert.equal(statusTransitionComments.length, 1);
+
+    const githubDetailsAfterFirstSync = await harness.getData<{
+      githubIssueNumber: number;
+      linkedPullRequestNumbers: number[];
+    } | null>('issue.githubDetails', {
+      companyId: 'company-1',
+      issueId: importedIssue?.id
+    });
+
+    assert.equal(githubDetailsAfterFirstSync?.githubIssueNumber, 26);
+    assert.deepEqual(githubDetailsAfterFirstSync?.linkedPullRequestNumbers, [260]);
 
     syncRun = 1;
 
@@ -1926,14 +2323,7 @@ test('worker resyncs imported issue descriptions when the GitHub body changes la
 
     assert.ok(importedIssueAfterSecondSync);
     assert.equal(importedIssueAfterSecondSync?.id, importedIssue?.id);
-    assert.match(
-      importedIssueAfterSecondSync?.description ?? '',
-      /\* GitHub issue: \[#26\]\(https:\/\/github\.com\/paperclipai\/example-repo\/issues\/26\)/
-    );
-    assert.match(
-      importedIssueAfterSecondSync?.description ?? '',
-      /\* PR: \[#260\]\(https:\/\/github\.com\/paperclipai\/example-repo\/pull\/260\)/
-    );
+    assert.doesNotMatch(importedIssueAfterSecondSync?.description ?? '', /^\*\s+GitHub issue:/m);
     assert.match(importedIssueAfterSecondSync?.description ?? '', /Updated body from GitHub/);
     assert.doesNotMatch(importedIssueAfterSecondSync?.description ?? '', /Original body/);
     assert.equal(statusTransitionComments.length, 1);
@@ -2095,25 +2485,14 @@ test('worker repairs missing descriptions for newly created issues through the l
     const descriptionPatchRequests = patchRequests.filter((request) => typeof request.body?.description === 'string');
     assert.equal(descriptionPatchRequests.length, 1);
     assert.equal(directDescriptionUpdateCalls.length, 0);
-    assert.match(
-      String(descriptionPatchRequests[0]?.body?.description ?? ''),
-      /\* GitHub issue: \[#27\]\(https:\/\/github\.com\/paperclipai\/example-repo\/issues\/27\)/
-    );
-    assert.match(
-      String(descriptionPatchRequests[0]?.body?.description ?? ''),
-      /\n\n---\n\nImported body/
-    );
+    assert.equal(String(descriptionPatchRequests[0]?.body?.description ?? ''), 'Imported body');
 
     const importedIssue = (await harness.ctx.issues.list({
       companyId: 'company-1'
     })).find((issue) => issue.title === 'Description repaired after create');
 
     assert.ok(importedIssue);
-    assert.match(
-      importedIssue?.description ?? '',
-      /\* GitHub issue: \[#27\]\(https:\/\/github\.com\/paperclipai\/example-repo\/issues\/27\)/
-    );
-    assert.match(importedIssue?.description ?? '', /\n\n---\n\nImported body/);
+    assert.equal(importedIssue?.description ?? '', 'Imported body');
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -2764,10 +3143,7 @@ test('worker normalizes GitHub raw HTML that Paperclip issue descriptions cannot
     assert.ok(importedIssue);
 
     const description = importedIssue?.description ?? '';
-    assert.match(
-      description,
-      /\* GitHub issue: \[#10\]\(https:\/\/github\.com\/paperclipai\/example-repo\/issues\/10\)/
-    );
+    assert.doesNotMatch(description, /^\*\s+GitHub issue:/m);
     assert.match(description, /First line\nSecond line/);
     assert.match(description, /\n\n### Preview\n\nInside details/);
     assert.match(description, /!\[Diagram\]\(https:\/\/example\.com\/diagram\.png\)/);
@@ -2957,10 +3333,7 @@ test('worker falls back to the SDK bridge when the local Paperclip description P
     })).find((issue) => issue.title === 'Local patch verification fallback');
 
     assert.ok(importedIssue);
-    assert.match(
-      importedIssue?.description ?? '',
-      /\* GitHub issue: \[#30\]\(https:\/\/github\.com\/paperclipai\/example-repo\/issues\/30\)/
-    );
+    assert.doesNotMatch(importedIssue?.description ?? '', /^\*\s+GitHub issue:/m);
     assert.match(importedIssue?.description ?? '', /Description survives even if the local PATCH response is stale\./);
   } finally {
     globalThis.fetch = originalFetch;
@@ -3138,10 +3511,7 @@ test('worker uses the live Paperclip API URL passed to sync.runNow instead of a 
     })).find((issue) => issue.title === 'Live origin issue');
 
     assert.ok(importedIssue);
-    assert.match(
-      importedIssue?.description ?? '',
-      /\* GitHub issue: \[#28\]\(https:\/\/github\.com\/paperclipai\/example-repo\/issues\/28\)/
-    );
+    assert.doesNotMatch(importedIssue?.description ?? '', /^\*\s+GitHub issue:/m);
     assert.match(importedIssue?.description ?? '', /Description imported through the current Paperclip origin\./);
   } finally {
     globalThis.fetch = originalFetch;
@@ -3271,10 +3641,7 @@ test('worker repairs empty descriptions before GitHub status snapshot failures c
     })).find((issue) => issue.title === 'Description repaired before status failure');
 
     assert.ok(importedIssue);
-    assert.match(
-      importedIssue?.description ?? '',
-      /\* GitHub issue: \[#29\]\(https:\/\/github\.com\/paperclipai\/example-repo\/issues\/29\)/
-    );
+    assert.doesNotMatch(importedIssue?.description ?? '', /^\*\s+GitHub issue:/m);
     assert.match(importedIssue?.description ?? '', /Body survives even when status lookup breaks\./);
   } finally {
     globalThis.fetch = originalFetch;
@@ -3714,7 +4081,11 @@ test('worker maps GitHub issue and linked PR state onto Paperclip statuses while
     );
     assert.match(
       statusTransitionComments.find((comment) => comment.issueId === commentedIssue.id)?.body ?? '',
-      /new comment was added to GitHub issue \[#31\]\(https:\/\/github\.com\/paperclipai\/example-repo\/issues\/31\)/
+      /a new GitHub comment was added/
+    );
+    assert.doesNotMatch(
+      statusTransitionComments.find((comment) => comment.issueId === commentedIssue.id)?.body ?? '',
+      /paperclipai\/example-repo#31/
     );
     assert.match(
       statusTransitionComments.find((comment) => comment.issueId === greenReviewIssue.id)?.body ?? '',
@@ -3722,19 +4093,23 @@ test('worker maps GitHub issue and linked PR state onto Paperclip statuses while
     );
     assert.match(
       statusTransitionComments.find((comment) => comment.issueId === greenReviewIssue.id)?.body ?? '',
-      /GitHub issue \[#35\]\(https:\/\/github\.com\/paperclipai\/example-repo\/issues\/35\) has linked pull request \[#350\]\(https:\/\/github\.com\/paperclipai\/example-repo\/pull\/350\) with green CI and all review threads resolved/
+      /the linked pull request has green CI with all review threads resolved/
+    );
+    assert.doesNotMatch(
+      statusTransitionComments.find((comment) => comment.issueId === greenReviewIssue.id)?.body ?? '',
+      /paperclipai\/example-repo#35|paperclipai\/example-repo#350/
     );
     assert.match(
       statusTransitionComments.find((comment) => comment.issueId === completedIssue.id)?.body ?? '',
-      /GitHub issue \[#36\]\(https:\/\/github\.com\/paperclipai\/example-repo\/issues\/36\) was closed as completed work/
+      /the GitHub issue was closed as completed work/
     );
     assert.match(
       statusTransitionComments.find((comment) => comment.issueId === notPlannedIssue.id)?.body ?? '',
-      /GitHub issue \[#37\]\(https:\/\/github\.com\/paperclipai\/example-repo\/issues\/37\) was closed as not planned/
+      /the GitHub issue was closed as not planned/
     );
     assert.match(
       statusTransitionComments.find((comment) => comment.issueId === duplicateIssue.id)?.body ?? '',
-      /GitHub issue \[#38\]\(https:\/\/github\.com\/paperclipai\/example-repo\/issues\/38\) was closed as a duplicate/
+      /the GitHub issue was closed as a duplicate/
     );
 
     const importRegistry = harness.getState({
@@ -3783,10 +4158,11 @@ test('worker ignores linked pull requests from other repositories', async () => 
   });
   await originalUpdate(importedIssue.id, { status: 'todo' }, 'company-1');
 
-  const statusTransitionComments: Array<{ issueId: string; body: string }> = [];
+  const statusTransitionComments: Array<{ issueId: string; body: string; commentId: string }> = [];
   harness.ctx.issues.createComment = async (issueId, body, companyId) => {
-    statusTransitionComments.push({ issueId, body });
-    return originalCreateComment(issueId, body, companyId);
+    const created = await originalCreateComment(issueId, body, companyId);
+    statusTransitionComments.push({ issueId, body, commentId: created.id });
+    return created;
   };
 
   await harness.ctx.state.set(
@@ -3941,8 +4317,29 @@ test('worker ignores linked pull requests from other repositories', async () => 
     const updatedIssue = await harness.ctx.issues.get(importedIssue.id, 'company-1');
     assert.equal(updatedIssue?.status, 'in_review');
     assert.equal(statusTransitionComments.length, 1);
-    assert.match(statusTransitionComments[0]?.body ?? '', /\[#1977\]\(https:\/\/github\.com\/paperclipai\/paperclip\/pull\/1977\)/);
-    assert.doesNotMatch(statusTransitionComments[0]?.body ?? '', /\[#1\]\(https:\/\/github\.com\/paperclipai\/paperclip\/pull\/1\)/);
+    assert.match(statusTransitionComments[0]?.body ?? '', /the linked pull request has green CI with all review threads resolved/);
+    assert.doesNotMatch(statusTransitionComments[0]?.body ?? '', /paperclipai\/paperclip#1977|paperclipai\/paperclip#1\b/);
+
+    const annotation = await harness.getData<{
+      links: Array<{ label: string; href: string }>;
+    } | null>('comment.annotation', {
+      companyId: 'company-1',
+      parentIssueId: importedIssue.id,
+      commentId: statusTransitionComments[0]?.commentId
+    });
+
+    assert.deepEqual(annotation?.links, [
+      {
+        type: 'issue',
+        label: 'Issue #923',
+        href: 'https://github.com/paperclipai/paperclip/issues/923'
+      },
+      {
+        type: 'pull_request',
+        label: 'PR #1977',
+        href: 'https://github.com/paperclipai/paperclip/pull/1977'
+      }
+    ]);
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -4160,10 +4557,11 @@ test('worker uses the local Paperclip issue PATCH API for status transitions whe
     return originalUpdate(issueId, patch, companyId);
   };
 
-  const directCommentCalls: Array<{ issueId: string; body: string }> = [];
+  const directCommentCalls: Array<{ issueId: string; body: string; commentId: string }> = [];
   harness.ctx.issues.createComment = async (issueId, body, companyId) => {
-    directCommentCalls.push({ issueId, body });
-    return originalCreateComment(issueId, body, companyId);
+    const created = await originalCreateComment(issueId, body, companyId);
+    directCommentCalls.push({ issueId, body, commentId: created.id });
+    return created;
   };
 
   const patchRequests: Array<{ issueId: string; body: Record<string, unknown> | null }> = [];
@@ -4262,15 +4660,39 @@ test('worker uses the local Paperclip issue PATCH API for status transitions whe
     };
 
     assert.equal(sync.syncState.status, 'success');
-    assert.equal(patchRequests.length, 1);
-    assert.equal(patchRequests[0]?.issueId, importedIssue.id);
-    assert.equal(patchRequests[0]?.body?.status, 'todo');
-    assert.match(String(patchRequests[0]?.body?.comment ?? ''), /from `in progress` to `todo`/);
-    assert.match(String(patchRequests[0]?.body?.comment ?? ''), /GitHub issue \[#41\]\(https:\/\/github\.com\/paperclipai\/example-repo\/issues\/41\)/);
+    const statusPatchRequests = patchRequests.filter((request) => typeof request.body?.status === 'string');
+    const descriptionPatchRequests = patchRequests.filter((request) => typeof request.body?.description === 'string');
+
+    assert.equal(statusPatchRequests.length, 1);
+    assert.equal(descriptionPatchRequests.length, 1);
+    assert.equal(statusPatchRequests[0]?.issueId, importedIssue.id);
+    assert.equal(statusPatchRequests[0]?.body?.status, 'todo');
+    assert.equal(statusPatchRequests[0]?.body?.comment, undefined);
+    assert.equal(String(descriptionPatchRequests[0]?.body?.description ?? ''), 'Body');
     assert.equal(directStatusUpdateCalls.length, 0);
-    assert.equal(directCommentCalls.length, 0);
-    assert.equal(apiTransitionComments.length, 1);
-    assert.match(apiTransitionComments[0]?.body ?? '', /new comment was added to GitHub issue \[#41\]/);
+    assert.equal(directCommentCalls.length, 1);
+    assert.equal(apiTransitionComments.length, 0);
+    assert.match(directCommentCalls[0]?.body ?? '', /from `in progress` to `todo`/);
+    assert.match(directCommentCalls[0]?.body ?? '', /a new GitHub comment was added/);
+    assert.doesNotMatch(directCommentCalls[0]?.body ?? '', /paperclipai\/example-repo#41/);
+
+    const annotation = await harness.getData<{
+      source: string;
+      links: Array<{ label: string; href: string }>;
+    } | null>('comment.annotation', {
+      companyId: 'company-1',
+      parentIssueId: importedIssue.id,
+      commentId: directCommentCalls[0]?.commentId
+    });
+
+    assert.equal(annotation?.source, 'entity');
+    assert.deepEqual(annotation?.links, [
+      {
+        type: 'issue',
+        label: 'Issue #41',
+        href: 'https://github.com/paperclipai/example-repo/issues/41'
+      }
+    ]);
 
     const updatedIssue = await harness.ctx.issues.get(importedIssue.id, 'company-1');
     assert.equal(updatedIssue?.status, 'todo');
@@ -4435,6 +4857,30 @@ test('worker reports sync error when configuration is incomplete', async () => {
 
   assert.equal(result.syncState.status, 'error');
   assert.equal(result.syncState.message, 'Configure a GitHub token secret before running sync.');
+  assert.equal(result.syncState.lastRunTrigger, 'manual');
+});
+
+test('sync.runNow falls back to the saved githubTokenRef when config has not propagated yet', async () => {
+  const harness = createTestHarness({ manifest });
+  await plugin.definition.setup(harness.ctx);
+
+  let resolvedSecretRef: string | null = null;
+  harness.ctx.secrets.resolve = async (secretRef) => {
+    resolvedSecretRef = secretRef;
+    return 'github-token';
+  };
+
+  await harness.performAction('settings.saveRegistration', {
+    githubTokenRef: 'github-secret-ref'
+  });
+
+  const result = await harness.performAction('sync.runNow', {}) as {
+    syncState: { status: string; message?: string; lastRunTrigger?: string };
+  };
+
+  assert.equal(resolvedSecretRef, 'github-secret-ref');
+  assert.equal(result.syncState.status, 'error');
+  assert.equal(result.syncState.message, 'Save at least one mapping with a created Paperclip project before running sync.');
   assert.equal(result.syncState.lastRunTrigger, 'manual');
 });
 
