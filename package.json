@@ -40,10 +40,12 @@
   },
   "dependencies": {
     "@octokit/rest": "^22.0.0",
-    "@paperclipai/plugin-sdk": "^2026.403.0"
+    "@paperclipai/plugin-sdk": "^2026.403.0",
+    "react": "^19.2.0"
   },
   "devDependencies": {
     "@types/node": "^24.5.2",
+    "@types/react": "^19.2.2",
     "esbuild": "^0.25.3",
     "playwright": "^1.58.0",
     "typescript": "^5.9.2"

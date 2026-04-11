@@ -13,11 +13,17 @@ importers:
         version: 22.0.1
       '@paperclipai/plugin-sdk':
         specifier: ^2026.403.0
-        version: 2026.403.0
+        version: 2026.403.0(react@19.2.5)
+      react:
+        specifier: ^19.2.0
+        version: 19.2.5
     devDependencies:
       '@types/node':
         specifier: ^24.5.2
         version: 24.12.2
+      '@types/react':
+        specifier: ^19.2.2
+        version: 19.2.14
       esbuild:
         specifier: ^0.25.3
         version: 0.25.12
@@ -253,8 +259,14 @@ packages:
   '@types/node@24.12.2':
     resolution: {integrity: sha512-A1sre26ke7HDIuY/M23nd9gfB+nrmhtYyMINbjI1zHJxYteKR6qSMX56FsmjMcDb3SMcjJg5BiRRgOCC/yBD0g==}
 
+  '@types/react@19.2.14':
+    resolution: {integrity: sha512-ilcTH/UniCkMdtexkoCN0bI7pMcJDvmQFPvuPvmEaYA/NSfFTAgdUSLAoVjaRJm7+6PvcM+q1zYOwS4wTYMF9w==}
+
   before-after-hook@4.0.0:
     resolution: {integrity: sha512-q6tR3RPqIB1pMiTRMFcZwuG5T8vwp+vUvEG0vuI6B+Rikh5BfPp2fQ82c925FOs+b0lcFQ8CFrL+KbilfZFhOQ==}
+
+  csstype@3.2.3:
+    resolution: {integrity: sha512-z1HGKcYy2xA8AGQfwrn0PAy+PB7X/GSj3UVJW9qKyn43xWa+gl5nXmU4qqLMRzWVLFC8KusUX8T/0kCiOYpAIQ==}
 
   esbuild@0.25.12:
     resolution: {integrity: sha512-bbPBYYrtZbkt6Os6FiTLCTFxvq4tt3JKall1vRwshA3fdVztsLAatFaZobhkBC8/BrPetoa0oksYoKXoG4ryJg==}
@@ -281,6 +293,10 @@ packages:
     resolution: {integrity: sha512-C8oWjPR3F81yljW9o5OxcWzfh6avkVwDD2VYdwIGqTkl+OGFISgypqzfu7dOe4QNLL2aqcWBmI3PMtLIK233lw==}
     engines: {node: '>=18'}
     hasBin: true
+
+  react@19.2.5:
+    resolution: {integrity: sha512-llUJLzz1zTUBrskt2pwZgLq59AemifIftw4aB7JxOqf1HY2FDaGDxgwpAPVzHU1kdWabH7FauP4i1oEeer2WCA==}
+    engines: {node: '>=0.10.0'}
 
   typescript@5.9.3:
     resolution: {integrity: sha512-jl1vZzPDinLr9eUt3J/t7V6FgNEw9QjvBPdysz9KfQDD41fQrC2Y4vKQdiaUpFT4bXlb1RHhLpp8wtm6M5TgSw==}
@@ -439,10 +455,12 @@ snapshots:
     dependencies:
       '@octokit/openapi-types': 27.0.0
 
-  '@paperclipai/plugin-sdk@2026.403.0':
+  '@paperclipai/plugin-sdk@2026.403.0(react@19.2.5)':
     dependencies:
       '@paperclipai/shared': 2026.403.0
       zod: 3.25.76
+    optionalDependencies:
+      react: 19.2.5
 
   '@paperclipai/shared@2026.403.0':
     dependencies:
@@ -452,7 +470,13 @@ snapshots:
     dependencies:
       undici-types: 7.16.0
 
+  '@types/react@19.2.14':
+    dependencies:
+      csstype: 3.2.3
+
   before-after-hook@4.0.0: {}
+
+  csstype@3.2.3: {}
 
   esbuild@0.25.12:
     optionalDependencies:
@@ -497,6 +521,8 @@ snapshots:
       playwright-core: 1.59.1
     optionalDependencies:
       fsevents: 2.3.2
+
+  react@19.2.5: {}
 
   typescript@5.9.3: {}
 
