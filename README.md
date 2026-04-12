@@ -23,13 +23,14 @@ It is designed for teams that plan in Paperclip but still receive work through G
 - GitHub token validation before saving.
 - GitHub token saved through Paperclip company secrets; the plugin stores only the secret reference.
 - Optional worker-local config file support at `~/.paperclip/plugins/github-sync/config.json` with a `githubToken` field for global runtime fallback.
-- GitHub token and automatic sync cadence stay shared across the plugin instance, while repository mappings and Paperclip board access are managed per company from the same hosted settings flow.
+- GitHub token and automatic sync cadence stay shared across the plugin instance, while repository mappings, advanced import defaults, and Paperclip board access are managed per company from the same hosted settings flow.
 - The hosted settings page calls out the current company by name and separates company-scoped setup from shared plugin-wide settings.
 - Automatic detection of authenticated Paperclip deployments through `/api/health`.
 - Paperclip board access connection flow from settings, enforced when the deployment requires authenticated board access for worker-side REST calls.
 - Paperclip board tokens saved through Paperclip company secrets per company; the plugin stores only the secret reference and mirrors that ref into plugin config so workers can resolve it during sync.
 - Support for multiple repository-to-project mappings.
 - When settings are opened inside a company, the repository list only shows that company’s mappings and saving it preserves mappings that belong to other companies.
+- Company-wide advanced settings for imported issues, including a default assignee, a default Paperclip status, and ignored GitHub issue authors.
 - Repository input accepts either `owner/repo` or `https://github.com/owner/repo`.
 - When a company already has Paperclip projects bound to GitHub repository workspaces, the settings page surfaces those existing projects so sync can be enabled without recreating the project.
 - Automatic creation or reuse of the target Paperclip project when a mapping is saved.
@@ -60,6 +61,7 @@ It is designed for teams that plan in Paperclip but still receive work through G
 ### Issue import and update behavior
 
 - Imports one top-level Paperclip issue per GitHub issue.
+- Can ignore GitHub issues from configured usernames such as `renovate`.
 - Preserves the original GitHub issue title without adding a prefix.
 - Uses the normalized GitHub issue body as the Paperclip issue description.
 - Normalizes GitHub HTML that Paperclip descriptions cannot render cleanly, including constructs such as `<br>`, `<hr>`, `<details>`, `<summary>`, and inline images.
@@ -87,7 +89,7 @@ It is designed for teams that plan in Paperclip but still receive work through G
 
 ### Status synchronization
 
-- Open GitHub issue with no linked pull request imports into Paperclip as `backlog`.
+- Open GitHub issue with no linked pull request imports into the configured default Paperclip status, which defaults to `backlog`.
 - Open GitHub issue with unfinished CI on a linked pull request maps to `in_progress`.
 - Open GitHub issue with failing CI or unresolved review threads on a linked pull request maps to `todo`.
 - Open GitHub issue with green CI and all review threads resolved maps to `in_review`.
@@ -113,7 +115,7 @@ It is designed for teams that plan in Paperclip but still receive work through G
 ## Paperclip surfaces added by this plugin
 
 - Dashboard widget with setup/readiness messaging, last sync status, and a link to settings.
-- Settings page for token validation, repository mappings, save, and manual sync.
+- Settings page for token validation, repository mappings, company-wide advanced defaults, save, and manual sync.
 - Global toolbar action for a full sync.
 - Project toolbar action for targeted project sync.
 - Issue toolbar action for targeted issue sync.
@@ -163,10 +165,11 @@ Notes:
 4. If the settings page reports that this Paperclip deployment requires board access, connect **Paperclip board access** from the same settings page and approve the new tab that opens.
 5. Add one or more repository mappings for the current company.
 6. For each mapping, either enable sync for an existing GitHub-linked Paperclip project or enter a GitHub repository and the Paperclip project name that should receive synced issues.
-7. Choose the automatic sync interval in minutes.
-8. Save the settings.
-9. Repeat inside any other Paperclip companies that should have their own mappings or board access.
-10. Run a manual sync to import the first batch of issues.
+7. Optionally configure the company-wide advanced defaults for new imports: default assignee, default status, and ignored GitHub usernames.
+8. Choose the automatic sync interval in minutes.
+9. Save the settings.
+10. Repeat inside any other Paperclip companies that should have their own mappings, defaults, or board access.
+11. Run a manual sync to import the first batch of issues.
 
 ## Expected workflow
 

@@ -35,6 +35,7 @@ export const manifest: PaperclipPluginManifestV1 = {
     'issues.update',
     'issue.comments.read',
     'issue.comments.create',
+    'agents.read',
     'jobs.schedule',
     'http.outbound',
     'secrets.read-ref',

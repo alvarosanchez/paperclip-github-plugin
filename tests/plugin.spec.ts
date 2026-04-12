@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 
+import type { Agent } from '@paperclipai/plugin-sdk';
 import { createTestHarness } from '@paperclipai/plugin-sdk/testing';
 
 import manifest from '../src/manifest.ts';
@@ -277,6 +278,43 @@ test('filterExistingProjectSyncCandidates hides projects already enabled in plug
     }
   ]);
 });
+
+function createAgentFixture(params: {
+  id: string;
+  companyId: string;
+  name: string;
+  title?: string;
+  status?: Agent['status'];
+}): Agent {
+  const now = new Date('2026-04-12T10:00:00.000Z');
+
+  return {
+    id: params.id,
+    companyId: params.companyId,
+    name: params.name,
+    urlKey: params.name.toLowerCase().replace(/[^a-z0-9]+/g, '-'),
+    role: 'general',
+    title: params.title ?? null,
+    icon: null,
+    status: params.status ?? 'idle',
+    reportsTo: null,
+    capabilities: null,
+    adapterType: 'codex_local',
+    adapterConfig: {},
+    runtimeConfig: {},
+    budgetMonthlyCents: 0,
+    spentMonthlyCents: 0,
+    pauseReason: null,
+    pausedAt: null,
+    permissions: {
+      canCreateAgents: false
+    },
+    lastHeartbeatAt: now,
+    metadata: null,
+    createdAt: now,
+    updatedAt: now
+  };
+}
 
 async function withExternalPluginConfig<T>(
   config: Record<string, unknown>,
@@ -1105,6 +1143,7 @@ test('manifest exposes GitHub Sync dashboard and settings UI metadata, config sc
   assert.ok(manifest.capabilities.includes('issues.update'));
   assert.ok(manifest.capabilities.includes('issue.comments.read'));
   assert.ok(manifest.capabilities.includes('issue.comments.create'));
+  assert.ok(manifest.capabilities.includes('agents.read'));
   assert.equal((manifest.instanceConfigSchema as { properties?: Record<string, unknown> }).properties?.githubTokenRef ? 'present' : 'missing', 'present');
   assert.equal((manifest.instanceConfigSchema as { properties?: Record<string, unknown> }).properties?.paperclipBoardApiTokenRefs ? 'present' : 'missing', 'present');
   const settingsSlot = manifest.ui?.slots?.find((slot) => slot.type === 'settingsPage');
@@ -1599,6 +1638,11 @@ test('worker saves normalized mappings with resolved project identifiers supplie
       status: 'idle'
     },
     scheduleFrequencyMinutes: 15,
+    advancedSettings: {
+      defaultStatus: 'backlog',
+      ignoredIssueAuthorUsernames: ['renovate']
+    },
+    availableAssignees: [],
     updatedAt: (result as { updatedAt: string }).updatedAt
   });
 });
@@ -1606,6 +1650,22 @@ test('worker saves normalized mappings with resolved project identifiers supplie
 test('worker scopes mapping saves and settings reads to the requested company', async () => {
   const harness = createTestHarness({ manifest });
   await plugin.definition.setup(harness.ctx);
+  harness.seed({
+    agents: [
+      createAgentFixture({
+        id: 'agent-1',
+        companyId: 'company-1',
+        name: 'Alex',
+        title: 'Engineer'
+      }),
+      createAgentFixture({
+        id: 'agent-2',
+        companyId: 'company-2',
+        name: 'Bailey',
+        title: 'Operator'
+      })
+    ]
+  });
 
   await harness.performAction('settings.saveRegistration', {
     mappings: [
@@ -1637,6 +1697,15 @@ test('worker scopes mapping saves and settings reads to the requested company', 
       paperclipProjectId?: string;
       companyId?: string;
     }>;
+    advancedSettings: {
+      defaultAssigneeAgentId?: string;
+      defaultStatus: string;
+      ignoredIssueAuthorUsernames: string[];
+    };
+    availableAssignees: Array<{
+      id: string;
+      name: string;
+    }>;
   }>('settings.registration', {
     companyId: 'company-1'
   });
@@ -1648,6 +1717,11 @@ test('worker scopes mapping saves and settings reads to the requested company', 
       paperclipProjectId?: string;
       companyId?: string;
     }>;
+    advancedSettings: {
+      defaultAssigneeAgentId?: string;
+      defaultStatus: string;
+      ignoredIssueAuthorUsernames: string[];
+    };
   }>('settings.registration', {
     companyId: 'company-2'
   });
@@ -1670,6 +1744,22 @@ test('worker scopes mapping saves and settings reads to the requested company', 
       companyId: 'company-2'
     }
   ]);
+  assert.deepEqual(companyOneBefore.advancedSettings, {
+    defaultStatus: 'backlog',
+    ignoredIssueAuthorUsernames: ['renovate']
+  });
+  assert.deepEqual(companyOneBefore.availableAssignees, [
+    {
+      id: 'agent-1',
+      name: 'Alex',
+      title: 'Engineer',
+      status: 'idle'
+    }
+  ]);
+  assert.deepEqual(companyTwoBefore.advancedSettings, {
+    defaultStatus: 'backlog',
+    ignoredIssueAuthorUsernames: ['renovate']
+  });
 
   const companyOneSaveResult = await harness.performAction('settings.saveRegistration', {
     companyId: 'company-1',
@@ -1681,6 +1771,11 @@ test('worker scopes mapping saves and settings reads to the requested company', 
         paperclipProjectId: 'project-3'
       }
     ],
+    advancedSettings: {
+      defaultAssigneeAgentId: 'agent-1',
+      defaultStatus: 'todo',
+      ignoredIssueAuthorUsernames: ['renovate', 'dependabot']
+    },
     syncState: {
       status: 'idle'
     }
@@ -1692,6 +1787,11 @@ test('worker scopes mapping saves and settings reads to the requested company', 
       paperclipProjectId?: string;
       companyId?: string;
     }>;
+    advancedSettings: {
+      defaultAssigneeAgentId?: string;
+      defaultStatus: string;
+      ignoredIssueAuthorUsernames: string[];
+    };
   };
 
   assert.deepEqual(companyOneSaveResult.mappings, [
@@ -1703,6 +1803,11 @@ test('worker scopes mapping saves and settings reads to the requested company', 
       companyId: 'company-1'
     }
   ]);
+  assert.deepEqual(companyOneSaveResult.advancedSettings, {
+    defaultAssigneeAgentId: 'agent-1',
+    defaultStatus: 'todo',
+    ignoredIssueAuthorUsernames: ['renovate', 'dependabot']
+  });
 
   const savedSettings = harness.getState({
     scopeKind: 'instance',
@@ -1714,6 +1819,11 @@ test('worker scopes mapping saves and settings reads to the requested company', 
       paperclipProjectName: string;
       paperclipProjectId?: string;
       companyId?: string;
+    }>;
+    companyAdvancedSettingsByCompanyId: Record<string, {
+      defaultAssigneeAgentId?: string;
+      defaultStatus: string;
+      ignoredIssueAuthorUsernames: string[];
     }>;
   };
 
@@ -1733,6 +1843,13 @@ test('worker scopes mapping saves and settings reads to the requested company', 
       companyId: 'company-1'
     }
   ]);
+  assert.deepEqual(savedSettings.companyAdvancedSettingsByCompanyId, {
+    'company-1': {
+      defaultAssigneeAgentId: 'agent-1',
+      defaultStatus: 'todo',
+      ignoredIssueAuthorUsernames: ['renovate', 'dependabot']
+    }
+  });
 });
 
 test('worker normalizes owner/repo slugs to canonical GitHub URLs when saving mappings', async () => {
@@ -1768,6 +1885,11 @@ test('worker normalizes owner/repo slugs to canonical GitHub URLs when saving ma
       status: 'idle'
     },
     scheduleFrequencyMinutes: 15,
+    advancedSettings: {
+      defaultStatus: 'backlog',
+      ignoredIssueAuthorUsernames: ['renovate']
+    },
+    availableAssignees: [],
     updatedAt: (result as { updatedAt: string }).updatedAt
   });
 });
@@ -2055,6 +2177,7 @@ test('worker lists only open GitHub issues when bootstrapping a repository with 
   await plugin.definition.setup(harness.ctx);
 
   await harness.performAction('settings.saveRegistration', {
+    companyId: 'company-1',
     mappings: [
       {
         id: 'mapping-a',
@@ -5142,6 +5265,202 @@ test('worker uses the live Paperclip API URL passed to sync.runNow instead of a 
     assert.ok(importedIssue);
     assert.doesNotMatch(importedIssue?.description ?? '', /^\*\s+GitHub issue:/m);
     assert.match(importedIssue?.description ?? '', /Description imported through the current Paperclip origin\./);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('sync applies company-wide advanced defaults and ignores configured GitHub authors', async () => {
+  const harness = createTestHarness({
+    manifest,
+    config: {
+      githubTokenRef: 'github-secret-ref'
+    }
+  });
+  await plugin.definition.setup(harness.ctx);
+  harness.seed({
+    agents: [
+      createAgentFixture({
+        id: 'agent-1',
+        companyId: 'company-1',
+        name: 'Alex',
+        title: 'Engineer'
+      })
+    ]
+  });
+  harness.ctx.secrets.resolve = async (secretRef) => {
+    if (secretRef === 'github-secret-ref') {
+      return 'github-token';
+    }
+
+    throw new Error(`Unexpected secret ref: ${secretRef}`);
+  };
+
+  const statusTransitionComments: Array<{ issueId: string; body: string }> = [];
+  const originalCreateComment = harness.ctx.issues.createComment.bind(harness.ctx.issues);
+  harness.ctx.issues.createComment = async (issueId, body, companyId) => {
+    statusTransitionComments.push({ issueId, body });
+    return originalCreateComment(issueId, body, companyId);
+  };
+
+  await harness.performAction('settings.saveRegistration', {
+    companyId: 'company-1',
+    mappings: [
+      {
+        id: 'mapping-a',
+        repositoryUrl: 'paperclipai/example-repo',
+        paperclipProjectName: 'Engineering',
+        paperclipProjectId: 'project-1',
+        companyId: 'company-1'
+      }
+    ],
+    advancedSettings: {
+      defaultAssigneeAgentId: 'agent-1',
+      defaultStatus: 'todo',
+      ignoredIssueAuthorUsernames: ['renovate']
+    },
+    syncState: {
+      status: 'idle'
+    }
+  });
+
+  const originalFetch = globalThis.fetch;
+
+  globalThis.fetch = async (input, init) => {
+    const rawUrl = getRequestUrl(input);
+    const url = new URL(rawUrl);
+
+    if (url.pathname === '/repos/paperclipai/example-repo/issues' && ['all', 'open'].includes(url.searchParams.get('state') ?? '')) {
+      return jsonResponse([
+        {
+          id: 2001,
+          number: 20,
+          title: 'Imported human issue',
+          body: 'Imported body',
+          html_url: 'https://github.com/paperclipai/example-repo/issues/20',
+          state: 'open',
+          comments: 0,
+          user: {
+            login: 'octocat'
+          }
+        },
+        {
+          id: 2002,
+          number: 21,
+          title: 'Ignored renovate issue',
+          body: 'Should not import',
+          html_url: 'https://github.com/paperclipai/example-repo/issues/21',
+          state: 'open',
+          comments: 0,
+          user: {
+            login: 'renovate'
+          }
+        }
+      ]);
+    }
+
+    if (url.pathname === '/graphql') {
+      const { query, variables } = getGraphqlRequest(init);
+      const issueNumber = typeof variables.issueNumber === 'number' ? variables.issueNumber : undefined;
+
+      if (query.includes('query GitHubIssueParentRelationships')) {
+        return graphqlIssueParentRelationshipsResponse([
+          { issueNumber: 20 },
+          { issueNumber: 21 }
+        ]);
+      }
+
+      if (query.includes('query GitHubRepositoryOpenIssueLinkedPullRequests')) {
+        return graphqlResponse({
+          repository: {
+            issues: {
+              pageInfo: {
+                hasNextPage: false,
+                endCursor: null
+              },
+              nodes: [
+                {
+                  number: 20,
+                  closedByPullRequestsReferences: {
+                    pageInfo: {
+                      hasNextPage: false,
+                      endCursor: null
+                    },
+                    nodes: []
+                  }
+                }
+              ]
+            }
+          }
+        });
+      }
+
+      if (query.includes('query GitHubRepositoryOpenPullRequestStatuses')) {
+        return graphqlResponse({
+          repository: {
+            pullRequests: {
+              pageInfo: {
+                hasNextPage: false,
+                endCursor: null
+              },
+              nodes: []
+            }
+          }
+        });
+      }
+
+      if (query.includes('query GitHubIssueStatusSnapshot') && issueNumber === 20) {
+        return graphqlResponse({
+          repository: {
+            issue: {
+              number: 20,
+              state: 'OPEN',
+              stateReason: null,
+              comments: {
+                totalCount: 0
+              },
+              closedByPullRequestsReferences: {
+                pageInfo: {
+                  hasNextPage: false,
+                  endCursor: null
+                },
+                nodes: []
+              }
+            }
+          }
+        });
+      }
+    }
+
+    throw new Error(`Unexpected GitHub request: ${url.toString()}`);
+  };
+
+  try {
+    const sync = await harness.performAction('sync.runNow', {}) as {
+      syncState: { status: string; createdIssuesCount?: number };
+    };
+
+    assert.equal(sync.syncState.status, 'success');
+    assert.equal(sync.syncState.createdIssuesCount, 1);
+
+    const importedIssues = await harness.ctx.issues.list({
+      companyId: 'company-1'
+    });
+
+    const importedHumanIssue = importedIssues.find((issue) => issue.title === 'Imported human issue');
+    const ignoredIssue = importedIssues.find((issue) => issue.title === 'Ignored renovate issue');
+
+    assert.ok(importedHumanIssue);
+    assert.equal(importedHumanIssue?.assigneeAgentId, 'agent-1');
+    assert.equal(importedHumanIssue?.status, 'todo');
+    assert.equal(ignoredIssue, undefined);
+    assert.equal(statusTransitionComments.length, 0);
+
+    const importRegistry = harness.getState({
+      scopeKind: 'instance',
+      stateKey: 'paperclip-github-plugin-import-registry'
+    }) as Array<{ githubIssueId: number }>;
+    assert.deepEqual(importRegistry.map((entry) => entry.githubIssueId), [2001]);
   } finally {
     globalThis.fetch = originalFetch;
   }
