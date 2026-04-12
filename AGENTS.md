@@ -82,6 +82,9 @@ Use these selectively:
 
 ## Documentation expectations
 
+`README.md` is user-facing documentation and MUST be kept up to date.
+`SPEC.md` is the plugin specification and MUST be kept up to date.
+
 Update `README.md` and `SPEC.md` when any of these change:
 
 - plugin purpose or scope
