@@ -9,13 +9,13 @@ importers:
   .:
     dependencies:
       '@octokit/rest':
-        specifier: ^22.0.0
+        specifier: ^22.0.1
         version: 22.0.1
       '@paperclipai/plugin-sdk':
         specifier: ^2026.403.0
         version: 2026.403.0(react@19.2.5)
       react:
-        specifier: ^19.2.0
+        specifier: ^19.2.5
         version: 19.2.5
     devDependencies:
       '@types/node':

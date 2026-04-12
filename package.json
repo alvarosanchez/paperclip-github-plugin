@@ -41,9 +41,9 @@
     "verify:manual": "pnpm build && pnpm exec playwright install chromium && node ./scripts/e2e/manual-paperclip-verify.mjs"
   },
   "dependencies": {
-    "@octokit/rest": "^22.0.0",
+    "@octokit/rest": "^22.0.1",
     "@paperclipai/plugin-sdk": "^2026.403.0",
-    "react": "^19.2.0"
+    "react": "^19.2.5"
   },
   "devDependencies": {
     "@types/node": "24.12.2",
