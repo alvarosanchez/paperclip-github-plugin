@@ -30,6 +30,7 @@ It is designed for teams that plan in Paperclip but still receive work through G
 - Support for multiple repository-to-project mappings.
 - When settings are opened inside a company, the repository list only shows that company’s mappings and saving it preserves mappings that belong to other companies.
 - Repository input accepts either `owner/repo` or `https://github.com/owner/repo`.
+- When a company already has Paperclip projects bound to GitHub repository workspaces, the settings page surfaces those existing projects so sync can be enabled without recreating the project.
 - Automatic creation or reuse of the target Paperclip project when a mapping is saved.
 - Automatic binding of the GitHub repository URL to the target Paperclip project workspace.
 - Configurable automatic sync cadence in whole minutes.
@@ -152,7 +153,7 @@ Notes:
 3. Save the validated token so Paperclip can store it as a secret reference.
 4. If the settings page reports that this Paperclip deployment requires board access, connect **Paperclip board access** from the same settings page and approve the new tab that opens.
 5. Add one or more repository mappings for the current company.
-6. For each mapping, enter a GitHub repository and the Paperclip project name that should receive synced issues.
+6. For each mapping, either enable sync for an existing GitHub-linked Paperclip project or enter a GitHub repository and the Paperclip project name that should receive synced issues.
 7. Choose the automatic sync interval in minutes.
 8. Save the settings.
 9. Repeat inside any other Paperclip companies that should have their own mappings or board access.
@@ -183,7 +184,7 @@ Imported issues stay linked to GitHub and continue to receive description, label
 - `pnpm dev` watches the manifest, worker, and UI bundles and rebuilds them into `dist/`.
 - `pnpm dev:ui` starts a local Paperclip plugin UI dev server from `dist/ui` on port `4177`.
 - `pnpm test:e2e` builds the plugin, boots an isolated Paperclip instance, installs the plugin, and verifies the hosted settings page renders.
-- `pnpm verify:manual` builds the plugin, boots a Paperclip instance for manual inspection, and opens the plugin settings page.
+- `pnpm verify:manual` builds the plugin, boots a Paperclip instance for manual inspection, seeds a project already mapped to `https://github.com/alvarosanchez/paperclip-github-plugin`, and opens the plugin settings page.
 
 For fast hosted-UI iteration, run `pnpm dev` in one terminal and `pnpm dev:ui` in another.
 

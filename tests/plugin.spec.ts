@@ -10,6 +10,10 @@ import manifest from '../src/manifest.ts';
 import { requiresPaperclipBoardAccess } from '../src/paperclip-health.ts';
 import { fetchJson, fetchPaperclipHealth, resolveCliAuthPollUrl } from '../src/ui/http.ts';
 import { mergePluginConfig } from '../src/ui/plugin-config.ts';
+import {
+  discoverExistingProjectSyncCandidates,
+  filterExistingProjectSyncCandidates
+} from '../src/ui/project-bindings.ts';
 import plugin from '../src/worker.ts';
 
 function jsonResponse(body: unknown, status = 200): Response {
@@ -150,6 +154,79 @@ function delay(ms: number): Promise<void> {
     globalThis.setTimeout(resolve, ms);
   });
 }
+
+test('discoverExistingProjectSyncCandidates normalizes GitHub workspaces and ignores non-GitHub links', () => {
+  const candidates = discoverExistingProjectSyncCandidates({
+    projects: [
+      { id: 'project-2', name: 'Beta' },
+      { id: 'project-1', name: 'Alpha' }
+    ],
+    workspacesByProjectId: {
+      'project-1': [
+        { repoUrl: 'https://github.com/example/alpha' },
+        { repoUrl: 'https://github.com/example/alpha.git', isPrimary: true },
+        { repoUrl: 'https://gitlab.com/example/alpha' }
+      ],
+      'project-2': [
+        { repoUrl: 'example/beta', sourceType: 'git_repo' }
+      ]
+    }
+  });
+
+  assert.deepEqual(candidates, [
+    {
+      projectId: 'project-1',
+      projectName: 'Alpha',
+      repositoryUrl: 'https://github.com/example/alpha',
+      isPrimary: false,
+      sourceType: undefined
+    },
+    {
+      projectId: 'project-2',
+      projectName: 'Beta',
+      repositoryUrl: 'https://github.com/example/beta',
+      isPrimary: false,
+      sourceType: 'git_repo'
+    }
+  ]);
+});
+
+test('filterExistingProjectSyncCandidates hides projects already enabled in plugin mappings', () => {
+  const availableCandidates = filterExistingProjectSyncCandidates(
+    [
+      {
+        projectId: 'project-1',
+        projectName: 'Alpha',
+        repositoryUrl: 'https://github.com/example/alpha',
+        isPrimary: true,
+        sourceType: 'git_repo'
+      },
+      {
+        projectId: 'project-2',
+        projectName: 'Beta',
+        repositoryUrl: 'https://github.com/example/beta',
+        isPrimary: false,
+        sourceType: 'git_repo'
+      }
+    ],
+    [
+      {
+        repositoryUrl: 'example/alpha',
+        paperclipProjectId: 'project-1'
+      }
+    ]
+  );
+
+  assert.deepEqual(availableCandidates, [
+    {
+      projectId: 'project-2',
+      projectName: 'Beta',
+      repositoryUrl: 'https://github.com/example/beta',
+      isPrimary: false,
+      sourceType: 'git_repo'
+    }
+  ]);
+});
 
 async function withExternalPluginConfig<T>(
   config: Record<string, unknown>,
@@ -5956,16 +6033,18 @@ test('worker stores repository and issue diagnostics when a sync fails mid-run',
 });
 
 test('worker reports sync error when configuration is incomplete', async () => {
-  const harness = createTestHarness({ manifest });
-  await plugin.definition.setup(harness.ctx);
+  await withExternalPluginConfig({}, async () => {
+    const harness = createTestHarness({ manifest });
+    await plugin.definition.setup(harness.ctx);
 
-  const result = await harness.performAction('sync.runNow', {}) as {
-    syncState: { status: string; message?: string; lastRunTrigger?: string };
-  };
+    const result = await harness.performAction('sync.runNow', {}) as {
+      syncState: { status: string; message?: string; lastRunTrigger?: string };
+    };
 
-  assert.equal(result.syncState.status, 'error');
-  assert.equal(result.syncState.message, 'Configure a GitHub token before running sync.');
-  assert.equal(result.syncState.lastRunTrigger, 'manual');
+    assert.equal(result.syncState.status, 'error');
+    assert.equal(result.syncState.message, 'Configure a GitHub token before running sync.');
+    assert.equal(result.syncState.lastRunTrigger, 'manual');
+  });
 });
 
 test('sync.runNow falls back to the saved githubTokenRef when config has not propagated yet', async () => {
