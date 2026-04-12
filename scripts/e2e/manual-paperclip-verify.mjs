@@ -15,6 +15,11 @@ const stateRoot = persistentStateRoot ?? await mkdtemp(join(tmpdir(), 'paperclip
 const paperclipHome = join(stateRoot, 'paperclip-home');
 const dataDir = join(stateRoot, 'paperclip-data');
 const instanceId = 'paperclip-github-plugin-manual';
+const seededProjectName = 'Paperclip Github Plugin';
+const seededRepositoryUrl = 'https://github.com/alvarosanchez/paperclip-github-plugin';
+const seededAgentName = 'CEO';
+const seededAgentModel = 'gpt-5.4';
+const seedAgentBypassApprovalsAndSandbox = process.env.PAPERCLIP_E2E_CEO_BYPASS_APPROVALS_AND_SANDBOX === 'true';
 const requestedPort = process.env.PAPERCLIP_E2E_PORT ? Number(process.env.PAPERCLIP_E2E_PORT) : 3100;
 const requestedDbPort = process.env.PAPERCLIP_E2E_DB_PORT ? Number(process.env.PAPERCLIP_E2E_DB_PORT) : 54329;
 const env = {
@@ -282,6 +287,106 @@ async function ensurePluginInstalled(configPath) {
   }
 }
 
+async function ensureSeedProjectMapped(company) {
+  const companyId = typeof company?.id === 'string' ? company.id : '';
+  if (!companyId) {
+    throw new Error('A seeded company id is required before creating the manual verification project.');
+  }
+
+  const projects = await fetchJson(new URL(`/api/companies/${companyId}/projects`, baseUrl).toString());
+  const existingProject =
+    Array.isArray(projects)
+      ? projects.find((entry) =>
+          entry
+          && typeof entry === 'object'
+          && typeof entry.id === 'string'
+          && typeof entry.name === 'string'
+          && entry.name.trim().toLowerCase() === seededProjectName.toLowerCase()
+        )
+      : null;
+
+  const project = existingProject ?? await fetchJson(new URL(`/api/companies/${companyId}/projects`, baseUrl).toString(), {
+    method: 'POST',
+    body: JSON.stringify({
+      name: seededProjectName,
+      status: 'planned'
+    })
+  });
+  const projectId = typeof project?.id === 'string' ? project.id : '';
+  if (!projectId) {
+    throw new Error('Paperclip did not return a usable project id for the manual verification seed project.');
+  }
+
+  const workspaces = await fetchJson(new URL(`/api/projects/${projectId}/workspaces`, baseUrl).toString());
+  const alreadyMapped =
+    Array.isArray(workspaces)
+      && workspaces.some((entry) =>
+        entry
+        && typeof entry === 'object'
+        && typeof entry.repoUrl === 'string'
+        && entry.repoUrl.trim().replace(/\.git$/, '') === seededRepositoryUrl
+      );
+  if (!alreadyMapped) {
+    await fetchJson(new URL(`/api/projects/${projectId}/workspaces`, baseUrl).toString(), {
+      method: 'POST',
+      body: JSON.stringify({
+        repoUrl: seededRepositoryUrl,
+        sourceType: 'git_repo',
+        isPrimary: true
+      })
+    });
+  }
+
+  log(`Seeded project ${seededProjectName} mapped to ${seededRepositoryUrl}.`);
+}
+
+async function ensureSeedAgent(company) {
+  const companyId = typeof company?.id === 'string' ? company.id : '';
+  if (!companyId) {
+    throw new Error('A seeded company id is required before creating the manual verification agent.');
+  }
+
+  const companyAgentsUrl = new URL(`/api/companies/${companyId}/agents`, baseUrl).toString();
+  const existingAgents = await fetchJson(companyAgentsUrl);
+  const existingAgent =
+    Array.isArray(existingAgents)
+      ? existingAgents.find((entry) =>
+          entry
+          && typeof entry === 'object'
+          && typeof entry.id === 'string'
+          && typeof entry.name === 'string'
+          && entry.name.trim().toLowerCase() === seededAgentName.toLowerCase()
+        )
+      : null;
+
+  const agentPayload = {
+    name: seededAgentName,
+    role: 'ceo',
+    title: seededAgentName,
+    icon: 'sparkles',
+    adapterType: 'codex_local',
+    adapterConfig: {
+      model: seededAgentModel,
+      dangerouslyBypassApprovalsAndSandbox: seedAgentBypassApprovalsAndSandbox
+    }
+  };
+
+  if (existingAgent) {
+    await fetchJson(new URL(`/api/agents/${existingAgent.id}`, baseUrl).toString(), {
+      method: 'PATCH',
+      body: JSON.stringify(agentPayload)
+    });
+    log(`Updated seeded agent ${seededAgentName} to use Codex ${seededAgentModel}${seedAgentBypassApprovalsAndSandbox ? ' with bypass enabled' : ''}.`);
+    return;
+  }
+
+  await fetchJson(companyAgentsUrl, {
+    method: 'POST',
+    body: JSON.stringify(agentPayload)
+  });
+  log(`Seeded agent ${seededAgentName} using Codex ${seededAgentModel}${seedAgentBypassApprovalsAndSandbox ? ' with bypass enabled' : ''}.`);
+}
+
 async function waitForServerExit(timeoutMs) {
   if (!serverProcess) {
     return;
@@ -379,6 +484,8 @@ async function main() {
   log(`Paperclip server is ready at ${baseUrl}.`);
 
   const company = await ensureCompanySeeded();
+  await ensureSeedProjectMapped(company);
+  await ensureSeedAgent(company);
   await ensurePluginInstalled(configPath);
 
   const manualUrl = `${baseUrl}/settings/plugins`;

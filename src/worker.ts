@@ -5,6 +5,7 @@ import { Octokit } from '@octokit/rest';
 import { definePlugin, runWorker, type Issue, type ToolResult, type ToolRunContext } from '@paperclipai/plugin-sdk';
 
 import { getGitHubAgentToolDeclaration } from './github-agent-tools.ts';
+import { parseRepositoryReference, type ParsedRepositoryReference } from './github-repo.ts';
 import { normalizePaperclipHealthResponse, requiresPaperclipBoardAccess } from './paperclip-health.ts';
 
 const SETTINGS_SCOPE = {
@@ -349,12 +350,6 @@ interface GitHubIssueLabelRecord {
 
 interface TokenValidationResult {
   login: string;
-}
-
-interface ParsedRepositoryReference {
-  owner: string;
-  repo: string;
-  url: string;
 }
 
 interface ParsedGitHubIssueReference {
@@ -2661,49 +2656,6 @@ function normalizeImportRegistry(value: unknown): ImportedIssueRecord[] {
       };
     })
     .filter((entry): entry is ImportedIssueRecord => entry !== null);
-}
-
-function parseRepositoryReference(repositoryInput: string): ParsedRepositoryReference | null {
-  const trimmed = repositoryInput.trim();
-  if (!trimmed) {
-    return null;
-  }
-
-  const slugMatch = trimmed.match(/^([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+?)(?:\.git)?$/);
-  if (slugMatch) {
-    const [, owner, repo] = slugMatch;
-    return {
-      owner,
-      repo,
-      url: `https://github.com/${owner}/${repo}`
-    };
-  }
-
-  try {
-    const url = new URL(trimmed);
-    if (url.hostname !== 'github.com' && url.hostname !== 'www.github.com') {
-      return null;
-    }
-
-    const pathSegments = url.pathname.split('/').filter(Boolean);
-    if (pathSegments.length !== 2) {
-      return null;
-    }
-
-    const [owner, rawRepo] = pathSegments;
-    const repo = rawRepo.replace(/\.git$/, '');
-    if (!owner || !repo) {
-      return null;
-    }
-
-    return {
-      owner,
-      repo,
-      url: `https://github.com/${owner}/${repo}`
-    };
-  } catch {
-    return null;
-  }
 }
 
 function requireRepositoryReference(repositoryInput: string): ParsedRepositoryReference {

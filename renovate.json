@@ -20,6 +20,15 @@
       "matchManagers": [
         "github-actions"
       ],
+      "matchPackageNames": [
+        "node"
+      ],
+      "allowedVersions": "<24"
+    },
+    {
+      "matchManagers": [
+        "github-actions"
+      ],
       "groupName": "github-actions"
     },
     {

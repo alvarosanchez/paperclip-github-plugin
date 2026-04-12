@@ -11,12 +11,13 @@ The plugin MUST provide a settings page inside Paperclip where an operator can c
 - Paperclip board access, which is optional on unauthenticated deployments and required when the Paperclip deployment reports `deploymentMode: "authenticated"`
 - one or more GitHub repository mappings
 - the frequency for automatic scheduled sync runs
-- a Paperclip project name per mapping where synchronized issues should be created
+- a Paperclip project name per mapping where synchronized issues should be created, including existing Paperclip projects that are already bound to a GitHub repository workspace
 
 The settings page MUST allow saving mappings and triggering a manual sync.
 - When the settings page is opened with a Paperclip company context, it MUST only display and save repository mappings for that company, and saving one company’s mappings MUST preserve mappings that belong to other companies.
 - The settings page SHOULD clearly label company-scoped setup versus plugin-instance-wide setup when both are shown together.
 - When a company context is present, the settings page SHOULD show the active company name prominently using a human-friendly label instead of a raw identifier.
+- When a company already has Paperclip projects bound to GitHub repository workspaces, the settings page SHOULD surface those projects so an operator can enable sync without recreating the project.
 - The plugin SHOULD also expose manual sync entry points from Paperclip toolbar surfaces when the SDK supports them.
 - When a manual sync will outlive a quick action response, the worker MUST persist a `running` sync state immediately and complete the sync asynchronously.
 - The settings page, dashboard widget, and sync toolbar surfaces SHOULD detect authenticated deployments from `/api/health` and MUST require connected Paperclip board access before enabling sync for the affected company.
@@ -77,6 +78,7 @@ The plugin MUST persist repository mappings and sync state in plugin state.
 
 - Saving a mapping MUST create or reuse the target Paperclip project.
 - Saving a company-scoped mapping from the settings page MUST create or reuse the target Paperclip project in that same company.
+- Saving a mapping for a Paperclip project that is already bound to the GitHub repository MUST reuse that existing project instead of creating a duplicate workspace binding.
 - Saving a mapping MUST bind the GitHub repository URL to the Paperclip project workspace.
 - Once a project has been created and linked, its project name field SHOULD be treated as read-only in the settings UI.
 

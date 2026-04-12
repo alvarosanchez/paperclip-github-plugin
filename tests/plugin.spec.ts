@@ -10,6 +10,10 @@ import manifest from '../src/manifest.ts';
 import { requiresPaperclipBoardAccess } from '../src/paperclip-health.ts';
 import { fetchJson, fetchPaperclipHealth, resolveCliAuthPollUrl } from '../src/ui/http.ts';
 import { mergePluginConfig } from '../src/ui/plugin-config.ts';
+import {
+  discoverExistingProjectSyncCandidates,
+  filterExistingProjectSyncCandidates
+} from '../src/ui/project-bindings.ts';
 import plugin from '../src/worker.ts';
 
 function jsonResponse(body: unknown, status = 200): Response {
@@ -176,6 +180,103 @@ async function createGitHubAgentToolHarness() {
 
   return harness;
 }
+
+test('discoverExistingProjectSyncCandidates normalizes GitHub workspaces and ignores non-GitHub links', () => {
+  const candidates = discoverExistingProjectSyncCandidates({
+    projects: [
+      { id: 'project-2', name: 'Beta' },
+      { id: 'project-1', name: 'Alpha' }
+    ],
+    workspacesByProjectId: {
+      'project-1': [
+        { repoUrl: 'https://github.com/example/alpha' },
+        { repoUrl: 'https://github.com/example/alpha.git', isPrimary: true },
+        { repoUrl: 'https://gitlab.com/example/alpha' }
+      ],
+      'project-2': [
+        { repoUrl: 'example/beta', sourceType: 'git_repo' }
+      ]
+    }
+  });
+
+  assert.deepEqual(candidates, [
+    {
+      projectId: 'project-1',
+      projectName: 'Alpha',
+      repositoryUrl: 'https://github.com/example/alpha',
+      isPrimary: true,
+      sourceType: undefined
+    },
+    {
+      projectId: 'project-2',
+      projectName: 'Beta',
+      repositoryUrl: 'https://github.com/example/beta',
+      isPrimary: false,
+      sourceType: 'git_repo'
+    }
+  ]);
+});
+
+test('discoverExistingProjectSyncCandidates merges duplicate repo workspaces and keeps primary metadata', () => {
+  const candidates = discoverExistingProjectSyncCandidates({
+    projects: [
+      { id: 'project-1', name: 'Alpha' }
+    ],
+    workspacesByProjectId: {
+      'project-1': [
+        { repoUrl: 'https://github.com/example/alpha', isPrimary: false },
+        { repoUrl: 'example/alpha', sourceType: 'git_repo', isPrimary: true }
+      ]
+    }
+  });
+
+  assert.deepEqual(candidates, [
+    {
+      projectId: 'project-1',
+      projectName: 'Alpha',
+      repositoryUrl: 'https://github.com/example/alpha',
+      isPrimary: true,
+      sourceType: 'git_repo'
+    }
+  ]);
+});
+
+test('filterExistingProjectSyncCandidates hides projects already enabled in plugin mappings', () => {
+  const availableCandidates = filterExistingProjectSyncCandidates(
+    [
+      {
+        projectId: 'project-1',
+        projectName: 'Alpha',
+        repositoryUrl: 'https://github.com/example/alpha',
+        isPrimary: true,
+        sourceType: 'git_repo'
+      },
+      {
+        projectId: 'project-2',
+        projectName: 'Beta',
+        repositoryUrl: 'https://github.com/example/beta',
+        isPrimary: false,
+        sourceType: 'git_repo'
+      }
+    ],
+    [
+      {
+        repositoryUrl: 'example/alpha',
+        paperclipProjectId: 'project-1'
+      }
+    ]
+  );
+
+  assert.deepEqual(availableCandidates, [
+    {
+      projectId: 'project-2',
+      projectName: 'Beta',
+      repositoryUrl: 'https://github.com/example/beta',
+      isPrimary: false,
+      sourceType: 'git_repo'
+    }
+  ]);
+});
 
 async function withExternalPluginConfig<T>(
   config: Record<string, unknown>,
