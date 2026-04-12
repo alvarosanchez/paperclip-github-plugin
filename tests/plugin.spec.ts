@@ -1170,7 +1170,8 @@ test('worker exposes toolbar sync state for global, project, and issue surfaces'
   const harness = createTestHarness({
     manifest,
     config: {
-      githubTokenRef: 'github-secret-ref'
+      githubTokenRef: 'github-secret-ref',
+      paperclipApiBaseUrl: 'https://paperclip.example.test'
     }
   });
   await plugin.definition.setup(harness.ctx);
@@ -2120,7 +2121,12 @@ test('settings.registration reports company-specific board access from plugin co
 });
 
 test('worker normalizes and saves the Paperclip API base URL alongside setup', async () => {
-  const harness = createTestHarness({ manifest });
+  const harness = createTestHarness({
+    manifest,
+    config: {
+      paperclipApiBaseUrl: 'http://127.0.0.1:63675'
+    }
+  });
   await plugin.definition.setup(harness.ctx);
 
   const result = await harness.performAction('settings.saveRegistration', {
@@ -2130,6 +2136,23 @@ test('worker normalizes and saves the Paperclip API base URL alongside setup', a
   };
 
   assert.equal(result.paperclipApiBaseUrl, 'http://127.0.0.1:63675');
+});
+
+test('worker rejects untrusted Paperclip API origins when saving setup', async () => {
+  const harness = createTestHarness({
+    manifest,
+    config: {
+      paperclipApiBaseUrl: 'http://127.0.0.1:63675'
+    }
+  });
+  await plugin.definition.setup(harness.ctx);
+
+  await assert.rejects(
+    harness.performAction('settings.saveRegistration', {
+      paperclipApiBaseUrl: 'https://evil.example'
+    }),
+    /trusted plugin config origin/i
+  );
 });
 
 test('worker validates a GitHub token by reaching the GitHub API', async () => {
@@ -2783,7 +2806,8 @@ test('worker maps GitHub labels onto existing Paperclip labels, creates missing 
   const harness = createTestHarness({
     manifest,
     config: {
-      githubTokenRef: 'github-secret-ref'
+      githubTokenRef: 'github-secret-ref',
+      paperclipApiBaseUrl: 'http://127.0.0.1:63675'
     }
   });
   await plugin.definition.setup(harness.ctx);
@@ -2940,6 +2964,7 @@ test('worker authenticates direct Paperclip REST label and issue sync calls with
     manifest,
     config: {
       githubTokenRef: 'github-secret-ref',
+      paperclipApiBaseUrl: 'http://127.0.0.1:63675',
       paperclipBoardApiTokenRefs: {
         'company-1': 'board-secret-ref'
       }
@@ -3121,7 +3146,8 @@ test('worker refreshes Paperclip labels before creating a missing label so newly
   const harness = createTestHarness({
     manifest,
     config: {
-      githubTokenRef: 'github-secret-ref'
+      githubTokenRef: 'github-secret-ref',
+      paperclipApiBaseUrl: 'http://127.0.0.1:63675'
     }
   });
   await plugin.definition.setup(harness.ctx);
@@ -3279,7 +3305,8 @@ test('worker resolves duplicate label create races by refreshing labels without 
   const harness = createTestHarness({
     manifest,
     config: {
-      githubTokenRef: 'github-secret-ref'
+      githubTokenRef: 'github-secret-ref',
+      paperclipApiBaseUrl: 'http://127.0.0.1:63675'
     }
   });
   await plugin.definition.setup(harness.ctx);
@@ -3439,7 +3466,8 @@ test('worker resyncs labels for already-imported issues when GitHub labels chang
   const harness = createTestHarness({
     manifest,
     config: {
-      githubTokenRef: 'github-secret-ref'
+      githubTokenRef: 'github-secret-ref',
+      paperclipApiBaseUrl: 'http://127.0.0.1:63675'
     }
   });
   await plugin.definition.setup(harness.ctx);
@@ -3604,7 +3632,8 @@ test('worker surfaces an actionable sync error when the Paperclip label API retu
   const harness = createTestHarness({
     manifest,
     config: {
-      githubTokenRef: 'github-secret-ref'
+      githubTokenRef: 'github-secret-ref',
+      paperclipApiBaseUrl: 'https://board.example.com'
     }
   });
   await plugin.definition.setup(harness.ctx);
@@ -3926,7 +3955,8 @@ test('worker repairs missing descriptions for newly created issues through the l
   const harness = createTestHarness({
     manifest,
     config: {
-      githubTokenRef: 'github-secret-ref'
+      githubTokenRef: 'github-secret-ref',
+      paperclipApiBaseUrl: 'http://127.0.0.1:63675'
     }
   });
   await plugin.definition.setup(harness.ctx);
@@ -4092,7 +4122,8 @@ test('worker repairs missing descriptions for the reported public issue case', a
   const harness = createTestHarness({
     manifest,
     config: {
-      githubTokenRef: 'github-secret-ref'
+      githubTokenRef: 'github-secret-ref',
+      paperclipApiBaseUrl: 'http://127.0.0.1:63675'
     }
   });
   await plugin.definition.setup(harness.ctx);
@@ -4272,7 +4303,8 @@ test('worker prefers local Paperclip issue creation for the reported public issu
   const harness = createTestHarness({
     manifest,
     config: {
-      githubTokenRef: 'github-secret-ref'
+      githubTokenRef: 'github-secret-ref',
+      paperclipApiBaseUrl: 'http://127.0.0.1:63675'
     }
   });
   await plugin.definition.setup(harness.ctx);
@@ -4440,7 +4472,8 @@ test('worker immediately repairs empty descriptions when the local Paperclip cre
   const harness = createTestHarness({
     manifest,
     config: {
-      githubTokenRef: 'github-secret-ref'
+      githubTokenRef: 'github-secret-ref',
+      paperclipApiBaseUrl: 'http://127.0.0.1:63675'
     }
   });
   await plugin.definition.setup(harness.ctx);
@@ -4751,7 +4784,8 @@ test('worker falls back to the SDK bridge when the local Paperclip description P
   const harness = createTestHarness({
     manifest,
     config: {
-      githubTokenRef: 'github-secret-ref'
+      githubTokenRef: 'github-secret-ref',
+      paperclipApiBaseUrl: 'http://127.0.0.1:63675'
     }
   });
   await plugin.definition.setup(harness.ctx);
@@ -4934,7 +4968,8 @@ test('worker falls back to the SDK bridge when the local Paperclip description P
   const harness = createTestHarness({
     manifest,
     config: {
-      githubTokenRef: 'github-secret-ref'
+      githubTokenRef: 'github-secret-ref',
+      paperclipApiBaseUrl: 'https://board.example.com'
     }
   });
   await plugin.definition.setup(harness.ctx);
@@ -5098,7 +5133,8 @@ test('worker uses the live Paperclip API URL passed to sync.runNow instead of a 
   const harness = createTestHarness({
     manifest,
     config: {
-      githubTokenRef: 'github-secret-ref'
+      githubTokenRef: 'github-secret-ref',
+      paperclipApiBaseUrl: 'http://127.0.0.1:63675'
     }
   });
   await plugin.definition.setup(harness.ctx);
@@ -5118,9 +5154,22 @@ test('worker uses the live Paperclip API URL passed to sync.runNow instead of a 
     ],
     syncState: {
       status: 'idle'
-    },
-    paperclipApiBaseUrl: 'http://127.0.0.1:11111'
+    }
   });
+
+  await harness.ctx.state.set(
+    {
+      scopeKind: 'instance',
+      stateKey: 'paperclip-github-plugin-settings'
+    },
+    {
+      ...(harness.getState({
+        scopeKind: 'instance',
+        stateKey: 'paperclip-github-plugin-settings'
+      }) as Record<string, unknown>),
+      paperclipApiBaseUrl: 'http://127.0.0.1:11111'
+    }
+  );
 
   const originalFetch = globalThis.fetch;
   const originalCreate = harness.ctx.issues.create;
@@ -5270,6 +5319,40 @@ test('worker uses the live Paperclip API URL passed to sync.runNow instead of a 
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+test('sync.runNow rejects an untrusted Paperclip API origin override', async () => {
+  const harness = createTestHarness({
+    manifest,
+    config: {
+      githubTokenRef: 'github-secret-ref',
+      paperclipApiBaseUrl: 'http://127.0.0.1:63675'
+    }
+  });
+  await plugin.definition.setup(harness.ctx);
+
+  await harness.performAction('settings.saveRegistration', {
+    mappings: [
+      {
+        id: 'mapping-a',
+        repositoryUrl: 'paperclipai/example-repo',
+        paperclipProjectName: 'Engineering',
+        paperclipProjectId: 'project-1',
+        companyId: 'company-1'
+      }
+    ],
+    syncState: {
+      status: 'idle'
+    }
+  });
+
+  await assert.rejects(
+    harness.performAction('sync.runNow', {
+      waitForCompletion: true,
+      paperclipApiBaseUrl: 'https://evil.example'
+    }),
+    /trusted plugin config origin/i
+  );
 });
 
 test('sync applies company-wide advanced defaults and ignores configured GitHub authors', async () => {
@@ -5472,7 +5555,8 @@ test('worker repairs empty descriptions before GitHub status snapshot failures c
   const harness = createTestHarness({
     manifest,
     config: {
-      githubTokenRef: 'github-secret-ref'
+      githubTokenRef: 'github-secret-ref',
+      paperclipApiBaseUrl: 'http://127.0.0.1:63675'
     }
   });
   await plugin.definition.setup(harness.ctx);
@@ -6440,7 +6524,8 @@ test('worker uses the local Paperclip issue PATCH API for status transitions whe
   const harness = createTestHarness({
     manifest,
     config: {
-      githubTokenRef: 'github-secret-ref'
+      githubTokenRef: 'github-secret-ref',
+      paperclipApiBaseUrl: 'http://127.0.0.1:63675'
     }
   });
   await plugin.definition.setup(harness.ctx);
@@ -6655,7 +6740,8 @@ test('worker falls back to the SDK bridge when the local Paperclip status PATCH 
   const harness = createTestHarness({
     manifest,
     config: {
-      githubTokenRef: 'github-secret-ref'
+      githubTokenRef: 'github-secret-ref',
+      paperclipApiBaseUrl: 'https://board.example.com'
     }
   });
   await plugin.definition.setup(harness.ctx);
@@ -7083,7 +7169,8 @@ test('worker blocks sync when the Paperclip deployment is authenticated and boar
   const harness = createTestHarness({
     manifest,
     config: {
-      githubTokenRef: 'github-secret-ref'
+      githubTokenRef: 'github-secret-ref',
+      paperclipApiBaseUrl: 'https://paperclip.example.test'
     }
   });
   await plugin.definition.setup(harness.ctx);

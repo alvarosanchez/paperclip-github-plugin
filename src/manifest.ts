@@ -54,6 +54,10 @@ export const manifest: PaperclipPluginManifestV1 = {
         additionalProperties: {
           type: 'string'
         }
+      },
+      paperclipApiBaseUrl: {
+        type: 'string',
+        title: 'Trusted Paperclip API Origin'
       }
     }
   },

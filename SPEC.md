@@ -55,6 +55,7 @@ The plugin MUST persist repository mappings, company-scoped advanced issue defau
 - GitHub repository, issue, PR, label, and sync metadata SHOULD move into a dedicated issue detail surface instead of being prepended into the issue description.
 - Repeated sync runs MUST continue reconciling imported Paperclip issue descriptions against the latest GitHub issue body.
 - Saving setup MUST persist the current Paperclip host origin so scheduled sync runs can call the local Paperclip label API later.
+- The worker MUST treat the runtime `PAPERCLIP_API_URL` or plugin-configured Paperclip API origin as the trusted source for direct authenticated Paperclip REST calls, and MUST reject ad hoc action inputs that point at a different origin.
 - When the worker is configured with a runtime `PAPERCLIP_API_URL`, that worker-accessible API origin MUST take precedence over the UI-saved host origin for local Paperclip REST calls.
 - Before a manual or scheduled sync touches any mapping whose company is missing board access, the worker MUST probe `/api/health` on the resolved Paperclip API origin and fail fast with configuration guidance when that deployment reports `deploymentMode: "authenticated"`.
 - When a company has connected Paperclip board access, the worker MUST attach `Authorization: Bearer <board-token>` to direct Paperclip REST issue and label calls for that company.

@@ -184,6 +184,7 @@ Imported issues stay linked to GitHub and continue to receive description, label
 - If token validation fails, confirm the token is still valid and can access the target repositories through the GitHub API.
 - If the dashboard, toolbar, or settings page says board access is required, open plugin settings inside the target company and complete the Paperclip board access approval flow before retrying sync.
 - If sync reports that the Paperclip API returned an authenticated HTML page instead of JSON, the worker is reaching a board URL that requires the browser login session. Connect Paperclip board access from plugin settings for that company, or set `PAPERCLIP_API_URL` for the Paperclip worker to a worker-accessible Paperclip API origin, then rerun sync.
+- If sync says the Paperclip API URL is not trusted, reopen GitHub Sync from the current Paperclip host so the settings UI can refresh the trusted origin in plugin config, or set `PAPERCLIP_API_URL` for the worker.
 - If GitHub rate limiting is hit, the plugin pauses sync until the reset time shown in Paperclip.
 - If a sync takes longer than a quick action window, the plugin continues in the background and updates the UI when it finishes.
 - If older imported issues are missing rich GitHub metadata, run sync once to refresh the link, labels, and pull request details.

@@ -2350,6 +2350,19 @@ function getPaperclipApiBaseUrl(): string | undefined {
   return window.location.origin;
 }
 
+async function syncTrustedPaperclipApiBaseUrl(pluginId: string | null): Promise<string | undefined> {
+  const paperclipApiBaseUrl = getPaperclipApiBaseUrl();
+  if (!pluginId || !paperclipApiBaseUrl) {
+    return paperclipApiBaseUrl;
+  }
+
+  await patchPluginConfig(pluginId, {
+    paperclipApiBaseUrl
+  });
+
+  return paperclipApiBaseUrl;
+}
+
 function formatDate(value?: string, fallback = 'Never'): string {
   if (!value) {
     return fallback;
@@ -4225,13 +4238,14 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
         });
       }
 
+      const trustedPaperclipApiBaseUrl = await syncTrustedPaperclipApiBaseUrl(pluginIdFromLocation);
       const result = await saveRegistration({
         companyId,
         mappings: resolvedMappings,
         advancedSettings: draftAdvancedSettings,
         syncState: form.syncState,
         scheduleFrequencyMinutes,
-        paperclipApiBaseUrl: getPaperclipApiBaseUrl()
+        ...(trustedPaperclipApiBaseUrl ? { paperclipApiBaseUrl: trustedPaperclipApiBaseUrl } : {})
       }) as GitHubSyncSettings;
 
       setForm((current) => ({
@@ -4278,9 +4292,10 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
         throw new Error(syncSetupMessage);
       }
 
+      const trustedPaperclipApiBaseUrl = await syncTrustedPaperclipApiBaseUrl(pluginIdFromLocation);
       const result = await runSyncNow({
         ...(hostContext.companyId ? { companyId: hostContext.companyId } : {}),
-        paperclipApiBaseUrl: getPaperclipApiBaseUrl()
+        ...(trustedPaperclipApiBaseUrl ? { paperclipApiBaseUrl: trustedPaperclipApiBaseUrl } : {})
       }) as GitHubSyncSettings;
 
       setForm((current) => ({
@@ -5013,6 +5028,7 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
 export function GitHubSyncDashboardWidget(): React.JSX.Element {
   const hostContext = useHostContext();
   const toast = usePluginToast();
+  const pluginIdFromLocation = getPluginIdFromLocation();
   const settings = usePluginData<GitHubSyncSettings>(
     'settings.registration',
     hostContext.companyId ? { companyId: hostContext.companyId } : {}
@@ -5132,9 +5148,10 @@ export function GitHubSyncDashboardWidget(): React.JSX.Element {
         throw new Error(syncSetupMessage);
       }
 
+      const trustedPaperclipApiBaseUrl = await syncTrustedPaperclipApiBaseUrl(pluginIdFromLocation);
       const result = await runSyncNow({
         ...(hostContext.companyId ? { companyId: hostContext.companyId } : {}),
-        paperclipApiBaseUrl: getPaperclipApiBaseUrl()
+        ...(trustedPaperclipApiBaseUrl ? { paperclipApiBaseUrl: trustedPaperclipApiBaseUrl } : {})
       }) as GitHubSyncSettings;
       const nextSyncState = result.syncState ?? EMPTY_SETTINGS.syncState;
       setManualSyncRequestError(null);
@@ -5303,6 +5320,7 @@ function GitHubSyncToolbarButtonSurface(props: {
 }): React.JSX.Element | null {
   const toast = usePluginToast();
   const runSyncNow = usePluginAction('sync.runNow');
+  const pluginIdFromLocation = getPluginIdFromLocation();
   const surfaceRef = useRef<HTMLDivElement | null>(null);
   const resolvedIssue = useResolvedIssueId({
     companyId: props.companyId,
@@ -5446,11 +5464,13 @@ function GitHubSyncToolbarButtonSurface(props: {
       }
 
       setRunningSync(true);
+      const trustedPaperclipApiBaseUrl = await syncTrustedPaperclipApiBaseUrl(pluginIdFromLocation);
       const result = await runSyncNow({
         waitForCompletion: false,
         ...(props.companyId ? { companyId: props.companyId } : {}),
         ...(props.entityType === 'project' && props.entityId ? { projectId: props.entityId } : {}),
-        ...(props.entityType === 'issue' && resolvedIssue.issueId ? { issueId: resolvedIssue.issueId } : {})
+        ...(props.entityType === 'issue' && resolvedIssue.issueId ? { issueId: resolvedIssue.issueId } : {}),
+        ...(trustedPaperclipApiBaseUrl ? { paperclipApiBaseUrl: trustedPaperclipApiBaseUrl } : {})
       }) as {
         syncState?: SyncRunState;
       };

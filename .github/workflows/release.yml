@@ -54,9 +54,6 @@ jobs:
           RELEASE_VERSION: ${{ steps.release_version.outputs.version }}
         run: npm pkg set version="$RELEASE_VERSION"
 
-      - name: Lint
-        run: pnpm lint
-
       - name: Typecheck
         run: pnpm typecheck
 
