@@ -740,6 +740,93 @@ const PAGE_STYLES = `
   line-height: 1.55;
 }
 
+.ghsync__scope-overview {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.ghsync__scope-card {
+  display: grid;
+  gap: 12px;
+  padding: 16px;
+  border-radius: 12px;
+  border: 1px solid var(--ghsync-border-soft);
+  background: var(--ghsync-surfaceRaised);
+}
+
+.ghsync__scope-card--company {
+  border-color: var(--ghsync-border);
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--ghsync-surfaceRaised) 82%, var(--ghsync-success-bg)), var(--ghsync-surfaceRaised));
+}
+
+.ghsync__scope-card--global {
+  border-color: var(--ghsync-info-border);
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--ghsync-surfaceRaised) 78%, var(--ghsync-info-bg)), var(--ghsync-surfaceRaised));
+}
+
+.ghsync__scope-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.ghsync__scope-kicker {
+  display: block;
+  color: var(--ghsync-muted);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.ghsync__scope-card .ghsync__scope-name {
+  margin: 0;
+  font-size: 22px;
+  line-height: 1.15;
+  font-weight: 700;
+  color: var(--ghsync-title);
+}
+
+.ghsync__scope-card p {
+  margin: 0;
+  color: var(--ghsync-muted);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.ghsync__scope-points {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.ghsync__scope-points li {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  color: var(--ghsync-text);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.ghsync__scope-points li::before {
+  content: "";
+  width: 7px;
+  height: 7px;
+  margin-top: 5px;
+  flex: 0 0 auto;
+  border-radius: 999px;
+  background: currentColor;
+  opacity: 0.65;
+}
+
 .ghsync__layout {
   display: grid;
   gap: 16px;
@@ -883,6 +970,13 @@ const PAGE_STYLES = `
   min-width: 0;
 }
 
+.ghsync__section-title-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
 .ghsync__section-copy h4 {
   margin: 0;
   font-size: 14px;
@@ -890,11 +984,51 @@ const PAGE_STYLES = `
   color: var(--ghsync-title);
 }
 
+.ghsync__section-tags {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
 .ghsync__section-copy p {
   margin: 6px 0 0;
   color: var(--ghsync-muted);
   font-size: 12px;
   line-height: 1.5;
+}
+
+.ghsync__scope-pill {
+  display: inline-flex;
+  align-items: center;
+  min-height: 22px;
+  padding: 0 9px;
+  border-radius: 999px;
+  border: 1px solid var(--ghsync-border);
+  background: transparent;
+  color: var(--ghsync-title);
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.ghsync__scope-pill--company {
+  border-color: var(--ghsync-border);
+  background: var(--ghsync-surface);
+  color: var(--ghsync-title);
+}
+
+.ghsync__scope-pill--global {
+  border-color: var(--ghsync-info-border);
+  background: var(--ghsync-info-bg);
+  color: var(--ghsync-info-text);
+}
+
+.ghsync__scope-pill--mixed {
+  border-color: var(--ghsync-warning-border);
+  background: var(--ghsync-warning-bg);
+  color: var(--ghsync-warning-text);
 }
 
 .ghsync__badge {
@@ -1046,14 +1180,19 @@ const PAGE_STYLES = `
   color: var(--ghsync-title);
 }
 
-.ghsync__connected span,
-.ghsync__locked span,
-.ghsync__sync-summary span {
+.ghsync__connected span:not(.ghsync__scope-pill),
+.ghsync__locked span:not(.ghsync__scope-pill),
+.ghsync__sync-summary span:not(.ghsync__scope-pill) {
   display: block;
   margin-top: 4px;
   color: var(--ghsync-muted);
   font-size: 12px;
   line-height: 1.5;
+}
+
+.ghsync__sync-summary > div {
+  display: grid;
+  gap: 8px;
 }
 
 .ghsync__sync-summary--success {
@@ -1248,6 +1387,7 @@ const PAGE_STYLES = `
 }
 
 @media (max-width: 980px) {
+  .ghsync__scope-overview,
   .ghsync__layout,
   .ghsync__schedule-card,
   .ghsync__mapping-grid,
@@ -2279,6 +2419,128 @@ function getStringValue(record: Record<string, unknown>, key: string): string | 
   return typeof value === 'string' && value.trim() ? value.trim() : null;
 }
 
+function isUuidLike(value: string): boolean {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value.trim());
+}
+
+function humanizeCompanyPrefix(value: string | null | undefined): string | null {
+  if (typeof value !== 'string' || !value.trim()) {
+    return null;
+  }
+
+  const trimmed = value.trim();
+  if (isUuidLike(trimmed)) {
+    return null;
+  }
+
+  return trimmed
+    .replace(/[-_]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/\b\w/g, (character) => character.toUpperCase());
+}
+
+function getCompanyLabelFromRecord(record: Record<string, unknown>): string | null {
+  const explicitLabel =
+    getStringValue(record, 'displayName')
+    ?? getStringValue(record, 'name')
+    ?? getStringValue(record, 'title');
+
+  if (explicitLabel && !isUuidLike(explicitLabel)) {
+    return explicitLabel;
+  }
+
+  return humanizeCompanyPrefix(
+    getStringValue(record, 'companyPrefix')
+    ?? getStringValue(record, 'prefix')
+    ?? getStringValue(record, 'slug')
+  );
+}
+
+async function resolveCompanyScopeLabel(companyId: string, companyPrefix?: string | null): Promise<string | null> {
+  try {
+    const response = await fetchJson<unknown>(`/api/companies/${companyId}`);
+    const record =
+      response && typeof response === 'object'
+        ? response as Record<string, unknown>
+        : null;
+    const directLabel = record ? getCompanyLabelFromRecord(record) : null;
+    if (directLabel) {
+      return directLabel;
+    }
+
+    const nestedCompany =
+      record?.company && typeof record.company === 'object'
+        ? record.company as Record<string, unknown>
+        : null;
+    const nestedLabel = nestedCompany ? getCompanyLabelFromRecord(nestedCompany) : null;
+    if (nestedLabel) {
+      return nestedLabel;
+    }
+  } catch {
+    // Best-effort only. Fall through to other resolution paths.
+  }
+
+  try {
+    const response = await fetchJson<unknown>('/api/companies');
+    if (Array.isArray(response)) {
+      const matchingCompany = response.find((entry) => {
+        if (!entry || typeof entry !== 'object') {
+          return false;
+        }
+
+        const record = entry as Record<string, unknown>;
+        const entryId = getStringValue(record, 'id');
+        const entryPrefix =
+          getStringValue(record, 'companyPrefix')
+          ?? getStringValue(record, 'prefix')
+          ?? getStringValue(record, 'slug');
+
+        return entryId === companyId || Boolean(companyPrefix && entryPrefix === companyPrefix);
+      });
+
+      if (matchingCompany && typeof matchingCompany === 'object') {
+        const label = getCompanyLabelFromRecord(matchingCompany as Record<string, unknown>);
+        if (label) {
+          return label;
+        }
+      }
+    }
+  } catch {
+    // Best-effort only. Fall through to the prefix fallback.
+  }
+
+  return humanizeCompanyPrefix(companyPrefix);
+}
+
+function useResolvedCompanyScopeLabel(companyId: string | null, companyPrefix: string | null): string | null {
+  const prefixFallback = humanizeCompanyPrefix(companyPrefix);
+  const [companyLabel, setCompanyLabel] = useState<string | null>(prefixFallback);
+
+  useEffect(() => {
+    if (!companyId) {
+      setCompanyLabel(null);
+      return;
+    }
+
+    setCompanyLabel(prefixFallback);
+    let cancelled = false;
+
+    void (async () => {
+      const resolvedLabel = await resolveCompanyScopeLabel(companyId, companyPrefix);
+      if (!cancelled) {
+        setCompanyLabel(resolvedLabel ?? prefixFallback);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [companyId, companyPrefix, prefixFallback]);
+
+  return companyLabel;
+}
+
 function notifyGitHubSyncSettingsChanged(): void {
   if (typeof window === 'undefined') {
     return;
@@ -3061,7 +3323,7 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
   useEffect(() => {
     const hasSavedToken = Boolean(form.githubTokenConfigured || showSavedTokenHint);
     const tokenStatus = tokenStatusOverride ?? (hasSavedToken ? 'valid' : 'required');
-    if (tokenStatus !== 'valid' || form.mappings.length > 0) {
+    if (!hostContext.companyId || tokenStatus !== 'valid' || form.mappings.length > 0) {
       return;
     }
 
@@ -3069,7 +3331,7 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
       ...current,
       mappings: [createEmptyMapping(0)]
       }));
-  }, [form.githubTokenConfigured, form.mappings.length, showSavedTokenHint, tokenStatusOverride]);
+  }, [form.githubTokenConfigured, form.mappings.length, hostContext.companyId, showSavedTokenHint, tokenStatusOverride]);
 
   useEffect(() => {
     if (form.syncState.status !== 'running') {
@@ -3098,6 +3360,17 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
   const theme = themeMode === 'light' ? LIGHT_PALETTE : DARK_PALETTE;
   const themeVars = buildThemeVars(theme, themeMode);
   const hasCompanyContext = Boolean(hostContext.companyId);
+  const companyScopeLabel = useResolvedCompanyScopeLabel(hostContext.companyId, hostContext.companyPrefix);
+  const currentCompanyName = companyScopeLabel ?? 'this company';
+  const currentCompanyHeading = companyScopeLabel ?? 'Current company';
+  const currentCompanySummaryName = companyScopeLabel ?? 'This company';
+  const headerDescription = hasCompanyContext
+    ? `GitHub access and automatic sync cadence are shared across GitHub Sync. Repository mappings, board access, and manual sync below apply only to ${currentCompanyName}.`
+    : 'Open GitHub Sync from inside a Paperclip company to configure repository mappings, board access, and company-specific sync. Shared settings stay visible here.';
+  const currentCompanyScopeDescription = hasCompanyContext
+    ? `These controls affect only ${currentCompanyName}.`
+    : 'Open this page inside a Paperclip company to unlock company-specific setup.';
+  const globalScopeDescription = 'These settings are shared across every company in this GitHub Sync plugin instance.';
   const hasSavedToken = Boolean(form.githubTokenConfigured || showSavedTokenHint);
   const boardAccessConfigured = Boolean(form.paperclipBoardAccessConfigured);
   const boardAccessRequired = boardAccessRequirement.required;
@@ -3106,12 +3379,13 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
   const tokenTone: Tone = tokenStatus === 'valid' ? 'success' : tokenStatus === 'invalid' ? 'danger' : 'warning';
   const tokenBannerLabel = tokenStatus === 'valid' ? 'Token valid' : tokenStatus === 'invalid' ? 'Token invalid' : 'Token required';
   const tokenBadgeLabel = tokenStatus === 'valid' ? 'Valid' : tokenStatus === 'invalid' ? 'Invalid' : 'Required';
-  const tokenDescription =
+  const tokenStatusDescription =
     tokenStatus === 'invalid'
         ? 'GitHub rejected the last token. Save a valid token to continue.'
         : tokenStatus === 'required'
           ? 'Add a token to continue.'
-          : null;
+          : 'One token is reused across every company in this plugin instance.';
+  const tokenDescription = `Shared across GitHub Sync. ${tokenStatusDescription}`;
   const boardAccessTone: Tone =
     connectingBoardAccess
       ? 'info'
@@ -3130,20 +3404,17 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
           : boardAccessRequirement.status === 'loading'
             ? 'Checking'
             : 'Optional';
-  const boardAccessDescription = boardAccessConfigured
-    ? 'Direct Paperclip REST calls will send a board bearer token for this company.'
-    : boardAccessRequired
-      ? hasCompanyContext
-        ? 'This Paperclip deployment requires board access before worker-side label and issue REST calls can run.'
-        : 'This Paperclip deployment requires board access, but you need to open plugin settings inside a company to connect it.'
-      : boardAccessRequirement.status === 'loading'
-        ? 'Checking whether this Paperclip deployment requires board-user authentication for direct REST calls.'
-        : 'Connect board access if this Paperclip deployment requires a board-user sign-in for local REST labels or issues.';
+  const boardAccessSectionDescription = hasCompanyContext
+    ? `Saved separately for ${currentCompanyName}.`
+    : 'Saved separately for each company.';
   const repositoriesUnlocked = tokenStatus === 'valid';
   const savedMappingsSource = currentSettings ? currentSettings.mappings ?? [] : form.mappings;
   const savedMappings = getComparableMappings(savedMappingsSource);
   const draftMappings = getComparableMappings(form.mappings);
   const savedMappingCount = savedMappings.length;
+  const repositoriesSectionDescription = hasCompanyContext
+    ? `Only repositories mapped for ${currentCompanyName} appear here.`
+    : 'Repository mappings are saved separately for each company.';
   const syncSetupIssue = getSyncSetupIssue({
     tokenStatus,
     savedMappingCount,
@@ -3171,11 +3442,13 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
     : null;
   const syncStatus = getSyncStatus(displaySyncState, runningSync, syncUnlocked);
   const canSaveToken =
+    hasCompanyContext &&
     !settingsMutationsLocked &&
     !submittingToken &&
     !showInitialLoadingState &&
     tokenDraft.trim().length > 0;
   const canSaveSetup =
+    hasCompanyContext &&
     repositoriesUnlocked &&
     !settingsMutationsLocked &&
     !submittingSetup &&
@@ -3203,11 +3476,11 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
         ? 'This deployment requires board access. Open settings inside a company to connect it.'
         : 'Open settings inside a company.'
       : connectingBoardAccess
-        ? 'Approval in progress.'
+        ? `Approval in progress for ${currentCompanyName}.`
         : boardAccessConfigured
-          ? 'Connected for this company.'
+          ? `Connected for ${currentCompanyName}.`
           : boardAccessRequired
-            ? 'Required before sync can run on this deployment.'
+            ? `Required before sync can run for ${currentCompanyName}.`
             : boardAccessRequirement.status === 'loading'
               ? 'Checking whether this deployment needs board access.'
               : 'Connect if Paperclip REST requires sign-in.';
@@ -3222,24 +3495,36 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
     syncState: displaySyncState,
     savedMappingCount
   });
+  const syncSectionDescription = hasCompanyContext
+    ? `Manual sync on this page runs only for ${currentCompanyName}. Automatic cadence is shared across GitHub Sync.`
+    : 'This view shows the shared cadence and latest sync state across the whole plugin instance.';
   const syncSummaryPrimaryText =
     syncProgress?.title ??
     displaySyncState.message ??
     (syncUnlocked ? 'Ready to sync.' : syncSetupMessage);
+  const manualSyncScopeSummary = hasCompanyContext
+    ? `Manual sync: ${currentCompanyName}`
+    : 'Manual sync: all companies';
   const syncSummarySecondaryText = syncProgress
     ? [
+        manualSyncScopeSummary,
         syncProgress.issueProgressLabel,
         syncProgress.currentIssueLabel ?? syncProgress.repositoryPosition,
         `Auto-sync: ${scheduleDescription}`
       ].filter((value): value is string => Boolean(value))
         .join(' · ')
-    : `Auto-sync: ${scheduleDescription} · Last trigger: ${displaySyncState.lastRunTrigger ?? 'none'} · Last checked: ${displaySyncState.checkedAt ? formatDate(displaySyncState.checkedAt) : 'never'}`;
+    : `${manualSyncScopeSummary} · Auto-sync: ${scheduleDescription} · Last trigger: ${displaySyncState.lastRunTrigger ?? 'none'} · Last checked: ${displaySyncState.checkedAt ? formatDate(displaySyncState.checkedAt) : 'never'}`;
   const syncSummaryClass =
     syncStatus.tone === 'success'
       ? 'ghsync__sync-summary ghsync__sync-summary--success'
       : syncStatus.tone === 'danger'
         ? 'ghsync__sync-summary ghsync__sync-summary--danger'
         : 'ghsync__sync-summary ghsync__sync-summary--info';
+  const manualSyncScopePillClass = hasCompanyContext
+    ? 'ghsync__scope-pill ghsync__scope-pill--company'
+    : 'ghsync__scope-pill ghsync__scope-pill--mixed';
+  const manualSyncScopePillLabel = hasCompanyContext ? 'Current company sync' : 'All companies';
+  const manualSyncButtonLabel = hasCompanyContext ? 'Run sync for this company' : 'Run sync across all companies';
 
   function updateMapping(mappingId: string, field: keyof RepositoryMapping, value: string) {
     setForm((current) => {
@@ -3347,6 +3632,7 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
         githubTokenRef: secret.id
       });
       await saveRegistration({
+        companyId,
         githubTokenRef: secret.id
       });
 
@@ -3516,6 +3802,7 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
       }
 
       const result = await saveRegistration({
+        companyId,
         mappings: resolvedMappings,
         syncState: form.syncState,
         scheduleFrequencyMinutes,
@@ -3565,6 +3852,7 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
       }
 
       const result = await runSyncNow({
+        ...(hostContext.companyId ? { companyId: hostContext.companyId } : {}),
         paperclipApiBaseUrl: getPaperclipApiBaseUrl()
       }) as GitHubSyncSettings;
 
@@ -3612,7 +3900,7 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
       <section className="ghsync__header">
         <div className="ghsync__header-copy">
           <h2>GitHub Sync settings</h2>
-          <p>Add a GitHub token to get started, then connect board access if this deployment requires authenticated board users.</p>
+          <p>{headerDescription}</p>
           {settingsMutationsLockReason ? <p className="ghsync__hint">{settingsMutationsLockReason}</p> : null}
         </div>
         <span className={`ghsync__badge ${getToneClass(tokenTone)}`}>
@@ -3621,10 +3909,46 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
         </span>
       </section>
 
+      <section className="ghsync__scope-overview" aria-label="Settings scope">
+        <article className="ghsync__scope-card ghsync__scope-card--company">
+          <div className="ghsync__scope-head">
+            <span className="ghsync__scope-kicker">Current company</span>
+            <span className={`ghsync__scope-pill ${hasCompanyContext ? 'ghsync__scope-pill--company' : 'ghsync__scope-pill--mixed'}`}>
+              {hasCompanyContext ? 'Company-specific' : 'Open inside a company'}
+            </span>
+          </div>
+          <p className="ghsync__scope-name">{hasCompanyContext ? currentCompanyHeading : 'Company-specific setup'}</p>
+          <p>{currentCompanyScopeDescription}</p>
+          <ul className="ghsync__scope-points">
+            <li>Repository mappings</li>
+            <li>Paperclip board access</li>
+            <li>Manual sync from this page</li>
+          </ul>
+        </article>
+
+        <article className="ghsync__scope-card ghsync__scope-card--global">
+          <div className="ghsync__scope-head">
+            <span className="ghsync__scope-kicker">Shared across GitHub Sync</span>
+            <span className="ghsync__scope-pill ghsync__scope-pill--global">Global</span>
+          </div>
+          <p className="ghsync__scope-name">Shared settings</p>
+          <p>{globalScopeDescription}</p>
+          <ul className="ghsync__scope-points">
+            <li>GitHub token</li>
+            <li>Automatic sync cadence</li>
+          </ul>
+        </article>
+      </section>
+
       <div className="ghsync__layout">
         <section className="ghsync__card">
           <div className="ghsync__card-header">
-            <h3>Connect GitHub</h3>
+            <h3>Settings</h3>
+            <p>
+              {hasCompanyContext
+                ? `${currentCompanySummaryName} is the active company for company-scoped sections below.`
+                : 'Shared settings stay visible here. Open GitHub Sync inside a company to edit company-specific setup.'}
+            </p>
           </div>
 
           {showInitialLoadingState ? <p className="ghsync__loading">Loading saved settings…</p> : null}
@@ -3632,15 +3956,32 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
           <section className="ghsync__section">
             <div className="ghsync__section-head">
               <div className="ghsync__section-copy">
-                <h4>GitHub access</h4>
-                {tokenDescription ? <p>{tokenDescription}</p> : null}
+                <div className="ghsync__section-title-row">
+                  <h4>GitHub access</h4>
+                  <div className="ghsync__section-tags">
+                    <span className="ghsync__scope-pill ghsync__scope-pill--global">Global</span>
+                  </div>
+                </div>
+                <p>{tokenDescription}</p>
               </div>
               <span className={`ghsync__badge ${getToneClass(tokenTone)}`}>
                 {tokenBadgeLabel}
               </span>
             </div>
 
-            {showTokenForm ? (
+            {!hasCompanyContext ? (
+              <div className="ghsync__locked">
+                <div>
+                  <strong>{hasSavedToken ? 'Shared token ready' : 'GitHub access needs a company context'}</strong>
+                  <span>
+                    {hasSavedToken
+                      ? 'Open plugin settings inside a company to replace the shared GitHub token, because it is stored as a company secret.'
+                      : 'Open plugin settings inside a company to save the shared GitHub token, because it is stored as a company secret.'}
+                  </span>
+                </div>
+                <span className="ghsync__badge ghsync__badge--neutral">Read only</span>
+              </div>
+            ) : showTokenForm ? (
               <form className="ghsync__stack" onSubmit={handleSaveToken}>
                 <div className="ghsync__field">
                   <label htmlFor="github-token">GitHub token</label>
@@ -3688,8 +4029,8 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
             ) : (
               <div className="ghsync__connected">
                 <div>
-                  <strong>{validatedLogin ? `Authenticated as ${validatedLogin}` : 'Token ready'}</strong>
-                  <span>Ready.</span>
+                  <strong>{validatedLogin ? `Authenticated as ${validatedLogin}` : 'Shared token ready'}</strong>
+                  <span>Shared across every company in GitHub Sync.</span>
                 </div>
                 <button
                   type="button"
@@ -3710,8 +4051,13 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
           <section className="ghsync__section">
             <div className="ghsync__section-head">
               <div className="ghsync__section-copy">
-                <h4>Paperclip board access</h4>
-                <p>{boardAccessDescription}</p>
+                <div className="ghsync__section-title-row">
+                  <h4>Paperclip board access</h4>
+                  <div className="ghsync__section-tags">
+                    <span className="ghsync__scope-pill ghsync__scope-pill--company">Current company</span>
+                  </div>
+                </div>
+                <p>{boardAccessSectionDescription}</p>
               </div>
               <span className={`ghsync__badge ${getToneClass(boardAccessTone)}`}>
                 {boardAccessBannerLabel}
@@ -3725,9 +4071,9 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
                     {boardAccessConfigured
                       ? boardAccessIdentity
                         ? `Connected as ${boardAccessIdentity}`
-                        : 'Connected for this company'
+                        : `Connected for ${currentCompanyName}`
                       : boardAccessRequired
-                        ? 'Required for this deployment'
+                        ? `Required for ${currentCompanyName}`
                         : boardAccessRequirement.status === 'loading'
                           ? 'Checking whether board access is required'
                           : 'Optional for this deployment'}
@@ -3771,14 +4117,34 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
           <section className="ghsync__section">
             <div className="ghsync__section-head">
               <div className="ghsync__section-copy">
-                <h4>Repositories</h4>
+                <div className="ghsync__section-title-row">
+                  <h4>Repositories</h4>
+                  <div className="ghsync__section-tags">
+                    <span className="ghsync__scope-pill ghsync__scope-pill--company">Current company</span>
+                  </div>
+                </div>
+                <p>{repositoriesSectionDescription}</p>
               </div>
               <span className={`ghsync__badge ${getToneClass(!repositoriesUnlocked ? 'neutral' : savedMappingCount > 0 ? 'success' : 'info')}`}>
-                {!repositoriesUnlocked ? 'Locked' : savedMappingCount > 0 ? `${savedMappingCount} saved` : 'Open'}
+                {!repositoriesUnlocked
+                  ? 'Locked'
+                  : savedMappingCount > 0
+                    ? hasCompanyContext
+                      ? `${savedMappingCount} saved`
+                      : `${savedMappingCount} total`
+                    : 'Open'}
               </span>
             </div>
 
-            {!repositoriesUnlocked ? (
+            {!hasCompanyContext ? (
+              <div className="ghsync__locked">
+                <div>
+                  <strong>Repository mappings need a company context</strong>
+                  <span>Open plugin settings from inside a Paperclip company to add or edit that company’s repository mappings.</span>
+                </div>
+                <span className="ghsync__badge ghsync__badge--neutral">Scoped</span>
+              </div>
+            ) : !repositoriesUnlocked ? (
               <div className="ghsync__locked">
                 <div>
                   <strong>Repositories are locked</strong>
@@ -3864,7 +4230,14 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
           <section className="ghsync__section">
             <div className="ghsync__section-head">
               <div className="ghsync__section-copy">
-                <h4>Sync</h4>
+                <div className="ghsync__section-title-row">
+                  <h4>Sync</h4>
+                  <div className="ghsync__section-tags">
+                    <span className={manualSyncScopePillClass}>{manualSyncScopePillLabel}</span>
+                    <span className="ghsync__scope-pill ghsync__scope-pill--global">Global cadence</span>
+                  </div>
+                </div>
+                <p>{syncSectionDescription}</p>
               </div>
               <span className={`ghsync__badge ${getToneClass(syncStatus.tone)}`}>{syncStatus.label}</span>
             </div>
@@ -3881,7 +4254,7 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
               <form className="ghsync__stack" onSubmit={handleSaveSetup}>
                 <div className="ghsync__schedule-card">
                   <div className="ghsync__field">
-                    <label htmlFor="sync-frequency-minutes">Automatic sync cadence</label>
+                    <label htmlFor="sync-frequency-minutes">Automatic sync cadence (shared)</label>
                     <input
                       id="sync-frequency-minutes"
                       className="ghsync__input"
@@ -3890,7 +4263,7 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
                       min={1}
                       step={1}
                       value={scheduleFrequencyDraft}
-                      disabled={settingsMutationsLocked}
+                      disabled={settingsMutationsLocked || !hasCompanyContext}
                       onChange={(event) => {
                         setScheduleFrequencyDraft(event.currentTarget.value);
                       }}
@@ -3902,7 +4275,13 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
                   </div>
 
                   <div className="ghsync__schedule-meta">
+                    <span className="ghsync__scope-pill ghsync__scope-pill--global">Global</span>
                     <strong>Auto-sync {scheduleDescription}</strong>
+                    <span>
+                      {hasCompanyContext
+                        ? 'Applies across every company in GitHub Sync.'
+                        : 'Shared across the whole plugin instance.'}
+                    </span>
                   </div>
                 </div>
 
@@ -3933,6 +4312,7 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
 
                     <div className={syncSummaryClass}>
                       <div>
+                        <span className={manualSyncScopePillClass}>{manualSyncScopePillLabel}</span>
                         <strong>{syncSummaryPrimaryText}</strong>
                         <span>{syncSummarySecondaryText}</span>
                       </div>
@@ -3942,7 +4322,7 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
                         onClick={handleRunSyncNow}
                         disabled={syncInFlight || showInitialLoadingState}
                       >
-                        {syncInFlight ? 'Running…' : 'Run sync now'}
+                        {syncInFlight ? 'Running…' : manualSyncButtonLabel}
                       </button>
                     </div>
                   </>
@@ -3960,7 +4340,7 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
                       className={getPluginActionClassName({ variant: 'primary' })}
                       disabled={!canSaveSetup}
                     >
-                      {submittingSetup ? 'Saving…' : 'Save setup'}
+                      {submittingSetup ? 'Saving…' : 'Save mappings and cadence'}
                     </button>
                   </div>
                 </div>
@@ -3971,7 +4351,12 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
 
         <aside className="ghsync__card">
           <div className="ghsync__card-header">
-            <h3>Setup</h3>
+            <h3>At a glance</h3>
+            <p>
+              {hasCompanyContext
+                ? `Current company: ${currentCompanySummaryName}. Global items stay shared across GitHub Sync.`
+                : 'No company selected. Open inside a company to edit company-specific setup.'}
+            </p>
           </div>
 
           <div className="ghsync__side-body">
@@ -3982,7 +4367,13 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
                   {tokenBadgeLabel}
                 </span>
               </div>
-              <span>{tokenStatus === 'valid' ? (validatedLogin ? `Authenticated as ${validatedLogin}.` : 'Ready.') : tokenStatus === 'invalid' ? 'Needs attention.' : 'Required.'}</span>
+              <span>
+                {tokenStatus === 'valid'
+                  ? (validatedLogin ? `Shared token authenticated as ${validatedLogin}.` : 'Shared token ready.')
+                  : tokenStatus === 'invalid'
+                    ? 'Shared token needs attention.'
+                    : 'Shared token required.'}
+              </span>
             </div>
 
             <div className="ghsync__check">
@@ -3992,7 +4383,17 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
                   {!repositoriesUnlocked ? 'Locked' : savedMappingCount > 0 ? 'Ready' : 'Open'}
                 </span>
               </div>
-              <span>{!repositoriesUnlocked ? 'Requires a token.' : savedMappingCount > 0 ? `${savedMappingCount} saved.` : 'Add a repository.'}</span>
+              <span>
+                {!repositoriesUnlocked
+                  ? 'Requires a token.'
+                  : savedMappingCount > 0
+                    ? hasCompanyContext
+                      ? `${savedMappingCount} saved for ${currentCompanyName}.`
+                      : `${savedMappingCount} saved across companies.`
+                    : hasCompanyContext
+                      ? `Add a repository for ${currentCompanyName}.`
+                      : 'Open settings inside a company to add a repository.'}
+              </span>
             </div>
 
             <div className="ghsync__check">
@@ -4010,7 +4411,13 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
                 <strong>Sync</strong>
                 <span className={`ghsync__badge ${getToneClass(syncStatus.tone)}`}>{syncStatus.label}</span>
               </div>
-              <span>{syncUnlocked ? `Auto-sync ${scheduleDescription}.` : syncSetupMessage}</span>
+              <span>
+                {syncUnlocked
+                  ? hasCompanyContext
+                    ? `Manual sync runs for ${currentCompanyName}. Auto-sync ${scheduleDescription} stays shared.`
+                    : `Shared cadence ${scheduleDescription}. Manual sync from this view runs across all companies.`
+                  : syncSetupMessage}
+              </span>
             </div>
 
             <div className="ghsync__detail-list">
@@ -4157,6 +4564,7 @@ export function GitHubSyncDashboardWidget(): React.JSX.Element {
       }
 
       const result = await runSyncNow({
+        ...(hostContext.companyId ? { companyId: hostContext.companyId } : {}),
         paperclipApiBaseUrl: getPaperclipApiBaseUrl()
       }) as GitHubSyncSettings;
       const nextSyncState = result.syncState ?? EMPTY_SETTINGS.syncState;

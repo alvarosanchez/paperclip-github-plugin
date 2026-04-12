@@ -13,6 +13,9 @@ The plugin MUST provide a settings page inside Paperclip where an operator can c
 - a Paperclip project name per mapping where synchronized issues should be created
 
 The settings page MUST allow saving mappings and triggering a manual sync.
+- When the settings page is opened with a Paperclip company context, it MUST only display and save repository mappings for that company, and saving one company’s mappings MUST preserve mappings that belong to other companies.
+- The settings page SHOULD clearly label company-scoped setup versus plugin-instance-wide setup when both are shown together.
+- When a company context is present, the settings page SHOULD show the active company name prominently using a human-friendly label instead of a raw identifier.
 - The plugin SHOULD also expose manual sync entry points from Paperclip toolbar surfaces when the SDK supports them.
 - When a manual sync will outlive a quick action response, the worker MUST persist a `running` sync state immediately and complete the sync asynchronously.
 - The settings page, dashboard widget, and sync toolbar surfaces SHOULD detect authenticated deployments from `/api/health` and MUST require connected Paperclip board access before enabling sync for the affected company.
@@ -33,6 +36,7 @@ The plugin MUST persist repository mappings and sync state in plugin state.
 - The worker MUST expose at least one data endpoint for reading the current settings and sync status.
 - The worker MUST expose action endpoints for saving mappings and triggering a manual sync.
 - The `sync.runNow` action SHOULD return the final sync result when it completes quickly, but MUST otherwise return promptly with the saved `running` state instead of waiting long enough to time out the host request.
+- A manual sync requested from a company-scoped settings or dashboard view MUST only sync repository mappings for that company.
 - The worker SHOULD support targeted manual sync requests for a specific mapped Paperclip project or imported Paperclip issue.
 - The plugin MUST declare a scheduled job that ticks every minute and only performs a scheduled sync when the saved frequency is due.
 - The sync flow MUST fetch open GitHub issues from every configured repository.
@@ -68,6 +72,7 @@ The plugin MUST persist repository mappings and sync state in plugin state.
 ## Project binding behavior
 
 - Saving a mapping MUST create or reuse the target Paperclip project.
+- Saving a company-scoped mapping from the settings page MUST create or reuse the target Paperclip project in that same company.
 - Saving a mapping MUST bind the GitHub repository URL to the Paperclip project workspace.
 - Once a project has been created and linked, its project name field SHOULD be treated as read-only in the settings UI.
 
