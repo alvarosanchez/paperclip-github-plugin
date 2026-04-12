@@ -70,7 +70,9 @@ The plugin MUST persist repository mappings and sync state in plugin state.
 - An open GitHub issue with a linked PR that has green CI and all review threads resolved MUST map to Paperclip `in_review`.
 - A closed GitHub issue completed as finished work MUST map to Paperclip `done`.
 - A closed GitHub issue closed as not planned or duplicate MUST map to Paperclip `cancelled`.
-- A new GitHub issue comment on an open imported issue MUST move the corresponding Paperclip issue back to `todo`, unless that Paperclip issue is currently `backlog`, in which case it MUST remain `backlog`.
+- A new GitHub issue comment on an open imported issue MUST move the corresponding Paperclip issue back to `todo` only when at least one newly added comment since the last sync was written by the original GitHub issue author or by a repository maintainer/admin that the worker can verify through the GitHub API.
+- A new GitHub issue comment from any other GitHub account MUST NOT move the corresponding Paperclip issue back to `todo`.
+- If that Paperclip issue is currently `backlog`, trusted GitHub comments MUST still leave it in `backlog`.
 - Whenever the sync flow changes a Paperclip issue status, it MUST add a Paperclip issue comment that explains the old status, the new status, and the GitHub condition that caused the transition.
 - When the SDK supports comment annotations, the plugin SHOULD render the referenced GitHub issue and PR links as a comment annotation attached to those sync-created comments.
 

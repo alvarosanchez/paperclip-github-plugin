@@ -327,6 +327,7 @@ interface GitHubIssueRecord {
   title: string;
   body: string | null;
   htmlUrl: string;
+  authorLogin?: string;
   labels: GitHubIssueLabelRecord[];
   state: 'open' | 'closed';
   stateReason?: GitHubIssueStateReason;
@@ -366,6 +367,9 @@ interface GitHubApiIssueRecord {
   title: string;
   body?: string | null;
   html_url: string;
+  user?: {
+    login?: string | null;
+  } | null;
   state: string;
   comments?: number;
   state_reason?: string | null;
@@ -625,6 +629,15 @@ interface GitHubCiContextRecord {
   state?: string;
 }
 
+interface GitHubIssueCommentRecord {
+  id: number;
+  body: string;
+  url?: string;
+  authorLogin?: string;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
 interface GitHubReviewThreadCommentRecord {
   id: string;
   databaseId?: number;
@@ -665,6 +678,7 @@ const FAILED_CHECK_RUN_CONCLUSIONS = new Set([
 const SUCCESSFUL_STATUS_CONTEXT_STATES = new Set(['SUCCESS']);
 const FAILED_STATUS_CONTEXT_STATES = new Set(['ERROR', 'FAILURE']);
 const PENDING_STATUS_CONTEXT_STATES = new Set(['EXPECTED', 'PENDING']);
+const GITHUB_REPOSITORY_MAINTAINER_ROLE_NAMES = new Set(['admin', 'maintain']);
 
 const GITHUB_ISSUE_STATUS_SNAPSHOT_QUERY = `
   query GitHubIssueStatusSnapshot($owner: String!, $repo: String!, $issueNumber: Int!, $after: String) {
@@ -1051,6 +1065,10 @@ function parseRetryAfterTimestamp(value: string | undefined, now = Date.now()): 
 
 function normalizeSecretRef(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim() ? value.trim() : undefined;
+}
+
+function normalizeGitHubUserLogin(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim() ? value.trim().toLowerCase() : undefined;
 }
 
 function normalizeGitHubTokenRef(value: unknown): string | undefined {
@@ -2836,6 +2854,7 @@ function normalizeGitHubIssueRecord(issue: GitHubApiIssueRecord): GitHubIssueRec
     title: issue.title,
     body: issue.body ?? null,
     htmlUrl: issue.html_url,
+    authorLogin: normalizeGitHubUserLogin(issue.user?.login),
     labels: normalizeGitHubIssueLabels(issue.labels),
     state: issue.state === 'closed' ? 'closed' : 'open',
     stateReason: normalizeGitHubIssueStateReason(issue.state_reason),
@@ -2979,8 +2998,9 @@ function normalizePaperclipIssueStatus(value: unknown): PaperclipIssueStatus | u
 function describeGitHubStatusTransitionReason(params: {
   snapshot: GitHubIssueStatusSnapshot;
   previousCommentCount?: number;
+  hasTrustedNewComment?: boolean;
 }): string {
-  const { snapshot, previousCommentCount } = params;
+  const { snapshot, previousCommentCount, hasTrustedNewComment } = params;
 
   if (snapshot.state === 'closed') {
     switch (snapshot.stateReason) {
@@ -2994,8 +3014,8 @@ function describeGitHubStatusTransitionReason(params: {
   }
 
   const baselineCommentCount = previousCommentCount ?? snapshot.commentCount;
-  if (snapshot.commentCount > baselineCommentCount) {
-    return 'a new GitHub comment was added';
+  if (snapshot.commentCount > baselineCommentCount && hasTrustedNewComment) {
+    return 'a new GitHub comment from the issue author or a repository maintainer was added';
   }
 
   if (snapshot.linkedPullRequests.length === 0) {
@@ -3051,14 +3071,16 @@ function buildPaperclipIssueStatusTransitionComment(params: {
   repository: ParsedRepositoryReference;
   snapshot: GitHubIssueStatusSnapshot;
   previousCommentCount?: number;
+  hasTrustedNewComment?: boolean;
 }): {
   body: string;
   annotation: StoredStatusTransitionCommentAnnotation;
 } {
-  const { previousStatus, nextStatus, repository, snapshot, previousCommentCount } = params;
+  const { previousStatus, nextStatus, repository, snapshot, previousCommentCount, hasTrustedNewComment } = params;
   const reason = describeGitHubStatusTransitionReason({
     snapshot,
-    previousCommentCount
+    previousCommentCount,
+    hasTrustedNewComment
   });
 
   return {
@@ -3077,9 +3099,10 @@ function resolvePaperclipIssueStatus(params: {
   currentStatus: PaperclipIssueStatus;
   snapshot: GitHubIssueStatusSnapshot;
   previousCommentCount?: number;
+  hasTrustedNewComment?: boolean;
   wasImportedThisRun: boolean;
 }): PaperclipIssueStatus {
-  const { currentStatus, snapshot, previousCommentCount, wasImportedThisRun } = params;
+  const { currentStatus, snapshot, previousCommentCount, hasTrustedNewComment, wasImportedThisRun } = params;
 
   if (snapshot.state === 'closed') {
     return snapshot.stateReason === 'duplicate' || snapshot.stateReason === 'not_planned' ? 'cancelled' : 'done';
@@ -3092,7 +3115,7 @@ function resolvePaperclipIssueStatus(params: {
   }
 
   const baselineCommentCount = previousCommentCount ?? snapshot.commentCount;
-  if (snapshot.commentCount > baselineCommentCount) {
+  if (snapshot.commentCount > baselineCommentCount && hasTrustedNewComment) {
     return 'todo';
   }
 
@@ -3515,6 +3538,172 @@ async function getGitHubIssueStatusSnapshot(
 
   issueStatusSnapshotCache.set(issueNumber, snapshot);
   return snapshot;
+}
+
+function buildGitHubRepositoryActorCacheKey(
+  repository: ParsedRepositoryReference,
+  login: string
+): string {
+  return `${repository.owner.toLowerCase()}/${repository.repo.toLowerCase()}:${login}`;
+}
+
+async function isGitHubUserRepositoryMaintainer(
+  octokit: Octokit,
+  repository: ParsedRepositoryReference,
+  login: string,
+  cache: Map<string, boolean>
+): Promise<boolean> {
+  const normalizedLogin = normalizeGitHubUserLogin(login);
+  if (!normalizedLogin) {
+    return false;
+  }
+
+  const cacheKey = buildGitHubRepositoryActorCacheKey(repository, normalizedLogin);
+  const cachedValue = cache.get(cacheKey);
+  if (cachedValue !== undefined) {
+    return cachedValue;
+  }
+
+  try {
+    const response = await octokit.rest.repos.getCollaboratorPermissionLevel({
+      owner: repository.owner,
+      repo: repository.repo,
+      username: normalizedLogin,
+      headers: {
+        accept: 'application/vnd.github+json',
+        'X-GitHub-Api-Version': GITHUB_API_VERSION
+      }
+    });
+    const roleName =
+      response.data && typeof response.data === 'object' && 'role_name' in response.data
+        ? normalizeGitHubUserLogin((response.data as { role_name?: unknown }).role_name)
+        : undefined;
+    const isMaintainer = roleName ? GITHUB_REPOSITORY_MAINTAINER_ROLE_NAMES.has(roleName) : false;
+    cache.set(cacheKey, isMaintainer);
+    return isMaintainer;
+  } catch {
+    cache.set(cacheKey, false);
+    return false;
+  }
+}
+
+async function listNewGitHubIssueCommentsSinceCount(
+  octokit: Octokit,
+  repository: ParsedRepositoryReference,
+  issueNumber: number,
+  previousCommentCount: number,
+  currentCommentCount: number
+): Promise<GitHubIssueCommentRecord[]> {
+  const normalizedPreviousCommentCount = Math.max(0, Math.floor(previousCommentCount));
+  const normalizedCurrentCommentCount = Math.max(0, Math.floor(currentCommentCount));
+  if (normalizedCurrentCommentCount <= normalizedPreviousCommentCount) {
+    return [];
+  }
+
+  const newCommentCount = normalizedCurrentCommentCount - normalizedPreviousCommentCount;
+  const comments: GitHubIssueCommentRecord[] = [];
+  const perPage = 100;
+  let page = Math.floor(normalizedPreviousCommentCount / perPage) + 1;
+  let remainingOffset = normalizedPreviousCommentCount % perPage;
+
+  while (comments.length < newCommentCount) {
+    const response = await octokit.rest.issues.listComments({
+      owner: repository.owner,
+      repo: repository.repo,
+      issue_number: issueNumber,
+      page,
+      per_page: perPage,
+      headers: {
+        accept: 'application/vnd.github+json',
+        'X-GitHub-Api-Version': GITHUB_API_VERSION
+      }
+    });
+
+    if (response.data.length === 0) {
+      break;
+    }
+
+    for (const comment of response.data.slice(remainingOffset)) {
+      comments.push({
+        id: comment.id,
+        body: comment.body ?? '',
+        url: comment.html_url ?? undefined,
+        authorLogin: normalizeGitHubUserLogin(comment.user?.login),
+        createdAt: comment.created_at ?? undefined,
+        updatedAt: comment.updated_at ?? undefined
+      });
+
+      if (comments.length >= newCommentCount) {
+        break;
+      }
+    }
+
+    if (response.data.length < perPage) {
+      break;
+    }
+
+    page += 1;
+    remainingOffset = 0;
+  }
+
+  return comments;
+}
+
+async function hasTrustedNewGitHubIssueComment(params: {
+  octokit: Octokit;
+  repository: ParsedRepositoryReference;
+  githubIssue: GitHubIssueRecord;
+  previousCommentCount?: number;
+  currentCommentCount: number;
+  maintainerCache: Map<string, boolean>;
+}): Promise<boolean> {
+  const normalizedPreviousCommentCount =
+    typeof params.previousCommentCount === 'number' && params.previousCommentCount >= 0
+      ? Math.floor(params.previousCommentCount)
+      : params.currentCommentCount;
+  const normalizedCurrentCommentCount = Math.max(0, Math.floor(params.currentCommentCount));
+  if (normalizedCurrentCommentCount <= normalizedPreviousCommentCount) {
+    return false;
+  }
+
+  const newComments = await listNewGitHubIssueCommentsSinceCount(
+    params.octokit,
+    params.repository,
+    params.githubIssue.number,
+    normalizedPreviousCommentCount,
+    normalizedCurrentCommentCount
+  );
+  if (newComments.length === 0) {
+    return false;
+  }
+
+  const originalPosterLogin = normalizeGitHubUserLogin(params.githubIssue.authorLogin);
+  const unseenAuthors = new Set<string>();
+  for (const comment of newComments) {
+    const authorLogin = normalizeGitHubUserLogin(comment.authorLogin);
+    if (!authorLogin) {
+      continue;
+    }
+
+    if (originalPosterLogin && authorLogin === originalPosterLogin) {
+      return true;
+    }
+
+    unseenAuthors.add(authorLogin);
+  }
+
+  for (const authorLogin of unseenAuthors) {
+    if (await isGitHubUserRepositoryMaintainer(
+      params.octokit,
+      params.repository,
+      authorLogin,
+      params.maintainerCache
+    )) {
+      return true;
+    }
+  }
+
+  return false;
 }
 
 function parseGitHubIssueHtmlUrl(value: string): ParsedGitHubIssueReference | undefined {
@@ -5638,6 +5827,7 @@ async function synchronizePaperclipIssueStatuses(
   linkedPullRequestsByIssueNumber: Map<number, GitHubLinkedPullRequestRecord[]>,
   issueStatusSnapshotCache: Map<number, GitHubIssueStatusSnapshot | null>,
   pullRequestStatusCache: Map<number, GitHubPullRequestStatusSnapshot>,
+  repositoryMaintainerCache: Map<string, boolean>,
   syncFailureContext: SyncFailureContext,
   failures: SyncProcessingFailure[],
   onProgress?: (progress: {
@@ -5789,10 +5979,19 @@ async function synchronizePaperclipIssueStatuses(
       );
 
       const previousCommentCount = importedIssue.lastSeenCommentCount;
+      const hasTrustedNewComment = await hasTrustedNewGitHubIssueComment({
+        octokit,
+        repository,
+        githubIssue,
+        previousCommentCount,
+        currentCommentCount: snapshot.commentCount,
+        maintainerCache: repositoryMaintainerCache
+      });
       const nextStatus = resolvePaperclipIssueStatus({
         currentStatus: paperclipIssue.status,
         snapshot,
         previousCommentCount,
+        hasTrustedNewComment,
         wasImportedThisRun: createdIssueIds.has(importedIssue.githubIssueId)
       });
 
@@ -5808,7 +6007,8 @@ async function synchronizePaperclipIssueStatuses(
         nextStatus,
         repository,
         snapshot,
-        previousCommentCount
+        previousCommentCount,
+        hasTrustedNewComment
       });
 
       updateSyncFailureContext(syncFailureContext, {
@@ -6331,22 +6531,8 @@ async function listAllGitHubIssueComments(
   octokit: Octokit,
   repository: ParsedRepositoryReference,
   issueNumber: number
-): Promise<Array<{
-  id: number;
-  body: string;
-  url?: string;
-  authorLogin?: string;
-  createdAt?: string;
-  updatedAt?: string;
-}>> {
-  const comments: Array<{
-    id: number;
-    body: string;
-    url?: string;
-    authorLogin?: string;
-    createdAt?: string;
-    updatedAt?: string;
-  }> = [];
+): Promise<GitHubIssueCommentRecord[]> {
+  const comments: GitHubIssueCommentRecord[] = [];
 
   for await (const response of octokit.paginate.iterator(octokit.rest.issues.listComments, {
     owner: repository.owner,
@@ -6362,7 +6548,7 @@ async function listAllGitHubIssueComments(
         id: comment.id,
         body: comment.body ?? '',
         url: comment.html_url ?? undefined,
-        authorLogin: comment.user?.login ?? undefined,
+        authorLogin: normalizeGitHubUserLogin(comment.user?.login),
         createdAt: comment.created_at ?? undefined,
         updatedAt: comment.updated_at ?? undefined
       });
@@ -6709,6 +6895,7 @@ async function performSync(
   const recoverableFailures: SyncProcessingFailure[] = [];
   const nextRegistry = [...importRegistry];
   const companyLabelDirectoryCache = new Map<string, PaperclipLabelDirectory>();
+  const repositoryMaintainerCache = new Map<string, boolean>();
   const supportsPaperclipLabelMapping =
     typeof ctx.issues?.list === 'function' && typeof ctx.issues?.update === 'function';
   let currentSettings = settings;
@@ -7053,6 +7240,7 @@ async function performSync(
           linkedPullRequestsByIssueNumber,
           issueStatusSnapshotCache,
           pullRequestStatusCache,
+          repositoryMaintainerCache,
           failureContext,
           recoverableFailures,
           async (progress) => {

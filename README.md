@@ -93,7 +93,7 @@ It is designed for teams that plan in Paperclip but still receive work through G
 - Open GitHub issue with green CI and all review threads resolved maps to `in_review`.
 - Closed GitHub issue completed as finished work maps to `done`.
 - Closed GitHub issue closed as `not_planned` or `duplicate` maps to `cancelled`.
-- New GitHub comments move an open imported Paperclip issue back to `todo`, unless that Paperclip issue is already `backlog`.
+- New GitHub comments move an open imported Paperclip issue back to `todo` only when the new comment came from the original issue author or a repository maintainer/admin that the worker can verify through the GitHub API.
 - Existing open issues that are already `backlog` stay in `backlog` until a human changes them in Paperclip.
 - When the plugin changes a Paperclip issue status, it adds a Paperclip comment explaining the transition.
 - When comment annotations are supported by the host, those transition comments also surface GitHub issue and pull request links directly under the comment.
