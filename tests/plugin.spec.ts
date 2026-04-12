@@ -5908,6 +5908,7 @@ test('worker maps GitHub issue and linked PR state onto Paperclip statuses while
   ]);
 
   const originalFetch = globalThis.fetch;
+  let backlogCommentIssueCommentRequests = 0;
 
   globalThis.fetch = async (input, init) => {
     const rawUrl = getRequestUrl(input);
@@ -5937,6 +5938,7 @@ test('worker maps GitHub issue and linked PR state onto Paperclip statuses while
     }
 
     if (url.pathname === '/repos/paperclipai/example-repo/issues/39/comments') {
+      backlogCommentIssueCommentRequests += 1;
       return jsonResponse([
         {
           id: 3901,
@@ -6114,6 +6116,7 @@ test('worker maps GitHub issue and linked PR state onto Paperclip statuses while
     assert.equal(importRegistry.find((entry) => entry.githubIssueId === 3002)?.lastSeenCommentCount, 2);
     assert.equal(importRegistry.find((entry) => entry.githubIssueId === 3003)?.lastSeenCommentCount, 2);
     assert.equal(importRegistry.find((entry) => entry.githubIssueId === 3010)?.githubIssueNumber, 38);
+    assert.equal(backlogCommentIssueCommentRequests, 0);
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -7696,6 +7699,169 @@ test('worker pauses sync when GitHub rate limiting is hit and skips later manual
     assert.equal(secondAttempt.syncState.status, 'error');
     assert.equal(secondAttempt.syncState.errorDetails?.rateLimitResetAt, expectedResetAt);
     assert.equal(githubRequestCount, 1);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('worker pauses sync when maintainer permission checks hit a GitHub rate limit', async () => {
+  const harness = createTestHarness({
+    manifest,
+    config: {
+      githubTokenRef: 'github-secret-ref'
+    }
+  });
+  await plugin.definition.setup(harness.ctx);
+
+  await harness.performAction('settings.saveRegistration', {
+    mappings: [
+      {
+        id: 'mapping-a',
+        repositoryUrl: 'paperclipai/example-repo',
+        paperclipProjectName: 'Engineering',
+        paperclipProjectId: 'project-1',
+        companyId: 'company-1'
+      }
+    ],
+    syncState: {
+      status: 'idle'
+    }
+  });
+
+  const importedIssue = await harness.ctx.issues.create({
+    companyId: 'company-1',
+    projectId: 'project-1',
+    title: 'Permission rate limit'
+  });
+  await harness.ctx.issues.update(importedIssue.id, { status: 'in_progress' }, 'company-1');
+
+  await harness.ctx.state.set(
+    {
+      scopeKind: 'instance',
+      stateKey: 'paperclip-github-plugin-import-registry'
+    },
+    [
+      {
+        mappingId: 'mapping-a',
+        githubIssueId: 4501,
+        githubIssueNumber: 45,
+        paperclipIssueId: importedIssue.id,
+        importedAt: '2026-04-09T09:00:00.000Z',
+        lastSeenCommentCount: 1,
+        repositoryUrl: 'https://github.com/paperclipai/example-repo',
+        paperclipProjectId: 'project-1',
+        companyId: 'company-1'
+      }
+    ]
+  );
+
+  const resetAtMs = Date.now() + 10 * 60_000;
+  const expectedResetAt = new Date(Math.floor(resetAtMs / 1_000) * 1_000).toISOString();
+  const originalFetch = globalThis.fetch;
+
+  globalThis.fetch = async (input, init) => {
+    const rawUrl = getRequestUrl(input);
+    const url = new URL(rawUrl);
+
+    if (url.pathname === '/repos/paperclipai/example-repo/issues' && ['all', 'open'].includes(url.searchParams.get('state') ?? '')) {
+      return jsonResponse([
+        {
+          id: 4501,
+          number: 45,
+          title: 'Permission rate limit',
+          body: null,
+          html_url: 'https://github.com/paperclipai/example-repo/issues/45',
+          user: {
+            login: 'issue-reporter-45'
+          },
+          state: 'open',
+          comments: 2
+        }
+      ]);
+    }
+
+    if (url.pathname === '/repos/paperclipai/example-repo/issues/45/comments') {
+      return jsonResponse([
+        {
+          id: 45011,
+          body: 'Initial issue comment',
+          user: {
+            login: 'someone-else'
+          }
+        },
+        {
+          id: 45012,
+          body: 'Maintainer follow-up',
+          user: {
+            login: 'repo-maintainer'
+          }
+        }
+      ]);
+    }
+
+    if (url.pathname === '/repos/paperclipai/example-repo/collaborators/repo-maintainer/permission') {
+      return githubRateLimitedResponse({
+        resetAtMs,
+        resource: 'core'
+      });
+    }
+
+    if (url.pathname === '/graphql') {
+      const { query, variables } = getGraphqlRequest(init);
+      const issueNumber = typeof variables.issueNumber === 'number' ? variables.issueNumber : undefined;
+
+      if (query.includes('query GitHubIssueParentRelationships')) {
+        return graphqlIssueParentRelationshipsResponse([
+          {
+            issueNumber: 45
+          }
+        ]);
+      }
+
+      if (query.includes('query GitHubIssueStatusSnapshot') && issueNumber === 45) {
+        return graphqlResponse({
+          repository: {
+            issue: {
+              number: 45,
+              state: 'OPEN',
+              stateReason: null,
+              comments: {
+                totalCount: 2
+              },
+              closedByPullRequestsReferences: {
+                pageInfo: {
+                  hasNextPage: false,
+                  endCursor: null
+                },
+                nodes: []
+              }
+            }
+          }
+        });
+      }
+    }
+
+    throw new Error(`Unexpected GitHub request: ${url.toString()}`);
+  };
+
+  try {
+    const result = await harness.performAction('sync.runNow', {
+      waitForCompletion: true
+    }) as {
+      syncState: {
+        status: string;
+        message?: string;
+        errorDetails?: {
+          rateLimitResetAt?: string;
+          rateLimitResource?: string;
+        };
+      };
+    };
+
+    assert.equal(result.syncState.status, 'error');
+    assert.match(result.syncState.message ?? '', /rate limit reached/i);
+    assert.equal(result.syncState.errorDetails?.rateLimitResetAt, expectedResetAt);
+    assert.equal(result.syncState.errorDetails?.rateLimitResource, 'core');
   } finally {
     globalThis.fetch = originalFetch;
   }

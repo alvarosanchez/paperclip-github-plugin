@@ -3744,9 +3744,13 @@ async function isGitHubUserRepositoryMaintainer(
     const isMaintainer = roleName ? GITHUB_REPOSITORY_MAINTAINER_ROLE_NAMES.has(roleName) : false;
     cache.set(cacheKey, isMaintainer);
     return isMaintainer;
-  } catch {
-    cache.set(cacheKey, false);
-    return false;
+  } catch (error) {
+    if (getErrorStatus(error) === 404) {
+      cache.set(cacheKey, false);
+      return false;
+    }
+
+    throw error;
   }
 }
 
@@ -6189,14 +6193,18 @@ async function synchronizePaperclipIssueStatuses(
       );
 
       const previousCommentCount = importedIssue.lastSeenCommentCount;
-      const hasTrustedNewComment = await hasTrustedNewGitHubIssueComment({
-        octokit,
-        repository,
-        githubIssue,
-        previousCommentCount,
-        currentCommentCount: snapshot.commentCount,
-        maintainerCache: repositoryMaintainerCache
-      });
+      const hasNewComments = snapshot.commentCount > (previousCommentCount ?? snapshot.commentCount);
+      const hasTrustedNewComment =
+        paperclipIssue.status === 'backlog' || !hasNewComments
+          ? false
+          : await hasTrustedNewGitHubIssueComment({
+              octokit,
+              repository,
+              githubIssue,
+              previousCommentCount,
+              currentCommentCount: snapshot.commentCount,
+              maintainerCache: repositoryMaintainerCache
+            });
       const nextStatus = resolvePaperclipIssueStatus({
         currentStatus: paperclipIssue.status,
         snapshot,
