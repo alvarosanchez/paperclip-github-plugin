@@ -20,10 +20,13 @@ It is designed for teams that plan in Paperclip but still receive work through G
 - Hosted settings page inside Paperclip.
 - GitHub token validation before saving.
 - GitHub token saved through Paperclip company secrets; the plugin stores only the secret reference.
+- GitHub token and automatic sync cadence stay shared across the plugin instance, while repository mappings and Paperclip board access are managed per company from the same hosted settings flow.
+- The hosted settings page calls out the current company by name and separates company-scoped setup from shared plugin-wide settings.
 - Automatic detection of authenticated Paperclip deployments through `/api/health`.
 - Paperclip board access connection flow from settings, enforced when the deployment requires authenticated board access for worker-side REST calls.
 - Paperclip board tokens saved through Paperclip company secrets per company; the plugin stores only the secret reference and mirrors that ref into plugin config so workers can resolve it during sync.
 - Support for multiple repository-to-project mappings.
+- When settings are opened inside a company, the repository list only shows that company’s mappings and saving it preserves mappings that belong to other companies.
 - Repository input accepts either `owner/repo` or `https://github.com/owner/repo`.
 - Automatic creation or reuse of the target Paperclip project when a mapping is saved.
 - Automatic binding of the GitHub repository URL to the target Paperclip project workspace.
@@ -32,8 +35,9 @@ It is designed for teams that plan in Paperclip but still receive work through G
 
 ### Sync behavior
 
-- Manual sync from the settings page.
+- Manual sync from the settings page, scoped to the current company when settings are opened inside a company.
 - Global toolbar button for syncing from anywhere in Paperclip.
+- Global toolbar and dashboard sync actions target the current company when they are rendered inside one, and fall back to all saved mappings only when no company context is active.
 - Project toolbar button for syncing the repository mapped to a specific Paperclip project.
 - Issue toolbar button for syncing the GitHub issue linked to a specific Paperclip issue.
 - Automatic scheduled sync driven by a job that checks every minute and runs when the saved cadence is due.
@@ -122,24 +126,26 @@ If you are installing into an isolated local Paperclip instance for testing, inc
 
 ## First-time setup in Paperclip
 
-1. Open Paperclip instance settings and go to the plugin settings for **GitHub Sync**.
+1. Open Paperclip instance settings and go to the plugin settings for **GitHub Sync** from inside the company you want to configure.
 2. Paste a GitHub token and validate it.
 3. Save the validated token so Paperclip can store it as a secret reference.
 4. If the settings page reports that this Paperclip deployment requires board access, connect **Paperclip board access** from the same settings page and approve the new tab that opens.
-5. Add one or more repository mappings.
+5. Add one or more repository mappings for the current company.
 6. For each mapping, enter a GitHub repository and the Paperclip project name that should receive synced issues.
 7. Choose the automatic sync interval in minutes.
 8. Save the settings.
-9. Run a manual sync to import the first batch of issues.
+9. Repeat inside any other Paperclip companies that should have their own mappings or board access.
+10. Run a manual sync to import the first batch of issues.
 
 ## Expected workflow
 
-After setup, the dashboard widget shows whether the integration is ready, syncing, paused, or needs attention. You can trigger a full sync from plugin settings or the global toolbar, or run narrower syncs from mapped projects and imported issues.
+After setup, the dashboard widget shows whether the integration is ready, syncing, paused, or needs attention. When you open settings or the dashboard inside a company, the repository list and manual sync controls only affect that company. When you open a global instance view with no company context, the sync status and cadence reflect the shared plugin instance.
 
 Imported issues stay linked to GitHub and continue to receive description, label, and status updates. GitHub-specific context stays out of the Paperclip issue description and instead appears in the dedicated GitHub detail tab and sync annotations.
 
 ## Troubleshooting notes
 
+- If one company’s mappings disappear after saving another company’s setup, reopen plugin settings inside the affected company and confirm each company’s mappings separately; the settings page now keeps those mapping lists isolated per company.
 - If sync says setup is incomplete, confirm that a validated token has been saved, at least one repository mapping has a created Paperclip project, and authenticated deployments have connected Paperclip board access for the current company.
 - If token validation fails, confirm the token is still valid and can access the target repositories through the GitHub API.
 - If the dashboard, toolbar, or settings page says board access is required, open plugin settings inside the target company and complete the Paperclip board access approval flow before retrying sync.

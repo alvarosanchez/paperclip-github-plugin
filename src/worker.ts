@@ -224,7 +224,7 @@ interface StatusTransitionCommentAnnotationInput {
 }
 
 interface ResolvedSyncTarget {
-  kind: 'project' | 'issue';
+  kind: 'company' | 'project' | 'issue';
   companyId: string;
   projectId?: string;
   issueId?: string;
@@ -1327,6 +1327,18 @@ function getSyncableMappings(mappings: RepositoryMapping[]): RepositoryMapping[]
   return mappings.filter((mapping) => mapping.repositoryUrl.trim() && mapping.paperclipProjectId && mapping.companyId);
 }
 
+function filterMappingsByCompany(
+  mappings: RepositoryMapping[],
+  companyId?: string
+): RepositoryMapping[] {
+  const normalizedCompanyId = normalizeCompanyId(companyId);
+  if (!normalizedCompanyId) {
+    return mappings;
+  }
+
+  return mappings.filter((mapping) => normalizeCompanyId(mapping.companyId) === normalizedCompanyId);
+}
+
 function getSyncableMappingsForTarget(
   mappings: RepositoryMapping[],
   target?: ResolvedSyncTarget
@@ -1338,6 +1350,8 @@ function getSyncableMappingsForTarget(
   }
 
   switch (target.kind) {
+    case 'company':
+      return syncableMappings.filter((mapping) => mapping.companyId === target.companyId);
     case 'project':
       return syncableMappings.filter((mapping) =>
         mapping.companyId === target.companyId &&
@@ -1529,7 +1543,16 @@ async function resolveManualSyncTarget(
     };
   }
 
-  return undefined;
+  const companyId = input.companyId?.trim();
+  if (!companyId) {
+    return undefined;
+  }
+
+  return {
+    kind: 'company',
+    companyId,
+    displayLabel: 'company'
+  };
 }
 
 function getSyncTargetRunningMessage(target?: ResolvedSyncTarget): string {
@@ -1543,6 +1566,10 @@ function getSyncTargetRunningMessage(target?: ResolvedSyncTarget): string {
 
   if (target.kind === 'project') {
     return 'GitHub sync is running for this project. This page will update when it finishes.';
+  }
+
+  if (target.kind === 'company') {
+    return 'GitHub sync is running for this company. This page will update when it finishes.';
   }
 
   return RUNNING_SYNC_MESSAGE;
@@ -1608,10 +1635,16 @@ async function buildToolbarSyncState(
   const settings = normalizeSettings(await ctx.state.get(SETTINGS_SCOPE));
   const config = await getResolvedConfig(ctx);
   const githubTokenConfigured = hasConfiguredGithubToken(settings, config);
-  const savedMappingCount = getSyncableMappings(settings.mappings).length;
   const companyId = typeof input.companyId === 'string' && input.companyId.trim() ? input.companyId.trim() : undefined;
   const entityId = typeof input.entityId === 'string' && input.entityId.trim() ? input.entityId.trim() : undefined;
   const entityType = typeof input.entityType === 'string' && input.entityType.trim() ? input.entityType.trim() : undefined;
+  const savedMappingCount = companyId
+    ? getSyncableMappingsForTarget(settings.mappings, {
+        kind: 'company',
+        companyId,
+        displayLabel: 'company'
+      }).length
+    : getSyncableMappings(settings.mappings).length;
 
   if (entityType === 'project' && entityId && companyId) {
     const mappings = getSyncableMappingsForTarget(settings.mappings, {
@@ -1671,8 +1704,12 @@ async function buildToolbarSyncState(
     message: !githubTokenConfigured
       ? MISSING_GITHUB_TOKEN_SYNC_MESSAGE
       : savedMappingCount === 0
-        ? MISSING_MAPPING_SYNC_MESSAGE
-        : 'Run a GitHub sync across every saved repository mapping.',
+        ? companyId
+          ? 'No GitHub repositories are mapped for this company.'
+          : MISSING_MAPPING_SYNC_MESSAGE
+        : companyId
+          ? 'Run a GitHub sync across every saved repository mapping for this company.'
+          : 'Run a GitHub sync across every saved repository mapping.',
     syncState: settings.syncState,
     githubTokenConfigured,
     savedMappingCount
@@ -1893,6 +1930,18 @@ function getPublicSettings(
     ...publicSettings
   } = settings;
   return publicSettings;
+}
+
+function getPublicSettingsForScope(
+  settings: GitHubSyncSettings,
+  companyId?: string
+): Omit<GitHubSyncSettings, 'githubTokenRef' | 'paperclipBoardApiTokenRefs'> {
+  const publicSettings = getPublicSettings(settings);
+
+  return {
+    ...publicSettings,
+    mappings: filterMappingsByCompany(publicSettings.mappings, companyId)
+  };
 }
 
 function createSetupConfigurationErrorSyncState(
@@ -5578,6 +5627,26 @@ function hasConfiguredPaperclipBoardAccess(
   );
 }
 
+function hasConfiguredPaperclipBoardAccessForMappings(
+  settings: Pick<GitHubSyncSettings, 'paperclipBoardApiTokenRefs'> | null | undefined,
+  config: Pick<GitHubSyncConfig, 'paperclipBoardApiTokenRefs'> | null | undefined,
+  mappings: RepositoryMapping[]
+): boolean {
+  const companyIds = [
+    ...new Set(
+      mappings
+        .map((mapping) => normalizeCompanyId(mapping.companyId))
+        .filter((companyId): companyId is string => Boolean(companyId))
+    )
+  ];
+
+  if (companyIds.length === 0) {
+    return false;
+  }
+
+  return companyIds.every((companyId) => hasConfiguredPaperclipBoardAccess(settings, config, companyId));
+}
+
 function getMappingsMissingPaperclipBoardAccess(
   settings: Pick<GitHubSyncSettings, 'paperclipBoardApiTokenRefs'> | null | undefined,
   config: Pick<GitHubSyncConfig, 'paperclipBoardApiTokenRefs'> | null | undefined,
@@ -6368,11 +6437,15 @@ const plugin = definePlugin({
         await saveSettingsSyncState(ctx, settingsForResponse, settingsForResponse.syncState);
       }
 
+      const scopedMappings = filterMappingsByCompany(settingsForResponse.mappings, requestedCompanyId);
+
       return {
-        ...getPublicSettings(settingsForResponse),
-        totalSyncedIssuesCount: countImportedIssuesForMappings(importRegistry, settingsForResponse.mappings),
+        ...getPublicSettingsForScope(settingsForResponse, requestedCompanyId),
+        totalSyncedIssuesCount: countImportedIssuesForMappings(importRegistry, scopedMappings),
         githubTokenConfigured,
-        paperclipBoardAccessConfigured: hasConfiguredPaperclipBoardAccess(settingsForResponse, config, requestedCompanyId),
+        paperclipBoardAccessConfigured: requestedCompanyId
+          ? hasConfiguredPaperclipBoardAccess(settingsForResponse, config, requestedCompanyId)
+          : hasConfiguredPaperclipBoardAccessForMappings(settingsForResponse, config, scopedMappings),
         ...(savedBoardTokenRef ? { paperclipBoardAccessConfigSyncRef: savedBoardTokenRef } : {}),
         paperclipBoardAccessNeedsConfigSync: Boolean(savedBoardTokenRef && !configuredBoardTokenRef)
       };
@@ -6402,12 +6475,25 @@ const plugin = definePlugin({
       const previous = normalizeSettings(await ctx.state.get(SETTINGS_SCOPE));
       const config = await getResolvedConfig(ctx);
       const record = input && typeof input === 'object' ? input as Record<string, unknown> : {};
+      const requestedCompanyId = normalizeCompanyId(record.companyId);
+      const hasMappingsPatch = 'mappings' in record;
       const githubTokenRef =
         'githubTokenRef' in record
           ? normalizeGitHubTokenRef(record.githubTokenRef)
           : normalizeGitHubTokenRef(previous.githubTokenRef) ?? normalizeGitHubTokenRef(config.githubTokenRef);
+      const inputMappings = hasMappingsPatch ? normalizeMappings(record.mappings) : previous.mappings;
+      const mergedMappings =
+        requestedCompanyId && hasMappingsPatch
+          ? [
+              ...previous.mappings.filter((mapping) => normalizeCompanyId(mapping.companyId) !== requestedCompanyId),
+              ...inputMappings.map((mapping) => ({
+                ...mapping,
+                companyId: requestedCompanyId
+              }))
+            ]
+          : inputMappings;
       const current = normalizeSettings({
-        mappings: 'mappings' in record ? record.mappings : previous.mappings,
+        mappings: mergedMappings,
         syncState: previous.syncState,
         scheduleFrequencyMinutes: 'scheduleFrequencyMinutes' in record ? record.scheduleFrequencyMinutes : previous.scheduleFrequencyMinutes,
         paperclipApiBaseUrl: 'paperclipApiBaseUrl' in record ? record.paperclipApiBaseUrl : previous.paperclipApiBaseUrl,
@@ -6436,7 +6522,7 @@ const plugin = definePlugin({
 
       await ctx.state.set(SETTINGS_SCOPE, next);
       await ctx.state.set(SYNC_STATE_SCOPE, next.syncState);
-      return getPublicSettings(next);
+      return getPublicSettingsForScope(next, requestedCompanyId);
     });
 
     ctx.actions.register('settings.updateBoardAccess', async (input) => {
@@ -6478,7 +6564,7 @@ const plugin = definePlugin({
       await ctx.state.set(SYNC_STATE_SCOPE, next.syncState);
 
       return {
-        ...getPublicSettings(next),
+        ...getPublicSettingsForScope(next, companyId),
         paperclipBoardAccessConfigured: hasConfiguredPaperclipBoardAccess(next, config, companyId)
       };
     });

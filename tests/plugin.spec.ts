@@ -495,6 +495,65 @@ test('worker exposes toolbar sync state for global, project, and issue surfaces'
   assert.equal(issueState.label, 'Sync #77');
 });
 
+test('worker scopes global toolbar sync state to the requested company', async () => {
+  const harness = createTestHarness({
+    manifest,
+    config: {
+      githubTokenRef: 'github-secret-ref'
+    }
+  });
+  await plugin.definition.setup(harness.ctx);
+
+  await harness.performAction('settings.saveRegistration', {
+    mappings: [
+      {
+        id: 'mapping-a',
+        repositoryUrl: 'paperclipai/example-repo',
+        paperclipProjectName: 'Engineering',
+        paperclipProjectId: 'project-1',
+        companyId: 'company-1'
+      },
+      {
+        id: 'mapping-b',
+        repositoryUrl: 'paperclipai/another-repo',
+        paperclipProjectName: 'Operations',
+        paperclipProjectId: 'project-2',
+        companyId: 'company-2'
+      }
+    ],
+    syncState: {
+      status: 'idle'
+    }
+  });
+
+  const companyOneState = await harness.getData<{
+    kind: string;
+    canRun: boolean;
+    message?: string;
+    savedMappingCount: number;
+  }>('sync.toolbarState', {
+    companyId: 'company-1'
+  });
+  const companyThreeState = await harness.getData<{
+    kind: string;
+    canRun: boolean;
+    message?: string;
+    savedMappingCount: number;
+  }>('sync.toolbarState', {
+    companyId: 'company-3'
+  });
+
+  assert.equal(companyOneState.kind, 'global');
+  assert.equal(companyOneState.canRun, true);
+  assert.equal(companyOneState.savedMappingCount, 1);
+  assert.equal(companyOneState.message, 'Run a GitHub sync across every saved repository mapping for this company.');
+
+  assert.equal(companyThreeState.kind, 'global');
+  assert.equal(companyThreeState.canRun, false);
+  assert.equal(companyThreeState.savedMappingCount, 0);
+  assert.equal(companyThreeState.message, 'No GitHub repositories are mapped for this company.');
+});
+
 test('worker uses the saved githubTokenRef fallback for toolbar state when config is stale', async () => {
   const harness = createTestHarness({ manifest });
   await plugin.definition.setup(harness.ctx);
@@ -816,6 +875,138 @@ test('worker saves normalized mappings with resolved project identifiers supplie
     scheduleFrequencyMinutes: 15,
     updatedAt: (result as { updatedAt: string }).updatedAt
   });
+});
+
+test('worker scopes mapping saves and settings reads to the requested company', async () => {
+  const harness = createTestHarness({ manifest });
+  await plugin.definition.setup(harness.ctx);
+
+  await harness.performAction('settings.saveRegistration', {
+    mappings: [
+      {
+        id: 'mapping-a',
+        repositoryUrl: 'https://github.com/paperclipai/example-repo',
+        paperclipProjectName: 'Engineering',
+        paperclipProjectId: 'project-1',
+        companyId: 'company-1'
+      },
+      {
+        id: 'mapping-b',
+        repositoryUrl: 'https://github.com/paperclipai/another-repo',
+        paperclipProjectName: 'Operations',
+        paperclipProjectId: 'project-2',
+        companyId: 'company-2'
+      }
+    ],
+    syncState: {
+      status: 'idle'
+    }
+  });
+
+  const companyOneBefore = await harness.getData<{
+    mappings: Array<{
+      id: string;
+      repositoryUrl: string;
+      paperclipProjectName: string;
+      paperclipProjectId?: string;
+      companyId?: string;
+    }>;
+  }>('settings.registration', {
+    companyId: 'company-1'
+  });
+  const companyTwoBefore = await harness.getData<{
+    mappings: Array<{
+      id: string;
+      repositoryUrl: string;
+      paperclipProjectName: string;
+      paperclipProjectId?: string;
+      companyId?: string;
+    }>;
+  }>('settings.registration', {
+    companyId: 'company-2'
+  });
+
+  assert.deepEqual(companyOneBefore.mappings, [
+    {
+      id: 'mapping-a',
+      repositoryUrl: 'https://github.com/paperclipai/example-repo',
+      paperclipProjectName: 'Engineering',
+      paperclipProjectId: 'project-1',
+      companyId: 'company-1'
+    }
+  ]);
+  assert.deepEqual(companyTwoBefore.mappings, [
+    {
+      id: 'mapping-b',
+      repositoryUrl: 'https://github.com/paperclipai/another-repo',
+      paperclipProjectName: 'Operations',
+      paperclipProjectId: 'project-2',
+      companyId: 'company-2'
+    }
+  ]);
+
+  const companyOneSaveResult = await harness.performAction('settings.saveRegistration', {
+    companyId: 'company-1',
+    mappings: [
+      {
+        id: 'mapping-a-updated',
+        repositoryUrl: 'https://github.com/paperclipai/example-repo-renamed',
+        paperclipProjectName: 'Platform',
+        paperclipProjectId: 'project-3'
+      }
+    ],
+    syncState: {
+      status: 'idle'
+    }
+  }) as {
+    mappings: Array<{
+      id: string;
+      repositoryUrl: string;
+      paperclipProjectName: string;
+      paperclipProjectId?: string;
+      companyId?: string;
+    }>;
+  };
+
+  assert.deepEqual(companyOneSaveResult.mappings, [
+    {
+      id: 'mapping-a-updated',
+      repositoryUrl: 'https://github.com/paperclipai/example-repo-renamed',
+      paperclipProjectName: 'Platform',
+      paperclipProjectId: 'project-3',
+      companyId: 'company-1'
+    }
+  ]);
+
+  const savedSettings = harness.getState({
+    scopeKind: 'instance',
+    stateKey: 'paperclip-github-plugin-settings'
+  }) as {
+    mappings: Array<{
+      id: string;
+      repositoryUrl: string;
+      paperclipProjectName: string;
+      paperclipProjectId?: string;
+      companyId?: string;
+    }>;
+  };
+
+  assert.deepEqual(savedSettings.mappings, [
+    {
+      id: 'mapping-b',
+      repositoryUrl: 'https://github.com/paperclipai/another-repo',
+      paperclipProjectName: 'Operations',
+      paperclipProjectId: 'project-2',
+      companyId: 'company-2'
+    },
+    {
+      id: 'mapping-a-updated',
+      repositoryUrl: 'https://github.com/paperclipai/example-repo-renamed',
+      paperclipProjectName: 'Platform',
+      paperclipProjectId: 'project-3',
+      companyId: 'company-1'
+    }
+  ]);
 });
 
 test('worker normalizes owner/repo slugs to canonical GitHub URLs when saving mappings', async () => {
@@ -5742,6 +5933,47 @@ test('sync.runNow falls back to the saved githubTokenRef when config has not pro
   assert.equal(result.syncState.status, 'error');
   assert.equal(result.syncState.message, 'Save at least one mapping with a created Paperclip project before running sync.');
   assert.equal(result.syncState.lastRunTrigger, 'manual');
+});
+
+test('sync.runNow scopes a company-level manual sync to the requested company', async () => {
+  const harness = createTestHarness({ manifest });
+  await plugin.definition.setup(harness.ctx);
+
+  harness.ctx.secrets.resolve = async () => 'github-token';
+
+  await harness.performAction('settings.saveRegistration', {
+    githubTokenRef: 'github-secret-ref',
+    mappings: [
+      {
+        id: 'mapping-b',
+        repositoryUrl: 'paperclipai/another-repo',
+        paperclipProjectName: 'Operations',
+        paperclipProjectId: 'project-2',
+        companyId: 'company-2'
+      }
+    ],
+    syncState: {
+      status: 'idle'
+    }
+  });
+
+  const result = await harness.performAction('sync.runNow', {
+    companyId: 'company-1'
+  }) as {
+    syncState: {
+      status: string;
+      message?: string;
+      lastRunTrigger?: string;
+      errorDetails?: {
+        configurationIssue?: string;
+      };
+    };
+  };
+
+  assert.equal(result.syncState.status, 'error');
+  assert.equal(result.syncState.message, 'Save at least one mapping with a created Paperclip project before running sync.');
+  assert.equal(result.syncState.lastRunTrigger, 'manual');
+  assert.equal(result.syncState.errorDetails?.configurationIssue, 'missing_mapping');
 });
 
 test('worker blocks sync when the Paperclip deployment is authenticated and board access is missing', async () => {
