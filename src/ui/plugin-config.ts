@@ -10,6 +10,19 @@ function normalizeOptionalString(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim() ? value.trim() : undefined;
 }
 
+function normalizePaperclipApiBaseUrl(value: unknown): string | undefined {
+  const normalizedValue = normalizeOptionalString(value);
+  if (!normalizedValue) {
+    return undefined;
+  }
+
+  try {
+    return new URL(normalizedValue).origin;
+  } catch {
+    return undefined;
+  }
+}
+
 export function normalizePluginConfigBoardTokenRefs(value: unknown): PluginConfigBoardTokenRefs | undefined {
   if (!value || typeof value !== 'object') {
     return undefined;
@@ -40,7 +53,7 @@ export function normalizePluginConfig(value: unknown): GitHubSyncPluginConfig {
   const record = { ...(value as Record<string, unknown>) };
   const githubTokenRef = normalizeOptionalString(record.githubTokenRef);
   const paperclipBoardApiTokenRefs = normalizePluginConfigBoardTokenRefs(record.paperclipBoardApiTokenRefs);
-  const paperclipApiBaseUrl = normalizeOptionalString(record.paperclipApiBaseUrl);
+  const paperclipApiBaseUrl = normalizePaperclipApiBaseUrl(record.paperclipApiBaseUrl);
 
   if (githubTokenRef) {
     record.githubTokenRef = githubTokenRef;

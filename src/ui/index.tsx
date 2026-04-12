@@ -2350,15 +2350,29 @@ function getPaperclipApiBaseUrl(): string | undefined {
   return window.location.origin;
 }
 
+const syncedPaperclipApiBaseUrlsByPluginId = new Map<string, string>();
+
 async function syncTrustedPaperclipApiBaseUrl(pluginId: string | null): Promise<string | undefined> {
   const paperclipApiBaseUrl = getPaperclipApiBaseUrl();
-  if (!pluginId || !paperclipApiBaseUrl) {
+  if (!paperclipApiBaseUrl) {
+    return undefined;
+  }
+
+  if (!pluginId) {
+    throw new Error(
+      'Unable to sync the trusted Paperclip API origin because the plugin ID is missing. Reload the plugin and try again before saving or syncing.'
+    );
+  }
+
+  const lastSyncedPaperclipApiBaseUrl = syncedPaperclipApiBaseUrlsByPluginId.get(pluginId);
+  if (lastSyncedPaperclipApiBaseUrl === paperclipApiBaseUrl) {
     return paperclipApiBaseUrl;
   }
 
   await patchPluginConfig(pluginId, {
     paperclipApiBaseUrl
   });
+  syncedPaperclipApiBaseUrlsByPluginId.set(pluginId, paperclipApiBaseUrl);
 
   return paperclipApiBaseUrl;
 }
@@ -2591,6 +2605,10 @@ async function patchPluginConfig(pluginId: string, patch: Record<string, unknown
   const currentConfigResponse = await fetchJson<PluginConfigResponse | null>(`/api/plugins/${pluginId}/config`);
   const currentConfig = normalizePluginConfig(currentConfigResponse?.configJson);
   const nextConfig = mergePluginConfig(currentConfig, patch);
+
+  if (JSON.stringify(nextConfig) === JSON.stringify(currentConfig)) {
+    return;
+  }
 
   await fetchJson(`/api/plugins/${pluginId}/config`, {
     method: 'POST',

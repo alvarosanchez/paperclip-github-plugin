@@ -6271,9 +6271,15 @@ async function resolvePaperclipApiAuthTokens(
   return tokensByCompanyId;
 }
 
-async function resolveGithubToken(ctx: PluginSetupContext): Promise<string> {
-  const settings = normalizeSettings(await ctx.state.get(SETTINGS_SCOPE));
-  const config = await getResolvedConfig(ctx);
+async function resolveGithubToken(
+  ctx: PluginSetupContext,
+  options: {
+    settings?: Pick<GitHubSyncSettings, 'githubTokenRef'> | null | undefined;
+    config?: GitHubSyncConfig;
+  } = {}
+): Promise<string> {
+  const settings = options.settings ?? normalizeSettings(await ctx.state.get(SETTINGS_SCOPE));
+  const config = options.config ?? await getResolvedConfig(ctx);
   const configuredTokenSource = getConfiguredGithubTokenSource(settings, config);
   if (configuredTokenSource.secretRef) {
     return ctx.secrets.resolve(configuredTokenSource.secretRef);
@@ -7432,9 +7438,14 @@ async function startSync(
     return quickResult ?? await getActiveOrCurrentSyncState(ctx);
   }
 
-  const config = await getResolvedConfig(ctx);
-  const token = await resolveGithubToken(ctx).catch(() => '');
-  const persistedSettings = normalizeSettings(await ctx.state.get(SETTINGS_SCOPE));
+  const [config, persistedSettings] = await Promise.all([
+    getResolvedConfig(ctx),
+    ctx.state.get(SETTINGS_SCOPE).then((value) => normalizeSettings(value))
+  ]);
+  const token = await resolveGithubToken(ctx, {
+    config,
+    settings: persistedSettings
+  }).catch(() => '');
   let currentSettings = sanitizeSettingsForCurrentSetup(persistedSettings, {
     hasToken: Boolean(token.trim()),
     hasMappings: getSyncableMappings(persistedSettings.mappings).length > 0

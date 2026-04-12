@@ -10,7 +10,7 @@ import { createTestHarness } from '@paperclipai/plugin-sdk/testing';
 import manifest from '../src/manifest.ts';
 import { requiresPaperclipBoardAccess } from '../src/paperclip-health.ts';
 import { fetchJson, fetchPaperclipHealth, resolveCliAuthPollUrl } from '../src/ui/http.ts';
-import { mergePluginConfig } from '../src/ui/plugin-config.ts';
+import { mergePluginConfig, normalizePluginConfig } from '../src/ui/plugin-config.ts';
 import {
   discoverExistingProjectSyncCandidates,
   filterExistingProjectSyncCandidates
@@ -1127,6 +1127,24 @@ test('mergePluginConfig preserves existing config while merging board access ref
     'company-2': 'board-secret-ref-2'
   });
   assert.equal(result.customFlag, true);
+});
+
+test('normalizePluginConfig canonicalizes the trusted Paperclip API origin and drops invalid values', () => {
+  assert.deepEqual(
+    normalizePluginConfig({
+      paperclipApiBaseUrl: ' https://paperclip.example.test/api/companies/company-1/issues '
+    }),
+    {
+      paperclipApiBaseUrl: 'https://paperclip.example.test'
+    }
+  );
+
+  assert.deepEqual(
+    normalizePluginConfig({
+      paperclipApiBaseUrl: 'not a url'
+    }),
+    {}
+  );
 });
 
 test('manifest exposes GitHub Sync dashboard and settings UI metadata, config schema, and job', () => {

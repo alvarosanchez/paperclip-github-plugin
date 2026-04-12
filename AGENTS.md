@@ -12,8 +12,7 @@ This repo contains a single Paperclip plugin package for GitHub synchronization 
 .
 ├── .github/workflows/
 ├── scripts/
-│   ├── e2e/
-│   └── noop.mjs
+│   └── e2e/
 ├── src/
 │   ├── manifest.ts
 │   ├── worker.ts
