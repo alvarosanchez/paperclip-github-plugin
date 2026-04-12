@@ -1,9 +1,16 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { useHostContext, usePluginAction, usePluginData, usePluginToast } from '@paperclipai/plugin-sdk/ui';
 
+import { parseRepositoryReference, type ParsedRepositoryReference } from '../github-repo.ts';
 import { requiresPaperclipBoardAccess } from '../paperclip-health.ts';
 import { buildPaperclipUrl, fetchJson, fetchPaperclipHealth, resolveCliAuthPollUrl } from './http.ts';
 import { mergePluginConfig, normalizePluginConfig } from './plugin-config.ts';
+import {
+  discoverExistingProjectSyncCandidates,
+  filterExistingProjectSyncCandidates,
+  type ExistingProjectSyncCandidate,
+  type ProjectWorkspaceSummary
+} from './project-bindings.ts';
 
 const HOST_BUTTON_BASE_CLASSNAME = [
   'inline-flex items-center justify-center whitespace-nowrap text-sm font-medium',
@@ -210,12 +217,6 @@ interface CliAuthIdentityResponse {
 
 interface PluginConfigResponse {
   configJson?: Record<string, unknown> | null;
-}
-
-interface ParsedRepositoryReference {
-  owner: string;
-  repo: string;
-  url: string;
 }
 
 type ThemeMode = 'light' | 'dark';
@@ -1282,6 +1283,40 @@ const PAGE_STYLES = `
   line-height: 1.5;
 }
 
+.ghsync__existing-projects {
+  display: grid;
+  gap: 10px;
+}
+
+.ghsync__existing-project-card {
+  display: grid;
+  gap: 10px;
+  align-items: start;
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.ghsync__existing-project-meta {
+  display: grid;
+  gap: 6px;
+}
+
+.ghsync__existing-project-meta strong {
+  color: var(--ghsync-title);
+  font-size: 13px;
+}
+
+.ghsync__existing-project-meta span {
+  color: var(--ghsync-muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.ghsync__existing-project-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
 .ghsync__mapping-grid {
   display: grid;
   align-items: start;
@@ -1390,6 +1425,7 @@ const PAGE_STYLES = `
   .ghsync__scope-overview,
   .ghsync__layout,
   .ghsync__schedule-card,
+  .ghsync__existing-project-card,
   .ghsync__mapping-grid,
   .ghsync__stats {
     grid-template-columns: minmax(0, 1fr);
@@ -2019,49 +2055,6 @@ function formatScheduleFrequency(minutes: number): string {
   return `every ${normalizedMinutes} minute${normalizedMinutes === 1 ? '' : 's'}`;
 }
 
-function parseRepositoryReference(repositoryInput: string): ParsedRepositoryReference | null {
-  const trimmed = repositoryInput.trim();
-  if (!trimmed) {
-    return null;
-  }
-
-  const slugMatch = trimmed.match(/^([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+?)(?:\.git)?$/);
-  if (slugMatch) {
-    const [, owner, repo] = slugMatch;
-    return {
-      owner,
-      repo,
-      url: `https://github.com/${owner}/${repo}`
-    };
-  }
-
-  try {
-    const url = new URL(trimmed);
-    if (url.hostname !== 'github.com' && url.hostname !== 'www.github.com') {
-      return null;
-    }
-
-    const pathSegments = url.pathname.split('/').filter(Boolean);
-    if (pathSegments.length !== 2) {
-      return null;
-    }
-
-    const [owner, rawRepo] = pathSegments;
-    const repo = rawRepo.replace(/\.git$/, '');
-    if (!owner || !repo) {
-      return null;
-    }
-
-    return {
-      owner,
-      repo,
-      url: `https://github.com/${owner}/${repo}`
-    };
-  } catch {
-    return null;
-  }
-}
-
 function formatProjectNameFromRepository(repositoryInput: string): string {
   const parsedRepository = parseRepositoryReference(repositoryInput);
   const repositoryName = parsedRepository?.repo
@@ -2197,7 +2190,7 @@ function useResolvedThemeMode(): ThemeMode {
 }
 
 async function resolveOrCreateProject(companyId: string, projectName: string): Promise<{ id: string; name: string }> {
-  const projects = await fetchJson<Array<{ id: string; name: string }>>(`/api/companies/${companyId}/projects`);
+  const projects = await listCompanyProjects(companyId);
   const existing = projects.find((project) => project.name.trim().toLowerCase() === projectName.trim().toLowerCase());
   if (existing) {
     return existing;
@@ -2212,11 +2205,92 @@ async function resolveOrCreateProject(companyId: string, projectName: string): P
   });
 }
 
-async function bindProjectRepo(projectId: string, repositoryUrl: string): Promise<void> {
+async function listCompanyProjects(companyId: string): Promise<Array<{ id: string; name: string }>> {
+  const response = await fetchJson<unknown>(`/api/companies/${companyId}/projects`);
+  if (!Array.isArray(response)) {
+    throw new Error(`Unexpected projects response for company ${companyId}: expected an array.`);
+  }
+
+  return response
+    .map((entry) => {
+      if (!entry || typeof entry !== 'object') {
+        return null;
+      }
+
+      const record = entry as Record<string, unknown>;
+      const id = typeof record.id === 'string' ? record.id.trim() : '';
+      const name = typeof record.name === 'string' ? record.name.trim() : '';
+      return id && name ? { id, name } : null;
+    })
+    .filter((entry): entry is { id: string; name: string } => entry !== null);
+}
+
+async function listProjectWorkspaces(projectId: string): Promise<ProjectWorkspaceSummary[]> {
+  const response = await fetchJson<unknown>(`/api/projects/${projectId}/workspaces`);
+  if (!Array.isArray(response)) {
+    throw new Error(`Unexpected project workspaces response for project ${projectId}: expected an array.`);
+  }
+
+  const workspaces: ProjectWorkspaceSummary[] = [];
+  for (const entry of response) {
+    if (!entry || typeof entry !== 'object') {
+      continue;
+    }
+
+    const record = entry as Record<string, unknown>;
+    workspaces.push({
+      repoUrl: typeof record.repoUrl === 'string' ? record.repoUrl : null,
+      sourceType: typeof record.sourceType === 'string' ? record.sourceType : null,
+      isPrimary: record.isPrimary === true
+    });
+  }
+
+  return workspaces;
+}
+
+async function loadExistingProjectSyncCandidates(companyId: string): Promise<ExistingProjectSyncCandidate[]> {
+  const projects = await listCompanyProjects(companyId);
+  const workspacesByProjectId = Object.fromEntries(
+    await Promise.all(
+      projects.map(async (project): Promise<[string, ProjectWorkspaceSummary[]]> => [
+        project.id,
+        await listProjectWorkspaces(project.id)
+      ])
+    )
+  ) as Record<string, ProjectWorkspaceSummary[]>;
+
+  return discoverExistingProjectSyncCandidates({
+    projects,
+    workspacesByProjectId
+  });
+}
+
+async function ensureProjectRepoBinding(projectId: string, repositoryUrl: string): Promise<void> {
+  const parsedRepository = parseRepositoryReference(repositoryUrl);
+  const normalizedRepositoryUrl = parsedRepository?.url ?? repositoryUrl.trim();
+
+  try {
+    const workspaces = await listProjectWorkspaces(projectId);
+    const alreadyBound = workspaces.some((workspace) => {
+      if (typeof workspace.repoUrl !== 'string' || !workspace.repoUrl.trim()) {
+        return false;
+      }
+
+      const normalizedWorkspaceRepositoryUrl = parseRepositoryReference(workspace.repoUrl)?.url ?? workspace.repoUrl.trim();
+      return normalizedWorkspaceRepositoryUrl === normalizedRepositoryUrl;
+    });
+
+    if (alreadyBound) {
+      return;
+    }
+  } catch {
+    // Fall back to attempting the create call when workspace listing is unavailable.
+  }
+
   await fetchJson(`/api/projects/${projectId}/workspaces`, {
     method: 'POST',
     body: JSON.stringify({
-      repoUrl: repositoryUrl,
+      repoUrl: normalizedRepositoryUrl,
       sourceType: 'git_repo',
       isPrimary: true
     })
@@ -3208,6 +3282,9 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
   const [showSavedTokenHint, setShowSavedTokenHint] = useState(false);
   const [showTokenEditor, setShowTokenEditor] = useState(false);
   const [cachedSettings, setCachedSettings] = useState<GitHubSyncSettings | null>(null);
+  const [existingProjectCandidates, setExistingProjectCandidates] = useState<ExistingProjectSyncCandidate[]>([]);
+  const [existingProjectCandidatesLoading, setExistingProjectCandidatesLoading] = useState(false);
+  const [existingProjectCandidatesError, setExistingProjectCandidatesError] = useState<string | null>(null);
   const themeMode = useResolvedThemeMode();
   const boardAccessRequirement = usePaperclipBoardAccessRequirement();
   const armSyncCompletionToast = useSyncCompletionToast(form.syncState, toast);
@@ -3253,6 +3330,50 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
       setValidatedLogin(null);
     }
   }, [settings.data, showSavedTokenHint]);
+
+  useEffect(() => {
+    const companyId = hostContext.companyId;
+    if (!companyId || tokenStatusOverride === 'invalid') {
+      setExistingProjectCandidates([]);
+      setExistingProjectCandidatesLoading(false);
+      setExistingProjectCandidatesError(null);
+      return;
+    }
+
+    let cancelled = false;
+    setExistingProjectCandidatesLoading(true);
+    setExistingProjectCandidatesError(null);
+
+    void (async () => {
+      try {
+        const candidates = await loadExistingProjectSyncCandidates(companyId);
+        if (cancelled) {
+          return;
+        }
+
+        setExistingProjectCandidates(candidates);
+      } catch (error) {
+        if (cancelled) {
+          return;
+        }
+
+        setExistingProjectCandidates([]);
+        setExistingProjectCandidatesError(
+          error instanceof Error
+            ? error.message
+            : 'GitHub Sync could not inspect existing GitHub-linked projects in this company.'
+        );
+      } finally {
+        if (!cancelled) {
+          setExistingProjectCandidatesLoading(false);
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [hostContext.companyId, settings.data?.updatedAt, tokenStatusOverride]);
 
   useEffect(() => {
     const companyId = hostContext.companyId;
@@ -3412,6 +3533,7 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
   const savedMappings = getComparableMappings(savedMappingsSource);
   const draftMappings = getComparableMappings(form.mappings);
   const savedMappingCount = savedMappings.length;
+  const availableExistingProjectCandidates = filterExistingProjectSyncCandidates(existingProjectCandidates, form.mappings);
   const repositoriesSectionDescription = hasCompanyContext
     ? `Only repositories mapped for ${currentCompanyName} appear here.`
     : 'Repository mappings are saved separately for each company.';
@@ -3570,6 +3692,33 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
       ...current,
       mappings: [...current.mappings, createEmptyMapping(current.mappings.length)]
     }));
+  }
+
+  function addExistingProjectCandidate(candidate: ExistingProjectSyncCandidate) {
+    setForm((current) => {
+      const emptyMappingIndex = current.mappings.findIndex((mapping) =>
+        !mapping.repositoryUrl.trim() && !mapping.paperclipProjectName.trim() && !mapping.paperclipProjectId
+      );
+      const nextMapping = {
+        ...(emptyMappingIndex === -1 ? createEmptyMapping(current.mappings.length) : current.mappings[emptyMappingIndex]),
+        repositoryUrl: candidate.repositoryUrl,
+        paperclipProjectName: candidate.projectName,
+        paperclipProjectId: candidate.projectId,
+        companyId: hostContext.companyId ?? undefined
+      };
+
+      if (emptyMappingIndex === -1) {
+        return {
+          ...current,
+          mappings: [...current.mappings, nextMapping]
+        };
+      }
+
+      return {
+        ...current,
+        mappings: current.mappings.map((mapping, index) => index === emptyMappingIndex ? nextMapping : mapping)
+      };
+    });
   }
 
   function removeMapping(mappingId: string) {
@@ -3790,7 +3939,7 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
           ? { id: mapping.paperclipProjectId, name: paperclipProjectName }
           : await resolveOrCreateProject(companyId, paperclipProjectName);
 
-        await bindProjectRepo(project.id, parsedRepository.url);
+        await ensureProjectRepoBinding(project.id, parsedRepository.url);
 
         resolvedMappings.push({
           ...mapping,
@@ -4155,6 +4304,42 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
             ) : (
               <div className="ghsync__stack">
                 {settingsMutationsLockReason ? <p className="ghsync__hint">{settingsMutationsLockReason}</p> : null}
+                {existingProjectCandidatesLoading ? (
+                  <p className="ghsync__hint">Checking this company for GitHub-linked projects that can be enabled for sync…</p>
+                ) : null}
+                {existingProjectCandidatesError ? (
+                  <p className="ghsync__hint ghsync__hint--error">{existingProjectCandidatesError}</p>
+                ) : null}
+                {availableExistingProjectCandidates.length > 0 ? (
+                  <div className="ghsync__existing-projects">
+                    <div className="ghsync__mapping-title">
+                      <strong>Existing GitHub-linked projects</strong>
+                      <span>Enable sync for projects that are already bound to a GitHub repository in {currentCompanyName}.</span>
+                    </div>
+                    {availableExistingProjectCandidates.map((candidate) => (
+                      <section key={`${candidate.projectId}:${candidate.repositoryUrl}`} className="ghsync__mapping-card ghsync__existing-project-card">
+                        <div className="ghsync__existing-project-meta">
+                          <strong>{candidate.projectName}</strong>
+                          <span>{candidate.repositoryUrl}</span>
+                          <div className="ghsync__existing-project-tags">
+                            <span className="ghsync__scope-pill ghsync__scope-pill--company">Existing project</span>
+                            <span className="ghsync__scope-pill ghsync__scope-pill--global">GitHub workspace</span>
+                          </div>
+                        </div>
+                        <div className="ghsync__button-row">
+                          <button
+                            type="button"
+                            className={getPluginActionClassName({ variant: 'secondary' })}
+                            disabled={settingsMutationsLocked}
+                            onClick={() => addExistingProjectCandidate(candidate)}
+                          >
+                            Enable sync
+                          </button>
+                        </div>
+                      </section>
+                    ))}
+                  </div>
+                ) : null}
                 <div className="ghsync__mapping-list">
                   {mappings.map((mapping, index) => {
                     const canRemove = mappings.length > 1 || mapping.repositoryUrl.trim() !== '' || mapping.paperclipProjectName.trim() !== '';
@@ -4164,6 +4349,9 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
                         <div className="ghsync__mapping-head">
                           <div className="ghsync__mapping-title">
                             <strong>Repository {index + 1}</strong>
+                            {mapping.paperclipProjectId ? (
+                              <span>This mapping will sync into an existing Paperclip project.</span>
+                            ) : null}
                           </div>
                           {canRemove ? (
                             <button
