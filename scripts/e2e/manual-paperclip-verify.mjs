@@ -434,6 +434,28 @@ async function cleanup() {
   }
 }
 
+async function resolvePluginSettingsUrl() {
+  const { chromium } = await import('playwright');
+  const browser = await chromium.launch({ headless: true });
+  const page = await browser.newPage();
+
+  try {
+    const settingsIndexUrl = new URL('/instance/settings/plugins', baseUrl).toString();
+    await page.goto(settingsIndexUrl, { waitUntil: 'load', timeout: 120000 });
+
+    const pluginLink = page.getByRole('link', { name: 'GitHub Sync' }).first();
+    await pluginLink.waitFor({ timeout: 120000 });
+    const href = await pluginLink.getAttribute('href');
+    if (!href) {
+      throw new Error('Could not resolve plugin settings detail href for manual verification.');
+    }
+
+    return new URL(href, baseUrl).toString();
+  } finally {
+    await browser.close();
+  }
+}
+
 async function main() {
   process.on('SIGINT', () => {
     if (shutdownRequested) {
@@ -488,7 +510,7 @@ async function main() {
   await ensureSeedAgent(company);
   await ensurePluginInstalled(configPath);
 
-  const manualUrl = `${baseUrl}/settings/plugins`;
+  const manualUrl = await resolvePluginSettingsUrl();
   await runCommand('open', [manualUrl], { stdio: 'ignore' });
 
   console.log('');

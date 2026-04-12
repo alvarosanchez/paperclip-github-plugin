@@ -1183,58 +1183,194 @@ const PAGE_STYLES = `
   cursor: not-allowed;
 }
 
-.ghsync__native-select {
+.ghsync__picker {
   position: relative;
 }
 
-.ghsync__native-select-input {
-  width: 100%;
-  min-height: 40px;
-  appearance: none;
-  border-radius: 10px;
-  border: 1px solid var(--ghsync-input-border);
-  background: var(--ghsync-input-bg);
-  color: var(--ghsync-input-text);
-  padding: 0 38px 0 12px;
-  outline: none;
+.ghsync__picker-trigger {
+  width: fit-content;
+  max-width: 100%;
+  min-height: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  border-radius: 8px;
+  border: 1px solid var(--ghsync-border);
+  background: color-mix(in srgb, var(--ghsync-badgeBg) 72%, transparent);
+  color: var(--ghsync-text);
+  padding: 4px 8px;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color 120ms ease, color 120ms ease, border-color 120ms ease;
 }
 
-.ghsync__native-select--with-dot .ghsync__native-select-input {
-  padding-left: 34px;
-}
-
-.ghsync__native-select-input:disabled {
+.ghsync__picker-trigger:disabled {
   opacity: 0.72;
   cursor: not-allowed;
 }
 
-.ghsync__native-select-input:focus,
-.ghsync__native-select-input:focus-visible {
+.ghsync__picker-trigger:focus,
+.ghsync__picker-trigger:focus-visible {
+  outline: none;
   border-color: var(--ghsync-border);
 }
 
-.ghsync__native-select-icon {
-  position: absolute;
-  inset: 0 12px 0 auto;
+.ghsync__picker-trigger:hover {
+  background: var(--ghsync-surfaceRaised);
+}
+
+.ghsync__picker-trigger--assignee {
+  min-width: 10rem;
+  font-size: 14px;
+  font-weight: 500;
+}
+
+.ghsync__picker-trigger--status {
+  font-size: 12px;
+}
+
+.ghsync__picker-trigger-main {
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.ghsync__picker-agent-icon {
   flex: 0 0 auto;
   display: inline-flex;
   align-items: center;
   color: var(--ghsync-muted);
-  pointer-events: none;
 }
 
-.ghsync__native-select-icon svg {
+.ghsync__picker-agent-icon svg {
+  width: 14px;
+  height: 14px;
+}
+
+.ghsync__picker-trigger-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ghsync__picker-trigger-icon {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  color: var(--ghsync-muted);
+}
+
+.ghsync__picker-trigger-icon svg,
+.ghsync__picker-option-check svg {
   width: 16px;
   height: 16px;
 }
 
-.ghsync__native-select-dot {
+.ghsync__picker-panel {
   position: absolute;
-  display: inline-flex;
+  top: calc(100% + 8px);
+  left: 0;
+  z-index: 30;
+  border-radius: 8px;
+  border: 1px solid var(--ghsync-border);
+  background: var(--ghsync-surfaceAlt);
+  box-shadow: var(--ghsync-shadow);
+  padding: 4px;
+}
+
+.ghsync__picker-panel--assignee {
+  width: min(20rem, calc(100vw - 2rem));
+}
+
+.ghsync__picker-panel--status {
+  width: 9rem;
+}
+
+.ghsync__picker-search {
+  padding: 2px 2px 6px;
+}
+
+.ghsync__picker-search-input {
+  width: 100%;
+  min-height: 32px;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--ghsync-input-text);
+  padding: 0 8px;
+  font-size: 14px;
+  outline: none;
+}
+
+.ghsync__picker-search-input::placeholder {
+  color: var(--ghsync-muted);
+}
+
+.ghsync__picker-search-input:focus,
+.ghsync__picker-search-input:focus-visible {
+  border-color: var(--ghsync-input-border);
+  background: var(--ghsync-surfaceRaised);
+}
+
+.ghsync__picker-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 240px;
+  overflow: auto;
+}
+
+.ghsync__picker-option {
+  width: 100%;
+  display: flex;
   align-items: center;
-  justify-content: center;
-  inset: 0 auto 0 12px;
-  pointer-events: none;
+  justify-content: space-between;
+  gap: 8px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--ghsync-input-text);
+  padding: 6px 8px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.ghsync__picker-option:hover,
+.ghsync__picker-option:focus,
+.ghsync__picker-option:focus-visible,
+.ghsync__picker-option--selected {
+  outline: none;
+  background: var(--ghsync-surfaceRaised);
+}
+
+.ghsync__picker-panel--assignee .ghsync__picker-option {
+  font-size: 14px;
+  touch-action: manipulation;
+}
+
+.ghsync__picker-panel--status .ghsync__picker-option {
+  font-size: 12px;
+}
+
+.ghsync__picker-option-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ghsync__picker-option-check {
+  flex: 0 0 auto;
+  color: var(--ghsync-muted);
+}
+
+.ghsync__picker-empty {
+  padding: 10px 12px;
+  color: var(--ghsync-muted);
+  font-size: 13px;
 }
 
 .ghsync__select-dot {
@@ -2260,6 +2396,313 @@ interface SettingsSelectOption {
   value: string;
   label: string;
   tone?: SelectTone;
+  icon?: 'agent';
+}
+
+function PickerChevronIcon(): React.JSX.Element {
+  return (
+    <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <path d="M4 6.5L8 10.5L12 6.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function PickerCheckIcon(): React.JSX.Element {
+  return (
+    <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <path d="M3.75 8.25L6.5 11L12.25 5.25" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function AgentIcon(): React.JSX.Element {
+  return (
+    <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <path
+        d="M8 1.75L8.96 4.31L11.5 5.25L8.96 6.19L8 8.75L7.04 6.19L4.5 5.25L7.04 4.31L8 1.75Z"
+        stroke="currentColor"
+        strokeWidth="1.15"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <path
+        d="M12.25 8.75L12.77 10.23L14.25 10.75L12.77 11.27L12.25 12.75L11.73 11.27L10.25 10.75L11.73 10.23L12.25 8.75Z"
+        stroke="currentColor"
+        strokeWidth="1.15"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <path
+        d="M4.25 9.75L4.64 10.86L5.75 11.25L4.64 11.64L4.25 12.75L3.86 11.64L2.75 11.25L3.86 10.86L4.25 9.75Z"
+        stroke="currentColor"
+        strokeWidth="1.15"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+function SettingsAssigneePicker(props: {
+  id: string;
+  value: string;
+  options: SettingsSelectOption[];
+  disabled?: boolean;
+  onChange: (value: string) => void;
+}): React.JSX.Element {
+  const { id, value, options, disabled, onChange } = props;
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState('');
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const searchInputRef = useRef<HTMLInputElement | null>(null);
+  const selectedOption = options.find((option) => option.value === value) ?? options[0];
+  const normalizedQuery = query.trim().toLowerCase();
+  const filteredOptions = normalizedQuery
+    ? options.filter((option) => option.label.toLowerCase().includes(normalizedQuery))
+    : options;
+
+  useEffect(() => {
+    if (!open) {
+      setQuery('');
+      return;
+    }
+
+    const handlePointerDown = (event: PointerEvent) => {
+      const target = event.target;
+      if (target instanceof Node && rootRef.current?.contains(target)) {
+        return;
+      }
+
+      setOpen(false);
+    };
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setOpen(false);
+      }
+    };
+
+    document.addEventListener('pointerdown', handlePointerDown);
+    document.addEventListener('keydown', handleKeyDown);
+
+    globalThis.setTimeout(() => {
+      searchInputRef.current?.focus();
+      searchInputRef.current?.select();
+    }, 0);
+
+    return () => {
+      document.removeEventListener('pointerdown', handlePointerDown);
+      document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [open]);
+
+  useEffect(() => {
+    if (disabled && open) {
+      setOpen(false);
+    }
+  }, [disabled, open]);
+
+  return (
+    <div className="ghsync__picker" ref={rootRef}>
+      <button
+        id={id}
+        type="button"
+        className="ghsync__picker-trigger ghsync__picker-trigger--assignee"
+        disabled={disabled}
+        aria-haspopup="dialog"
+        aria-expanded={open}
+        onClick={() => {
+          if (disabled) {
+            return;
+          }
+
+          setOpen((current) => !current);
+        }}
+      >
+        <span className="ghsync__picker-trigger-main">
+          {selectedOption?.icon === 'agent' ? (
+            <span className="ghsync__picker-agent-icon" aria-hidden="true">
+              <AgentIcon />
+            </span>
+          ) : null}
+          <span className="ghsync__picker-trigger-label">{selectedOption?.label ?? 'No assignee'}</span>
+        </span>
+        <span className="ghsync__picker-trigger-icon">
+          <PickerChevronIcon />
+        </span>
+      </button>
+
+      {open ? (
+        <div className="ghsync__picker-panel ghsync__picker-panel--assignee" role="dialog" aria-label="Choose default assignee">
+          <div className="ghsync__picker-search">
+            <input
+              ref={searchInputRef}
+              type="text"
+              className="ghsync__picker-search-input"
+              placeholder="Search assignees..."
+              value={query}
+              onChange={(event) => {
+                setQuery(event.currentTarget.value);
+              }}
+              onKeyDown={(event) => {
+                if (event.key === 'Escape') {
+                  event.preventDefault();
+                  setOpen(false);
+                }
+              }}
+            />
+          </div>
+
+          <div className="ghsync__picker-list" role="listbox" aria-labelledby={id}>
+            {filteredOptions.length > 0 ? (
+              filteredOptions.map((option) => {
+                const selected = option.value === value;
+
+                return (
+                  <button
+                    key={option.value || '__unassigned'}
+                    type="button"
+                    role="option"
+                    aria-selected={selected}
+                    className={`ghsync__picker-option${selected ? ' ghsync__picker-option--selected' : ''}`}
+                    onClick={() => {
+                      onChange(option.value);
+                      setOpen(false);
+                    }}
+                  >
+                    <span className="ghsync__picker-trigger-main">
+                      {option.icon === 'agent' ? (
+                        <span className="ghsync__picker-agent-icon" aria-hidden="true">
+                          <AgentIcon />
+                        </span>
+                      ) : null}
+                      <span className="ghsync__picker-option-label">{option.label}</span>
+                    </span>
+                    <span className="ghsync__picker-option-check" aria-hidden="true">
+                      {selected ? <PickerCheckIcon /> : null}
+                    </span>
+                  </button>
+                );
+              })
+            ) : (
+              <div className="ghsync__picker-empty">No assignees match.</div>
+            )}
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function SettingsStatusPicker(props: {
+  id: string;
+  value: string;
+  options: SettingsSelectOption[];
+  disabled?: boolean;
+  onChange: (value: string) => void;
+}): React.JSX.Element {
+  const { id, value, options, disabled, onChange } = props;
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const selectedOption = options.find((option) => option.value === value) ?? options[0];
+
+  useEffect(() => {
+    if (!open) {
+      return;
+    }
+
+    const handlePointerDown = (event: PointerEvent) => {
+      const target = event.target;
+      if (target instanceof Node && rootRef.current?.contains(target)) {
+        return;
+      }
+
+      setOpen(false);
+    };
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setOpen(false);
+      }
+    };
+
+    document.addEventListener('pointerdown', handlePointerDown);
+    document.addEventListener('keydown', handleKeyDown);
+
+    return () => {
+      document.removeEventListener('pointerdown', handlePointerDown);
+      document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [open]);
+
+  useEffect(() => {
+    if (disabled && open) {
+      setOpen(false);
+    }
+  }, [disabled, open]);
+
+  return (
+    <div className="ghsync__picker" ref={rootRef}>
+      <button
+        id={id}
+        type="button"
+        className="ghsync__picker-trigger ghsync__picker-trigger--status"
+        disabled={disabled}
+        aria-haspopup="dialog"
+        aria-expanded={open}
+        onClick={() => {
+          if (disabled) {
+            return;
+          }
+
+          setOpen((current) => !current);
+        }}
+      >
+        <span className="ghsync__picker-trigger-main">
+          <span
+            className={`ghsync__select-dot ghsync__select-dot--${selectedOption?.tone ?? 'neutral'}`}
+            aria-hidden="true"
+          />
+          <span className="ghsync__picker-trigger-label">{selectedOption?.label ?? 'Backlog'}</span>
+        </span>
+      </button>
+
+      {open ? (
+        <div className="ghsync__picker-panel ghsync__picker-panel--status" role="dialog" aria-label="Choose default status">
+          <div className="ghsync__picker-list" role="listbox" aria-labelledby={id}>
+            {options.map((option) => {
+              const selected = option.value === value;
+
+              return (
+                <button
+                  key={option.value}
+                  type="button"
+                  role="option"
+                  aria-selected={selected}
+                  className={`ghsync__picker-option${selected ? ' ghsync__picker-option--selected' : ''}`}
+                  onClick={() => {
+                    onChange(option.value);
+                    setOpen(false);
+                  }}
+                >
+                  <span className="ghsync__picker-trigger-main">
+                    <span
+                      className={`ghsync__select-dot ghsync__select-dot--${option.tone ?? 'neutral'}`}
+                      aria-hidden="true"
+                    />
+                    <span className="ghsync__picker-option-label">{option.label}</span>
+                  </span>
+                  <span className="ghsync__picker-option-check" aria-hidden="true">
+                    {selected ? <PickerCheckIcon /> : null}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
 }
 
 function normalizeScheduleFrequencyMinutes(value: unknown): number {
@@ -3905,7 +4348,8 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
     { value: '', label: 'Unassigned' },
     ...availableAssignees.map((option) => ({
       value: option.id,
-      label: formatAssigneeOptionLabel(option)
+      label: formatAssigneeOptionLabel(option),
+      icon: 'agent' as const
     }))
   ];
   const statusSelectOptions: SettingsSelectOption[] = PAPERCLIP_STATUS_OPTIONS.map((option) => ({
@@ -3913,10 +4357,6 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
     label: option.label,
     tone: option.tone
   }));
-  const selectedStatusOption =
-    statusSelectOptions.find((option) => option.value === form.advancedSettings.defaultStatus)
-    ?? statusSelectOptions[0];
-
   useEffect(() => {
     if (advancedSettingsDirty) {
       setShowAdvancedSettings(true);
@@ -4705,71 +5145,40 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
                 <div className="ghsync__mapping-grid">
                   <div className="ghsync__field">
                     <label htmlFor="advanced-default-assignee">Default assignee</label>
-                    <div className="ghsync__native-select">
-                      <select
-                        id="advanced-default-assignee"
-                        className="ghsync__input ghsync__native-select-input"
-                        value={form.advancedSettings.defaultAssigneeAgentId ?? ''}
-                        disabled={settingsMutationsLocked}
-                        onChange={(event) => {
-                          const nextValue = event.currentTarget.value.trim();
-                          setForm((current) => ({
-                            ...current,
-                            advancedSettings: {
-                              ...current.advancedSettings,
-                              ...(nextValue ? { defaultAssigneeAgentId: nextValue } : { defaultAssigneeAgentId: undefined })
-                            }
-                          }));
-                        }}
-                      >
-                        {assigneeSelectOptions.map((option) => (
-                          <option key={option.value || '__unassigned'} value={option.value}>
-                            {option.label}
-                          </option>
-                        ))}
-                      </select>
-                      <span className="ghsync__native-select-icon" aria-hidden="true">
-                        <svg viewBox="0 0 16 16" fill="none">
-                          <path d="M4 6.5L8 10.5L12 6.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-                        </svg>
-                      </span>
-                    </div>
+                    <SettingsAssigneePicker
+                      id="advanced-default-assignee"
+                      value={form.advancedSettings.defaultAssigneeAgentId ?? ''}
+                      options={assigneeSelectOptions}
+                      disabled={settingsMutationsLocked}
+                      onChange={(nextValue) => {
+                        setForm((current) => ({
+                          ...current,
+                          advancedSettings: {
+                            ...current.advancedSettings,
+                            ...(nextValue ? { defaultAssigneeAgentId: nextValue } : { defaultAssigneeAgentId: undefined })
+                          }
+                        }));
+                      }}
+                    />
                   </div>
 
                   <div className="ghsync__field">
                     <label htmlFor="advanced-default-status">Default status</label>
-                    <div className="ghsync__native-select ghsync__native-select--with-dot">
-                      <span
-                        className={`ghsync__select-dot ghsync__native-select-dot ghsync__select-dot--${selectedStatusOption.tone ?? 'neutral'}`}
-                        aria-hidden="true"
-                      />
-                      <select
-                        id="advanced-default-status"
-                        className="ghsync__input ghsync__native-select-input"
-                        value={form.advancedSettings.defaultStatus}
-                        disabled={settingsMutationsLocked}
-                        onChange={(event) => {
-                          setForm((current) => ({
-                            ...current,
-                            advancedSettings: {
-                              ...current.advancedSettings,
-                              defaultStatus: normalizePaperclipIssueStatus(event.currentTarget.value)
-                            }
-                          }));
-                        }}
-                      >
-                        {statusSelectOptions.map((option) => (
-                          <option key={option.value} value={option.value}>
-                            {option.label}
-                          </option>
-                        ))}
-                      </select>
-                      <span className="ghsync__native-select-icon" aria-hidden="true">
-                        <svg viewBox="0 0 16 16" fill="none">
-                          <path d="M4 6.5L8 10.5L12 6.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-                        </svg>
-                      </span>
-                    </div>
+                    <SettingsStatusPicker
+                      id="advanced-default-status"
+                      value={form.advancedSettings.defaultStatus}
+                      options={statusSelectOptions}
+                      disabled={settingsMutationsLocked}
+                      onChange={(nextValue) => {
+                        setForm((current) => ({
+                          ...current,
+                          advancedSettings: {
+                            ...current.advancedSettings,
+                            defaultStatus: normalizePaperclipIssueStatus(nextValue)
+                          }
+                        }));
+                      }}
+                    />
                   </div>
                 </div>
 
