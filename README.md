@@ -13,6 +13,7 @@ It is designed for teams that plan in Paperclip but still receive work through G
 - Supports an optional worker-local config file at `~/.paperclip/plugins/github-sync/config.json` for a raw `githubToken` fallback when Paperclip-managed secrets are not available.
 - Can store a per-company Paperclip board API token for worker-side REST calls when Paperclip board access requires sign-in.
 - Adds Paperclip UI surfaces for setup, sync status, manual sync actions, issue details, and GitHub link annotations.
+- Exposes agent tools so Paperclip agents can search GitHub for duplicates, read and update issues, open pull requests, inspect CI, work through review threads, and request reviewers without leaving the plugin surface.
 
 ## User-facing features
 
@@ -46,6 +47,14 @@ It is designed for teams that plan in Paperclip but still receive work through G
 - Background completion for long-running manual or scheduled syncs so the host request can return promptly.
 - Live sync progress and troubleshooting details in the Paperclip UI.
 - Cumulative sync counts and last-run status in plugin state.
+
+### Agent tools
+
+- Repository-scoped search for issues and pull requests to support deduplication during triage.
+- GitHub issue read, comment-read, comment-write, and metadata update tools for agent implementation work.
+- Pull request creation, read, update, changed-file, CI-check, review-thread, and reviewer-request tools for agent delivery work.
+- Review-thread reply plus resolve and unresolve tools so agents can respond to automated review feedback directly from Paperclip.
+- Comment-posting tools automatically append a footer disclosing that a Paperclip AI agent authored the message and which LLM was used; callers must provide the LLM name when posting those messages.
 
 ### Issue import and update behavior
 

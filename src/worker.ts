@@ -2,8 +2,9 @@ import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { Octokit } from '@octokit/rest';
-import { definePlugin, runWorker, type Issue } from '@paperclipai/plugin-sdk';
+import { definePlugin, runWorker, type Issue, type ToolResult, type ToolRunContext } from '@paperclipai/plugin-sdk';
 
+import { getGitHubAgentToolDeclaration } from './github-agent-tools.ts';
 import { normalizePaperclipHealthResponse, requiresPaperclipBoardAccess } from './paperclip-health.ts';
 
 const SETTINGS_SCOPE = {
@@ -42,6 +43,7 @@ const MISSING_BOARD_ACCESS_SYNC_ACTION =
 const ISSUE_LINK_ENTITY_TYPE = 'paperclip-github-plugin.issue-link';
 const COMMENT_ANNOTATION_ENTITY_TYPE = 'paperclip-github-plugin.comment-annotation';
 const EXTERNAL_CONFIG_FILE_PATH_SEGMENTS = ['.paperclip', 'plugins', 'github-sync', 'config.json'] as const;
+const AI_AUTHORED_COMMENT_FOOTER_PREFIX = 'Created by a Paperclip AI agent using ';
 
 type PluginSetupContext = Parameters<Parameters<typeof definePlugin>[0]['setup']>[0];
 type PaperclipIssueStatus = Issue['status'];
@@ -531,11 +533,124 @@ interface GitHubRepositoryOpenPullRequestStatusesQueryResult {
   } | null;
 }
 
+interface GitHubPullRequestReviewThreadsDetailedQueryResult {
+  repository?: {
+    pullRequest?: {
+      reviewThreads?: {
+        pageInfo?: GitHubPageInfo | null;
+        nodes?: Array<{
+          id?: string | null;
+          isResolved?: boolean | null;
+          isOutdated?: boolean | null;
+          path?: string | null;
+          line?: number | null;
+          originalLine?: number | null;
+          startLine?: number | null;
+          originalStartLine?: number | null;
+          comments?: {
+            totalCount?: number | null;
+            nodes?: Array<{
+              id?: string | null;
+              databaseId?: number | null;
+              body?: string | null;
+              url?: string | null;
+              createdAt?: string | null;
+              author?: {
+                login?: string | null;
+              } | null;
+              replyTo?: {
+                id?: string | null;
+              } | null;
+            } | null> | null;
+          } | null;
+        } | null> | null;
+      } | null;
+    } | null;
+  } | null;
+}
+
+interface GitHubAddPullRequestReviewThreadReplyMutationResult {
+  addPullRequestReviewThreadReply?: {
+    comment?: {
+      id?: string | null;
+      body?: string | null;
+      url?: string | null;
+      createdAt?: string | null;
+      author?: {
+        login?: string | null;
+      } | null;
+    } | null;
+  } | null;
+}
+
+interface GitHubResolveReviewThreadMutationResult {
+  resolveReviewThread?: {
+    thread?: {
+      id?: string | null;
+      isResolved?: boolean | null;
+    } | null;
+  } | null;
+}
+
+interface GitHubUnresolveReviewThreadMutationResult {
+  unresolveReviewThread?: {
+    thread?: {
+      id?: string | null;
+      isResolved?: boolean | null;
+    } | null;
+  } | null;
+}
+
+interface GitHubConvertPullRequestToDraftMutationResult {
+  convertPullRequestToDraft?: {
+    pullRequest?: {
+      id?: string | null;
+      number?: number | null;
+      isDraft?: boolean | null;
+      url?: string | null;
+    } | null;
+  } | null;
+}
+
+interface GitHubMarkPullRequestReadyForReviewMutationResult {
+  markPullRequestReadyForReview?: {
+    pullRequest?: {
+      id?: string | null;
+      number?: number | null;
+      isDraft?: boolean | null;
+      url?: string | null;
+    } | null;
+  } | null;
+}
+
 interface GitHubCiContextRecord {
   type: 'checkRun' | 'statusContext';
   status?: string;
   conclusion?: string;
   state?: string;
+}
+
+interface GitHubReviewThreadCommentRecord {
+  id: string;
+  databaseId?: number;
+  body: string;
+  url?: string;
+  createdAt?: string;
+  authorLogin?: string;
+  replyToId?: string;
+}
+
+interface GitHubReviewThreadRecord {
+  id: string;
+  isResolved: boolean;
+  isOutdated: boolean;
+  path?: string;
+  line?: number;
+  originalLine?: number;
+  startLine?: number;
+  originalStartLine?: number;
+  comments: GitHubReviewThreadCommentRecord[];
+  totalCommentCount?: number;
 }
 
 interface SyncProcessingFailure {
@@ -702,6 +817,122 @@ const GITHUB_REPOSITORY_OPEN_PULL_REQUEST_STATUSES_QUERY = `
             }
           }
         }
+      }
+    }
+  }
+`;
+
+const GITHUB_PULL_REQUEST_REVIEW_THREADS_DETAILED_QUERY = `
+  query GitHubPullRequestReviewThreadsDetailed($owner: String!, $repo: String!, $pullRequestNumber: Int!, $after: String) {
+    repository(owner: $owner, name: $repo) {
+      pullRequest(number: $pullRequestNumber) {
+        reviewThreads(first: 100, after: $after) {
+          pageInfo {
+            hasNextPage
+            endCursor
+          }
+          nodes {
+            id
+            isResolved
+            isOutdated
+            path
+            line
+            originalLine
+            startLine
+            originalStartLine
+            comments(first: 100) {
+              totalCount
+              nodes {
+                id
+                databaseId
+                body
+                url
+                createdAt
+                author {
+                  login
+                }
+                replyTo {
+                  id
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+`;
+
+const GITHUB_ADD_PULL_REQUEST_REVIEW_THREAD_REPLY_MUTATION = `
+  mutation GitHubAddPullRequestReviewThreadReply($pullRequestReviewThreadId: ID!, $body: String!) {
+    addPullRequestReviewThreadReply(input: {
+      pullRequestReviewThreadId: $pullRequestReviewThreadId
+      body: $body
+    }) {
+      comment {
+        id
+        body
+        url
+        createdAt
+        author {
+          login
+        }
+      }
+    }
+  }
+`;
+
+const GITHUB_RESOLVE_REVIEW_THREAD_MUTATION = `
+  mutation GitHubResolveReviewThread($threadId: ID!) {
+    resolveReviewThread(input: {
+      threadId: $threadId
+    }) {
+      thread {
+        id
+        isResolved
+      }
+    }
+  }
+`;
+
+const GITHUB_UNRESOLVE_REVIEW_THREAD_MUTATION = `
+  mutation GitHubUnresolveReviewThread($threadId: ID!) {
+    unresolveReviewThread(input: {
+      threadId: $threadId
+    }) {
+      thread {
+        id
+        isResolved
+      }
+    }
+  }
+`;
+
+const GITHUB_CONVERT_PULL_REQUEST_TO_DRAFT_MUTATION = `
+  mutation GitHubConvertPullRequestToDraft($pullRequestId: ID!) {
+    convertPullRequestToDraft(input: {
+      pullRequestId: $pullRequestId
+    }) {
+      pullRequest {
+        id
+        number
+        isDraft
+        url
+      }
+    }
+  }
+`;
+
+const GITHUB_MARK_PULL_REQUEST_READY_FOR_REVIEW_MUTATION = `
+  mutation GitHubMarkPullRequestReadyForReview($pullRequestId: ID!) {
+    markPullRequestReadyForReview(input: {
+      pullRequestId: $pullRequestId
+    }) {
+      pullRequest {
+        id
+        number
+        isDraft
+        url
       }
     }
   }
@@ -5843,6 +6074,530 @@ async function resolveGithubToken(ctx: PluginSetupContext): Promise<string> {
   return configuredTokenSource.token ?? '';
 }
 
+function getToolInputRecord(params: unknown): Record<string, unknown> {
+  return params && typeof params === 'object' ? params as Record<string, unknown> : {};
+}
+
+function normalizeOptionalToolString(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim() ? value.trim() : undefined;
+}
+
+function normalizeToolPositiveInteger(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isInteger(value) && value > 0 ? value : undefined;
+}
+
+function normalizeToolStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  const seen = new Set<string>();
+  const normalizedValues: string[] = [];
+
+  for (const entry of value) {
+    if (typeof entry !== 'string') {
+      continue;
+    }
+
+    const trimmed = entry.trim();
+    const key = trimmed.toLowerCase();
+    if (!trimmed || seen.has(key)) {
+      continue;
+    }
+
+    seen.add(key);
+    normalizedValues.push(trimmed);
+  }
+
+  return normalizedValues;
+}
+
+function formatRepositoryLabel(repository: Pick<ParsedRepositoryReference, 'owner' | 'repo'>): string {
+  return `${repository.owner}/${repository.repo}`;
+}
+
+function buildToolSuccessResult(content: string, data: unknown): ToolResult {
+  return {
+    content,
+    data
+  };
+}
+
+function buildToolErrorResult(error: unknown): ToolResult {
+  const rateLimitPause = getGitHubRateLimitPauseDetails(error);
+  if (rateLimitPause) {
+    const resourceLabel = formatGitHubRateLimitResource(rateLimitPause.resource) ?? 'GitHub API';
+    return {
+      error: `${resourceLabel} rate limit reached. Wait until ${formatUtcTimestamp(rateLimitPause.resetAt)} before retrying.`
+    };
+  }
+
+  return {
+    error: getErrorMessage(error)
+  };
+}
+
+async function executeGitHubTool(
+  fn: () => Promise<ToolResult>
+): Promise<ToolResult> {
+  try {
+    return await fn();
+  } catch (error) {
+    return buildToolErrorResult(error);
+  }
+}
+
+async function createGitHubToolOctokit(ctx: PluginSetupContext): Promise<Octokit> {
+  const token = (await resolveGithubToken(ctx)).trim();
+  if (!token) {
+    throw new Error(MISSING_GITHUB_TOKEN_SYNC_MESSAGE);
+  }
+
+  return new Octokit({ auth: token });
+}
+
+async function resolveRepositoryFromRunContext(
+  ctx: PluginSetupContext,
+  runCtx: ToolRunContext
+): Promise<ParsedRepositoryReference> {
+  const settings = normalizeSettings(await ctx.state.get(SETTINGS_SCOPE));
+  const mappings = getSyncableMappingsForTarget(settings.mappings, {
+    kind: 'project',
+    companyId: runCtx.companyId,
+    projectId: runCtx.projectId,
+    displayLabel: 'project'
+  });
+  const repositories = [
+    ...new Map(
+      mappings
+        .map((mapping) => {
+          const repository = parseRepositoryReference(mapping.repositoryUrl);
+          return repository ? [repository.url, repository] as const : null;
+        })
+        .filter((entry): entry is readonly [string, ParsedRepositoryReference] => entry !== null)
+    ).values()
+  ];
+
+  if (repositories.length === 1) {
+    return repositories[0];
+  }
+
+  if (repositories.length === 0) {
+    throw new Error('No GitHub repository is mapped to the current Paperclip project. Pass repository explicitly.');
+  }
+
+  throw new Error('Multiple GitHub repositories are mapped to the current Paperclip project. Pass repository explicitly.');
+}
+
+async function resolveGitHubToolRepository(
+  ctx: PluginSetupContext,
+  runCtx: ToolRunContext,
+  input: Record<string, unknown>
+): Promise<ParsedRepositoryReference> {
+  const explicitRepository = normalizeOptionalToolString(input.repository);
+  if (explicitRepository) {
+    return requireRepositoryReference(explicitRepository);
+  }
+
+  const paperclipIssueId = normalizeOptionalToolString(input.paperclipIssueId);
+  if (paperclipIssueId) {
+    const link = await resolvePaperclipIssueGitHubLink(ctx, paperclipIssueId, runCtx.companyId);
+    if (!link) {
+      throw new Error('This Paperclip issue is not linked to a GitHub issue yet. Pass repository explicitly.');
+    }
+
+    return requireRepositoryReference(link.repositoryUrl);
+  }
+
+  return resolveRepositoryFromRunContext(ctx, runCtx);
+}
+
+async function resolveGitHubIssueToolTarget(
+  ctx: PluginSetupContext,
+  runCtx: ToolRunContext,
+  input: Record<string, unknown>
+): Promise<{
+  repository: ParsedRepositoryReference;
+  issueNumber: number;
+  paperclipIssueId?: string;
+  githubIssueId?: number;
+  githubIssueUrl?: string;
+}> {
+  const paperclipIssueId = normalizeOptionalToolString(input.paperclipIssueId);
+  if (paperclipIssueId) {
+    const link = await resolvePaperclipIssueGitHubLink(ctx, paperclipIssueId, runCtx.companyId);
+    if (!link) {
+      throw new Error('This Paperclip issue is not linked to a GitHub issue yet.');
+    }
+
+    const repository = normalizeOptionalToolString(input.repository)
+      ? requireRepositoryReference(String(input.repository))
+      : requireRepositoryReference(link.repositoryUrl);
+    const explicitIssueNumber = normalizeToolPositiveInteger(input.issueNumber);
+    if (explicitIssueNumber !== undefined && explicitIssueNumber !== link.githubIssueNumber) {
+      throw new Error('The provided issue number does not match the linked GitHub issue for this Paperclip issue.');
+    }
+
+    return {
+      repository,
+      issueNumber: link.githubIssueNumber,
+      paperclipIssueId,
+      githubIssueId: link.githubIssueId,
+      githubIssueUrl: link.githubIssueUrl
+    };
+  }
+
+  const repository = await resolveGitHubToolRepository(ctx, runCtx, input);
+  const issueNumber = normalizeToolPositiveInteger(input.issueNumber);
+  if (issueNumber === undefined) {
+    throw new Error('issueNumber is required when paperclipIssueId is not provided.');
+  }
+
+  return {
+    repository,
+    issueNumber
+  };
+}
+
+async function resolveGitHubPullRequestToolTarget(
+  ctx: PluginSetupContext,
+  runCtx: ToolRunContext,
+  input: Record<string, unknown>
+): Promise<{
+  repository: ParsedRepositoryReference;
+  pullRequestNumber: number;
+  paperclipIssueId?: string;
+}> {
+  const paperclipIssueId = normalizeOptionalToolString(input.paperclipIssueId);
+  if (paperclipIssueId) {
+    const link = await resolvePaperclipIssueGitHubLink(ctx, paperclipIssueId, runCtx.companyId);
+    if (!link) {
+      throw new Error('This Paperclip issue is not linked to GitHub yet.');
+    }
+
+    const repository = normalizeOptionalToolString(input.repository)
+      ? requireRepositoryReference(String(input.repository))
+      : requireRepositoryReference(link.repositoryUrl);
+    const explicitPullRequestNumber = normalizeToolPositiveInteger(input.pullRequestNumber);
+    if (explicitPullRequestNumber !== undefined) {
+      return {
+        repository,
+        pullRequestNumber: explicitPullRequestNumber,
+        paperclipIssueId
+      };
+    }
+
+    if (link.linkedPullRequestNumbers.length === 1) {
+      return {
+        repository,
+        pullRequestNumber: link.linkedPullRequestNumbers[0],
+        paperclipIssueId
+      };
+    }
+
+    throw new Error('pullRequestNumber is required unless the linked Paperclip issue has exactly one linked pull request.');
+  }
+
+  const repository = await resolveGitHubToolRepository(ctx, runCtx, input);
+  const pullRequestNumber = normalizeToolPositiveInteger(input.pullRequestNumber);
+  if (pullRequestNumber === undefined) {
+    throw new Error('pullRequestNumber is required when paperclipIssueId is not provided.');
+  }
+
+  return {
+    repository,
+    pullRequestNumber
+  };
+}
+
+function formatAiAuthorshipFooter(llmModel: string): string {
+  return `\n\n---\n${AI_AUTHORED_COMMENT_FOOTER_PREFIX}${llmModel.trim()}.`;
+}
+
+function appendAiAuthorshipFooter(body: string, llmModel: string): string {
+  const trimmedBody = body.trim();
+  if (!trimmedBody) {
+    throw new Error('Comment body cannot be empty.');
+  }
+
+  const trimmedModel = llmModel.trim();
+  if (!trimmedModel) {
+    throw new Error('llmModel is required when posting a GitHub comment.');
+  }
+
+  return `${trimmedBody}${formatAiAuthorshipFooter(trimmedModel)}`;
+}
+
+async function fetchGitHubIssue(
+  octokit: Octokit,
+  repository: ParsedRepositoryReference,
+  issueNumber: number
+): Promise<GitHubIssueRecord> {
+  const response = await octokit.rest.issues.get({
+    owner: repository.owner,
+    repo: repository.repo,
+    issue_number: issueNumber,
+    headers: {
+      'X-GitHub-Api-Version': GITHUB_API_VERSION
+    }
+  });
+
+  return normalizeGitHubIssueRecord(response.data as GitHubApiIssueRecord);
+}
+
+async function listAllGitHubIssueComments(
+  octokit: Octokit,
+  repository: ParsedRepositoryReference,
+  issueNumber: number
+): Promise<Array<{
+  id: number;
+  body: string;
+  url?: string;
+  authorLogin?: string;
+  createdAt?: string;
+  updatedAt?: string;
+}>> {
+  const comments: Array<{
+    id: number;
+    body: string;
+    url?: string;
+    authorLogin?: string;
+    createdAt?: string;
+    updatedAt?: string;
+  }> = [];
+
+  for await (const response of octokit.paginate.iterator(octokit.rest.issues.listComments, {
+    owner: repository.owner,
+    repo: repository.repo,
+    issue_number: issueNumber,
+    per_page: 100,
+    headers: {
+      'X-GitHub-Api-Version': GITHUB_API_VERSION
+    }
+  })) {
+    for (const comment of response.data) {
+      comments.push({
+        id: comment.id,
+        body: comment.body ?? '',
+        url: comment.html_url ?? undefined,
+        authorLogin: comment.user?.login ?? undefined,
+        createdAt: comment.created_at ?? undefined,
+        updatedAt: comment.updated_at ?? undefined
+      });
+    }
+  }
+
+  return comments;
+}
+
+async function listAllPullRequestFiles(
+  octokit: Octokit,
+  repository: ParsedRepositoryReference,
+  pullRequestNumber: number
+): Promise<Array<{
+  filename: string;
+  status?: string;
+  additions: number;
+  deletions: number;
+  changes: number;
+  patch?: string;
+  blobUrl?: string;
+}>> {
+  const files: Array<{
+    filename: string;
+    status?: string;
+    additions: number;
+    deletions: number;
+    changes: number;
+    patch?: string;
+    blobUrl?: string;
+  }> = [];
+
+  for await (const response of octokit.paginate.iterator(octokit.rest.pulls.listFiles, {
+    owner: repository.owner,
+    repo: repository.repo,
+    pull_number: pullRequestNumber,
+    per_page: 100,
+    headers: {
+      'X-GitHub-Api-Version': GITHUB_API_VERSION
+    }
+  })) {
+    for (const file of response.data) {
+      files.push({
+        filename: file.filename,
+        status: file.status ?? undefined,
+        additions: file.additions,
+        deletions: file.deletions,
+        changes: file.changes,
+        patch: file.patch ?? undefined,
+        blobUrl: file.blob_url ?? undefined
+      });
+    }
+  }
+
+  return files;
+}
+
+function normalizeGitHubReviewThreadComment(
+  value: {
+    id?: string | null;
+    databaseId?: number | null;
+    body?: string | null;
+    url?: string | null;
+    createdAt?: string | null;
+    author?: {
+      login?: string | null;
+    } | null;
+    replyTo?: {
+      id?: string | null;
+    } | null;
+  } | null | undefined
+): GitHubReviewThreadCommentRecord | null {
+  if (!value?.id) {
+    return null;
+  }
+
+  return {
+    id: value.id,
+    ...(typeof value.databaseId === 'number' ? { databaseId: value.databaseId } : {}),
+    body: value.body ?? '',
+    ...(value.url ? { url: value.url } : {}),
+    ...(value.createdAt ? { createdAt: value.createdAt } : {}),
+    ...(value.author?.login ? { authorLogin: value.author.login } : {}),
+    ...(value.replyTo?.id ? { replyToId: value.replyTo.id } : {})
+  };
+}
+
+function normalizeGitHubReviewThread(
+  value: {
+    id?: string | null;
+    isResolved?: boolean | null;
+    isOutdated?: boolean | null;
+    path?: string | null;
+    line?: number | null;
+    originalLine?: number | null;
+    startLine?: number | null;
+    originalStartLine?: number | null;
+    comments?: {
+      totalCount?: number | null;
+      nodes?: Array<{
+        id?: string | null;
+        databaseId?: number | null;
+        body?: string | null;
+        url?: string | null;
+        createdAt?: string | null;
+        author?: {
+          login?: string | null;
+        } | null;
+        replyTo?: {
+          id?: string | null;
+        } | null;
+      } | null> | null;
+    } | null;
+  } | null | undefined
+): GitHubReviewThreadRecord | null {
+  if (!value?.id) {
+    return null;
+  }
+
+  const comments = (value.comments?.nodes ?? [])
+    .map((comment) => normalizeGitHubReviewThreadComment(comment))
+    .filter((comment): comment is GitHubReviewThreadCommentRecord => comment !== null);
+
+  return {
+    id: value.id,
+    isResolved: value.isResolved === true,
+    isOutdated: value.isOutdated === true,
+    ...(value.path ? { path: value.path } : {}),
+    ...(typeof value.line === 'number' ? { line: value.line } : {}),
+    ...(typeof value.originalLine === 'number' ? { originalLine: value.originalLine } : {}),
+    ...(typeof value.startLine === 'number' ? { startLine: value.startLine } : {}),
+    ...(typeof value.originalStartLine === 'number' ? { originalStartLine: value.originalStartLine } : {}),
+    comments,
+    ...(typeof value.comments?.totalCount === 'number' ? { totalCommentCount: value.comments.totalCount } : {})
+  };
+}
+
+async function listDetailedPullRequestReviewThreads(
+  octokit: Octokit,
+  repository: ParsedRepositoryReference,
+  pullRequestNumber: number
+): Promise<GitHubReviewThreadRecord[]> {
+  const threads: GitHubReviewThreadRecord[] = [];
+  let after: string | undefined;
+
+  do {
+    const response = await octokit.graphql<GitHubPullRequestReviewThreadsDetailedQueryResult>(
+      GITHUB_PULL_REQUEST_REVIEW_THREADS_DETAILED_QUERY,
+      {
+        owner: repository.owner,
+        repo: repository.repo,
+        pullRequestNumber,
+        after
+      }
+    );
+
+    const connection = response.repository?.pullRequest?.reviewThreads;
+    for (const node of connection?.nodes ?? []) {
+      const thread = normalizeGitHubReviewThread(node);
+      if (thread) {
+        threads.push(thread);
+      }
+    }
+
+    after = getPageCursor(connection?.pageInfo);
+  } while (after);
+
+  return threads;
+}
+
+async function updatePullRequestDraftState(
+  octokit: Octokit,
+  pullRequestNodeId: string,
+  isDraft: boolean
+): Promise<void> {
+  if (isDraft) {
+    await octokit.graphql<GitHubConvertPullRequestToDraftMutationResult>(
+      GITHUB_CONVERT_PULL_REQUEST_TO_DRAFT_MUTATION,
+      {
+        pullRequestId: pullRequestNodeId
+      }
+    );
+    return;
+  }
+
+  await octokit.graphql<GitHubMarkPullRequestReadyForReviewMutationResult>(
+    GITHUB_MARK_PULL_REQUEST_READY_FOR_REVIEW_MUTATION,
+    {
+      pullRequestId: pullRequestNodeId
+    }
+  );
+}
+
+function mergeNamedValues(
+  currentValues: string[],
+  params: {
+    setValues: string[];
+    addValues: string[];
+    removeValues: string[];
+  }
+): string[] {
+  if (params.setValues.length > 0) {
+    return params.setValues;
+  }
+
+  const values = new Map(currentValues.map((value) => [value.toLowerCase(), value] as const));
+  for (const value of params.addValues) {
+    values.set(value.toLowerCase(), value);
+  }
+
+  for (const value of params.removeValues) {
+    values.delete(value.toLowerCase());
+  }
+
+  return [...values.values()];
+}
+
 async function validateGithubToken(token: string): Promise<TokenValidationResult> {
   const octokit = new Octokit({ auth: token.trim() });
 
@@ -6532,6 +7287,751 @@ async function startSync(
   }
 }
 
+function registerGitHubAgentTools(ctx: PluginSetupContext): void {
+  ctx.tools.register(
+    'search_repository_items',
+    getGitHubAgentToolDeclaration('search_repository_items'),
+    async (params, runCtx) => executeGitHubTool(async () => {
+      const input = getToolInputRecord(params);
+      const octokit = await createGitHubToolOctokit(ctx);
+      const repository = await resolveGitHubToolRepository(ctx, runCtx, input);
+      const query = normalizeOptionalToolString(input.query);
+      if (!query) {
+        throw new Error('query is required.');
+      }
+
+      const type = input.type === 'issue' || input.type === 'pull_request' || input.type === 'all'
+        ? input.type
+        : 'all';
+      const state = input.state === 'open' || input.state === 'closed' || input.state === 'all'
+        ? input.state
+        : 'all';
+      const labels = normalizeToolStringArray(input.labels);
+      const limit = normalizeToolPositiveInteger(input.limit) ?? 10;
+      const searchTerms = [
+        `repo:${formatRepositoryLabel(repository)}`,
+        query.trim(),
+        type === 'issue' ? 'is:issue' : type === 'pull_request' ? 'is:pr' : '',
+        state === 'open' ? 'is:open' : state === 'closed' ? 'is:closed' : '',
+        normalizeOptionalToolString(input.author) ? `author:${normalizeOptionalToolString(input.author)}` : '',
+        normalizeOptionalToolString(input.assignee) ? `assignee:${normalizeOptionalToolString(input.assignee)}` : '',
+        ...labels.map((label) => `label:"${label.replace(/"/g, '\\"')}"`)
+      ].filter(Boolean);
+      const response = await octokit.rest.search.issuesAndPullRequests({
+        q: searchTerms.join(' '),
+        per_page: Math.min(limit, 50),
+        headers: {
+          'X-GitHub-Api-Version': GITHUB_API_VERSION
+        }
+      });
+      const items = response.data.items.map((item) => ({
+        number: item.number,
+        title: item.title,
+        kind: item.pull_request ? 'pull_request' as const : 'issue' as const,
+        state: item.state,
+        url: item.html_url,
+        createdAt: item.created_at,
+        updatedAt: item.updated_at,
+        authorLogin: item.user?.login ?? undefined,
+        labels: (item.labels ?? []).map((label) => {
+          if (typeof label === 'string') {
+            return {
+              name: label
+            };
+          }
+
+          return {
+            name: label.name ?? '',
+            color: label.color ?? undefined
+          };
+        }).filter((label) => label.name)
+      }));
+
+      return buildToolSuccessResult(
+        `Found ${items.length} matching GitHub ${items.length === 1 ? 'item' : 'items'} in ${formatRepositoryLabel(repository)}.`,
+        {
+          repository: repository.url,
+          query,
+          type,
+          state,
+          items
+        }
+      );
+    })
+  );
+
+  ctx.tools.register(
+    'get_issue',
+    getGitHubAgentToolDeclaration('get_issue'),
+    async (params, runCtx) => executeGitHubTool(async () => {
+      const input = getToolInputRecord(params);
+      const target = await resolveGitHubIssueToolTarget(ctx, runCtx, input);
+      const octokit = await createGitHubToolOctokit(ctx);
+      const response = await octokit.rest.issues.get({
+        owner: target.repository.owner,
+        repo: target.repository.repo,
+        issue_number: target.issueNumber,
+        headers: {
+          'X-GitHub-Api-Version': GITHUB_API_VERSION
+        }
+      });
+      const issue = normalizeGitHubIssueRecord(response.data as GitHubApiIssueRecord);
+      const linkedPullRequests = await listLinkedPullRequestsForIssue(octokit, target.repository, target.issueNumber);
+      const assignees = (response.data.assignees ?? [])
+        .map((assignee) => assignee?.login ?? '')
+        .filter(Boolean);
+      const milestone = response.data.milestone
+        ? {
+            number: response.data.milestone.number,
+            title: response.data.milestone.title,
+            state: response.data.milestone.state,
+            description: response.data.milestone.description ?? undefined,
+            dueOn: response.data.milestone.due_on ?? undefined,
+            url: response.data.milestone.html_url ?? undefined
+          }
+        : null;
+
+      return buildToolSuccessResult(
+        `Loaded GitHub issue #${issue.number} from ${formatRepositoryLabel(target.repository)}.`,
+        {
+          repository: target.repository.url,
+          issue: {
+            number: issue.number,
+            title: issue.title,
+            body: issue.body,
+            url: issue.htmlUrl,
+            state: issue.state,
+            stateReason: issue.stateReason,
+            labels: issue.labels,
+            assignees,
+            milestone,
+            commentsCount: issue.commentsCount,
+            linkedPullRequests
+          }
+        }
+      );
+    })
+  );
+
+  ctx.tools.register(
+    'list_issue_comments',
+    getGitHubAgentToolDeclaration('list_issue_comments'),
+    async (params, runCtx) => executeGitHubTool(async () => {
+      const input = getToolInputRecord(params);
+      const target = await resolveGitHubIssueToolTarget(ctx, runCtx, input);
+      const octokit = await createGitHubToolOctokit(ctx);
+      const comments = await listAllGitHubIssueComments(octokit, target.repository, target.issueNumber);
+
+      return buildToolSuccessResult(
+        `Loaded ${comments.length} GitHub ${comments.length === 1 ? 'comment' : 'comments'} from issue #${target.issueNumber}.`,
+        {
+          repository: target.repository.url,
+          issueNumber: target.issueNumber,
+          comments
+        }
+      );
+    })
+  );
+
+  ctx.tools.register(
+    'update_issue',
+    getGitHubAgentToolDeclaration('update_issue'),
+    async (params, runCtx) => executeGitHubTool(async () => {
+      const input = getToolInputRecord(params);
+      const target = await resolveGitHubIssueToolTarget(ctx, runCtx, input);
+      const octokit = await createGitHubToolOctokit(ctx);
+      const currentResponse = await octokit.rest.issues.get({
+        owner: target.repository.owner,
+        repo: target.repository.repo,
+        issue_number: target.issueNumber,
+        headers: {
+          'X-GitHub-Api-Version': GITHUB_API_VERSION
+        }
+      });
+      const currentIssue = currentResponse.data;
+      const currentLabels = normalizeGitHubIssueLabels((currentIssue as GitHubApiIssueRecord).labels).map((label) => label.name);
+      const currentAssignees = (currentIssue.assignees ?? [])
+        .map((assignee) => assignee?.login ?? '')
+        .filter(Boolean);
+      const nextLabels = mergeNamedValues(currentLabels, {
+        setValues: normalizeToolStringArray(input.setLabels),
+        addValues: normalizeToolStringArray(input.addLabels),
+        removeValues: normalizeToolStringArray(input.removeLabels)
+      });
+      const nextAssignees = mergeNamedValues(currentAssignees, {
+        setValues: normalizeToolStringArray(input.setAssignees),
+        addValues: normalizeToolStringArray(input.addAssignees),
+        removeValues: normalizeToolStringArray(input.removeAssignees)
+      });
+      const title = Object.prototype.hasOwnProperty.call(input, 'title') && typeof input.title === 'string'
+        ? input.title
+        : undefined;
+      const body = Object.prototype.hasOwnProperty.call(input, 'body') && typeof input.body === 'string'
+        ? input.body
+        : undefined;
+      const state = input.state === 'open' || input.state === 'closed' ? input.state : undefined;
+      const milestoneNumber = Object.prototype.hasOwnProperty.call(input, 'milestoneNumber')
+        ? input.milestoneNumber === null
+          ? null
+          : normalizeToolPositiveInteger(input.milestoneNumber)
+        : undefined;
+
+      const hasChanges =
+        title !== undefined ||
+        body !== undefined ||
+        state !== undefined ||
+        Object.prototype.hasOwnProperty.call(input, 'milestoneNumber') ||
+        normalizeToolStringArray(input.setLabels).length > 0 ||
+        normalizeToolStringArray(input.addLabels).length > 0 ||
+        normalizeToolStringArray(input.removeLabels).length > 0 ||
+        normalizeToolStringArray(input.setAssignees).length > 0 ||
+        normalizeToolStringArray(input.addAssignees).length > 0 ||
+        normalizeToolStringArray(input.removeAssignees).length > 0;
+
+      const updatedResponse = hasChanges
+        ? await octokit.rest.issues.update({
+            owner: target.repository.owner,
+            repo: target.repository.repo,
+            issue_number: target.issueNumber,
+            ...(title !== undefined ? { title } : {}),
+            ...(body !== undefined ? { body } : {}),
+            ...(state ? { state } : {}),
+            ...(Object.prototype.hasOwnProperty.call(input, 'milestoneNumber') ? { milestone: milestoneNumber } : {}),
+            labels: nextLabels,
+            assignees: nextAssignees,
+            headers: {
+              'X-GitHub-Api-Version': GITHUB_API_VERSION
+            }
+          })
+        : currentResponse;
+      const updatedIssue = normalizeGitHubIssueRecord(updatedResponse.data as GitHubApiIssueRecord);
+
+      return buildToolSuccessResult(
+        hasChanges
+          ? `Updated GitHub issue #${updatedIssue.number} in ${formatRepositoryLabel(target.repository)}.`
+          : `No GitHub issue changes were requested for #${updatedIssue.number}.`,
+        {
+          repository: target.repository.url,
+          issue: {
+            number: updatedIssue.number,
+            title: updatedIssue.title,
+            body: updatedIssue.body,
+            url: updatedIssue.htmlUrl,
+            state: updatedIssue.state,
+            stateReason: updatedIssue.stateReason,
+            labels: normalizeGitHubIssueLabels((updatedResponse.data as GitHubApiIssueRecord).labels),
+            assignees: (updatedResponse.data.assignees ?? []).map((assignee) => assignee?.login ?? '').filter(Boolean),
+            milestone: updatedResponse.data.milestone
+              ? {
+                  number: updatedResponse.data.milestone.number,
+                  title: updatedResponse.data.milestone.title,
+                  state: updatedResponse.data.milestone.state,
+                  url: updatedResponse.data.milestone.html_url ?? undefined
+                }
+              : null
+          }
+        }
+      );
+    })
+  );
+
+  ctx.tools.register(
+    'add_issue_comment',
+    getGitHubAgentToolDeclaration('add_issue_comment'),
+    async (params, runCtx) => executeGitHubTool(async () => {
+      const input = getToolInputRecord(params);
+      const target = await resolveGitHubIssueToolTarget(ctx, runCtx, input);
+      const octokit = await createGitHubToolOctokit(ctx);
+      const body = appendAiAuthorshipFooter(String(input.body ?? ''), normalizeOptionalToolString(input.llmModel) ?? '');
+      const response = await octokit.rest.issues.createComment({
+        owner: target.repository.owner,
+        repo: target.repository.repo,
+        issue_number: target.issueNumber,
+        body,
+        headers: {
+          'X-GitHub-Api-Version': GITHUB_API_VERSION
+        }
+      });
+
+      return buildToolSuccessResult(
+        `Posted a GitHub comment on issue #${target.issueNumber}.`,
+        {
+          repository: target.repository.url,
+          issueNumber: target.issueNumber,
+          comment: {
+            id: response.data.id,
+            url: response.data.html_url ?? undefined,
+            body: response.data.body ?? '',
+            authorLogin: response.data.user?.login ?? undefined,
+            createdAt: response.data.created_at ?? undefined
+          }
+        }
+      );
+    })
+  );
+
+  ctx.tools.register(
+    'create_pull_request',
+    getGitHubAgentToolDeclaration('create_pull_request'),
+    async (params, runCtx) => executeGitHubTool(async () => {
+      const input = getToolInputRecord(params);
+      const repository = await resolveGitHubToolRepository(ctx, runCtx, input);
+      const head = normalizeOptionalToolString(input.head);
+      const base = normalizeOptionalToolString(input.base);
+      const title = normalizeOptionalToolString(input.title);
+      if (!head || !base || !title) {
+        throw new Error('head, base, and title are required.');
+      }
+
+      const octokit = await createGitHubToolOctokit(ctx);
+      const response = await octokit.rest.pulls.create({
+        owner: repository.owner,
+        repo: repository.repo,
+        head,
+        base,
+        title,
+        ...(typeof input.body === 'string' ? { body: input.body } : {}),
+        ...(typeof input.draft === 'boolean' ? { draft: input.draft } : {}),
+        headers: {
+          'X-GitHub-Api-Version': GITHUB_API_VERSION
+        }
+      });
+
+      return buildToolSuccessResult(
+        `Created pull request #${response.data.number} in ${formatRepositoryLabel(repository)}.`,
+        {
+          repository: repository.url,
+          pullRequest: {
+            number: response.data.number,
+            title: response.data.title,
+            body: response.data.body ?? '',
+            url: response.data.html_url,
+            state: response.data.state,
+            isDraft: response.data.draft,
+            headRefName: response.data.head.ref,
+            baseRefName: response.data.base.ref
+          }
+        }
+      );
+    })
+  );
+
+  ctx.tools.register(
+    'get_pull_request',
+    getGitHubAgentToolDeclaration('get_pull_request'),
+    async (params, runCtx) => executeGitHubTool(async () => {
+      const input = getToolInputRecord(params);
+      const target = await resolveGitHubPullRequestToolTarget(ctx, runCtx, input);
+      const octokit = await createGitHubToolOctokit(ctx);
+      const response = await octokit.rest.pulls.get({
+        owner: target.repository.owner,
+        repo: target.repository.repo,
+        pull_number: target.pullRequestNumber,
+        headers: {
+          'X-GitHub-Api-Version': GITHUB_API_VERSION
+        }
+      });
+      const snapshot = await getGitHubPullRequestStatusSnapshot(
+        octokit,
+        target.repository,
+        target.pullRequestNumber,
+        new Map()
+      );
+
+      return buildToolSuccessResult(
+        `Loaded pull request #${response.data.number} from ${formatRepositoryLabel(target.repository)}.`,
+        {
+          repository: target.repository.url,
+          pullRequest: {
+            number: response.data.number,
+            title: response.data.title,
+            body: response.data.body ?? '',
+            url: response.data.html_url,
+            state: response.data.state,
+            isDraft: response.data.draft,
+            merged: response.data.merged,
+            mergeable: response.data.mergeable,
+            mergeableState: response.data.mergeable_state,
+            headRefName: response.data.head.ref,
+            headSha: response.data.head.sha,
+            baseRefName: response.data.base.ref,
+            authorLogin: response.data.user?.login ?? undefined,
+            requestedReviewers: (response.data.requested_reviewers ?? []).map((reviewer) => reviewer?.login ?? '').filter(Boolean),
+            requestedTeams: (response.data.requested_teams ?? []).map((team) => team?.slug ?? '').filter(Boolean),
+            ciState: snapshot.ciState,
+            hasUnresolvedReviewThreads: snapshot.hasUnresolvedReviewThreads
+          }
+        }
+      );
+    })
+  );
+
+  ctx.tools.register(
+    'update_pull_request',
+    getGitHubAgentToolDeclaration('update_pull_request'),
+    async (params, runCtx) => executeGitHubTool(async () => {
+      const input = getToolInputRecord(params);
+      const target = await resolveGitHubPullRequestToolTarget(ctx, runCtx, input);
+      const octokit = await createGitHubToolOctokit(ctx);
+      let currentResponse = await octokit.rest.pulls.get({
+        owner: target.repository.owner,
+        repo: target.repository.repo,
+        pull_number: target.pullRequestNumber,
+        headers: {
+          'X-GitHub-Api-Version': GITHUB_API_VERSION
+        }
+      });
+      const title = Object.prototype.hasOwnProperty.call(input, 'title') && typeof input.title === 'string'
+        ? input.title
+        : undefined;
+      const body = Object.prototype.hasOwnProperty.call(input, 'body') && typeof input.body === 'string'
+        ? input.body
+        : undefined;
+      const base = normalizeOptionalToolString(input.base);
+      const state = input.state === 'open' || input.state === 'closed' ? input.state : undefined;
+      const isDraft = typeof input.isDraft === 'boolean' ? input.isDraft : undefined;
+
+      if (title !== undefined || body !== undefined || base !== undefined || state !== undefined) {
+        currentResponse = await octokit.rest.pulls.update({
+          owner: target.repository.owner,
+          repo: target.repository.repo,
+          pull_number: target.pullRequestNumber,
+          ...(title !== undefined ? { title } : {}),
+          ...(body !== undefined ? { body } : {}),
+          ...(base !== undefined ? { base } : {}),
+          ...(state !== undefined ? { state } : {}),
+          headers: {
+            'X-GitHub-Api-Version': GITHUB_API_VERSION
+          }
+        });
+      }
+
+      if (isDraft !== undefined && currentResponse.data.draft !== isDraft) {
+        if (!currentResponse.data.node_id) {
+          throw new Error('GitHub did not return a pull request node id, so draft state cannot be updated.');
+        }
+
+        await updatePullRequestDraftState(octokit, currentResponse.data.node_id, isDraft);
+        currentResponse = await octokit.rest.pulls.get({
+          owner: target.repository.owner,
+          repo: target.repository.repo,
+          pull_number: target.pullRequestNumber,
+          headers: {
+            'X-GitHub-Api-Version': GITHUB_API_VERSION
+          }
+        });
+      }
+
+      return buildToolSuccessResult(
+        `Updated pull request #${currentResponse.data.number} in ${formatRepositoryLabel(target.repository)}.`,
+        {
+          repository: target.repository.url,
+          pullRequest: {
+            number: currentResponse.data.number,
+            title: currentResponse.data.title,
+            body: currentResponse.data.body ?? '',
+            url: currentResponse.data.html_url,
+            state: currentResponse.data.state,
+            isDraft: currentResponse.data.draft,
+            baseRefName: currentResponse.data.base.ref
+          }
+        }
+      );
+    })
+  );
+
+  ctx.tools.register(
+    'list_pull_request_files',
+    getGitHubAgentToolDeclaration('list_pull_request_files'),
+    async (params, runCtx) => executeGitHubTool(async () => {
+      const input = getToolInputRecord(params);
+      const target = await resolveGitHubPullRequestToolTarget(ctx, runCtx, input);
+      const octokit = await createGitHubToolOctokit(ctx);
+      const files = await listAllPullRequestFiles(octokit, target.repository, target.pullRequestNumber);
+
+      return buildToolSuccessResult(
+        `Loaded ${files.length} changed ${files.length === 1 ? 'file' : 'files'} from pull request #${target.pullRequestNumber}.`,
+        {
+          repository: target.repository.url,
+          pullRequestNumber: target.pullRequestNumber,
+          files
+        }
+      );
+    })
+  );
+
+  ctx.tools.register(
+    'get_pull_request_checks',
+    getGitHubAgentToolDeclaration('get_pull_request_checks'),
+    async (params, runCtx) => executeGitHubTool(async () => {
+      const input = getToolInputRecord(params);
+      const target = await resolveGitHubPullRequestToolTarget(ctx, runCtx, input);
+      const octokit = await createGitHubToolOctokit(ctx);
+      const pullRequestResponse = await octokit.rest.pulls.get({
+        owner: target.repository.owner,
+        repo: target.repository.repo,
+        pull_number: target.pullRequestNumber,
+        headers: {
+          'X-GitHub-Api-Version': GITHUB_API_VERSION
+        }
+      });
+      const headSha = pullRequestResponse.data.head.sha;
+      const [snapshotResult, checksResult, statusResult, workflowRunsResult] = await Promise.allSettled([
+        getGitHubPullRequestStatusSnapshot(octokit, target.repository, target.pullRequestNumber, new Map()),
+        octokit.rest.checks.listForRef({
+          owner: target.repository.owner,
+          repo: target.repository.repo,
+          ref: headSha,
+          per_page: 100,
+          headers: {
+            'X-GitHub-Api-Version': GITHUB_API_VERSION
+          }
+        }),
+        octokit.rest.repos.getCombinedStatusForRef({
+          owner: target.repository.owner,
+          repo: target.repository.repo,
+          ref: headSha,
+          per_page: 100,
+          headers: {
+            'X-GitHub-Api-Version': GITHUB_API_VERSION
+          }
+        }),
+        octokit.rest.actions.listWorkflowRunsForRepo({
+          owner: target.repository.owner,
+          repo: target.repository.repo,
+          head_sha: headSha,
+          per_page: 20,
+          headers: {
+            'X-GitHub-Api-Version': GITHUB_API_VERSION
+          }
+        })
+      ]);
+      const warnings = [
+        checksResult.status === 'rejected' ? `check_runs_unavailable: ${getErrorMessage(checksResult.reason)}` : null,
+        statusResult.status === 'rejected' ? `status_contexts_unavailable: ${getErrorMessage(statusResult.reason)}` : null,
+        workflowRunsResult.status === 'rejected' ? `workflow_runs_unavailable: ${getErrorMessage(workflowRunsResult.reason)}` : null
+      ].filter((warning): warning is string => warning !== null);
+      const snapshot = snapshotResult.status === 'fulfilled'
+        ? snapshotResult.value
+        : {
+            number: target.pullRequestNumber,
+            hasUnresolvedReviewThreads: false,
+            ciState: 'unfinished' as const
+          };
+
+      return buildToolSuccessResult(
+        `Loaded CI status for pull request #${target.pullRequestNumber} in ${formatRepositoryLabel(target.repository)}.`,
+        {
+          repository: target.repository.url,
+          pullRequestNumber: target.pullRequestNumber,
+          headSha,
+          ciState: snapshot.ciState,
+          hasUnresolvedReviewThreads: snapshot.hasUnresolvedReviewThreads,
+          checkRuns: checksResult.status === 'fulfilled'
+            ? checksResult.value.data.check_runs.map((checkRun) => ({
+                id: checkRun.id,
+                name: checkRun.name,
+                status: checkRun.status,
+                conclusion: checkRun.conclusion ?? undefined,
+                detailsUrl: checkRun.details_url ?? undefined,
+                startedAt: checkRun.started_at ?? undefined,
+                completedAt: checkRun.completed_at ?? undefined,
+                appName: checkRun.app?.name ?? undefined
+              }))
+            : [],
+          statusContexts: statusResult.status === 'fulfilled'
+            ? statusResult.value.data.statuses.map((statusEntry) => ({
+                context: statusEntry.context,
+                state: statusEntry.state,
+                description: statusEntry.description ?? undefined,
+                targetUrl: statusEntry.target_url ?? undefined,
+                createdAt: statusEntry.created_at ?? undefined,
+                updatedAt: statusEntry.updated_at ?? undefined
+              }))
+            : [],
+          workflowRuns: workflowRunsResult.status === 'fulfilled'
+            ? workflowRunsResult.value.data.workflow_runs.map((workflowRun) => ({
+                id: workflowRun.id,
+                name: workflowRun.name,
+                displayTitle: workflowRun.display_title ?? undefined,
+                status: workflowRun.status,
+                conclusion: workflowRun.conclusion ?? undefined,
+                event: workflowRun.event,
+                url: workflowRun.html_url,
+                headBranch: workflowRun.head_branch,
+                runNumber: workflowRun.run_number
+              }))
+            : [],
+          warnings
+        }
+      );
+    })
+  );
+
+  ctx.tools.register(
+    'list_pull_request_review_threads',
+    getGitHubAgentToolDeclaration('list_pull_request_review_threads'),
+    async (params, runCtx) => executeGitHubTool(async () => {
+      const input = getToolInputRecord(params);
+      const target = await resolveGitHubPullRequestToolTarget(ctx, runCtx, input);
+      const octokit = await createGitHubToolOctokit(ctx);
+      const threads = await listDetailedPullRequestReviewThreads(octokit, target.repository, target.pullRequestNumber);
+
+      return buildToolSuccessResult(
+        `Loaded ${threads.length} review ${threads.length === 1 ? 'thread' : 'threads'} from pull request #${target.pullRequestNumber}.`,
+        {
+          repository: target.repository.url,
+          pullRequestNumber: target.pullRequestNumber,
+          threads
+        }
+      );
+    })
+  );
+
+  ctx.tools.register(
+    'reply_to_review_thread',
+    getGitHubAgentToolDeclaration('reply_to_review_thread'),
+    async (params) => executeGitHubTool(async () => {
+      const input = getToolInputRecord(params);
+      const threadId = normalizeOptionalToolString(input.threadId);
+      if (!threadId) {
+        throw new Error('threadId is required.');
+      }
+
+      const body = appendAiAuthorshipFooter(String(input.body ?? ''), normalizeOptionalToolString(input.llmModel) ?? '');
+      const octokit = await createGitHubToolOctokit(ctx);
+      const response = await octokit.graphql<GitHubAddPullRequestReviewThreadReplyMutationResult>(
+        GITHUB_ADD_PULL_REQUEST_REVIEW_THREAD_REPLY_MUTATION,
+        {
+          pullRequestReviewThreadId: threadId,
+          body
+        }
+      );
+      const comment = response.addPullRequestReviewThreadReply?.comment;
+      if (!comment?.id) {
+        throw new Error('GitHub did not return the created review-thread reply.');
+      }
+
+      return buildToolSuccessResult(
+        'Posted a reply to the GitHub review thread.',
+        {
+          comment: {
+            id: comment.id,
+            body: comment.body ?? '',
+            url: comment.url ?? undefined,
+            createdAt: comment.createdAt ?? undefined,
+            authorLogin: comment.author?.login ?? undefined
+          }
+        }
+      );
+    })
+  );
+
+  ctx.tools.register(
+    'resolve_review_thread',
+    getGitHubAgentToolDeclaration('resolve_review_thread'),
+    async (params) => executeGitHubTool(async () => {
+      const input = getToolInputRecord(params);
+      const threadId = normalizeOptionalToolString(input.threadId);
+      if (!threadId) {
+        throw new Error('threadId is required.');
+      }
+
+      const octokit = await createGitHubToolOctokit(ctx);
+      const response = await octokit.graphql<GitHubResolveReviewThreadMutationResult>(
+        GITHUB_RESOLVE_REVIEW_THREAD_MUTATION,
+        {
+          threadId
+        }
+      );
+      const thread = response.resolveReviewThread?.thread;
+      if (!thread?.id) {
+        throw new Error('GitHub did not return the updated review thread.');
+      }
+
+      return buildToolSuccessResult(
+        'Resolved the GitHub review thread.',
+        {
+          thread: {
+            id: thread.id,
+            isResolved: thread.isResolved === true
+          }
+        }
+      );
+    })
+  );
+
+  ctx.tools.register(
+    'unresolve_review_thread',
+    getGitHubAgentToolDeclaration('unresolve_review_thread'),
+    async (params) => executeGitHubTool(async () => {
+      const input = getToolInputRecord(params);
+      const threadId = normalizeOptionalToolString(input.threadId);
+      if (!threadId) {
+        throw new Error('threadId is required.');
+      }
+
+      const octokit = await createGitHubToolOctokit(ctx);
+      const response = await octokit.graphql<GitHubUnresolveReviewThreadMutationResult>(
+        GITHUB_UNRESOLVE_REVIEW_THREAD_MUTATION,
+        {
+          threadId
+        }
+      );
+      const thread = response.unresolveReviewThread?.thread;
+      if (!thread?.id) {
+        throw new Error('GitHub did not return the updated review thread.');
+      }
+
+      return buildToolSuccessResult(
+        'Reopened the GitHub review thread.',
+        {
+          thread: {
+            id: thread.id,
+            isResolved: thread.isResolved === true
+          }
+        }
+      );
+    })
+  );
+
+  ctx.tools.register(
+    'request_pull_request_reviewers',
+    getGitHubAgentToolDeclaration('request_pull_request_reviewers'),
+    async (params, runCtx) => executeGitHubTool(async () => {
+      const input = getToolInputRecord(params);
+      const target = await resolveGitHubPullRequestToolTarget(ctx, runCtx, input);
+      const userReviewers = normalizeToolStringArray(input.userReviewers);
+      const teamReviewers = normalizeToolStringArray(input.teamReviewers);
+      if (userReviewers.length === 0 && teamReviewers.length === 0) {
+        throw new Error('Provide at least one user reviewer or team reviewer.');
+      }
+
+      const octokit = await createGitHubToolOctokit(ctx);
+      const response = await octokit.rest.pulls.requestReviewers({
+        owner: target.repository.owner,
+        repo: target.repository.repo,
+        pull_number: target.pullRequestNumber,
+        reviewers: userReviewers,
+        team_reviewers: teamReviewers,
+        headers: {
+          'X-GitHub-Api-Version': GITHUB_API_VERSION
+        }
+      });
+
+      return buildToolSuccessResult(
+        `Requested reviewers for pull request #${target.pullRequestNumber}.`,
+        {
+          repository: target.repository.url,
+          pullRequestNumber: target.pullRequestNumber,
+          requestedReviewers: (response.data.requested_reviewers ?? []).map((reviewer) => reviewer?.login ?? '').filter(Boolean),
+          requestedTeams: (response.data.requested_teams ?? []).map((team) => team?.slug ?? '').filter(Boolean)
+        }
+      );
+    })
+  );
+}
+
 const plugin = definePlugin({
   async setup(ctx) {
     ctx.data.register('settings.registration', async (input) => {
@@ -6737,6 +8237,8 @@ const plugin = definePlugin({
         ...(target ? { target } : {})
       });
     });
+
+    registerGitHubAgentTools(ctx);
 
     ctx.jobs.register('sync.github-issues', async (job) => {
       const settings = normalizeSettings(await ctx.state.get(SETTINGS_SCOPE));

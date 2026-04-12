@@ -41,6 +41,8 @@ The plugin MUST persist repository mappings and sync state in plugin state.
 - A manual sync requested from a company-scoped settings or dashboard view MUST only sync repository mappings for that company.
 - The worker SHOULD support targeted manual sync requests for a specific mapped Paperclip project or imported Paperclip issue.
 - The plugin MUST declare a scheduled job that ticks every minute and only performs a scheduled sync when the saved frequency is due.
+- The plugin MUST expose agent tools for the GitHub issue and pull request workflow around synced work, including repository-item search, issue reads and updates, issue comment reads and writes, pull request creation and updates, pull request file and CI inspection, review-thread reads and replies, review-thread resolution changes, and pull request reviewer requests.
+- Agent tools that post GitHub comments or review-thread replies MUST require the caller to identify the LLM used and MUST append a footer that discloses that a Paperclip AI agent created the message and which LLM was used.
 - The sync flow MUST fetch open GitHub issues from every configured repository.
 - The sync flow MUST create one top-level Paperclip issue per imported GitHub issue when the target mapping has a resolved Paperclip project identifier.
 - Imported Paperclip issues MUST keep the original GitHub issue title without adding a `[GitHub]` prefix.

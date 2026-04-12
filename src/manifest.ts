@@ -1,6 +1,8 @@
 import { createRequire } from 'node:module';
 import type { PaperclipPluginManifestV1 } from '@paperclipai/plugin-sdk';
 
+import { GITHUB_AGENT_TOOLS } from './github-agent-tools.ts';
+
 const require = createRequire(import.meta.url);
 const packageJson = require('../package.json') as { version?: unknown };
 const DASHBOARD_WIDGET_CAPABILITY = 'ui.dashboardWidget.register' as unknown as PaperclipPluginManifestV1['capabilities'][number];
@@ -35,7 +37,8 @@ export const manifest: PaperclipPluginManifestV1 = {
     'issue.comments.create',
     'jobs.schedule',
     'http.outbound',
-    'secrets.read-ref'
+    'secrets.read-ref',
+    'agent.tools.register'
   ],
   instanceConfigSchema: {
     type: 'object',
@@ -61,6 +64,7 @@ export const manifest: PaperclipPluginManifestV1 = {
       schedule: SCHEDULE_TICK_CRON
     }
   ],
+  tools: GITHUB_AGENT_TOOLS,
   entrypoints: {
     worker: './dist/worker.js',
     ui: './dist/ui/'
