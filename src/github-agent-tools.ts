@@ -27,6 +27,28 @@ const llmModelProperty = {
   description: 'Exact LLM name used to draft the comment. Required so the plugin can append the mandatory AI-authorship footer.'
 } as const;
 
+const issueTargetSchema = {
+  anyOf: [
+    {
+      required: ['paperclipIssueId']
+    },
+    {
+      required: ['issueNumber']
+    }
+  ]
+} as const;
+
+const pullRequestTargetSchema = {
+  anyOf: [
+    {
+      required: ['paperclipIssueId']
+    },
+    {
+      required: ['pullRequestNumber']
+    }
+  ]
+} as const;
+
 export const GITHUB_AGENT_TOOLS: PluginToolDeclaration[] = [
   {
     name: 'search_repository_items',
@@ -83,6 +105,7 @@ export const GITHUB_AGENT_TOOLS: PluginToolDeclaration[] = [
     parametersSchema: {
       type: 'object',
       additionalProperties: false,
+      ...issueTargetSchema,
       properties: {
         repository: repositoryProperty,
         issueNumber: issueNumberProperty,
@@ -97,6 +120,7 @@ export const GITHUB_AGENT_TOOLS: PluginToolDeclaration[] = [
     parametersSchema: {
       type: 'object',
       additionalProperties: false,
+      ...issueTargetSchema,
       properties: {
         repository: repositoryProperty,
         issueNumber: issueNumberProperty,
@@ -111,6 +135,7 @@ export const GITHUB_AGENT_TOOLS: PluginToolDeclaration[] = [
     parametersSchema: {
       type: 'object',
       additionalProperties: false,
+      ...issueTargetSchema,
       properties: {
         repository: repositoryProperty,
         issueNumber: issueNumberProperty,
@@ -177,6 +202,7 @@ export const GITHUB_AGENT_TOOLS: PluginToolDeclaration[] = [
       type: 'object',
       additionalProperties: false,
       required: ['body', 'llmModel'],
+      ...issueTargetSchema,
       properties: {
         repository: repositoryProperty,
         issueNumber: issueNumberProperty,
@@ -226,6 +252,7 @@ export const GITHUB_AGENT_TOOLS: PluginToolDeclaration[] = [
     parametersSchema: {
       type: 'object',
       additionalProperties: false,
+      ...pullRequestTargetSchema,
       properties: {
         repository: repositoryProperty,
         pullRequestNumber: pullRequestNumberProperty,
@@ -240,6 +267,7 @@ export const GITHUB_AGENT_TOOLS: PluginToolDeclaration[] = [
     parametersSchema: {
       type: 'object',
       additionalProperties: false,
+      ...pullRequestTargetSchema,
       properties: {
         repository: repositoryProperty,
         pullRequestNumber: pullRequestNumberProperty,
@@ -271,6 +299,7 @@ export const GITHUB_AGENT_TOOLS: PluginToolDeclaration[] = [
     parametersSchema: {
       type: 'object',
       additionalProperties: false,
+      ...pullRequestTargetSchema,
       properties: {
         repository: repositoryProperty,
         pullRequestNumber: pullRequestNumberProperty,
@@ -285,6 +314,7 @@ export const GITHUB_AGENT_TOOLS: PluginToolDeclaration[] = [
     parametersSchema: {
       type: 'object',
       additionalProperties: false,
+      ...pullRequestTargetSchema,
       properties: {
         repository: repositoryProperty,
         pullRequestNumber: pullRequestNumberProperty,
@@ -299,6 +329,7 @@ export const GITHUB_AGENT_TOOLS: PluginToolDeclaration[] = [
     parametersSchema: {
       type: 'object',
       additionalProperties: false,
+      ...pullRequestTargetSchema,
       properties: {
         repository: repositoryProperty,
         pullRequestNumber: pullRequestNumberProperty,
@@ -366,23 +397,40 @@ export const GITHUB_AGENT_TOOLS: PluginToolDeclaration[] = [
     parametersSchema: {
       type: 'object',
       additionalProperties: false,
+      ...pullRequestTargetSchema,
       properties: {
         repository: repositoryProperty,
         pullRequestNumber: pullRequestNumberProperty,
         paperclipIssueId: paperclipIssueIdProperty,
         userReviewers: {
           type: 'array',
+          minItems: 1,
           items: {
             type: 'string'
           }
         },
         teamReviewers: {
           type: 'array',
+          minItems: 1,
           items: {
             type: 'string'
           }
         }
-      }
+      },
+      anyOf: [
+        {
+          required: ['paperclipIssueId', 'userReviewers']
+        },
+        {
+          required: ['paperclipIssueId', 'teamReviewers']
+        },
+        {
+          required: ['pullRequestNumber', 'userReviewers']
+        },
+        {
+          required: ['pullRequestNumber', 'teamReviewers']
+        }
+      ]
     }
   }
 ];

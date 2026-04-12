@@ -439,6 +439,43 @@ test('search_repository_items infers the mapped repository from the tool run con
   }
 });
 
+test('search_repository_items strips repository qualifiers from the free-text query', async () => {
+  const harness = await createGitHubAgentToolHarness();
+  const originalFetch = globalThis.fetch;
+  let capturedQuery = '';
+
+  globalThis.fetch = async (input) => {
+    const url = new URL(getRequestUrl(input));
+    if (url.pathname === '/search/issues') {
+      capturedQuery = url.searchParams.get('q') ?? '';
+      return jsonResponse({
+        total_count: 0,
+        incomplete_results: false,
+        items: []
+      });
+    }
+
+    throw new Error(`Unexpected GitHub request: ${url.toString()}`);
+  };
+
+  try {
+    const result = await harness.executeTool('search_repository_items', {
+      query: 'repo:other/repo org:other duplicate crash'
+    }, {
+      companyId: 'company-1',
+      projectId: 'project-1'
+    });
+
+    assert.ok(!result.error);
+    assert.match(capturedQuery, /^repo:paperclipai\/example-repo /);
+    assert.doesNotMatch(capturedQuery, /repo:other\/repo/);
+    assert.doesNotMatch(capturedQuery, /org:other/);
+    assert.match(capturedQuery, /duplicate crash/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test('add_issue_comment appends the required AI footer with the llm model', async () => {
   const harness = await createGitHubAgentToolHarness();
   const originalFetch = globalThis.fetch;
@@ -480,6 +517,62 @@ test('add_issue_comment appends the required AI footer with the llm model', asyn
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+test('issue-targeted tools reject repository overrides that do not match the linked GitHub issue repository', async () => {
+  const harness = await createGitHubAgentToolHarness();
+  harness.seed({
+    issues: [
+      {
+        id: 'issue-1',
+        companyId: 'company-1',
+        projectId: 'project-1',
+        title: 'Imported issue',
+        description: '',
+        status: 'todo'
+      } as never
+    ]
+  });
+
+  await harness.ctx.entities.upsert({
+    entityType: 'paperclip-github-plugin.issue-link',
+    scopeKind: 'issue',
+    scopeId: 'issue-1',
+    data: {
+      companyId: 'company-1',
+      paperclipProjectId: 'project-1',
+      repositoryUrl: 'https://github.com/paperclipai/example-repo',
+      githubIssueId: 1234,
+      githubIssueNumber: 12,
+      githubIssueUrl: 'https://github.com/paperclipai/example-repo/issues/12',
+      githubIssueState: 'open',
+      commentsCount: 0,
+      linkedPullRequestNumbers: [7],
+      labels: [],
+      syncedAt: '2026-04-12T10:00:00Z'
+    }
+  });
+
+  const issueResult = await harness.executeTool('add_issue_comment', {
+    paperclipIssueId: 'issue-1',
+    repository: 'paperclipai/other-repo',
+    body: 'Investigating.',
+    llmModel: 'gpt-5.4'
+  }, {
+    companyId: 'company-1',
+    projectId: 'project-1'
+  });
+  assert.match(issueResult.error ?? '', /does not match the linked GitHub repository/);
+
+  const pullRequestResult = await harness.executeTool('get_pull_request', {
+    paperclipIssueId: 'issue-1',
+    repository: 'paperclipai/other-repo',
+    pullRequestNumber: 7
+  }, {
+    companyId: 'company-1',
+    projectId: 'project-1'
+  });
+  assert.match(pullRequestResult.error ?? '', /repository must match the GitHub repository linked to the provided Paperclip issue/);
 });
 
 test('get_pull_request_checks returns CI jobs, status contexts, and workflow runs', async () => {

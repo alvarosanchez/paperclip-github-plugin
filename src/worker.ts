@@ -6116,6 +6116,32 @@ function formatRepositoryLabel(repository: Pick<ParsedRepositoryReference, 'owne
   return `${repository.owner}/${repository.repo}`;
 }
 
+function assertExplicitRepositoryMatchesLinkedRepository(
+  explicitRepositoryInput: unknown,
+  linkedRepositoryUrl: string,
+  mismatchMessage: string
+): ParsedRepositoryReference {
+  const linkedRepository = requireRepositoryReference(linkedRepositoryUrl);
+  const explicitRepository = normalizeOptionalToolString(explicitRepositoryInput);
+  if (!explicitRepository) {
+    return linkedRepository;
+  }
+
+  const requestedRepository = requireRepositoryReference(explicitRepository);
+  if (!areRepositoriesEqual(requestedRepository, linkedRepository)) {
+    throw new Error(mismatchMessage);
+  }
+
+  return linkedRepository;
+}
+
+function sanitizeRepositoryScopedSearchQuery(query: string): string {
+  return query
+    .replace(/(^|\s)(?:repo|org|user):(?:"[^"]+"|\S+)/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 function buildToolSuccessResult(content: string, data: unknown): ToolResult {
   return {
     content,
@@ -6230,9 +6256,11 @@ async function resolveGitHubIssueToolTarget(
       throw new Error('This Paperclip issue is not linked to a GitHub issue yet.');
     }
 
-    const repository = normalizeOptionalToolString(input.repository)
-      ? requireRepositoryReference(String(input.repository))
-      : requireRepositoryReference(link.repositoryUrl);
+    const repository = assertExplicitRepositoryMatchesLinkedRepository(
+      input.repository,
+      link.repositoryUrl,
+      'The provided repository does not match the linked GitHub repository for this Paperclip issue.'
+    );
     const explicitIssueNumber = normalizeToolPositiveInteger(input.issueNumber);
     if (explicitIssueNumber !== undefined && explicitIssueNumber !== link.githubIssueNumber) {
       throw new Error('The provided issue number does not match the linked GitHub issue for this Paperclip issue.');
@@ -6275,9 +6303,11 @@ async function resolveGitHubPullRequestToolTarget(
       throw new Error('This Paperclip issue is not linked to GitHub yet.');
     }
 
-    const repository = normalizeOptionalToolString(input.repository)
-      ? requireRepositoryReference(String(input.repository))
-      : requireRepositoryReference(link.repositoryUrl);
+    const repository = assertExplicitRepositoryMatchesLinkedRepository(
+      input.repository,
+      link.repositoryUrl,
+      'repository must match the GitHub repository linked to the provided Paperclip issue.'
+    );
     const explicitPullRequestNumber = normalizeToolPositiveInteger(input.pullRequestNumber);
     if (explicitPullRequestNumber !== undefined) {
       return {
@@ -7295,9 +7325,13 @@ function registerGitHubAgentTools(ctx: PluginSetupContext): void {
       const input = getToolInputRecord(params);
       const octokit = await createGitHubToolOctokit(ctx);
       const repository = await resolveGitHubToolRepository(ctx, runCtx, input);
-      const query = normalizeOptionalToolString(input.query);
-      if (!query) {
+      const rawQuery = normalizeOptionalToolString(input.query);
+      if (!rawQuery) {
         throw new Error('query is required.');
+      }
+      const query = sanitizeRepositoryScopedSearchQuery(rawQuery);
+      if (!query) {
+        throw new Error('query must include free-text search terms after removing repository or org qualifiers.');
       }
 
       const type = input.type === 'issue' || input.type === 'pull_request' || input.type === 'all'
