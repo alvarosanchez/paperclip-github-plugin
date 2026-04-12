@@ -3127,18 +3127,9 @@ function formatPaperclipIssueStatus(status: PaperclipIssueStatus): string {
 }
 
 function normalizePaperclipIssueStatus(value: unknown): PaperclipIssueStatus | undefined {
-  switch (value) {
-    case 'backlog':
-    case 'todo':
-    case 'in_progress':
-    case 'in_review':
-    case 'done':
-    case 'blocked':
-    case 'cancelled':
-      return value;
-    default:
-      return undefined;
-  }
+  return PAPERCLIP_ISSUE_STATUSES.includes(value as PaperclipIssueStatus)
+    ? value as PaperclipIssueStatus
+    : undefined;
 }
 
 function describeGitHubStatusTransitionReason(params: {
@@ -8246,6 +8237,7 @@ const plugin = definePlugin({
     ctx.data.register('settings.registration', async (input) => {
       const record = input && typeof input === 'object' ? input as Record<string, unknown> : {};
       const requestedCompanyId = normalizeCompanyId(record.companyId);
+      const includeAssignees = Boolean(requestedCompanyId && record.includeAssignees === true);
       const saved = await ctx.state.get(SETTINGS_SCOPE);
       const importRegistry = normalizeImportRegistry(await ctx.state.get(IMPORT_REGISTRY_SCOPE));
       const normalizedSettings = normalizeSettings(saved);
@@ -8270,13 +8262,13 @@ const plugin = definePlugin({
       }
 
       const scopedMappings = filterMappingsByCompany(settingsForResponse.mappings, requestedCompanyId);
-      const availableAssignees = requestedCompanyId
+      const availableAssignees = includeAssignees && requestedCompanyId
         ? await listAvailableAssignees(ctx, requestedCompanyId)
         : [];
 
       return {
         ...getPublicSettingsForScope(settingsForResponse, requestedCompanyId),
-        availableAssignees,
+        ...(includeAssignees ? { availableAssignees } : {}),
         totalSyncedIssuesCount: countImportedIssuesForMappings(importRegistry, scopedMappings),
         githubTokenConfigured,
         paperclipBoardAccessConfigured: requestedCompanyId

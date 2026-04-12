@@ -1707,7 +1707,8 @@ test('worker scopes mapping saves and settings reads to the requested company', 
       name: string;
     }>;
   }>('settings.registration', {
-    companyId: 'company-1'
+    companyId: 'company-1',
+    includeAssignees: true
   });
   const companyTwoBefore = await harness.getData<{
     mappings: Array<{
@@ -1760,6 +1761,7 @@ test('worker scopes mapping saves and settings reads to the requested company', 
     defaultStatus: 'backlog',
     ignoredIssueAuthorUsernames: ['renovate']
   });
+  assert.equal('availableAssignees' in companyTwoBefore, false);
 
   const companyOneSaveResult = await harness.performAction('settings.saveRegistration', {
     companyId: 'company-1',

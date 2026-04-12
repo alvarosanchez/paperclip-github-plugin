@@ -1183,98 +1183,58 @@ const PAGE_STYLES = `
   cursor: not-allowed;
 }
 
-.ghsync__select {
+.ghsync__native-select {
   position: relative;
 }
 
-.ghsync__select-trigger {
+.ghsync__native-select-input {
   width: 100%;
   min-height: 40px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  padding: 0 12px;
+  appearance: none;
   border-radius: 10px;
   border: 1px solid var(--ghsync-input-border);
   background: var(--ghsync-input-bg);
   color: var(--ghsync-input-text);
+  padding: 0 38px 0 12px;
   outline: none;
-  cursor: pointer;
-  text-align: left;
 }
 
-.ghsync__select-trigger:disabled {
+.ghsync__native-select--with-dot .ghsync__native-select-input {
+  padding-left: 34px;
+}
+
+.ghsync__native-select-input:disabled {
   opacity: 0.72;
   cursor: not-allowed;
 }
 
-.ghsync__select--open .ghsync__select-trigger,
-.ghsync__select-trigger:focus-visible {
+.ghsync__native-select-input:focus,
+.ghsync__native-select-input:focus-visible {
   border-color: var(--ghsync-border);
 }
 
-.ghsync__select-trigger-label,
-.ghsync__select-option-label {
-  min-width: 0;
-  display: inline-flex;
-  align-items: center;
-  gap: 10px;
-}
-
-.ghsync__select-trigger-label {
-  font-size: 14px;
-  color: var(--ghsync-title);
-}
-
-.ghsync__select-trigger-icon {
+.ghsync__native-select-icon {
+  position: absolute;
+  inset: 0 12px 0 auto;
   flex: 0 0 auto;
   display: inline-flex;
   align-items: center;
   color: var(--ghsync-muted);
+  pointer-events: none;
 }
 
-.ghsync__select-trigger-icon svg {
+.ghsync__native-select-icon svg {
   width: 16px;
   height: 16px;
 }
 
-.ghsync__select-menu {
+.ghsync__native-select-dot {
   position: absolute;
-  top: calc(100% + 6px);
-  left: 0;
-  right: 0;
-  z-index: 20;
-  display: grid;
-  gap: 2px;
-  padding: 6px;
-  border-radius: 12px;
-  border: 1px solid var(--ghsync-border);
-  background: var(--ghsync-surfaceAlt);
-  box-shadow: var(--ghsync-shadow);
-}
-
-.ghsync__select-option {
-  width: 100%;
-  display: flex;
+  display: inline-flex;
   align-items: center;
-  justify-content: flex-start;
-  padding: 9px 10px;
-  border: 0;
-  border-radius: 8px;
-  background: transparent;
-  color: var(--ghsync-text);
-  cursor: pointer;
-  text-align: left;
-}
-
-.ghsync__select-option:hover,
-.ghsync__select-option--selected {
-  background: color-mix(in srgb, var(--ghsync-surfaceRaised) 78%, var(--ghsync-badge-bg));
-}
-
-.ghsync__select-option-label {
-  font-size: 14px;
+  justify-content: center;
+  inset: 0 auto 0 12px;
+  pointer-events: none;
 }
 
 .ghsync__select-dot {
@@ -2300,107 +2260,6 @@ interface SettingsSelectOption {
   value: string;
   label: string;
   tone?: SelectTone;
-}
-
-function SettingsSelect(props: {
-  id: string;
-  value: string;
-  options: SettingsSelectOption[];
-  disabled?: boolean;
-  onChange: (value: string) => void;
-}): React.JSX.Element {
-  const { id, value, options, disabled = false, onChange } = props;
-  const [open, setOpen] = useState(false);
-  const rootRef = useRef<HTMLDivElement | null>(null);
-  const selectedOption = options.find((option) => option.value === value) ?? options[0];
-
-  useEffect(() => {
-    if (!open) {
-      return;
-    }
-
-    function handlePointerDown(event: MouseEvent) {
-      if (!rootRef.current?.contains(event.target as Node)) {
-        setOpen(false);
-      }
-    }
-
-    function handleKeyDown(event: KeyboardEvent) {
-      if (event.key === 'Escape') {
-        setOpen(false);
-      }
-    }
-
-    window.addEventListener('mousedown', handlePointerDown);
-    window.addEventListener('keydown', handleKeyDown);
-
-    return () => {
-      window.removeEventListener('mousedown', handlePointerDown);
-      window.removeEventListener('keydown', handleKeyDown);
-    };
-  }, [open]);
-
-  useEffect(() => {
-    if (disabled) {
-      setOpen(false);
-    }
-  }, [disabled]);
-
-  return (
-    <div ref={rootRef} className={`ghsync__select${open ? ' ghsync__select--open' : ''}`}>
-      <button
-        id={id}
-        type="button"
-        className="ghsync__select-trigger"
-        aria-haspopup="listbox"
-        aria-expanded={open}
-        aria-controls={`${id}-listbox`}
-        disabled={disabled}
-        onClick={() => {
-          if (!disabled) {
-            setOpen((current) => !current);
-          }
-        }}
-      >
-        <span className="ghsync__select-trigger-label">
-          {selectedOption?.tone ? <span className={`ghsync__select-dot ghsync__select-dot--${selectedOption.tone}`} aria-hidden="true" /> : null}
-          <span>{selectedOption?.label ?? ''}</span>
-        </span>
-        <span className="ghsync__select-trigger-icon" aria-hidden="true">
-          <svg viewBox="0 0 16 16" fill="none">
-            <path d="M4 6.5L8 10.5L12 6.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-          </svg>
-        </span>
-      </button>
-
-      {open ? (
-        <div className="ghsync__select-menu" role="listbox" id={`${id}-listbox`} aria-labelledby={id}>
-          {options.map((option) => {
-            const isSelected = option.value === value;
-
-            return (
-              <button
-                key={option.value}
-                type="button"
-                role="option"
-                aria-selected={isSelected}
-                className={`ghsync__select-option${isSelected ? ' ghsync__select-option--selected' : ''}`}
-                onClick={() => {
-                  onChange(option.value);
-                  setOpen(false);
-                }}
-              >
-                <span className="ghsync__select-option-label">
-                  {option.tone ? <span className={`ghsync__select-dot ghsync__select-dot--${option.tone}`} aria-hidden="true" /> : null}
-                  <span>{option.label}</span>
-                </span>
-              </button>
-            );
-          })}
-        </div>
-      ) : null}
-    </div>
-  );
 }
 
 function normalizeScheduleFrequencyMinutes(value: unknown): number {
@@ -3658,7 +3517,7 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
   const pluginIdFromLocation = getPluginIdFromLocation();
   const settings = usePluginData<GitHubSyncSettings>(
     'settings.registration',
-    hostContext.companyId ? { companyId: hostContext.companyId } : {}
+    hostContext.companyId ? { companyId: hostContext.companyId, includeAssignees: true } : {}
   );
   const saveRegistration = usePluginAction('settings.saveRegistration');
   const updateBoardAccess = usePluginAction('settings.updateBoardAccess');
@@ -4054,6 +3913,9 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
     label: option.label,
     tone: option.tone
   }));
+  const selectedStatusOption =
+    statusSelectOptions.find((option) => option.value === form.advancedSettings.defaultStatus)
+    ?? statusSelectOptions[0];
 
   useEffect(() => {
     if (advancedSettingsDirty) {
@@ -4843,41 +4705,71 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
                 <div className="ghsync__mapping-grid">
                   <div className="ghsync__field">
                     <label htmlFor="advanced-default-assignee">Default assignee</label>
-                    <SettingsSelect
-                      id="advanced-default-assignee"
-                      value={form.advancedSettings.defaultAssigneeAgentId ?? ''}
-                      disabled={settingsMutationsLocked}
-                      options={assigneeSelectOptions}
-                      onChange={(value) => {
-                        const nextValue = value.trim();
-                        setForm((current) => ({
-                          ...current,
-                          advancedSettings: {
-                            ...current.advancedSettings,
-                            ...(nextValue ? { defaultAssigneeAgentId: nextValue } : { defaultAssigneeAgentId: undefined })
-                          }
-                        }));
-                      }}
-                    />
+                    <div className="ghsync__native-select">
+                      <select
+                        id="advanced-default-assignee"
+                        className="ghsync__input ghsync__native-select-input"
+                        value={form.advancedSettings.defaultAssigneeAgentId ?? ''}
+                        disabled={settingsMutationsLocked}
+                        onChange={(event) => {
+                          const nextValue = event.currentTarget.value.trim();
+                          setForm((current) => ({
+                            ...current,
+                            advancedSettings: {
+                              ...current.advancedSettings,
+                              ...(nextValue ? { defaultAssigneeAgentId: nextValue } : { defaultAssigneeAgentId: undefined })
+                            }
+                          }));
+                        }}
+                      >
+                        {assigneeSelectOptions.map((option) => (
+                          <option key={option.value || '__unassigned'} value={option.value}>
+                            {option.label}
+                          </option>
+                        ))}
+                      </select>
+                      <span className="ghsync__native-select-icon" aria-hidden="true">
+                        <svg viewBox="0 0 16 16" fill="none">
+                          <path d="M4 6.5L8 10.5L12 6.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+                        </svg>
+                      </span>
+                    </div>
                   </div>
 
                   <div className="ghsync__field">
                     <label htmlFor="advanced-default-status">Default status</label>
-                    <SettingsSelect
-                      id="advanced-default-status"
-                      value={form.advancedSettings.defaultStatus}
-                      disabled={settingsMutationsLocked}
-                      options={statusSelectOptions}
-                      onChange={(value) => {
-                        setForm((current) => ({
-                          ...current,
-                          advancedSettings: {
-                            ...current.advancedSettings,
-                            defaultStatus: normalizePaperclipIssueStatus(value)
-                          }
-                        }));
-                      }}
-                    />
+                    <div className="ghsync__native-select ghsync__native-select--with-dot">
+                      <span
+                        className={`ghsync__select-dot ghsync__native-select-dot ghsync__select-dot--${selectedStatusOption.tone ?? 'neutral'}`}
+                        aria-hidden="true"
+                      />
+                      <select
+                        id="advanced-default-status"
+                        className="ghsync__input ghsync__native-select-input"
+                        value={form.advancedSettings.defaultStatus}
+                        disabled={settingsMutationsLocked}
+                        onChange={(event) => {
+                          setForm((current) => ({
+                            ...current,
+                            advancedSettings: {
+                              ...current.advancedSettings,
+                              defaultStatus: normalizePaperclipIssueStatus(event.currentTarget.value)
+                            }
+                          }));
+                        }}
+                      >
+                        {statusSelectOptions.map((option) => (
+                          <option key={option.value} value={option.value}>
+                            {option.label}
+                          </option>
+                        ))}
+                      </select>
+                      <span className="ghsync__native-select-icon" aria-hidden="true">
+                        <svg viewBox="0 0 16 16" fill="none">
+                          <path d="M4 6.5L8 10.5L12 6.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+                        </svg>
+                      </span>
+                    </div>
                   </div>
                 </div>
 
