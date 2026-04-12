@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { useHostContext, usePluginAction, usePluginData, usePluginToast } from '@paperclipai/plugin-sdk/ui';
 
+import { parseRepositoryReference, type ParsedRepositoryReference } from '../github-repo.ts';
 import { requiresPaperclipBoardAccess } from '../paperclip-health.ts';
 import { buildPaperclipUrl, fetchJson, fetchPaperclipHealth, resolveCliAuthPollUrl } from './http.ts';
 import { mergePluginConfig, normalizePluginConfig } from './plugin-config.ts';
@@ -216,12 +217,6 @@ interface CliAuthIdentityResponse {
 
 interface PluginConfigResponse {
   configJson?: Record<string, unknown> | null;
-}
-
-interface ParsedRepositoryReference {
-  owner: string;
-  repo: string;
-  url: string;
 }
 
 type ThemeMode = 'light' | 'dark';
@@ -2060,49 +2055,6 @@ function formatScheduleFrequency(minutes: number): string {
   return `every ${normalizedMinutes} minute${normalizedMinutes === 1 ? '' : 's'}`;
 }
 
-function parseRepositoryReference(repositoryInput: string): ParsedRepositoryReference | null {
-  const trimmed = repositoryInput.trim();
-  if (!trimmed) {
-    return null;
-  }
-
-  const slugMatch = trimmed.match(/^([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+?)(?:\.git)?$/);
-  if (slugMatch) {
-    const [, owner, repo] = slugMatch;
-    return {
-      owner,
-      repo,
-      url: `https://github.com/${owner}/${repo}`
-    };
-  }
-
-  try {
-    const url = new URL(trimmed);
-    if (url.hostname !== 'github.com' && url.hostname !== 'www.github.com') {
-      return null;
-    }
-
-    const pathSegments = url.pathname.split('/').filter(Boolean);
-    if (pathSegments.length !== 2) {
-      return null;
-    }
-
-    const [owner, rawRepo] = pathSegments;
-    const repo = rawRepo.replace(/\.git$/, '');
-    if (!owner || !repo) {
-      return null;
-    }
-
-    return {
-      owner,
-      repo,
-      url: `https://github.com/${owner}/${repo}`
-    };
-  } catch {
-    return null;
-  }
-}
-
 function formatProjectNameFromRepository(repositoryInput: string): string {
   const parsedRepository = parseRepositoryReference(repositoryInput);
   const repositoryName = parsedRepository?.repo
@@ -2256,7 +2208,7 @@ async function resolveOrCreateProject(companyId: string, projectName: string): P
 async function listCompanyProjects(companyId: string): Promise<Array<{ id: string; name: string }>> {
   const response = await fetchJson<unknown>(`/api/companies/${companyId}/projects`);
   if (!Array.isArray(response)) {
-    return [];
+    throw new Error(`Unexpected projects response for company ${companyId}: expected an array.`);
   }
 
   return response
@@ -2276,7 +2228,7 @@ async function listCompanyProjects(companyId: string): Promise<Array<{ id: strin
 async function listProjectWorkspaces(projectId: string): Promise<ProjectWorkspaceSummary[]> {
   const response = await fetchJson<unknown>(`/api/projects/${projectId}/workspaces`);
   if (!Array.isArray(response)) {
-    return [];
+    throw new Error(`Unexpected project workspaces response for project ${projectId}: expected an array.`);
   }
 
   const workspaces: ProjectWorkspaceSummary[] = [];

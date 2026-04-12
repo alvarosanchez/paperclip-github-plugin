@@ -1,3 +1,5 @@
+import { parseRepositoryReference } from '../github-repo.ts';
+
 export interface RepositoryMappingSnapshot {
   repositoryUrl: string;
   paperclipProjectId?: string;
@@ -22,41 +24,6 @@ export interface ExistingProjectSyncCandidate {
   isPrimary: boolean;
 }
 
-function parseGitHubRepositoryReference(repositoryInput: string): string | null {
-  const trimmed = repositoryInput.trim();
-  if (!trimmed) {
-    return null;
-  }
-
-  const slugMatch = trimmed.match(/^([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+?)(?:\.git)?$/);
-  if (slugMatch) {
-    const [, owner, repo] = slugMatch;
-    return `https://github.com/${owner}/${repo}`;
-  }
-
-  try {
-    const url = new URL(trimmed);
-    if (url.hostname !== 'github.com' && url.hostname !== 'www.github.com') {
-      return null;
-    }
-
-    const pathSegments = url.pathname.split('/').filter(Boolean);
-    if (pathSegments.length !== 2) {
-      return null;
-    }
-
-    const [owner, rawRepo] = pathSegments;
-    const repo = rawRepo.replace(/\.git$/, '');
-    if (!owner || !repo) {
-      return null;
-    }
-
-    return `https://github.com/${owner}/${repo}`;
-  } catch {
-    return null;
-  }
-}
-
 function compareByProjectName(left: ExistingProjectSyncCandidate, right: ExistingProjectSyncCandidate): number {
   const projectNameComparison = left.projectName.localeCompare(right.projectName, undefined, { sensitivity: 'base' });
   if (projectNameComparison !== 0) {
@@ -70,8 +37,7 @@ export function discoverExistingProjectSyncCandidates(params: {
   projects: CompanyProjectSummary[];
   workspacesByProjectId: Record<string, ProjectWorkspaceSummary[] | undefined>;
 }): ExistingProjectSyncCandidate[] {
-  const discoveredCandidates: ExistingProjectSyncCandidate[] = [];
-  const seenCandidates = new Set<string>();
+  const discoveredCandidates = new Map<string, ExistingProjectSyncCandidate>();
 
   for (const project of params.projects) {
     const projectId = project.id.trim();
@@ -82,30 +48,39 @@ export function discoverExistingProjectSyncCandidates(params: {
 
     const workspaces = params.workspacesByProjectId[projectId] ?? [];
     for (const workspace of workspaces) {
-      const repositoryUrl = parseGitHubRepositoryReference(workspace.repoUrl ?? '');
-      if (!repositoryUrl) {
+      const parsedRepository = parseRepositoryReference(workspace.repoUrl ?? '');
+      if (!parsedRepository) {
         continue;
       }
 
+      const repositoryUrl = parsedRepository.url;
       const candidateKey = `${projectId}:${repositoryUrl}`;
-      if (seenCandidates.has(candidateKey)) {
+      const sourceType =
+        typeof workspace.sourceType === 'string' && workspace.sourceType.trim()
+          ? workspace.sourceType.trim()
+          : undefined;
+      const isPrimary = workspace.isPrimary === true;
+      const existingCandidate = discoveredCandidates.get(candidateKey);
+      if (existingCandidate) {
+        discoveredCandidates.set(candidateKey, {
+          ...existingCandidate,
+          sourceType: existingCandidate.sourceType ?? sourceType,
+          isPrimary: existingCandidate.isPrimary || isPrimary
+        });
         continue;
       }
-      seenCandidates.add(candidateKey);
 
-      discoveredCandidates.push({
+      discoveredCandidates.set(candidateKey, {
         projectId,
         projectName,
         repositoryUrl,
-        sourceType: typeof workspace.sourceType === 'string' && workspace.sourceType.trim()
-          ? workspace.sourceType.trim()
-          : undefined,
-        isPrimary: workspace.isPrimary === true
+        sourceType,
+        isPrimary
       });
     }
   }
 
-  return discoveredCandidates.sort(compareByProjectName);
+  return [...discoveredCandidates.values()].sort(compareByProjectName);
 }
 
 export function filterExistingProjectSyncCandidates(
@@ -119,7 +94,7 @@ export function filterExistingProjectSyncCandidates(
   );
   const mappedRepositoryUrls = new Set(
     mappings
-      .map((mapping) => parseGitHubRepositoryReference(mapping.repositoryUrl))
+      .map((mapping) => parseRepositoryReference(mapping.repositoryUrl)?.url)
       .filter((value): value is string => Boolean(value))
   );
 

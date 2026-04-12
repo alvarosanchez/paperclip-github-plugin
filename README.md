@@ -185,6 +185,7 @@ Imported issues stay linked to GitHub and continue to receive description, label
 - `pnpm dev:ui` starts a local Paperclip plugin UI dev server from `dist/ui` on port `4177`.
 - `pnpm test:e2e` builds the plugin, boots an isolated Paperclip instance, installs the plugin, and verifies the hosted settings page renders.
 - `pnpm verify:manual` builds the plugin, boots a Paperclip instance for manual inspection, seeds a project already mapped to `https://github.com/alvarosanchez/paperclip-github-plugin`, seeds a `CEO` agent on the Codex local adapter with model `gpt-5.4`, and opens the plugin settings page.
+- Set `PAPERCLIP_E2E_CEO_BYPASS_APPROVALS_AND_SANDBOX=true` if you want that seeded `CEO` agent to opt into Codex's bypass flag during manual verification.
 
 For fast hosted-UI iteration, run `pnpm dev` in one terminal and `pnpm dev:ui` in another.
 

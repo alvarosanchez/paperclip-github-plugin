@@ -178,7 +178,7 @@ test('discoverExistingProjectSyncCandidates normalizes GitHub workspaces and ign
       projectId: 'project-1',
       projectName: 'Alpha',
       repositoryUrl: 'https://github.com/example/alpha',
-      isPrimary: false,
+      isPrimary: true,
       sourceType: undefined
     },
     {
@@ -186,6 +186,30 @@ test('discoverExistingProjectSyncCandidates normalizes GitHub workspaces and ign
       projectName: 'Beta',
       repositoryUrl: 'https://github.com/example/beta',
       isPrimary: false,
+      sourceType: 'git_repo'
+    }
+  ]);
+});
+
+test('discoverExistingProjectSyncCandidates merges duplicate repo workspaces and keeps primary metadata', () => {
+  const candidates = discoverExistingProjectSyncCandidates({
+    projects: [
+      { id: 'project-1', name: 'Alpha' }
+    ],
+    workspacesByProjectId: {
+      'project-1': [
+        { repoUrl: 'https://github.com/example/alpha', isPrimary: false },
+        { repoUrl: 'example/alpha', sourceType: 'git_repo', isPrimary: true }
+      ]
+    }
+  });
+
+  assert.deepEqual(candidates, [
+    {
+      projectId: 'project-1',
+      projectName: 'Alpha',
+      repositoryUrl: 'https://github.com/example/alpha',
+      isPrimary: true,
       sourceType: 'git_repo'
     }
   ]);

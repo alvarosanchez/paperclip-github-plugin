@@ -19,6 +19,7 @@ const seededProjectName = 'Paperclip Github Plugin';
 const seededRepositoryUrl = 'https://github.com/alvarosanchez/paperclip-github-plugin';
 const seededAgentName = 'CEO';
 const seededAgentModel = 'gpt-5.4';
+const seedAgentBypassApprovalsAndSandbox = process.env.PAPERCLIP_E2E_CEO_BYPASS_APPROVALS_AND_SANDBOX === 'true';
 const requestedPort = process.env.PAPERCLIP_E2E_PORT ? Number(process.env.PAPERCLIP_E2E_PORT) : 3100;
 const requestedDbPort = process.env.PAPERCLIP_E2E_DB_PORT ? Number(process.env.PAPERCLIP_E2E_DB_PORT) : 54329;
 const env = {
@@ -366,7 +367,7 @@ async function ensureSeedAgent(company) {
     adapterType: 'codex_local',
     adapterConfig: {
       model: seededAgentModel,
-      dangerouslyBypassApprovalsAndSandbox: true
+      dangerouslyBypassApprovalsAndSandbox: seedAgentBypassApprovalsAndSandbox
     }
   };
 
@@ -375,7 +376,7 @@ async function ensureSeedAgent(company) {
       method: 'PATCH',
       body: JSON.stringify(agentPayload)
     });
-    log(`Updated seeded agent ${seededAgentName} to use Codex ${seededAgentModel}.`);
+    log(`Updated seeded agent ${seededAgentName} to use Codex ${seededAgentModel}${seedAgentBypassApprovalsAndSandbox ? ' with bypass enabled' : ''}.`);
     return;
   }
 
@@ -383,7 +384,7 @@ async function ensureSeedAgent(company) {
     method: 'POST',
     body: JSON.stringify(agentPayload)
   });
-  log(`Seeded agent ${seededAgentName} using Codex ${seededAgentModel}.`);
+  log(`Seeded agent ${seededAgentName} using Codex ${seededAgentModel}${seedAgentBypassApprovalsAndSandbox ? ' with bypass enabled' : ''}.`);
 }
 
 async function waitForServerExit(timeoutMs) {
