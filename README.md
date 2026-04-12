@@ -2,7 +2,7 @@
 
 GitHub Sync is a Paperclip plugin that connects GitHub repositories to Paperclip projects and keeps GitHub issues synchronized into your Paperclip workspace.
 
-It is designed for teams that plan in Paperclip but still receive work through GitHub issues. The plugin gives you a Paperclip-native setup flow, secure GitHub token handling through Paperclip secrets, authenticated-deployment detection with required board-access connection when needed, manual sync controls, automatic background sync, and GitHub context directly on synced Paperclip issues.
+It is designed for teams that plan in Paperclip but still receive work through GitHub issues. The plugin gives you a Paperclip-native setup flow, secure GitHub token handling through Paperclip secrets or an optional local worker config file, authenticated-deployment detection with required board-access connection when needed, manual sync controls, automatic background sync, and GitHub context directly on synced Paperclip issues.
 
 ## What the plugin does
 
@@ -10,6 +10,7 @@ It is designed for teams that plan in Paperclip but still receive work through G
 - Imports GitHub issues as top-level Paperclip issues.
 - Keeps already imported issues updated instead of recreating them.
 - Stores the GitHub token as a Paperclip secret reference instead of persisting the raw token in plugin state.
+- Supports an optional worker-local config file at `~/.paperclip/plugins/github-sync/config.json` for a raw `githubToken` fallback when Paperclip-managed secrets are not available.
 - Can store a per-company Paperclip board API token for worker-side REST calls when Paperclip board access requires sign-in.
 - Adds Paperclip UI surfaces for setup, sync status, manual sync actions, issue details, and GitHub link annotations.
 
@@ -20,6 +21,7 @@ It is designed for teams that plan in Paperclip but still receive work through G
 - Hosted settings page inside Paperclip.
 - GitHub token validation before saving.
 - GitHub token saved through Paperclip company secrets; the plugin stores only the secret reference.
+- Optional worker-local config file support at `~/.paperclip/plugins/github-sync/config.json` with a `githubToken` field for global runtime fallback.
 - GitHub token and automatic sync cadence stay shared across the plugin instance, while repository mappings and Paperclip board access are managed per company from the same hosted settings flow.
 - The hosted settings page calls out the current company by name and separates company-scoped setup from shared plugin-wide settings.
 - Automatic detection of authenticated Paperclip deployments through `/api/health`.
@@ -89,6 +91,7 @@ It is designed for teams that plan in Paperclip but still receive work through G
 ### Resilience and safety
 
 - Raw GitHub tokens are never persisted in plugin state.
+- Raw GitHub tokens loaded from `~/.paperclip/plugins/github-sync/config.json` stay worker-local and are never returned by public data endpoints.
 - Raw Paperclip board tokens are never persisted in plugin state or plugin config.
 - Scheduled sync skips runs that are not due yet.
 - Incomplete setup is surfaced as configuration guidance instead of silently failing.
@@ -124,6 +127,24 @@ npx paperclip plugin install --local "$PWD"
 
 If you are installing into an isolated local Paperclip instance for testing, include the Paperclip CLI flags you normally use for `--data-dir` and `--config`.
 
+## Optional external worker config
+
+If the Paperclip host cannot provide the GitHub token through environment variables or plugin config, the worker can also read an optional local file:
+
+```json
+{
+  "githubToken": "ghp_your_token_here"
+}
+```
+
+Save it at `~/.paperclip/plugins/github-sync/config.json`.
+
+Notes:
+
+- This file is read by the worker only.
+- The raw token is not persisted into plugin state or plugin config.
+- A GitHub token secret saved through the Paperclip settings UI still takes precedence over the external file.
+
 ## First-time setup in Paperclip
 
 1. Open Paperclip instance settings and go to the plugin settings for **GitHub Sync** from inside the company you want to configure.
@@ -146,7 +167,7 @@ Imported issues stay linked to GitHub and continue to receive description, label
 ## Troubleshooting notes
 
 - If one company’s mappings disappear after saving another company’s setup, reopen plugin settings inside the affected company and confirm each company’s mappings separately; the settings page now keeps those mapping lists isolated per company.
-- If sync says setup is incomplete, confirm that a validated token has been saved, at least one repository mapping has a created Paperclip project, and authenticated deployments have connected Paperclip board access for the current company.
+- If sync says setup is incomplete, confirm that either a validated token secret has been saved or `~/.paperclip/plugins/github-sync/config.json` contains `githubToken`, at least one repository mapping has a created Paperclip project, and authenticated deployments have connected Paperclip board access for the current company.
 - If token validation fails, confirm the token is still valid and can access the target repositories through the GitHub API.
 - If the dashboard, toolbar, or settings page says board access is required, open plugin settings inside the target company and complete the Paperclip board access approval flow before retrying sync.
 - If sync reports that the Paperclip API returned an authenticated HTML page instead of JSON, the worker is reaching a board URL that requires the browser login session. Connect Paperclip board access from plugin settings for that company, or set `PAPERCLIP_API_URL` for the Paperclip worker to a worker-accessible Paperclip API origin, then rerun sync.

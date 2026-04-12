@@ -1,4 +1,7 @@
 import { strict as assert } from 'node:assert';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import test from 'node:test';
 
 import { createTestHarness } from '@paperclipai/plugin-sdk/testing';
@@ -146,6 +149,33 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => {
     globalThis.setTimeout(resolve, ms);
   });
+}
+
+async function withExternalPluginConfig<T>(
+  config: Record<string, unknown>,
+  run: () => Promise<T>
+): Promise<T> {
+  const temporaryHomeDirectory = await mkdtemp(join(tmpdir(), 'paperclip-github-plugin-'));
+  const configDirectory = join(temporaryHomeDirectory, '.paperclip', 'plugins', 'github-sync');
+  const configFilePath = join(configDirectory, 'config.json');
+  const previousHome = process.env.HOME;
+
+  await mkdir(configDirectory, { recursive: true });
+  await writeFile(configFilePath, `${JSON.stringify(config, null, 2)}\n`, 'utf8');
+
+  process.env.HOME = temporaryHomeDirectory;
+
+  try {
+    return await run();
+  } finally {
+    if (previousHome === undefined) {
+      delete process.env.HOME;
+    } else {
+      process.env.HOME = previousHome;
+    }
+
+    await rm(temporaryHomeDirectory, { recursive: true, force: true });
+  }
 }
 
 interface PublicGitHubIssueFixture {
@@ -1166,6 +1196,33 @@ test('settings.registration reports a configured token without resolving the sav
   assert.equal(result.githubTokenConfigured, true);
   assert.equal(result.syncState?.status, 'idle');
   assert.equal(resolveCount, 0);
+});
+
+test('settings.registration reports a configured token from the external config file without resolving secrets', { concurrency: false }, async () => {
+  await withExternalPluginConfig(
+    {
+      githubToken: 'ghp_external_token'
+    },
+    async () => {
+      const harness = createTestHarness({ manifest });
+      await plugin.definition.setup(harness.ctx);
+
+      let resolveCount = 0;
+      harness.ctx.secrets.resolve = async () => {
+        resolveCount += 1;
+        throw new Error('Secret resolution should not happen for settings data.');
+      };
+
+      const result = await harness.getData<{
+        githubTokenConfigured?: boolean;
+        syncState?: { status?: string };
+      }>('settings.registration');
+
+      assert.equal(result.githubTokenConfigured, true);
+      assert.equal(result.syncState?.status, 'idle');
+      assert.equal(resolveCount, 0);
+    }
+  );
 });
 
 test('settings.registration reports company-specific board access without resolving the saved secret', async () => {
@@ -5907,7 +5964,7 @@ test('worker reports sync error when configuration is incomplete', async () => {
   };
 
   assert.equal(result.syncState.status, 'error');
-  assert.equal(result.syncState.message, 'Configure a GitHub token secret before running sync.');
+  assert.equal(result.syncState.message, 'Configure a GitHub token before running sync.');
   assert.equal(result.syncState.lastRunTrigger, 'manual');
 });
 
@@ -5933,6 +5990,33 @@ test('sync.runNow falls back to the saved githubTokenRef when config has not pro
   assert.equal(result.syncState.status, 'error');
   assert.equal(result.syncState.message, 'Save at least one mapping with a created Paperclip project before running sync.');
   assert.equal(result.syncState.lastRunTrigger, 'manual');
+});
+
+test('sync.runNow falls back to the external config file token when no secret ref is configured', { concurrency: false }, async () => {
+  await withExternalPluginConfig(
+    {
+      githubToken: 'ghp_external_token'
+    },
+    async () => {
+      const harness = createTestHarness({ manifest });
+      await plugin.definition.setup(harness.ctx);
+
+      let resolveCount = 0;
+      harness.ctx.secrets.resolve = async () => {
+        resolveCount += 1;
+        throw new Error('Secret resolution should not happen when using the external config file token.');
+      };
+
+      const result = await harness.performAction('sync.runNow', {}) as {
+        syncState: { status: string; message?: string; lastRunTrigger?: string };
+      };
+
+      assert.equal(resolveCount, 0);
+      assert.equal(result.syncState.status, 'error');
+      assert.equal(result.syncState.message, 'Save at least one mapping with a created Paperclip project before running sync.');
+      assert.equal(result.syncState.lastRunTrigger, 'manual');
+    }
+  );
 });
 
 test('sync.runNow scopes a company-level manual sync to the requested company', async () => {
@@ -6079,12 +6163,13 @@ test('settings registration clears legacy setup errors once the missing token is
       mappings: [],
       syncState: {
         status: 'error',
-        message: 'Configure a GitHub token secret before running sync.',
+        message: 'Configure a GitHub token before running sync.',
         checkedAt: '2026-04-10T10:58:17.000Z',
         lastRunTrigger: 'schedule',
         errorDetails: {
           phase: 'configuration',
-          suggestedAction: 'Open settings, add a GitHub token secret, validate it, and then run sync again.'
+          suggestedAction:
+            'Open settings and save a GitHub token secret, or create ~/.paperclip/plugins/github-sync/config.json with a "githubToken" value, and then run sync again.'
         }
       },
       scheduleFrequencyMinutes: 15
@@ -6146,12 +6231,13 @@ test('saving setup clears stale setup errors instead of resaving them from the U
       mappings: [],
       syncState: {
         status: 'error',
-        message: 'Configure a GitHub token secret before running sync.',
+        message: 'Configure a GitHub token before running sync.',
         checkedAt: '2026-04-10T10:58:17.000Z',
         lastRunTrigger: 'schedule',
         errorDetails: {
           phase: 'configuration',
-          suggestedAction: 'Open settings, add a GitHub token secret, validate it, and then run sync again.'
+          suggestedAction:
+            'Open settings and save a GitHub token secret, or create ~/.paperclip/plugins/github-sync/config.json with a "githubToken" value, and then run sync again.'
         }
       },
       scheduleFrequencyMinutes: 15
@@ -6170,12 +6256,13 @@ test('saving setup clears stale setup errors instead of resaving them from the U
     ],
     syncState: {
       status: 'error',
-      message: 'Configure a GitHub token secret before running sync.',
+      message: 'Configure a GitHub token before running sync.',
       checkedAt: '2026-04-10T10:58:17.000Z',
       lastRunTrigger: 'schedule',
       errorDetails: {
         phase: 'configuration',
-        suggestedAction: 'Open settings, add a GitHub token secret, validate it, and then run sync again.'
+        suggestedAction:
+          'Open settings and save a GitHub token secret, or create ~/.paperclip/plugins/github-sync/config.json with a "githubToken" value, and then run sync again.'
       }
     }
   }) as {

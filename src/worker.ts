@@ -1,3 +1,6 @@
+import { readFile } from 'node:fs/promises';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 import { Octokit } from '@octokit/rest';
 import { definePlugin, runWorker, type Issue } from '@paperclipai/plugin-sdk';
 
@@ -26,8 +29,9 @@ const MANUAL_SYNC_RESPONSE_GRACE_PERIOD_MS = 500;
 const RUNNING_SYNC_MESSAGE = 'GitHub sync is running in the background. This page will update when it finishes.';
 const SYNC_PROGRESS_PERSIST_INTERVAL_MS = 250;
 const GITHUB_SECONDARY_RATE_LIMIT_FALLBACK_MS = 60_000;
-const MISSING_GITHUB_TOKEN_SYNC_MESSAGE = 'Configure a GitHub token secret before running sync.';
-const MISSING_GITHUB_TOKEN_SYNC_ACTION = 'Open settings, add a GitHub token secret, validate it, and then run sync again.';
+const MISSING_GITHUB_TOKEN_SYNC_MESSAGE = 'Configure a GitHub token before running sync.';
+const MISSING_GITHUB_TOKEN_SYNC_ACTION =
+  'Open settings and save a GitHub token secret, or create ~/.paperclip/plugins/github-sync/config.json with a "githubToken" value, and then run sync again.';
 const MISSING_MAPPING_SYNC_MESSAGE = 'Save at least one mapping with a created Paperclip project before running sync.';
 const MISSING_MAPPING_SYNC_ACTION =
   'Open settings, add a repository mapping, let Paperclip create the target project, and then retry sync.';
@@ -37,6 +41,7 @@ const MISSING_BOARD_ACCESS_SYNC_ACTION =
   'Open plugin settings for each mapped company that sync will touch, connect Paperclip board access, approve the flow, and then run sync again.';
 const ISSUE_LINK_ENTITY_TYPE = 'paperclip-github-plugin.issue-link';
 const COMMENT_ANNOTATION_ENTITY_TYPE = 'paperclip-github-plugin.comment-annotation';
+const EXTERNAL_CONFIG_FILE_PATH_SEGMENTS = ['.paperclip', 'plugins', 'github-sync', 'config.json'] as const;
 
 type PluginSetupContext = Parameters<Parameters<typeof definePlugin>[0]['setup']>[0];
 type PaperclipIssueStatus = Issue['status'];
@@ -248,7 +253,13 @@ interface GitHubSyncSettings {
 
 interface GitHubSyncConfig {
   githubTokenRef?: string;
+  githubToken?: string;
   paperclipBoardApiTokenRefs?: PaperclipBoardApiTokenRefs;
+}
+
+interface ResolvedGitHubTokenSource {
+  secretRef?: string;
+  token?: string;
 }
 
 function normalizeCompanyId(value: unknown): string | undefined {
@@ -258,6 +269,7 @@ function normalizeCompanyId(value: unknown): string | undefined {
 let activeSyncPromise: Promise<GitHubSyncSettings> | null = null;
 let activeRunningSyncState: GitHubSyncSettings | null = null;
 let activePaperclipApiAuthTokensByCompanyId: Map<string, string> | null = null;
+let activeExternalConfigWarningKey: string | null = null;
 
 class PaperclipLabelSyncError extends Error {
   readonly name = 'PaperclipLabelSyncError';
@@ -2120,10 +2132,99 @@ function normalizeConfig(value: unknown): GitHubSyncConfig {
   }
 
   const record = value as Record<string, unknown>;
+  const githubTokenRef = normalizeGitHubTokenRef(record.githubTokenRef);
+  const githubToken = normalizeGitHubToken(record.githubToken);
+  const paperclipBoardApiTokenRefs = normalizePaperclipBoardApiTokenRefs(record.paperclipBoardApiTokenRefs);
+
   return {
-    githubTokenRef: typeof record.githubTokenRef === 'string' ? record.githubTokenRef : undefined,
-    paperclipBoardApiTokenRefs: normalizePaperclipBoardApiTokenRefs(record.paperclipBoardApiTokenRefs)
+    ...(githubTokenRef ? { githubTokenRef } : {}),
+    ...(githubToken ? { githubToken } : {}),
+    ...(paperclipBoardApiTokenRefs ? { paperclipBoardApiTokenRefs } : {})
   };
+}
+
+function normalizeGitHubToken(value: unknown): string | undefined {
+  if (typeof value !== 'string') {
+    return undefined;
+  }
+
+  const trimmed = value.trim();
+  return trimmed ? trimmed : undefined;
+}
+
+function getExternalConfigFilePath(): string | undefined {
+  const homeDirectory = getHomeDirectory();
+  return homeDirectory ? join(homeDirectory, ...EXTERNAL_CONFIG_FILE_PATH_SEGMENTS) : undefined;
+}
+
+function getHomeDirectory(): string | undefined {
+  try {
+    const resolvedHomeDirectory = homedir();
+    return typeof resolvedHomeDirectory === 'string' && resolvedHomeDirectory.trim()
+      ? resolvedHomeDirectory
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function warnOnceAboutExternalConfig(
+  ctx: PluginSetupContext,
+  warningKey: string,
+  message: string,
+  metadata: Record<string, unknown>
+): void {
+  if (activeExternalConfigWarningKey === warningKey) {
+    return;
+  }
+
+  activeExternalConfigWarningKey = warningKey;
+  ctx.logger.warn(message, metadata);
+}
+
+async function readExternalConfig(ctx: PluginSetupContext): Promise<GitHubSyncConfig> {
+  const externalConfigFilePath = getExternalConfigFilePath();
+  if (!externalConfigFilePath) {
+    activeExternalConfigWarningKey = null;
+    return {};
+  }
+
+  try {
+    const rawConfig = await readFile(externalConfigFilePath, 'utf8');
+    const parsedConfig = JSON.parse(rawConfig) as unknown;
+    activeExternalConfigWarningKey = null;
+    return normalizeConfig(parsedConfig);
+  } catch (error) {
+    const errorCode = error && typeof error === 'object' && 'code' in error ? (error as { code?: unknown }).code : undefined;
+    if (errorCode === 'ENOENT') {
+      activeExternalConfigWarningKey = null;
+      return {};
+    }
+
+    if (error instanceof SyntaxError) {
+      warnOnceAboutExternalConfig(
+        ctx,
+        `syntax:${externalConfigFilePath}`,
+        'Ignoring the GitHub Sync external config file because it is not valid JSON.',
+        {
+          filePath: externalConfigFilePath,
+          error: error.message
+        }
+      );
+      return {};
+    }
+
+    warnOnceAboutExternalConfig(
+      ctx,
+      `read:${externalConfigFilePath}:${String(errorCode ?? 'unknown')}`,
+      'Ignoring the GitHub Sync external config file because it could not be read.',
+      {
+        filePath: externalConfigFilePath,
+        error: getErrorMessage(error)
+      }
+    );
+    return {};
+  }
 }
 
 function normalizePaperclipBoardApiTokenRefs(value: unknown): PaperclipBoardApiTokenRefs | undefined {
@@ -5570,21 +5671,43 @@ async function synchronizePaperclipIssueStatuses(
 }
 
 async function getResolvedConfig(ctx: PluginSetupContext): Promise<GitHubSyncConfig> {
-  return normalizeConfig(await ctx.config.get());
+  const [savedConfig, externalConfig] = await Promise.all([
+    ctx.config.get(),
+    readExternalConfig(ctx)
+  ]);
+
+  return {
+    ...externalConfig,
+    ...normalizeConfig(savedConfig)
+  };
+}
+
+function getConfiguredGithubTokenSource(
+  settings: Pick<GitHubSyncSettings, 'githubTokenRef'> | null | undefined,
+  config: GitHubSyncConfig
+): ResolvedGitHubTokenSource {
+  const secretRef = normalizeGitHubTokenRef(config.githubTokenRef) ?? normalizeGitHubTokenRef(settings?.githubTokenRef);
+  if (secretRef) {
+    return { secretRef };
+  }
+
+  const token = normalizeGitHubToken(config.githubToken);
+  return token ? { token } : {};
 }
 
 function getConfiguredGithubTokenRef(
   settings: Pick<GitHubSyncSettings, 'githubTokenRef'> | null | undefined,
   config: GitHubSyncConfig
 ): string | undefined {
-  return normalizeGitHubTokenRef(config.githubTokenRef) ?? normalizeGitHubTokenRef(settings?.githubTokenRef);
+  return getConfiguredGithubTokenSource(settings, config).secretRef;
 }
 
 function hasConfiguredGithubToken(
   settings: Pick<GitHubSyncSettings, 'githubTokenRef'> | null | undefined,
   config: GitHubSyncConfig
 ): boolean {
-  return Boolean(getConfiguredGithubTokenRef(settings, config));
+  const configuredTokenSource = getConfiguredGithubTokenSource(settings, config);
+  return Boolean(configuredTokenSource.secretRef ?? configuredTokenSource.token);
 }
 
 function getSavedPaperclipBoardApiTokenRef(
@@ -5712,12 +5835,12 @@ async function resolvePaperclipApiAuthTokens(
 async function resolveGithubToken(ctx: PluginSetupContext): Promise<string> {
   const settings = normalizeSettings(await ctx.state.get(SETTINGS_SCOPE));
   const config = await getResolvedConfig(ctx);
-  const secretRef = getConfiguredGithubTokenRef(settings, config) ?? '';
-  if (!secretRef) {
-    return '';
+  const configuredTokenSource = getConfiguredGithubTokenSource(settings, config);
+  if (configuredTokenSource.secretRef) {
+    return ctx.secrets.resolve(configuredTokenSource.secretRef);
   }
 
-  return ctx.secrets.resolve(secretRef);
+  return configuredTokenSource.token ?? '';
 }
 
 async function validateGithubToken(token: string): Promise<TokenValidationResult> {
@@ -6419,6 +6542,7 @@ const plugin = definePlugin({
       const normalizedSettings = normalizeSettings(saved);
       const config = await getResolvedConfig(ctx);
       const githubTokenRef = getConfiguredGithubTokenRef(normalizedSettings, config);
+      const githubTokenConfigured = hasConfiguredGithubToken(normalizedSettings, config);
       const configuredBoardTokenRef = getConfiguredPaperclipBoardApiTokenRef(config, requestedCompanyId);
       const savedBoardTokenRef = getSavedPaperclipBoardApiTokenRef(normalizedSettings, requestedCompanyId);
       const settingsWithResolvedToken = githubTokenRef === normalizedSettings.githubTokenRef
@@ -6427,7 +6551,6 @@ const plugin = definePlugin({
             ...normalizedSettings,
             ...(githubTokenRef ? { githubTokenRef } : {})
           };
-      const githubTokenConfigured = Boolean(githubTokenRef);
       const settingsForResponse = sanitizeSettingsForCurrentSetup(settingsWithResolvedToken, {
         hasToken: githubTokenConfigured,
         hasMappings: getSyncableMappings(settingsWithResolvedToken.mappings).length > 0
@@ -6516,7 +6639,7 @@ const plugin = definePlugin({
         ...(githubTokenRef ? { githubTokenRef } : {}),
         updatedAt: new Date().toISOString()
       }, {
-        hasToken: Boolean(normalizeGitHubTokenRef(config.githubTokenRef) ?? githubTokenRef),
+        hasToken: hasConfiguredGithubToken({ githubTokenRef }, config),
         hasMappings: getSyncableMappings(nextMappings).length > 0
       });
 
