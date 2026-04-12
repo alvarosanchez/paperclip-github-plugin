@@ -37,6 +37,8 @@ Read these before changing behavior:
 - `src/worker.ts` - worker logic, sync behavior, and persisted plugin state
 - `src/ui/index.tsx` - in-host Paperclip UI surfaces
 - `tests/plugin.spec.ts` - minimum fast contract coverage
+- `paperclip-plugin-ui` - global reusable Paperclip plugin UI patterns discovered in this repo
+- `paperclip-plugin-development` - global reusable Paperclip plugin backend/worker patterns discovered in this repo
 
 ## Working rules
 
@@ -57,6 +59,14 @@ Read these before changing behavior:
 - Treat `src/ui/index.tsx` as a real Paperclip-hosted UI, not a standalone demo.
 - Keep loading, error, and empty states resilient.
 - If you rename exported UI components, update the manifest slot export names in the same change.
+
+### Skill maintenance
+
+- If you discover or introduce a reusable Paperclip plugin pattern while working, update the matching global skill in the same change.
+- Update `paperclip-plugin-ui` for hosted UI patterns, reusable UI helpers, theme/styling rules, slot behavior, or Paperclip-native interaction conventions.
+- Update `paperclip-plugin-development` for worker/backend patterns, manifest/backend capability rules, state/config/secrets patterns, jobs, entities, orchestration, or test strategy.
+- If a pattern spans both worker and UI concerns, update both skills so they stay in sync.
+- Keep the skill `SKILL.md`, any affected `references/` files, and `agents/openai.yaml` aligned with the latest reusable patterns.
 
 ### Packaging and release changes
 
@@ -88,3 +98,9 @@ Update `README.md` and `SPEC.md` when any of these change:
 - manifest capabilities or slots
 - worker or UI contract
 - packaging or release workflow
+
+Update the matching global skills when any of these change:
+
+- reusable Paperclip plugin UI patterns or helper components
+- reusable Paperclip plugin worker/backend patterns or helper functions
+- recommended verification or testing patterns for plugins in this repo

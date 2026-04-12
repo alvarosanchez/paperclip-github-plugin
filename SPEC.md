@@ -84,5 +84,7 @@ The plugin MUST persist repository mappings and sync state in plugin state.
 
 ## Packaging and release requirements
 
+- The build pipeline MUST bundle the manifest and worker for Node execution and bundle the hosted UI separately for browser execution.
+- Local development SHOULD provide a watch-mode build and a local UI dev server for hosted-UI iteration.
 - The build pipeline MUST stamp the plugin manifest version from build-time package metadata rather than keeping a separately hardcoded manifest version.
 - The release workflow MUST derive the published version from the GitHub release tag and stamp that version into publishable package metadata before build and publish.
