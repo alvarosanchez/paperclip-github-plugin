@@ -184,7 +184,7 @@ Imported issues stay linked to GitHub and continue to receive description, label
 - `pnpm dev` watches the manifest, worker, and UI bundles and rebuilds them into `dist/`.
 - `pnpm dev:ui` starts a local Paperclip plugin UI dev server from `dist/ui` on port `4177`.
 - `pnpm test:e2e` builds the plugin, boots an isolated Paperclip instance, installs the plugin, and verifies the hosted settings page renders.
-- `pnpm verify:manual` builds the plugin, boots a Paperclip instance for manual inspection, seeds a project already mapped to `https://github.com/alvarosanchez/paperclip-github-plugin`, and opens the plugin settings page.
+- `pnpm verify:manual` builds the plugin, boots a Paperclip instance for manual inspection, seeds a project already mapped to `https://github.com/alvarosanchez/paperclip-github-plugin`, seeds a `CEO` agent on the Codex local adapter with model `gpt-5.4`, and opens the plugin settings page.
 
 For fast hosted-UI iteration, run `pnpm dev` in one terminal and `pnpm dev:ui` in another.
 

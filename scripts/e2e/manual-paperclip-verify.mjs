@@ -17,6 +17,8 @@ const dataDir = join(stateRoot, 'paperclip-data');
 const instanceId = 'paperclip-github-plugin-manual';
 const seededProjectName = 'Paperclip Github Plugin';
 const seededRepositoryUrl = 'https://github.com/alvarosanchez/paperclip-github-plugin';
+const seededAgentName = 'CEO';
+const seededAgentModel = 'gpt-5.4';
 const requestedPort = process.env.PAPERCLIP_E2E_PORT ? Number(process.env.PAPERCLIP_E2E_PORT) : 3100;
 const requestedDbPort = process.env.PAPERCLIP_E2E_DB_PORT ? Number(process.env.PAPERCLIP_E2E_DB_PORT) : 54329;
 const env = {
@@ -337,6 +339,53 @@ async function ensureSeedProjectMapped(company) {
   log(`Seeded project ${seededProjectName} mapped to ${seededRepositoryUrl}.`);
 }
 
+async function ensureSeedAgent(company) {
+  const companyId = typeof company?.id === 'string' ? company.id : '';
+  if (!companyId) {
+    throw new Error('A seeded company id is required before creating the manual verification agent.');
+  }
+
+  const companyAgentsUrl = new URL(`/api/companies/${companyId}/agents`, baseUrl).toString();
+  const existingAgents = await fetchJson(companyAgentsUrl);
+  const existingAgent =
+    Array.isArray(existingAgents)
+      ? existingAgents.find((entry) =>
+          entry
+          && typeof entry === 'object'
+          && typeof entry.id === 'string'
+          && typeof entry.name === 'string'
+          && entry.name.trim().toLowerCase() === seededAgentName.toLowerCase()
+        )
+      : null;
+
+  const agentPayload = {
+    name: seededAgentName,
+    role: 'ceo',
+    title: seededAgentName,
+    icon: 'sparkles',
+    adapterType: 'codex_local',
+    adapterConfig: {
+      model: seededAgentModel,
+      dangerouslyBypassApprovalsAndSandbox: true
+    }
+  };
+
+  if (existingAgent) {
+    await fetchJson(new URL(`/api/agents/${existingAgent.id}`, baseUrl).toString(), {
+      method: 'PATCH',
+      body: JSON.stringify(agentPayload)
+    });
+    log(`Updated seeded agent ${seededAgentName} to use Codex ${seededAgentModel}.`);
+    return;
+  }
+
+  await fetchJson(companyAgentsUrl, {
+    method: 'POST',
+    body: JSON.stringify(agentPayload)
+  });
+  log(`Seeded agent ${seededAgentName} using Codex ${seededAgentModel}.`);
+}
+
 async function waitForServerExit(timeoutMs) {
   if (!serverProcess) {
     return;
@@ -435,6 +484,7 @@ async function main() {
 
   const company = await ensureCompanySeeded();
   await ensureSeedProjectMapped(company);
+  await ensureSeedAgent(company);
   await ensurePluginInstalled(configPath);
 
   const manualUrl = `${baseUrl}/settings/plugins`;
