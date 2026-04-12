@@ -10,11 +10,13 @@ The plugin MUST provide a settings page inside Paperclip where an operator can c
 - an optional external config file at `~/.paperclip/plugins/github-sync/config.json` for worker-only global values such as a raw `githubToken`
 - Paperclip board access, which is optional on unauthenticated deployments and required when the Paperclip deployment reports `deploymentMode: "authenticated"`
 - one or more GitHub repository mappings
+- company-scoped advanced defaults for imported issues: default assignee, default Paperclip status, and ignored GitHub issue authors
 - the frequency for automatic scheduled sync runs
 - a Paperclip project name per mapping where synchronized issues should be created, including existing Paperclip projects that are already bound to a GitHub repository workspace
 
 The settings page MUST allow saving mappings and triggering a manual sync.
 - When the settings page is opened with a Paperclip company context, it MUST only display and save repository mappings for that company, and saving one company’s mappings MUST preserve mappings that belong to other companies.
+- When the settings page is opened with a Paperclip company context, it MUST only display and save advanced issue defaults for that company, and saving one company’s defaults MUST preserve defaults that belong to other companies.
 - The settings page SHOULD clearly label company-scoped setup versus plugin-instance-wide setup when both are shown together.
 - When a company context is present, the settings page SHOULD show the active company name prominently using a human-friendly label instead of a raw identifier.
 - When a company already has Paperclip projects bound to GitHub repository workspaces, the settings page SHOULD surface those projects so an operator can enable sync without recreating the project.
@@ -35,7 +37,7 @@ The settings page MUST allow saving mappings and triggering a manual sync.
 
 ## Synchronization behavior
 
-The plugin MUST persist repository mappings and sync state in plugin state.
+The plugin MUST persist repository mappings, company-scoped advanced issue defaults, and sync state in plugin state.
 - The worker MUST expose at least one data endpoint for reading the current settings and sync status.
 - The worker MUST expose action endpoints for saving mappings and triggering a manual sync.
 - The `sync.runNow` action SHOULD return the final sync result when it completes quickly, but MUST otherwise return promptly with the saved `running` state instead of waiting long enough to time out the host request.
@@ -45,7 +47,9 @@ The plugin MUST persist repository mappings and sync state in plugin state.
 - The plugin MUST expose agent tools for the GitHub issue and pull request workflow around synced work, including repository-item search, issue reads and updates, issue comment reads and writes, pull request creation and updates, pull request file and CI inspection, review-thread reads and replies, review-thread resolution changes, and pull request reviewer requests.
 - Agent tools that post GitHub comments or review-thread replies MUST require the caller to identify the LLM used and MUST append a footer that discloses that a Paperclip AI agent created the message and which LLM was used.
 - The sync flow MUST fetch open GitHub issues from every configured repository.
+- The sync flow MUST ignore GitHub issues whose author username matches a configured ignored username for that mapping company.
 - The sync flow MUST create one top-level Paperclip issue per imported GitHub issue when the target mapping has a resolved Paperclip project identifier.
+- When the mapping company has a configured default assignee, the sync flow MUST assign newly created imported Paperclip issues to that Paperclip agent.
 - Imported Paperclip issues MUST keep the original GitHub issue title without adding a `[GitHub]` prefix.
 - Imported issue descriptions SHOULD contain the normalized GitHub body when present and MUST normalize the GitHub raw HTML constructs that Paperclip cannot render in multiline descriptions.
 - GitHub repository, issue, PR, label, and sync metadata SHOULD move into a dedicated issue detail surface instead of being prepended into the issue description.
@@ -62,7 +66,7 @@ The plugin MUST persist repository mappings and sync state in plugin state.
 - Repeated sync runs MUST continue reconciling imported Paperclip issue statuses against the latest GitHub state.
 - When the local Paperclip host API is available, sync-driven Paperclip status transitions SHOULD go through the same issue-update path Paperclip UI uses so timeline activity is recorded for agents and humans.
 - Repeated sync runs MUST continue reconciling imported Paperclip issue labels against the latest mapped GitHub labels, including removing labels that were removed on GitHub.
-- An open GitHub issue without a linked PR MUST map to Paperclip `backlog` when it is first imported.
+- An open GitHub issue without a linked PR MUST map to the configured default Paperclip status when it is first imported, and that default MUST be `backlog` when the company has not chosen another status.
 - If an imported Paperclip issue is currently `backlog` and its linked GitHub issue is still open, the sync flow MUST preserve `backlog`; only a manual Paperclip transition may move it out of `backlog`.
 - If a Paperclip issue that came from an open GitHub issue without a linked PR is later moved out of `backlog`, the sync flow SHOULD preserve that Paperclip status until another open-issue GitHub rule applies.
 - An open GitHub issue with a linked PR that still has unfinished CI jobs MUST map to Paperclip `in_progress`.
