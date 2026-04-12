@@ -4,7 +4,7 @@
   "description": "Paperclip plugin for synchronizing GitHub issues into Paperclip projects.",
   "license": "Apache-2.0",
   "type": "module",
-  "packageManager": "pnpm@10.17.1",
+  "packageManager": "pnpm@10.33.0",
   "engines": {
     "node": ">=20"
   },
