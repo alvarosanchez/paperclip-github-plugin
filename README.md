@@ -1,5 +1,10 @@
 # paperclip-github-plugin
 
+[![npm version](https://img.shields.io/npm/v/paperclip-github-plugin)](https://www.npmjs.com/package/paperclip-github-plugin)
+[![CI](https://img.shields.io/github/actions/workflow/status/alvarosanchez/paperclip-github-plugin/ci.yml?branch=main&label=CI)](https://github.com/alvarosanchez/paperclip-github-plugin/actions/workflows/ci.yml)
+[![Node >=20](https://img.shields.io/badge/node-%3E%3D20-339933?logo=node.js&logoColor=white)](https://www.npmjs.com/package/paperclip-github-plugin)
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](https://github.com/alvarosanchez/paperclip-github-plugin/blob/main/LICENSE)
+
 GitHub Sync is a Paperclip plugin for teams that plan in Paperclip but still receive work through GitHub issues.
 
 It connects GitHub repositories to Paperclip projects, imports open issues as top-level Paperclip issues, keeps those issues updated over time, and gives Paperclip agents first-class GitHub workflow tools for triage and delivery.
@@ -58,19 +63,32 @@ Paperclip agents can search GitHub for duplicates, read and update issues, post 
 ## Requirements
 
 - Node.js 20+
-- `pnpm`
 - a Paperclip host that supports plugin installation
 - a GitHub token with API access to the repositories you want to sync
 
-## Install from this repository
+## Install from npm
+
+```bash
+npx paperclipai plugin install paperclip-github-plugin
+```
+
+If you are installing into an isolated Paperclip instance, include the CLI flags you normally use for `--data-dir` and `--config`.
+
+```bash
+npx paperclipai plugin install paperclip-github-plugin \
+  --data-dir /path/to/paperclip-data \
+  --config /path/to/paperclip.config.json
+```
+
+## Install from a local checkout
+
+If you are developing the plugin locally or testing an unpublished change, you will also need `pnpm`:
 
 ```bash
 pnpm install
 pnpm build
-npx paperclip plugin install --local "$PWD"
+npx paperclipai plugin install --local "$PWD"
 ```
-
-If you are installing into an isolated local Paperclip instance for testing, include the Paperclip CLI flags you normally use for `--data-dir` and `--config`.
 
 ## First-time setup in Paperclip
 
