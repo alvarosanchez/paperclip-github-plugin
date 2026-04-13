@@ -89,6 +89,7 @@ interface SyncRunState {
   cancelRequestedAt?: string;
   progress?: SyncProgressState;
   errorDetails?: SyncErrorDetails;
+  recentFailures?: SyncFailureLogEntry[];
 }
 
 type SyncProgressPhase = 'preparing' | 'importing' | 'syncing';
@@ -125,6 +126,11 @@ interface SyncErrorDetails {
   suggestedAction?: string;
   rateLimitResetAt?: string;
   rateLimitResource?: string;
+}
+
+interface SyncFailureLogEntry extends SyncErrorDetails {
+  message: string;
+  occurredAt?: string;
 }
 
 type PaperclipIssueStatus = 'backlog' | 'todo' | 'in_progress' | 'in_review' | 'done' | 'blocked' | 'cancelled';
@@ -735,6 +741,10 @@ const SHARED_PROGRESS_STYLES = `
     align-items: stretch;
     flex-direction: column;
   }
+
+  .ghsync-diagnostics__layout--split {
+    grid-template-columns: 1fr;
+  }
 }
 `;
 
@@ -961,6 +971,79 @@ const PAGE_STYLES = `
   display: grid;
   gap: 10px;
   grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+}
+
+.ghsync-diagnostics__layout {
+  display: grid;
+  gap: 10px;
+}
+
+.ghsync-diagnostics__layout--split {
+  grid-template-columns: minmax(220px, 300px) minmax(0, 1fr);
+  align-items: start;
+}
+
+.ghsync-diagnostics__detail,
+.ghsync-diagnostics__failures {
+  display: grid;
+  gap: 10px;
+}
+
+.ghsync-diagnostics__failures {
+  max-height: 420px;
+  overflow: auto;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.ghsync-diagnostics__failure {
+  display: grid;
+  gap: 6px;
+  width: 100%;
+  padding: 12px;
+  border-radius: 10px;
+  border: 1px solid var(--ghsync-dangerBorder);
+  background: var(--ghsync-surfaceAlt);
+  text-align: left;
+  transition: border-color 160ms ease, background 160ms ease, transform 160ms ease;
+}
+
+.ghsync-diagnostics__failure-item {
+  list-style: none;
+}
+
+.ghsync-diagnostics__failure:hover {
+  border-color: var(--ghsync-dangerText);
+  transform: translateY(-1px);
+}
+
+.ghsync-diagnostics__failure--active {
+  border-color: var(--ghsync-dangerText);
+  background: color-mix(in srgb, var(--ghsync-dangerBg) 35%, var(--ghsync-surfaceAlt));
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--ghsync-dangerText) 22%, transparent);
+}
+
+.ghsync-diagnostics__failure-title {
+  color: var(--ghsync-title);
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.ghsync-diagnostics__failure-meta {
+  color: var(--ghsync-muted);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.ghsync-diagnostics__failure-preview {
+  color: var(--ghsync-text);
+  font-size: 12px;
+  line-height: 1.5;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  overflow: hidden;
 }
 
 .ghsync-diagnostics__item,
@@ -1937,6 +2020,72 @@ const WIDGET_STYLES = `
   grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
 }
 
+.ghsync-diagnostics__layout {
+  display: grid;
+  gap: 10px;
+}
+
+.ghsync-diagnostics__layout--split {
+  grid-template-columns: minmax(200px, 240px) minmax(0, 1fr);
+  align-items: start;
+}
+
+.ghsync-diagnostics__detail,
+.ghsync-diagnostics__failures {
+  display: grid;
+  gap: 10px;
+}
+
+.ghsync-diagnostics__failures {
+  max-height: 320px;
+  overflow: auto;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.ghsync-diagnostics__failure {
+  display: grid;
+  gap: 6px;
+  width: 100%;
+  padding: 12px;
+  border-radius: 10px;
+  border: 1px solid var(--ghsync-dangerBorder);
+  background: var(--ghsync-surfaceAlt);
+  text-align: left;
+}
+
+.ghsync-diagnostics__failure-item {
+  list-style: none;
+}
+
+.ghsync-diagnostics__failure--active {
+  border-color: var(--ghsync-dangerText);
+  background: color-mix(in srgb, var(--ghsync-dangerBg) 35%, var(--ghsync-surfaceAlt));
+}
+
+.ghsync-diagnostics__failure-title {
+  color: var(--ghsync-title);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.ghsync-diagnostics__failure-meta {
+  color: var(--ghsync-muted);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.ghsync-diagnostics__failure-preview {
+  color: var(--ghsync-text);
+  font-size: 12px;
+  line-height: 1.5;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  overflow: hidden;
+}
+
 .ghsync-diagnostics__item,
 .ghsync-diagnostics__block {
   display: grid;
@@ -2076,6 +2225,10 @@ const WIDGET_STYLES = `
   .ghsync__button,
   .ghsync-widget__link {
     flex: 1 1 auto;
+  }
+
+  .ghsync-diagnostics__layout--split {
+    grid-template-columns: 1fr;
   }
 }
 
@@ -3827,21 +3980,36 @@ function formatSyncFailureRepository(repositoryUrl?: string): string | null {
   return repositoryUrl.trim();
 }
 
-function getSyncDiagnostics(syncState: SyncRunState): {
+function getSyncFailureLogEntries(syncState: SyncRunState): SyncFailureLogEntry[] {
+  if (syncState.recentFailures?.length) {
+    return syncState.recentFailures.filter((entry) => typeof entry.message === 'string' && entry.message.trim());
+  }
+
+  if (syncState.status !== 'error') {
+    return [];
+  }
+
+  return [
+    {
+      message: syncState.message?.trim() || 'GitHub sync failed.',
+      occurredAt: syncState.checkedAt,
+      ...(syncState.errorDetails ?? {})
+    }
+  ];
+}
+
+function getSyncDiagnostics(entry: SyncFailureLogEntry): {
+  message: string;
   rows: Array<{ label: string; value: string }>;
   rawMessage?: string;
   suggestedAction?: string;
 } | null {
-  if (syncState.status !== 'error') {
-    return null;
-  }
-
   const rows: Array<{ label: string; value: string }> = [];
-  const repositoryLabel = formatSyncFailureRepository(syncState.errorDetails?.repositoryUrl);
-  const phaseLabel = formatSyncFailurePhase(syncState.errorDetails?.phase);
-  const issueNumber = syncState.errorDetails?.githubIssueNumber;
-  const rateLimitResetAt = syncState.errorDetails?.rateLimitResetAt;
-  const rateLimitResourceLabel = getGitHubRateLimitResourceLabel(syncState.errorDetails?.rateLimitResource);
+  const repositoryLabel = formatSyncFailureRepository(entry.repositoryUrl);
+  const phaseLabel = formatSyncFailurePhase(entry.phase);
+  const issueNumber = entry.githubIssueNumber;
+  const rateLimitResetAt = entry.rateLimitResetAt;
+  const rateLimitResourceLabel = getGitHubRateLimitResourceLabel(entry.rateLimitResource);
 
   if (repositoryLabel) {
     rows.push({
@@ -3878,17 +4046,25 @@ function getSyncDiagnostics(syncState: SyncRunState): {
     });
   }
 
-  const rawMessage =
-    syncState.errorDetails?.rawMessage && syncState.errorDetails.rawMessage !== syncState.message
-      ? syncState.errorDetails.rawMessage
-      : undefined;
-  const suggestedAction = syncState.errorDetails?.suggestedAction;
+  if (entry.occurredAt) {
+    rows.push({
+      label: 'Captured',
+      value: formatDate(entry.occurredAt, entry.occurredAt)
+    });
+  }
 
-  if (rows.length === 0 && !rawMessage && !suggestedAction) {
+  const rawMessage =
+    entry.rawMessage && entry.rawMessage !== entry.message
+      ? entry.rawMessage
+      : undefined;
+  const suggestedAction = entry.suggestedAction;
+
+  if (!entry.message && rows.length === 0 && !rawMessage && !suggestedAction) {
     return null;
   }
 
   return {
+    message: entry.message,
     rows,
     ...(rawMessage ? { rawMessage } : {}),
     ...(suggestedAction ? { suggestedAction } : {})
@@ -3952,8 +4128,18 @@ function SyncDiagnosticsPanel(props: {
   requestError?: string | null;
   compact?: boolean;
 }): React.JSX.Element | null {
-  const diagnostics = getSyncDiagnostics(props.syncState);
+  const failureEntries = getSyncFailureLogEntries(props.syncState);
+  const latestFailureIndex = Math.max(failureEntries.length - 1, 0);
+  const [selectedFailureIndex, setSelectedFailureIndex] = useState(latestFailureIndex);
+  const selectedFailure = failureEntries[Math.min(selectedFailureIndex, latestFailureIndex)];
+  const diagnostics = selectedFailure ? getSyncDiagnostics(selectedFailure) : null;
   const requestError = props.requestError?.trim() ? props.requestError.trim() : null;
+  const canSelectFailures = !props.compact && failureEntries.length > 1;
+  const savedFailureCount = props.syncState.erroredIssuesCount ?? failureEntries.length;
+
+  useEffect(() => {
+    setSelectedFailureIndex(latestFailureIndex);
+  }, [latestFailureIndex, props.syncState.checkedAt, props.syncState.status]);
 
   if (!diagnostics && !requestError) {
     return null;
@@ -3965,7 +4151,11 @@ function SyncDiagnosticsPanel(props: {
         <strong>{diagnostics ? 'Troubleshooting details' : 'Sync request failed'}</strong>
         <span>
           {diagnostics
-            ? 'GitHub Sync saved this snapshot from the latest failed run.'
+            ? canSelectFailures
+              ? savedFailureCount > failureEntries.length
+                ? `GitHub Sync saved the latest ${failureEntries.length} of ${savedFailureCount} failures from the latest run. Select one to inspect.`
+                : `GitHub Sync saved ${failureEntries.length} failure${failureEntries.length === 1 ? '' : 's'} from the latest run. Select one to inspect.`
+              : 'GitHub Sync saved this snapshot from the latest failed run.'
             : 'The sync request failed before the worker returned a saved result.'}
         </span>
       </div>
@@ -3977,28 +4167,74 @@ function SyncDiagnosticsPanel(props: {
         </div>
       ) : null}
 
-      {diagnostics?.rows.length ? (
-        <div className="ghsync-diagnostics__grid">
-          {diagnostics.rows.map((row) => (
-            <div key={row.label} className="ghsync-diagnostics__item">
-              <span className="ghsync-diagnostics__label">{row.label}</span>
-              <strong className="ghsync-diagnostics__value">{row.value}</strong>
+      {diagnostics ? (
+        <div className={`ghsync-diagnostics__layout${canSelectFailures ? ' ghsync-diagnostics__layout--split' : ''}`}>
+          {canSelectFailures ? (
+            <ul className="ghsync-diagnostics__failures" aria-label="Latest sync failures">
+              {failureEntries.map((failure, index) => {
+                const repositoryLabel = formatSyncFailureRepository(failure.repositoryUrl);
+                const issueLabel =
+                  failure.githubIssueNumber !== undefined ? `Issue #${failure.githubIssueNumber}` : null;
+                const phaseLabel = formatSyncFailurePhase(failure.phase);
+                const title = [repositoryLabel, issueLabel].filter((value): value is string => Boolean(value)).join(' · ');
+                const meta = [phaseLabel, failure.occurredAt ? formatDate(failure.occurredAt, failure.occurredAt) : null]
+                  .filter((value): value is string => Boolean(value))
+                  .join(' · ');
+
+                return (
+                  <li
+                    key={`${failure.occurredAt ?? 'unknown'}-${failure.githubIssueNumber ?? 'no-issue'}-${index}`}
+                    className="ghsync-diagnostics__failure-item"
+                  >
+                    <button
+                      type="button"
+                      className={`ghsync-diagnostics__failure${index === selectedFailureIndex ? ' ghsync-diagnostics__failure--active' : ''}`}
+                      aria-pressed={index === selectedFailureIndex}
+                      onClick={() => setSelectedFailureIndex(index)}
+                    >
+                      <strong className="ghsync-diagnostics__failure-title">
+                        {title || `Failure ${index + 1}`}
+                      </strong>
+                      {meta ? <span className="ghsync-diagnostics__failure-meta">{meta}</span> : null}
+                      <span className="ghsync-diagnostics__failure-preview">{failure.message}</span>
+                    </button>
+                  </li>
+                );
+              })}
+            </ul>
+          ) : null}
+
+          <div className="ghsync-diagnostics__detail">
+            <div className="ghsync-diagnostics__block">
+              <span className="ghsync-diagnostics__label">Summary</span>
+              <div className="ghsync-diagnostics__value">{diagnostics.message}</div>
             </div>
-          ))}
-        </div>
-      ) : null}
 
-      {diagnostics?.rawMessage ? (
-        <div className="ghsync-diagnostics__block">
-          <span className="ghsync-diagnostics__label">Raw error</span>
-          <div className="ghsync-diagnostics__value ghsync-diagnostics__value--code">{diagnostics.rawMessage}</div>
-        </div>
-      ) : null}
+            {diagnostics.rows.length ? (
+              <div className="ghsync-diagnostics__grid">
+                {diagnostics.rows.map((row) => (
+                  <div key={row.label} className="ghsync-diagnostics__item">
+                    <span className="ghsync-diagnostics__label">{row.label}</span>
+                    <strong className="ghsync-diagnostics__value">{row.value}</strong>
+                  </div>
+                ))}
+              </div>
+            ) : null}
 
-      {diagnostics?.suggestedAction ? (
-        <div className="ghsync-diagnostics__block">
-          <span className="ghsync-diagnostics__label">Next step</span>
-          <div className="ghsync-diagnostics__value">{diagnostics.suggestedAction}</div>
+            {diagnostics.rawMessage ? (
+              <div className="ghsync-diagnostics__block">
+                <span className="ghsync-diagnostics__label">Raw error</span>
+                <div className="ghsync-diagnostics__value ghsync-diagnostics__value--code">{diagnostics.rawMessage}</div>
+              </div>
+            ) : null}
+
+            {diagnostics.suggestedAction ? (
+              <div className="ghsync-diagnostics__block">
+                <span className="ghsync-diagnostics__label">Next step</span>
+                <div className="ghsync-diagnostics__value">{diagnostics.suggestedAction}</div>
+              </div>
+            ) : null}
+          </div>
         </div>
       ) : null}
     </section>

@@ -3858,6 +3858,14 @@ test('worker surfaces an actionable sync error when the Paperclip label API retu
           rawMessage?: string;
           suggestedAction?: string;
         };
+        recentFailures?: Array<{
+          message?: string;
+          phase?: string;
+          repositoryUrl?: string;
+          githubIssueNumber?: number;
+          rawMessage?: string;
+          suggestedAction?: string;
+        }>;
       };
     };
 
@@ -3868,6 +3876,14 @@ test('worker surfaces an actionable sync error when the Paperclip label API retu
     assert.match(sync.syncState.errorDetails?.rawMessage ?? '', /PAPERCLIP_API_URL/);
     assert.match(sync.syncState.errorDetails?.suggestedAction ?? '', /PAPERCLIP_API_URL/);
     assert.ok((sync.syncState.erroredIssuesCount ?? 0) >= 1);
+    assert.ok((sync.syncState.recentFailures?.length ?? 0) >= 1);
+    const labelFailure = sync.syncState.recentFailures?.find((entry) =>
+      /authenticated Paperclip API response/.test(entry.rawMessage ?? '')
+    );
+    assert.ok(labelFailure);
+    assert.match(labelFailure?.message ?? '', /syncing issue labels/i);
+    assert.match(labelFailure?.rawMessage ?? '', /authenticated Paperclip API response/);
+    assert.match(labelFailure?.suggestedAction ?? '', /PAPERCLIP_API_URL/);
     assert.ok(
       harness.logs.find((entry) =>
         entry.level === 'warn'
