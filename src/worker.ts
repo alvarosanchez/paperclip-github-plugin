@@ -18,6 +18,11 @@ const SYNC_STATE_SCOPE = {
   stateKey: 'paperclip-github-plugin-last-sync'
 };
 
+const SYNC_CANCELLATION_SCOPE = {
+  scopeKind: 'instance' as const,
+  stateKey: 'paperclip-github-plugin-sync-cancel-request'
+};
+
 const IMPORT_REGISTRY_SCOPE = {
   scopeKind: 'instance' as const,
   stateKey: 'paperclip-github-plugin-import-registry'
@@ -31,6 +36,7 @@ const DEFAULT_PAPERCLIP_LABEL_COLOR = '#6366f1';
 const PAPERCLIP_LABEL_PAGE_SIZE = 100;
 const MANUAL_SYNC_RESPONSE_GRACE_PERIOD_MS = 500;
 const RUNNING_SYNC_MESSAGE = 'GitHub sync is running in the background. This page will update when it finishes.';
+const CANCELLING_SYNC_MESSAGE = 'Cancellation requested. GitHub sync will stop after the current step finishes.';
 const SYNC_PROGRESS_PERSIST_INTERVAL_MS = 250;
 const GITHUB_SECONDARY_RATE_LIMIT_FALLBACK_MS = 60_000;
 const MISSING_GITHUB_TOKEN_SYNC_MESSAGE = 'Configure a GitHub token before running sync.';
@@ -120,7 +126,7 @@ interface GitHubSyncAssigneeOption {
 }
 
 interface SyncRunState {
-  status: 'idle' | 'running' | 'success' | 'error';
+  status: 'idle' | 'running' | 'success' | 'error' | 'cancelled';
   message?: string;
   checkedAt?: string;
   syncedIssuesCount?: number;
@@ -128,6 +134,7 @@ interface SyncRunState {
   skippedIssuesCount?: number;
   erroredIssuesCount?: number;
   lastRunTrigger?: 'manual' | 'schedule' | 'retry';
+  cancelRequestedAt?: string;
   progress?: SyncProgressState;
   errorDetails?: SyncErrorDetails;
 }
@@ -284,6 +291,10 @@ interface ResolvedGitHubTokenSource {
   token?: string;
 }
 
+interface SyncCancellationRequest {
+  requestedAt: string;
+}
+
 function normalizeCompanyId(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim() ? value.trim() : undefined;
 }
@@ -337,6 +348,16 @@ class PaperclipLabelSyncError extends Error {
     this.paperclipApiBaseUrl = params.paperclipApiBaseUrl;
     this.requiresAuthentication = Boolean(failure?.requiresAuthentication);
     this.labelNames = labelNames;
+  }
+}
+
+class SyncCancellationError extends Error {
+  readonly name = 'SyncCancellationError';
+  readonly requestedAt: string;
+
+  constructor(requestedAt: string) {
+    super(CANCELLING_SYNC_MESSAGE);
+    this.requestedAt = requestedAt;
   }
 }
 
@@ -1013,6 +1034,30 @@ function createIdleSyncState(): SyncRunState {
   };
 }
 
+function createCancelledSyncState(params: {
+  message: string;
+  trigger: 'manual' | 'schedule' | 'retry';
+  syncedIssuesCount: number;
+  createdIssuesCount: number;
+  skippedIssuesCount: number;
+  erroredIssuesCount?: number;
+  progress?: SyncProgressState;
+}): SyncRunState {
+  const { message, trigger, syncedIssuesCount, createdIssuesCount, skippedIssuesCount, erroredIssuesCount, progress } = params;
+
+  return {
+    status: 'cancelled',
+    message,
+    checkedAt: new Date().toISOString(),
+    syncedIssuesCount,
+    createdIssuesCount,
+    skippedIssuesCount,
+    erroredIssuesCount,
+    lastRunTrigger: trigger,
+    ...(progress ? { progress: normalizeSyncProgress(progress) } : {})
+  };
+}
+
 function formatGitHubIssueCountLabel(count: number): string {
   const normalizedCount = Math.max(0, Math.floor(count));
   return `${normalizedCount} GitHub ${normalizedCount === 1 ? 'issue' : 'issues'}`;
@@ -1603,6 +1648,7 @@ function createRunningSyncState(
     erroredIssuesCount?: number;
     progress?: SyncProgressState;
     message?: string;
+    cancelRequestedAt?: string;
   } = {}
 ): SyncRunState {
   return {
@@ -1614,6 +1660,7 @@ function createRunningSyncState(
     skippedIssuesCount: options.skippedIssuesCount ?? 0,
     erroredIssuesCount: options.erroredIssuesCount ?? 0,
     lastRunTrigger: trigger,
+    ...(options.cancelRequestedAt ? { cancelRequestedAt: options.cancelRequestedAt } : {}),
     ...(options.progress ? { progress: normalizeSyncProgress(options.progress) } : {})
   };
 }
@@ -2336,6 +2383,43 @@ async function saveSettingsSyncState(
   return next;
 }
 
+async function setSyncCancellationRequest(
+  ctx: PluginSetupContext,
+  request: SyncCancellationRequest | null
+): Promise<void> {
+  await ctx.state.set(SYNC_CANCELLATION_SCOPE, request);
+}
+
+async function getSyncCancellationRequest(
+  ctx: PluginSetupContext
+): Promise<SyncCancellationRequest | null> {
+  const activeRequestedAt = activeRunningSyncState?.syncState.cancelRequestedAt?.trim();
+  if (activeRunningSyncState?.syncState.status === 'running' && activeRequestedAt) {
+    return {
+      requestedAt: activeRequestedAt
+    };
+  }
+
+  return normalizeSyncCancellationRequest(await ctx.state.get(SYNC_CANCELLATION_SCOPE));
+}
+
+function buildCancelledSyncMessage(
+  target: ResolvedSyncTarget | undefined,
+  progress: SyncProgressState | undefined
+): string {
+  const completedIssueCount =
+    typeof progress?.completedIssueCount === 'number' ? Math.max(0, progress.completedIssueCount) : undefined;
+  const totalIssueCount =
+    typeof progress?.totalIssueCount === 'number' ? Math.max(0, progress.totalIssueCount) : undefined;
+  const scopeLabel = target ? `GitHub sync for ${target.displayLabel}` : 'GitHub sync';
+  const completionSummary =
+    completedIssueCount !== undefined && totalIssueCount !== undefined
+      ? ` Completed ${Math.min(completedIssueCount, totalIssueCount)} of ${totalIssueCount} issues before stopping.`
+      : '';
+
+  return `${scopeLabel} was cancelled before it finished.${completionSummary}`;
+}
+
 async function createUnexpectedSyncErrorResult(
   ctx: PluginSetupContext,
   trigger: 'manual' | 'schedule' | 'retry',
@@ -2566,6 +2650,19 @@ function normalizePaperclipBoardApiTokenRefs(value: unknown): PaperclipBoardApiT
   return Object.fromEntries(entries);
 }
 
+function normalizeSyncCancellationRequest(value: unknown): SyncCancellationRequest | null {
+  if (!value || typeof value !== 'object') {
+    return null;
+  }
+
+  const requestedAt =
+    typeof (value as { requestedAt?: unknown }).requestedAt === 'string'
+      ? (value as { requestedAt: string }).requestedAt.trim()
+      : '';
+
+  return requestedAt ? { requestedAt } : null;
+}
+
 function normalizeSyncState(value: unknown): SyncRunState {
   if (!value || typeof value !== 'object') {
     return DEFAULT_SETTINGS.syncState;
@@ -2578,7 +2675,7 @@ function normalizeSyncState(value: unknown): SyncRunState {
   const errorDetails = normalizeSyncErrorDetails(record.errorDetails);
 
   return {
-    status: status === 'running' || status === 'success' || status === 'error' ? status : 'idle',
+    status: status === 'running' || status === 'success' || status === 'error' || status === 'cancelled' ? status : 'idle',
     message: typeof record.message === 'string' ? record.message : undefined,
     checkedAt: typeof record.checkedAt === 'string' ? record.checkedAt : undefined,
     syncedIssuesCount: typeof record.syncedIssuesCount === 'number' ? record.syncedIssuesCount : undefined,
@@ -2586,6 +2683,7 @@ function normalizeSyncState(value: unknown): SyncRunState {
     skippedIssuesCount: typeof record.skippedIssuesCount === 'number' ? record.skippedIssuesCount : undefined,
     erroredIssuesCount: typeof record.erroredIssuesCount === 'number' ? record.erroredIssuesCount : undefined,
     lastRunTrigger: lastRunTrigger === 'manual' || lastRunTrigger === 'schedule' || lastRunTrigger === 'retry' ? lastRunTrigger : undefined,
+    cancelRequestedAt: typeof record.cancelRequestedAt === 'string' ? record.cancelRequestedAt : undefined,
     ...(progress ? { progress } : {}),
     ...(errorDetails ? { errorDetails } : {})
   };
@@ -5914,26 +6012,32 @@ async function createPaperclipIssue(
     createPath = 'sdk';
   }
 
+  const ensuredCreatedIssueId = createdIssueId;
+  if (!ensuredCreatedIssueId) {
+    throw new Error('GitHub sync could not resolve the created Paperclip issue id.');
+  }
+  const normalizedCreatedIssueDescription = createdIssueDescription ?? undefined;
+
   if (createPath !== 'sdk') {
     await applyDefaultAssigneeToPaperclipIssue(ctx, {
       companyId: mapping.companyId,
-      issueId: createdIssueId,
+      issueId: ensuredCreatedIssueId,
       defaultAssigneeAgentId: advancedSettings.defaultAssigneeAgentId
     });
   }
 
-  if (normalizeIssueDescriptionValue(createdIssueDescription) !== description) {
+  if (normalizeIssueDescriptionValue(normalizedCreatedIssueDescription) !== description) {
     logIssueDescriptionDiagnostic(
       ctx,
       'warn',
       'GitHub sync detected a missing or mismatched Paperclip issue description immediately after issue creation.',
       {
         companyId: mapping.companyId,
-        issueId: createdIssueId,
+        issueId: ensuredCreatedIssueId,
         paperclipApiBaseUrl,
         githubIssue: issue,
         linkedPullRequestNumbers: [],
-        currentDescription: createdIssueDescription,
+        currentDescription: normalizedCreatedIssueDescription,
         nextDescription: description,
         reason: 'create_response_mismatch',
         createPath
@@ -5944,8 +6048,8 @@ async function createPaperclipIssue(
       ctx,
       {
         companyId: mapping.companyId,
-        issueId: createdIssueId,
-        currentDescription: createdIssueDescription,
+        issueId: ensuredCreatedIssueId,
+        currentDescription: normalizedCreatedIssueDescription,
         githubIssue: issue,
         linkedPullRequestNumbers: [],
         paperclipApiBaseUrl,
@@ -5954,7 +6058,7 @@ async function createPaperclipIssue(
     );
   }
 
-  await upsertGitHubIssueLinkRecord(ctx, mapping, createdIssueId, issue, []);
+  await upsertGitHubIssueLinkRecord(ctx, mapping, ensuredCreatedIssueId, issue, []);
 
   if (syncFailureContext) {
     updateSyncFailureContext(syncFailureContext, {
@@ -5974,12 +6078,12 @@ async function createPaperclipIssue(
   await applyPaperclipLabelsToIssue(
     ctx,
     mapping.companyId,
-    createdIssueId,
+    ensuredCreatedIssueId,
     labelResolution.labels
   );
 
   return {
-    id: createdIssueId,
+    id: ensuredCreatedIssueId,
     unresolvedGitHubLabels: labelResolution.unresolvedGitHubLabels,
     ...(labelResolution.failure ? { labelResolutionFailure: labelResolution.failure } : {})
   };
@@ -6091,6 +6195,7 @@ async function synchronizePaperclipIssueStatuses(
   repositoryMaintainerCache: Map<string, boolean>,
   syncFailureContext: SyncFailureContext,
   failures: SyncProcessingFailure[],
+  assertNotCancelled?: () => Promise<void>,
   onProgress?: (progress: {
     githubIssueId: number;
     completedIssueCount: number;
@@ -6122,6 +6227,10 @@ async function synchronizePaperclipIssueStatuses(
   const totalIssueCount = importedIssues.length;
 
   for (const importedIssue of importedIssues) {
+      if (assertNotCancelled) {
+        await assertNotCancelled();
+      }
+
       const githubIssue = allIssuesById.get(importedIssue.githubIssueId);
 
       try {
@@ -7189,6 +7298,15 @@ async function performSync(
     progress: currentProgress
   });
 
+  async function throwIfSyncCancelled(): Promise<void> {
+    const cancellationRequest = await getSyncCancellationRequest(ctx);
+    if (!cancellationRequest) {
+      return;
+    }
+
+    throw new SyncCancellationError(cancellationRequest.requestedAt);
+  }
+
   async function persistRunningProgress(force = false): Promise<void> {
     const progress = normalizeSyncProgress(currentProgress);
     const signature = JSON.stringify({
@@ -7239,7 +7357,11 @@ async function performSync(
   const repositoryPlans: RepositorySyncPlan[] = [];
 
   try {
+    await throwIfSyncCancelled();
+
     for (const [mappingIndex, mapping] of mappings.entries()) {
+      await throwIfSyncCancelled();
+
       try {
         const repository = requireRepositoryReference(mapping.repositoryUrl);
         const importedIssueRecords = nextRegistry
@@ -7334,7 +7456,7 @@ async function performSync(
           trackedIssueCount
         });
       } catch (error) {
-        if (isGitHubRateLimitError(error)) {
+        if (error instanceof SyncCancellationError || isGitHubRateLimitError(error)) {
           throw error;
         }
 
@@ -7366,6 +7488,8 @@ async function performSync(
     await persistRunningProgress(true);
 
     for (const plan of repositoryPlans) {
+      await throwIfSyncCancelled();
+
       try {
         const { mapping, advancedSettings, repository, repositoryIndex, allIssuesById, issues } = plan;
         const companyId = mapping.companyId;
@@ -7430,8 +7554,9 @@ async function performSync(
             openLinkedPullRequestNumbers,
             pullRequestStatusCache
           );
+          await throwIfSyncCancelled();
         } catch (error) {
-          if (isGitHubRateLimitError(error)) {
+          if (error instanceof SyncCancellationError || isGitHubRateLimitError(error)) {
             throw error;
           }
 
@@ -7452,6 +7577,8 @@ async function performSync(
         await persistRunningProgress(true);
 
         for (const [issueIndex, issue] of issues.entries()) {
+          await throwIfSyncCancelled();
+
           const createdIssueCountBefore = createdIssueIds.size;
           const skippedIssueCountBefore = skippedIssueIds.size;
 
@@ -7503,6 +7630,7 @@ async function performSync(
           totalIssueCount: totalTrackedIssueCount
         };
         await persistRunningProgress(true);
+        await throwIfSyncCancelled();
 
         const synchronizationResult = await synchronizePaperclipIssueStatuses(
           ctx,
@@ -7521,6 +7649,7 @@ async function performSync(
           repositoryMaintainerCache,
           failureContext,
           recoverableFailures,
+          throwIfSyncCancelled,
           async (progress) => {
             markTrackedIssueProcessed(mapping, progress.githubIssueId);
             currentProgress = {
@@ -7541,7 +7670,7 @@ async function performSync(
         updatedLabelsCount += synchronizationResult.updatedLabelsCount;
         updatedDescriptionsCount += synchronizationResult.updatedDescriptionsCount;
       } catch (error) {
-        if (isGitHubRateLimitError(error)) {
+        if (error instanceof SyncCancellationError || isGitHubRateLimitError(error)) {
           throw error;
         }
 
@@ -7594,6 +7723,25 @@ async function performSync(
     await ctx.state.set(IMPORT_REGISTRY_SCOPE, nextRegistry);
     return next;
   } catch (error) {
+    if (error instanceof SyncCancellationError) {
+      const next = {
+        ...currentSettings,
+        syncState: createCancelledSyncState({
+          message: buildCancelledSyncMessage(options.target, currentProgress),
+          trigger,
+          syncedIssuesCount,
+          createdIssuesCount,
+          skippedIssuesCount,
+          erroredIssuesCount: recoverableFailures.length,
+          progress: currentProgress
+        })
+      };
+      await ctx.state.set(SETTINGS_SCOPE, next);
+      await ctx.state.set(SYNC_STATE_SCOPE, next.syncState);
+      await ctx.state.set(IMPORT_REGISTRY_SCOPE, nextRegistry);
+      return next;
+    }
+
     const errorDetails = buildSyncErrorDetails(error, failureContext);
     const next = {
       ...currentSettings,
@@ -7681,6 +7829,8 @@ async function startSync(
     return currentSettings;
   }
 
+  await setSyncCancellationRequest(ctx, null);
+
   const runningStatePromise = (async () => {
     const syncableMappings = getSyncableMappingsForTarget(currentSettings.mappings, options.target);
     const syncState = createRunningSyncState(currentSettings.syncState, trigger, {
@@ -7711,6 +7861,7 @@ async function startSync(
     } catch (error) {
       return await createUnexpectedSyncErrorResult(ctx, trigger, error);
     } finally {
+      await setSyncCancellationRequest(ctx, null);
       activePaperclipApiAuthTokensByCompanyId = null;
       activeRunningSyncState = null;
       activeSyncPromise = null;
@@ -8725,6 +8876,38 @@ const plugin = definePlugin({
         ...(typeof paperclipApiBaseUrl === 'string' ? { paperclipApiBaseUrl } : {}),
         ...(target ? { target } : {})
       });
+    });
+
+    ctx.actions.register('sync.cancel', async () => {
+      const currentSettings = await getActiveOrCurrentSyncState(ctx);
+      if (currentSettings.syncState.status !== 'running') {
+        return currentSettings;
+      }
+
+      const existingRequest =
+        currentSettings.syncState.cancelRequestedAt?.trim()
+          ? { requestedAt: currentSettings.syncState.cancelRequestedAt.trim() }
+          : await getSyncCancellationRequest(ctx);
+      const cancellationRequest = existingRequest ?? {
+        requestedAt: new Date().toISOString()
+      };
+
+      await setSyncCancellationRequest(ctx, cancellationRequest);
+      const next = await saveSettingsSyncState(
+        ctx,
+        currentSettings,
+        createRunningSyncState(currentSettings.syncState, currentSettings.syncState.lastRunTrigger ?? 'manual', {
+          syncedIssuesCount: currentSettings.syncState.syncedIssuesCount ?? 0,
+          createdIssuesCount: currentSettings.syncState.createdIssuesCount ?? 0,
+          skippedIssuesCount: currentSettings.syncState.skippedIssuesCount ?? 0,
+          erroredIssuesCount: currentSettings.syncState.erroredIssuesCount ?? 0,
+          progress: currentSettings.syncState.progress,
+          message: CANCELLING_SYNC_MESSAGE,
+          cancelRequestedAt: cancellationRequest.requestedAt
+        })
+      );
+      activeRunningSyncState = next;
+      return next;
     });
 
     registerGitHubAgentTools(ctx);

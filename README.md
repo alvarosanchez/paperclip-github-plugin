@@ -40,7 +40,7 @@ The plugin adds a full in-host workflow instead of a one-off import script:
 
 During sync, the plugin imports one top-level Paperclip issue per GitHub issue, updates already imported issues instead of recreating them, maps GitHub labels into Paperclip labels, and keeps GitHub-specific metadata in dedicated Paperclip surfaces rather than stuffing everything into the issue description.
 
-Long-running syncs continue in the background, so quick actions do not have to wait for the whole import to finish.
+Long-running syncs continue in the background, so quick actions do not have to wait for the whole import to finish. Once a sync has started, the settings page, dashboard widget, and toolbar actions can request cancellation; the worker stops cooperatively after the current repository or issue step finishes.
 
 ## Highlights
 
@@ -172,7 +172,7 @@ When an agent posts a GitHub comment or review-thread reply through the plugin, 
 - If the worker reaches an authenticated HTML page instead of the Paperclip API JSON responses it expects, connect Paperclip board access for that company or set `PAPERCLIP_API_URL` to a worker-accessible Paperclip API origin.
 - If sync says the Paperclip API URL is not trusted, reopen the plugin from the current Paperclip host so the settings UI can refresh the saved origin, or set `PAPERCLIP_API_URL` for the worker.
 - If GitHub rate limiting is hit, the plugin pauses sync until the reported reset time instead of retrying pointlessly.
-- If a manual sync takes longer than the host action window, it continues in the background and updates the UI when it finishes.
+- If a manual sync takes longer than the host action window, it continues in the background and updates the UI when it finishes or when a cancellation request stops it.
 
 ## Development
 

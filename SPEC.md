@@ -22,6 +22,7 @@ The settings page MUST allow saving mappings and triggering a manual sync.
 - When a company already has Paperclip projects bound to GitHub repository workspaces, the settings page SHOULD surface those projects so an operator can enable sync without recreating the project.
 - The plugin SHOULD also expose manual sync entry points from Paperclip toolbar surfaces when the SDK supports them.
 - When a manual sync will outlive a quick action response, the worker MUST persist a `running` sync state immediately and complete the sync asynchronously.
+- Once a sync is running, the settings page, dashboard widget, and toolbar sync entry points MUST provide a way to request cancellation, and the worker MUST stop cooperatively after the current repository or issue step finishes.
 - The settings page, dashboard widget, and sync toolbar surfaces SHOULD detect authenticated deployments from `/api/health` and MUST require connected Paperclip board access before enabling sync for the affected company.
 
 ## Secret handling

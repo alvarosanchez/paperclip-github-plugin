@@ -78,7 +78,7 @@ interface RepositoryMapping {
 }
 
 interface SyncRunState {
-  status: 'idle' | 'running' | 'success' | 'error';
+  status: 'idle' | 'running' | 'success' | 'error' | 'cancelled';
   message?: string;
   checkedAt?: string;
   syncedIssuesCount?: number;
@@ -86,6 +86,7 @@ interface SyncRunState {
   skippedIssuesCount?: number;
   erroredIssuesCount?: number;
   lastRunTrigger?: 'manual' | 'schedule' | 'retry';
+  cancelRequestedAt?: string;
   progress?: SyncProgressState;
   errorDetails?: SyncErrorDetails;
 }
@@ -554,13 +555,21 @@ function getActiveRateLimitPause(syncState: SyncRunState, referenceTimeMs = Date
   };
 }
 
+function isSyncCancellationRequested(syncState: SyncRunState): boolean {
+  return syncState.status === 'running' && Boolean(syncState.cancelRequestedAt?.trim());
+}
+
 function getSyncToastTitle(syncState: SyncRunState): string {
   if (getActiveRateLimitPause(syncState)) {
     return 'GitHub sync is paused';
   }
 
+  if (syncState.status === 'cancelled') {
+    return 'GitHub sync was cancelled';
+  }
+
   if (syncState.status === 'running') {
-    return 'GitHub sync is running';
+    return isSyncCancellationRequested(syncState) ? 'GitHub sync is stopping' : 'GitHub sync is running';
   }
 
   return syncState.status === 'error' ? 'GitHub sync needs attention' : 'GitHub sync finished';
@@ -572,7 +581,9 @@ function getSyncToastBody(syncState: SyncRunState): string {
   }
 
   if (syncState.status === 'running') {
-    return 'GitHub sync is running in the background.';
+    return isSyncCancellationRequested(syncState)
+      ? 'Cancellation requested. GitHub sync will stop after the current step finishes.'
+      : 'GitHub sync is running in the background.';
   }
 
   return 'GitHub sync completed.';
@@ -583,7 +594,7 @@ function getSyncToastTone(syncState: SyncRunState): 'info' | 'error' | 'success'
     return 'info';
   }
 
-  if (syncState.status === 'running') {
+  if (syncState.status === 'running' || syncState.status === 'cancelled') {
     return 'info';
   }
 
@@ -3203,7 +3214,10 @@ function getSyncStatus(syncState: SyncRunState, runningSync: boolean, syncUnlock
   }
 
   if (runningSync || syncState.status === 'running') {
-    return { label: 'Running', tone: 'info' };
+    return {
+      label: isSyncCancellationRequested(syncState) ? 'Cancelling' : 'Running',
+      tone: 'info'
+    };
   }
 
   if (getActiveRateLimitPause(syncState)) {
@@ -3216,6 +3230,10 @@ function getSyncStatus(syncState: SyncRunState, runningSync: boolean, syncUnlock
 
   if (syncState.status === 'success') {
     return { label: 'Ready', tone: 'success' };
+  }
+
+  if (syncState.status === 'cancelled') {
+    return { label: 'Cancelled', tone: 'neutral' };
   }
 
   return { label: 'Ready', tone: 'info' };
@@ -3651,10 +3669,14 @@ function getDashboardSummary(params: {
   if (params.runningSync || params.syncState.status === 'running') {
     const progress = getRunningSyncProgressModel(params.syncState);
     return {
-      label: 'Syncing',
+      label: isSyncCancellationRequested(params.syncState) ? 'Cancelling' : 'Syncing',
       tone: 'info',
-      title: progress?.title ?? 'Sync in progress',
-      body: progress?.description ?? 'GitHub issues are being checked right now. This card refreshes automatically until the run finishes.'
+      title: isSyncCancellationRequested(params.syncState)
+        ? 'Stopping the current sync'
+        : progress?.title ?? 'Sync in progress',
+      body: isSyncCancellationRequested(params.syncState)
+        ? 'GitHub Sync will stop after the current repository or issue step finishes.'
+        : progress?.description ?? 'GitHub issues are being checked right now. This card refreshes automatically until the run finishes.'
     };
   }
 
@@ -3673,6 +3695,15 @@ function getDashboardSummary(params: {
       tone: 'danger',
       title: 'Last sync needs attention',
       body: params.syncState.message ?? 'Open settings to review the latest GitHub sync issue.'
+    };
+  }
+
+  if (params.syncState.status === 'cancelled') {
+    return {
+      label: 'Cancelled',
+      tone: 'neutral',
+      title: 'Sync cancelled',
+      body: params.syncState.message ?? 'The last GitHub sync was cancelled before it finished.'
     };
   }
 
@@ -3986,11 +4017,13 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
   const updateBoardAccess = usePluginAction('settings.updateBoardAccess');
   const validateToken = usePluginAction('settings.validateToken');
   const runSyncNow = usePluginAction('sync.runNow');
+  const cancelSync = usePluginAction('sync.cancel');
   const [form, setForm] = useState<GitHubSyncSettings>(EMPTY_SETTINGS);
   const [submittingToken, setSubmittingToken] = useState(false);
   const [connectingBoardAccess, setConnectingBoardAccess] = useState(false);
   const [submittingSetup, setSubmittingSetup] = useState(false);
   const [runningSync, setRunningSync] = useState(false);
+  const [cancellingSync, setCancellingSync] = useState(false);
   const [manualSyncRequestError, setManualSyncRequestError] = useState<string | null>(null);
   const [scheduleFrequencyDraft, setScheduleFrequencyDraft] = useState(String(DEFAULT_SCHEDULE_FREQUENCY_MINUTES));
   const [ignoredAuthorsDraft, setIgnoredAuthorsDraft] = useState(DEFAULT_ADVANCED_SETTINGS.ignoredIssueAuthorUsernames.join(', '));
@@ -4324,6 +4357,7 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
     hasMappings: savedMappingCount > 0,
     hasBoardAccess: boardAccessReady
   });
+  const cancellationRequested = cancellingSync || isSyncCancellationRequested(displaySyncState);
   const mappingsDirty = JSON.stringify(draftMappings) !== JSON.stringify(savedMappings);
   const advancedSettingsDirty = JSON.stringify(draftAdvancedSettings) !== JSON.stringify(savedAdvancedSettings);
   const scheduleFrequencyError = getScheduleFrequencyError(scheduleFrequencyDraft);
@@ -4393,6 +4427,7 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
   });
   const syncSectionDescription = '';
   const syncSummaryPrimaryText =
+    (cancellationRequested ? 'Cancellation requested.' : undefined) ??
     syncProgress?.title ??
     displaySyncState.message ??
     (syncUnlocked ? 'Ready to sync.' : syncSetupMessage);
@@ -4402,6 +4437,7 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
   const syncSummarySecondaryText = syncProgress
     ? [
         manualSyncScopeSummary,
+        cancellationRequested ? 'Stopping after the current step' : null,
         syncProgress.issueProgressLabel,
         syncProgress.currentIssueLabel ?? syncProgress.repositoryPosition,
         `Auto-sync: ${scheduleDescription}`
@@ -4837,6 +4873,48 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
       }
     } finally {
       setRunningSync(false);
+    }
+  }
+
+  async function handleCancelSync(): Promise<void> {
+    setCancellingSync(true);
+    setManualSyncRequestError(null);
+
+    try {
+      const result = await cancelSync() as GitHubSyncSettings;
+
+      setForm((current) => ({
+        ...current,
+        syncState: result.syncState
+      }));
+      toast({
+        title: getSyncToastTitle(result.syncState),
+        body: getSyncToastBody(result.syncState),
+        tone: getSyncToastTone(result.syncState)
+      });
+      armSyncCompletionToast(result.syncState);
+
+      try {
+        await settings.refresh();
+      } catch {
+        return;
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unable to cancel sync.';
+      setManualSyncRequestError(message);
+      toast({
+        title: 'Unable to cancel GitHub sync',
+        body: message,
+        tone: 'error'
+      });
+
+      try {
+        await settings.refresh();
+      } catch {
+        return;
+      }
+    } finally {
+      setCancellingSync(false);
     }
   }
 
@@ -5376,11 +5454,15 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
                       </div>
                       <button
                         type="button"
-                        className={getPluginActionClassName({ variant: 'primary' })}
-                        onClick={handleRunSyncNow}
-                        disabled={syncInFlight || showInitialLoadingState}
+                        className={getPluginActionClassName({ variant: syncInFlight ? 'danger' : 'primary' })}
+                        onClick={syncInFlight ? handleCancelSync : handleRunSyncNow}
+                        disabled={showInitialLoadingState || (syncInFlight ? cancellationRequested : false)}
                       >
-                        {syncInFlight ? 'Running…' : manualSyncButtonLabel}
+                        {syncInFlight
+                          ? cancellationRequested
+                            ? 'Cancelling…'
+                            : 'Cancel sync'
+                          : manualSyncButtonLabel}
                       </button>
                     </div>
                   </>
@@ -5508,7 +5590,9 @@ export function GitHubSyncDashboardWidget(): React.JSX.Element {
     hostContext.companyId ? { companyId: hostContext.companyId } : {}
   );
   const runSyncNow = usePluginAction('sync.runNow');
+  const cancelSync = usePluginAction('sync.cancel');
   const [runningSync, setRunningSync] = useState(false);
+  const [cancellingSync, setCancellingSync] = useState(false);
   const [manualSyncRequestError, setManualSyncRequestError] = useState<string | null>(null);
   const [settingsHref, setSettingsHref] = useState(SETTINGS_INDEX_HREF);
   const [cachedSettings, setCachedSettings] = useState<GitHubSyncSettings | null>(null);
@@ -5541,6 +5625,7 @@ export function GitHubSyncDashboardWidget(): React.JSX.Element {
   });
   const syncUnlocked = syncSetupIssue === null;
   const syncInFlight = runningSync || displaySyncState.status === 'running';
+  const cancellationRequested = cancellingSync || isSyncCancellationRequested(displaySyncState);
   const scheduleFrequencyMinutes = normalizeScheduleFrequencyMinutes(current.scheduleFrequencyMinutes);
   const scheduleDescription = formatScheduleFrequency(scheduleFrequencyMinutes);
   const summary = getDashboardSummary({
@@ -5657,6 +5742,33 @@ export function GitHubSyncDashboardWidget(): React.JSX.Element {
     }
   }
 
+  async function handleCancelSync(): Promise<void> {
+    setCancellingSync(true);
+    setManualSyncRequestError(null);
+
+    try {
+      const result = await cancelSync() as GitHubSyncSettings;
+      const nextSyncState = result.syncState ?? EMPTY_SETTINGS.syncState;
+      toast({
+        title: getSyncToastTitle(nextSyncState),
+        body: getSyncToastBody(nextSyncState),
+        tone: getSyncToastTone(nextSyncState)
+      });
+      armSyncCompletionToast(nextSyncState);
+      await settings.refresh();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unable to cancel GitHub sync.';
+      setManualSyncRequestError(message);
+      toast({
+        title: 'Unable to cancel GitHub sync',
+        body: message,
+        tone: 'error'
+      });
+    } finally {
+      setCancellingSync(false);
+    }
+  }
+
   return (
     <section className="ghsync-widget" style={themeVars}>
       <style>{WIDGET_STYLES}</style>
@@ -5752,14 +5864,25 @@ export function GitHubSyncDashboardWidget(): React.JSX.Element {
               Open settings
             </a>
             {syncUnlocked ? (
-              <button
-                type="button"
-                className={getPluginActionClassName({ variant: 'primary' })}
-                onClick={handleRunSync}
-                disabled={syncInFlight || showInitialLoadingState}
-              >
-                {syncInFlight ? 'Running…' : 'Run sync now'}
-              </button>
+              syncInFlight ? (
+                <button
+                  type="button"
+                  className={getPluginActionClassName({ variant: 'danger' })}
+                  onClick={handleCancelSync}
+                  disabled={cancellationRequested || showInitialLoadingState}
+                >
+                  {cancellationRequested ? 'Cancelling…' : 'Cancel sync'}
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  className={getPluginActionClassName({ variant: 'primary' })}
+                  onClick={handleRunSync}
+                  disabled={showInitialLoadingState}
+                >
+                  Run sync now
+                </button>
+              )
             ) : null}
           </div>
         </div>
@@ -5794,6 +5917,7 @@ function GitHubSyncToolbarButtonSurface(props: {
 }): React.JSX.Element | null {
   const toast = usePluginToast();
   const runSyncNow = usePluginAction('sync.runNow');
+  const cancelSync = usePluginAction('sync.cancel');
   const pluginIdFromLocation = getPluginIdFromLocation();
   const surfaceRef = useRef<HTMLDivElement | null>(null);
   const resolvedIssue = useResolvedIssueId({
@@ -5816,6 +5940,7 @@ function GitHubSyncToolbarButtonSurface(props: {
     props.companyId ? { companyId: props.companyId } : {}
   );
   const [runningSync, setRunningSync] = useState(false);
+  const [cancellingSync, setCancellingSync] = useState(false);
   const themeMode = useResolvedThemeMode();
   const boardAccessRequirement = usePaperclipBoardAccessRequirement();
   const theme = themeMode === 'light' ? LIGHT_PALETTE : DARK_PALETTE;
@@ -5842,6 +5967,7 @@ function GitHubSyncToolbarButtonSurface(props: {
       : state.message;
   const effectiveLabel = boardAccessSetupIssue ? 'Board access required' : state.label;
   const syncInFlight = runningSync || state.syncState.status === 'running';
+  const cancellationRequested = cancellingSync || isSyncCancellationRequested(state.syncState);
   const armSyncCompletionToast = useSyncCompletionToast(state.syncState, toast);
 
   useEffect(() => {
@@ -5968,6 +6094,32 @@ function GitHubSyncToolbarButtonSurface(props: {
     }
   }
 
+  async function handleCancelSync(): Promise<void> {
+    try {
+      setCancellingSync(true);
+      const result = await cancelSync() as {
+        syncState?: SyncRunState;
+      };
+      const nextSyncState = result.syncState ?? EMPTY_SETTINGS.syncState;
+
+      toast({
+        title: getSyncToastTitle(nextSyncState),
+        body: getSyncToastBody(nextSyncState),
+        tone: getSyncToastTone(nextSyncState)
+      });
+      armSyncCompletionToast(nextSyncState);
+      toolbarState.refresh();
+    } catch (error) {
+      toast({
+        title: 'Unable to cancel GitHub sync',
+        body: error instanceof Error ? error.message : 'Unable to cancel GitHub sync.',
+        tone: 'error'
+      });
+    } finally {
+      setCancellingSync(false);
+    }
+  }
+
   return (
     <div
       ref={surfaceRef}
@@ -5982,11 +6134,17 @@ function GitHubSyncToolbarButtonSurface(props: {
         data-variant="outline"
         data-size="sm"
         className={props.entityType ? HOST_ENTITY_BUTTON_CLASSNAME : HOST_GLOBAL_BUTTON_CLASSNAME}
-        disabled={!effectiveCanRun || syncInFlight || toolbarState.loading}
-        onClick={handleRunSync}
+        disabled={toolbarState.loading || (syncInFlight ? cancellationRequested : !effectiveCanRun)}
+        onClick={syncInFlight ? handleCancelSync : handleRunSync}
       >
         <GitHubMarkIcon className="mr-1.5 h-3.5 w-3.5" />
-        <span>{syncInFlight ? 'Syncing…' : effectiveLabel}</span>
+        <span>
+          {syncInFlight
+            ? cancellationRequested
+              ? 'Cancelling…'
+              : 'Cancel sync'
+            : effectiveLabel}
+        </span>
       </button>
     </div>
   );
@@ -6092,7 +6250,7 @@ function GitHubSyncIssueDetailTabContent(props: {
             <div className="ghsync-issue-detail__section">
               <div className="ghsync-issue-detail__section-heading">Linked pull requests</div>
               <div className="ghsync-extension-links">
-                {issueDetails.linkedPullRequestNumbers.map((pullRequestNumber) => (
+                {issueDetails.linkedPullRequestNumbers.map((pullRequestNumber: number) => (
                   <a
                     key={pullRequestNumber}
                     href={`${issueDetails.repositoryUrl}/pull/${pullRequestNumber}`}
@@ -6115,7 +6273,7 @@ function GitHubSyncIssueDetailTabContent(props: {
             <div className="ghsync-issue-detail__section">
               <div className="ghsync-issue-detail__section-heading">Labels</div>
               <div className="ghsync-extension-labels">
-                {issueDetails.labels.map((label) => (
+                {issueDetails.labels.map((label: { name: string; color?: string }) => (
                   <span
                     key={`${label.name}:${label.color ?? 'none'}`}
                     className="ghsync-extension-pill"
@@ -6187,7 +6345,7 @@ export function GitHubSyncCommentAnnotation(): React.JSX.Element | null {
       <style>{EXTENSION_SURFACE_STYLES}</style>
       <div className="ghsync-comment-annotation">
         <span className="ghsync-comment-annotation__label">GitHub refs</span>
-        {annotation.data.links.map((link) => (
+        {annotation.data.links.map((link: CommentAnnotationData['links'][number]) => (
           <a
             key={`${link.type}:${link.href}`}
             href={link.href}

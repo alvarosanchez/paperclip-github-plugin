@@ -8518,6 +8518,137 @@ test('worker returns a running state for long manual syncs and persists the fina
   }
 });
 
+test('worker can cancel a long-running manual sync after it has started', async () => {
+  const harness = createTestHarness({
+    manifest,
+    config: {
+      githubTokenRef: 'github-secret-ref'
+    }
+  });
+  await plugin.definition.setup(harness.ctx);
+
+  await harness.performAction('settings.saveRegistration', {
+    mappings: [
+      {
+        id: 'mapping-a',
+        repositoryUrl: 'paperclipai/example-repo',
+        paperclipProjectName: 'Engineering',
+        paperclipProjectId: 'project-1',
+        companyId: 'company-1'
+      }
+    ],
+    syncState: {
+      status: 'idle'
+    }
+  });
+
+  const originalFetch = globalThis.fetch;
+
+  globalThis.fetch = async (input, init) => {
+    const rawUrl = getRequestUrl(input);
+    const url = new URL(rawUrl);
+
+    if (url.pathname === '/repos/paperclipai/example-repo/issues' && ['all', 'open'].includes(url.searchParams.get('state') ?? '')) {
+      await delay(1_200);
+
+      return jsonResponse([
+        {
+          id: 1001,
+          number: 10,
+          title: 'Cancellable sync issue',
+          body: 'Body from GitHub',
+          html_url: 'https://github.com/paperclipai/example-repo/issues/10',
+          state: 'open'
+        }
+      ]);
+    }
+
+    if (url.pathname === '/graphql') {
+      const { query, variables } = getGraphqlRequest(init);
+      const issueNumber = typeof variables.issueNumber === 'number' ? variables.issueNumber : undefined;
+
+      if (query.includes('query GitHubIssueParentRelationships')) {
+        return graphqlIssueParentRelationshipsResponse([
+          {
+            issueNumber: 10
+          }
+        ]);
+      }
+
+      if (query.includes('query GitHubIssueStatusSnapshot') && issueNumber === 10) {
+        return graphqlResponse({
+          repository: {
+            issue: {
+              number: 10,
+              state: 'OPEN',
+              stateReason: null,
+              comments: {
+                totalCount: 0
+              },
+              closedByPullRequestsReferences: {
+                pageInfo: {
+                  hasNextPage: false,
+                  endCursor: null
+                },
+                nodes: []
+              }
+            }
+          }
+        });
+      }
+    }
+
+    throw new Error(`Unexpected GitHub request: ${url.toString()}`);
+  };
+
+  try {
+    const runningResult = await harness.performAction('sync.runNow', {}) as {
+      syncState: { status: string; message?: string };
+    };
+    assert.equal(runningResult.syncState.status, 'running');
+
+    const cancelResult = await harness.performAction('sync.cancel', {}) as {
+      syncState: { status: string; message?: string; cancelRequestedAt?: string };
+    };
+    assert.equal(cancelResult.syncState.status, 'running');
+    assert.equal(cancelResult.syncState.message, 'Cancellation requested. GitHub sync will stop after the current step finishes.');
+    assert.ok(cancelResult.syncState.cancelRequestedAt);
+
+    await waitFor(() => {
+      const current = harness.getState({
+        scopeKind: 'instance',
+        stateKey: 'paperclip-github-plugin-settings'
+      }) as {
+        syncState?: { status?: string };
+      } | undefined;
+
+      return current?.syncState?.status === 'cancelled';
+    });
+
+    const cancelledState = harness.getState({
+      scopeKind: 'instance',
+      stateKey: 'paperclip-github-plugin-settings'
+    }) as {
+      syncState: {
+        status: string;
+        createdIssuesCount?: number;
+        skippedIssuesCount?: number;
+        syncedIssuesCount?: number;
+        message?: string;
+      };
+    };
+
+    assert.equal(cancelledState.syncState.status, 'cancelled');
+    assert.equal(cancelledState.syncState.createdIssuesCount, 0);
+    assert.equal(cancelledState.syncState.skippedIssuesCount, 0);
+    assert.equal(cancelledState.syncState.syncedIssuesCount, 1);
+    assert.match(cancelledState.syncState.message ?? '', /was cancelled before it finished/i);
+    assert.match(cancelledState.syncState.message ?? '', /completed 0 of 1 issues/i);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test('worker persists live sync progress and imported counts before a long-running sync finishes', async () => {
   const harness = createTestHarness({
     manifest,
