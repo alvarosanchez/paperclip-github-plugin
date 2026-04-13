@@ -3,6 +3,7 @@ import { useHostContext, usePluginAction, usePluginData, usePluginToast } from '
 
 import { parseRepositoryReference, type ParsedRepositoryReference } from '../github-repo.ts';
 import { requiresPaperclipBoardAccess } from '../paperclip-health.ts';
+import { normalizeCompanyAssigneeOptionsResponse, type GitHubSyncAssigneeOption } from './assignees.ts';
 import { buildPaperclipUrl, fetchJson, fetchPaperclipHealth, resolveCliAuthPollUrl } from './http.ts';
 import { mergePluginConfig, normalizePluginConfig } from './plugin-config.ts';
 import {
@@ -130,13 +131,6 @@ interface GitHubSyncAdvancedSettings {
   defaultAssigneeAgentId?: string;
   defaultStatus: PaperclipIssueStatus;
   ignoredIssueAuthorUsernames: string[];
-}
-
-interface GitHubSyncAssigneeOption {
-  id: string;
-  name: string;
-  title?: string;
-  status?: string;
 }
 
 interface GitHubSyncSettings {
@@ -2950,6 +2944,12 @@ async function listCompanyProjects(companyId: string): Promise<Array<{ id: strin
     .filter((entry): entry is { id: string; name: string } => entry !== null);
 }
 
+async function listCompanyAssigneeOptions(companyId: string): Promise<GitHubSyncAssigneeOption[]> {
+  return normalizeCompanyAssigneeOptionsResponse(
+    await fetchJson<unknown>(`/api/companies/${companyId}/agents`)
+  );
+}
+
 async function listProjectWorkspaces(projectId: string): Promise<ProjectWorkspaceSummary[]> {
   const response = await fetchJson<unknown>(`/api/projects/${projectId}/workspaces`);
   if (!Array.isArray(response)) {
@@ -4016,10 +4016,12 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
   const [existingProjectCandidates, setExistingProjectCandidates] = useState<ExistingProjectSyncCandidate[]>([]);
   const [existingProjectCandidatesLoading, setExistingProjectCandidatesLoading] = useState(false);
   const [existingProjectCandidatesError, setExistingProjectCandidatesError] = useState<string | null>(null);
+  const [browserAvailableAssignees, setBrowserAvailableAssignees] = useState<GitHubSyncAssigneeOption[]>([]);
   const themeMode = useResolvedThemeMode();
   const boardAccessRequirement = usePaperclipBoardAccessRequirement();
   const armSyncCompletionToast = useSyncCompletionToast(form.syncState, toast);
   const boardAccessConfigSyncAttemptRef = useRef<string | null>(null);
+  const assigneeFallbackAttemptRef = useRef<string | null>(null);
 
   const currentSettings = settings.data ?? cachedSettings;
   const showInitialLoadingState = settings.loading && !settings.data && !cachedSettings;
@@ -4108,6 +4110,53 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
       cancelled = true;
     };
   }, [hostContext.companyId, settings.data?.updatedAt, tokenStatusOverride]);
+
+  useEffect(() => {
+    const companyId = hostContext.companyId;
+    const workerAvailableAssignees = currentSettings?.availableAssignees ?? [];
+    const snapshotKey = `${companyId ?? 'none'}:${currentSettings?.updatedAt ?? 'none'}`;
+
+    if (!companyId) {
+      assigneeFallbackAttemptRef.current = null;
+      setBrowserAvailableAssignees([]);
+      return;
+    }
+
+    if (workerAvailableAssignees.length > 0) {
+      assigneeFallbackAttemptRef.current = snapshotKey;
+      setBrowserAvailableAssignees([]);
+      return;
+    }
+
+    if (assigneeFallbackAttemptRef.current === snapshotKey) {
+      return;
+    }
+
+    assigneeFallbackAttemptRef.current = snapshotKey;
+
+    let cancelled = false;
+
+    void (async () => {
+      try {
+        const assignees = await listCompanyAssigneeOptions(companyId);
+        if (cancelled) {
+          return;
+        }
+
+        setBrowserAvailableAssignees(assignees);
+      } catch {
+        if (cancelled) {
+          return;
+        }
+
+        setBrowserAvailableAssignees([]);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [currentSettings?.availableAssignees?.length, currentSettings?.updatedAt, hostContext.companyId]);
 
   useEffect(() => {
     const companyId = hostContext.companyId;
@@ -4254,7 +4303,9 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
   const boardAccessSectionDescription = '';
   const repositoriesUnlocked = tokenStatus === 'valid';
   const availableAssignees = getAvailableAssigneeOptions(
-    currentSettings?.availableAssignees ?? form.availableAssignees,
+    (currentSettings?.availableAssignees?.length ? currentSettings.availableAssignees : null)
+    ?? (form.availableAssignees?.length ? form.availableAssignees : null)
+    ?? browserAvailableAssignees,
     form.advancedSettings.defaultAssigneeAgentId
   );
   const savedMappingsSource = currentSettings ? currentSettings.mappings ?? [] : form.mappings;
