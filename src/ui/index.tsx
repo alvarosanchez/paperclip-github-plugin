@@ -4021,6 +4021,7 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
   const boardAccessRequirement = usePaperclipBoardAccessRequirement();
   const armSyncCompletionToast = useSyncCompletionToast(form.syncState, toast);
   const boardAccessConfigSyncAttemptRef = useRef<string | null>(null);
+  const assigneeFallbackAttemptRef = useRef<string | null>(null);
 
   const currentSettings = settings.data ?? cachedSettings;
   const showInitialLoadingState = settings.loading && !settings.data && !cachedSettings;
@@ -4112,17 +4113,26 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
 
   useEffect(() => {
     const companyId = hostContext.companyId;
-    const workerAvailableAssignees = settings.data?.availableAssignees ?? [];
+    const workerAvailableAssignees = currentSettings?.availableAssignees ?? [];
+    const snapshotKey = `${companyId ?? 'none'}:${currentSettings?.updatedAt ?? 'none'}`;
 
     if (!companyId) {
+      assigneeFallbackAttemptRef.current = null;
       setBrowserAvailableAssignees([]);
       return;
     }
 
     if (workerAvailableAssignees.length > 0) {
+      assigneeFallbackAttemptRef.current = snapshotKey;
       setBrowserAvailableAssignees([]);
       return;
     }
+
+    if (assigneeFallbackAttemptRef.current === snapshotKey) {
+      return;
+    }
+
+    assigneeFallbackAttemptRef.current = snapshotKey;
 
     let cancelled = false;
 
@@ -4146,7 +4156,7 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
     return () => {
       cancelled = true;
     };
-  }, [hostContext.companyId, settings.data?.availableAssignees, settings.data?.updatedAt]);
+  }, [currentSettings?.availableAssignees?.length, currentSettings?.updatedAt, hostContext.companyId]);
 
   useEffect(() => {
     const companyId = hostContext.companyId;

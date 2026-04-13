@@ -284,6 +284,10 @@ test('normalizeCompanyAssigneeOptionsResponse keeps assignable agents and trims 
   assert.deepEqual(
     normalizeCompanyAssigneeOptionsResponse([
       {
+        id: 'agent-3',
+        name: 'Casey'
+      },
+      {
         id: ' agent-2 ',
         name: ' Bailey ',
         title: ' Operator ',
@@ -293,10 +297,6 @@ test('normalizeCompanyAssigneeOptionsResponse keeps assignable agents and trims 
         id: 'agent-1',
         name: 'Alex',
         status: 'terminated'
-      },
-      {
-        id: 'agent-3',
-        name: 'Casey'
       },
       null
     ]),
