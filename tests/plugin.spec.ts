@@ -9,6 +9,7 @@ import { createTestHarness } from '@paperclipai/plugin-sdk/testing';
 
 import manifest from '../src/manifest.ts';
 import { requiresPaperclipBoardAccess } from '../src/paperclip-health.ts';
+import { normalizeCompanyAssigneeOptionsResponse } from '../src/ui/assignees.ts';
 import { fetchJson, fetchPaperclipHealth, resolveCliAuthPollUrl } from '../src/ui/http.ts';
 import { mergePluginConfig, normalizePluginConfig } from '../src/ui/plugin-config.ts';
 import {
@@ -277,6 +278,41 @@ test('filterExistingProjectSyncCandidates hides projects already enabled in plug
       sourceType: 'git_repo'
     }
   ]);
+});
+
+test('normalizeCompanyAssigneeOptionsResponse keeps assignable agents and trims their labels', () => {
+  assert.deepEqual(
+    normalizeCompanyAssigneeOptionsResponse([
+      {
+        id: ' agent-2 ',
+        name: ' Bailey ',
+        title: ' Operator ',
+        status: ' idle '
+      },
+      {
+        id: 'agent-1',
+        name: 'Alex',
+        status: 'terminated'
+      },
+      {
+        id: 'agent-3',
+        name: 'Casey'
+      },
+      null
+    ]),
+    [
+      {
+        id: 'agent-2',
+        name: 'Bailey',
+        title: 'Operator',
+        status: 'idle'
+      },
+      {
+        id: 'agent-3',
+        name: 'Casey'
+      }
+    ]
+  );
 });
 
 function createAgentFixture(params: {
