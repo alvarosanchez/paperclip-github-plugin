@@ -180,20 +180,28 @@ function delay(ms: number): Promise<void> {
   });
 }
 
-test('manifest version defaults to package.json when no build-stamped version is provided', async () => {
-  const packageJson = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8')) as {
-    version?: unknown;
-  };
-  const resolvedManifest = await importManifestWithPluginVersion();
+test(
+  'manifest version defaults to package.json when no build-stamped version is provided',
+  { concurrency: false },
+  async () => {
+    const packageJson = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8')) as {
+      version?: unknown;
+    };
+    const resolvedManifest = await importManifestWithPluginVersion();
 
-  assert.equal(resolvedManifest.version, packageJson.version);
-});
+    assert.equal(resolvedManifest.version, packageJson.version);
+  }
+);
 
-test('manifest version prefers the build-stamped plugin version when provided', async () => {
-  const resolvedManifest = await importManifestWithPluginVersion('9.9.9-test');
+test(
+  'manifest version prefers the build-stamped plugin version when provided',
+  { concurrency: false },
+  async () => {
+    const resolvedManifest = await importManifestWithPluginVersion('9.9.9-test');
 
-  assert.equal(resolvedManifest.version, '9.9.9-test');
-});
+    assert.equal(resolvedManifest.version, '9.9.9-test');
+  }
+);
 
 async function createGitHubAgentToolHarness() {
   const harness = createTestHarness({
