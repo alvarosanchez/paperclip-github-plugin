@@ -4357,7 +4357,10 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
     hasMappings: savedMappingCount > 0,
     hasBoardAccess: boardAccessReady
   });
-  const cancellationRequested = cancellingSync || isSyncCancellationRequested(displaySyncState);
+  const syncPersistedRunning = displaySyncState.status === 'running';
+  const syncStartPending = runningSync && !syncPersistedRunning;
+  const syncInFlight = syncStartPending || syncPersistedRunning;
+  const cancellationRequested = syncPersistedRunning && (cancellingSync || isSyncCancellationRequested(displaySyncState));
   const mappingsDirty = JSON.stringify(draftMappings) !== JSON.stringify(savedMappings);
   const advancedSettingsDirty = JSON.stringify(draftAdvancedSettings) !== JSON.stringify(savedAdvancedSettings);
   const scheduleFrequencyError = getScheduleFrequencyError(scheduleFrequencyDraft);
@@ -4365,7 +4368,6 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
   const savedScheduleFrequencyMinutes = normalizeScheduleFrequencyMinutes(currentSettings?.scheduleFrequencyMinutes);
   const scheduleDirty = scheduleFrequencyError === null && scheduleFrequencyMinutes !== savedScheduleFrequencyMinutes;
   const mappings = form.mappings.length > 0 ? form.mappings : [createEmptyMapping(0)];
-  const syncInFlight = runningSync || displaySyncState.status === 'running';
   const settingsMutationsLocked = syncInFlight;
   const settingsMutationsLockReason = settingsMutationsLocked
     ? 'Settings are temporarily locked while a sync is running to avoid overwriting local edits.'
@@ -4877,6 +4879,10 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
   }
 
   async function handleCancelSync(): Promise<void> {
+    if (!syncPersistedRunning) {
+      return;
+    }
+
     setCancellingSync(true);
     setManualSyncRequestError(null);
 
@@ -5454,14 +5460,16 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
                       </div>
                       <button
                         type="button"
-                        className={getPluginActionClassName({ variant: syncInFlight ? 'danger' : 'primary' })}
-                        onClick={syncInFlight ? handleCancelSync : handleRunSyncNow}
-                        disabled={showInitialLoadingState || (syncInFlight ? cancellationRequested : false)}
+                        className={getPluginActionClassName({ variant: syncPersistedRunning ? 'danger' : 'primary' })}
+                        onClick={syncPersistedRunning ? handleCancelSync : handleRunSyncNow}
+                        disabled={showInitialLoadingState || syncStartPending || (syncPersistedRunning ? cancellationRequested : false)}
                       >
-                        {syncInFlight
+                        {syncPersistedRunning
                           ? cancellationRequested
                             ? 'Cancelling…'
                             : 'Cancel sync'
+                          : syncStartPending
+                            ? 'Running…'
                           : manualSyncButtonLabel}
                       </button>
                     </div>
@@ -5624,8 +5632,10 @@ export function GitHubSyncDashboardWidget(): React.JSX.Element {
     hasBoardAccess: boardAccessReady
   });
   const syncUnlocked = syncSetupIssue === null;
-  const syncInFlight = runningSync || displaySyncState.status === 'running';
-  const cancellationRequested = cancellingSync || isSyncCancellationRequested(displaySyncState);
+  const syncPersistedRunning = displaySyncState.status === 'running';
+  const syncStartPending = runningSync && !syncPersistedRunning;
+  const syncInFlight = syncStartPending || syncPersistedRunning;
+  const cancellationRequested = syncPersistedRunning && (cancellingSync || isSyncCancellationRequested(displaySyncState));
   const scheduleFrequencyMinutes = normalizeScheduleFrequencyMinutes(current.scheduleFrequencyMinutes);
   const scheduleDescription = formatScheduleFrequency(scheduleFrequencyMinutes);
   const summary = getDashboardSummary({
@@ -5743,6 +5753,10 @@ export function GitHubSyncDashboardWidget(): React.JSX.Element {
   }
 
   async function handleCancelSync(): Promise<void> {
+    if (!syncPersistedRunning) {
+      return;
+    }
+
     setCancellingSync(true);
     setManualSyncRequestError(null);
 
@@ -5864,25 +5878,20 @@ export function GitHubSyncDashboardWidget(): React.JSX.Element {
               Open settings
             </a>
             {syncUnlocked ? (
-              syncInFlight ? (
-                <button
-                  type="button"
-                  className={getPluginActionClassName({ variant: 'danger' })}
-                  onClick={handleCancelSync}
-                  disabled={cancellationRequested || showInitialLoadingState}
-                >
-                  {cancellationRequested ? 'Cancelling…' : 'Cancel sync'}
-                </button>
-              ) : (
-                <button
-                  type="button"
-                  className={getPluginActionClassName({ variant: 'primary' })}
-                  onClick={handleRunSync}
-                  disabled={showInitialLoadingState}
-                >
-                  Run sync now
-                </button>
-              )
+              <button
+                type="button"
+                className={getPluginActionClassName({ variant: syncPersistedRunning ? 'danger' : 'primary' })}
+                onClick={syncPersistedRunning ? handleCancelSync : handleRunSync}
+                disabled={showInitialLoadingState || syncStartPending || (syncPersistedRunning ? cancellationRequested : false)}
+              >
+                {syncPersistedRunning
+                  ? cancellationRequested
+                    ? 'Cancelling…'
+                    : 'Cancel sync'
+                  : syncStartPending
+                    ? 'Running…'
+                    : 'Run sync now'}
+              </button>
             ) : null}
           </div>
         </div>
@@ -5966,8 +5975,10 @@ function GitHubSyncToolbarButtonSurface(props: {
       ? getSyncSetupMessage(boardAccessSetupIssue, hasCompanyContext)
       : state.message;
   const effectiveLabel = boardAccessSetupIssue ? 'Board access required' : state.label;
-  const syncInFlight = runningSync || state.syncState.status === 'running';
-  const cancellationRequested = cancellingSync || isSyncCancellationRequested(state.syncState);
+  const syncPersistedRunning = state.syncState.status === 'running';
+  const syncStartPending = runningSync && !syncPersistedRunning;
+  const syncInFlight = syncStartPending || syncPersistedRunning;
+  const cancellationRequested = syncPersistedRunning && (cancellingSync || isSyncCancellationRequested(state.syncState));
   const armSyncCompletionToast = useSyncCompletionToast(state.syncState, toast);
 
   useEffect(() => {
@@ -6095,6 +6106,10 @@ function GitHubSyncToolbarButtonSurface(props: {
   }
 
   async function handleCancelSync(): Promise<void> {
+    if (!syncPersistedRunning) {
+      return;
+    }
+
     try {
       setCancellingSync(true);
       const result = await cancelSync() as {
@@ -6134,15 +6149,17 @@ function GitHubSyncToolbarButtonSurface(props: {
         data-variant="outline"
         data-size="sm"
         className={props.entityType ? HOST_ENTITY_BUTTON_CLASSNAME : HOST_GLOBAL_BUTTON_CLASSNAME}
-        disabled={toolbarState.loading || (syncInFlight ? cancellationRequested : !effectiveCanRun)}
-        onClick={syncInFlight ? handleCancelSync : handleRunSync}
+        disabled={toolbarState.loading || syncStartPending || (syncPersistedRunning ? cancellationRequested : !effectiveCanRun)}
+        onClick={syncPersistedRunning ? handleCancelSync : handleRunSync}
       >
         <GitHubMarkIcon className="mr-1.5 h-3.5 w-3.5" />
         <span>
-          {syncInFlight
+          {syncPersistedRunning
             ? cancellationRequested
               ? 'Cancelling…'
               : 'Cancel sync'
+            : syncStartPending
+              ? 'Syncing…'
             : effectiveLabel}
         </span>
       </button>

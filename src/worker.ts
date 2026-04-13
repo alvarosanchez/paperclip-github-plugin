@@ -1651,16 +1651,20 @@ function createRunningSyncState(
     cancelRequestedAt?: string;
   } = {}
 ): SyncRunState {
+  const previousRunningState = previous.status === 'running' ? previous : undefined;
+  const nextMessage = options.message ?? previousRunningState?.message ?? RUNNING_SYNC_MESSAGE;
+  const nextCancelRequestedAt = options.cancelRequestedAt ?? previousRunningState?.cancelRequestedAt;
+
   return {
     status: 'running',
-    message: options.message ?? RUNNING_SYNC_MESSAGE,
+    message: nextMessage,
     checkedAt: previous.checkedAt,
     syncedIssuesCount: options.syncedIssuesCount ?? 0,
     createdIssuesCount: options.createdIssuesCount ?? 0,
     skippedIssuesCount: options.skippedIssuesCount ?? 0,
     erroredIssuesCount: options.erroredIssuesCount ?? 0,
     lastRunTrigger: trigger,
-    ...(options.cancelRequestedAt ? { cancelRequestedAt: options.cancelRequestedAt } : {}),
+    ...(nextCancelRequestedAt ? { cancelRequestedAt: nextCancelRequestedAt } : {}),
     ...(options.progress ? { progress: normalizeSyncProgress(options.progress) } : {})
   };
 }
