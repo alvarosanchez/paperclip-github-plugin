@@ -1,4 +1,4 @@
-const SETTINGS_INDEX_HREF = '/settings/plugins';
+const SETTINGS_INDEX_HREF = '/instance/settings/plugins';
 const GITHUB_SYNC_PLUGIN_KEY = 'paperclip-github-plugin';
 const GITHUB_SYNC_PLUGIN_DISPLAY_NAME = 'GitHub Sync';
 

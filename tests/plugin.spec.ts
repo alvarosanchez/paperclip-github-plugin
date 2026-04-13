@@ -343,7 +343,7 @@ test('resolveInstalledGitHubSyncPluginId finds the GitHub Sync installation id f
   ];
 
   assert.equal(resolveInstalledGitHubSyncPluginId(records), 'plugin-123');
-  assert.equal(resolvePluginSettingsHref(records), '/settings/plugins/plugin-123');
+  assert.equal(resolvePluginSettingsHref(records), '/instance/settings/plugins/plugin-123');
   assert.equal(resolveInstalledGitHubSyncPluginId(records, 'plugin-from-route'), 'plugin-from-route');
 });
 
