@@ -980,6 +980,9 @@ const PAGE_STYLES = `
 .ghsync-diagnostics__failures {
   max-height: 420px;
   overflow: auto;
+  margin: 0;
+  padding: 0;
+  list-style: none;
 }
 
 .ghsync-diagnostics__failure {
@@ -992,6 +995,10 @@ const PAGE_STYLES = `
   background: var(--ghsync-surfaceAlt);
   text-align: left;
   transition: border-color 160ms ease, background 160ms ease, transform 160ms ease;
+}
+
+.ghsync-diagnostics__failure-item {
+  list-style: none;
 }
 
 .ghsync-diagnostics__failure:hover {
@@ -2020,6 +2027,9 @@ const WIDGET_STYLES = `
 .ghsync-diagnostics__failures {
   max-height: 320px;
   overflow: auto;
+  margin: 0;
+  padding: 0;
+  list-style: none;
 }
 
 .ghsync-diagnostics__failure {
@@ -2031,6 +2041,10 @@ const WIDGET_STYLES = `
   border: 1px solid var(--ghsync-dangerBorder);
   background: var(--ghsync-surfaceAlt);
   text-align: left;
+}
+
+.ghsync-diagnostics__failure-item {
+  list-style: none;
 }
 
 .ghsync-diagnostics__failure--active {
@@ -4095,16 +4109,17 @@ function SyncDiagnosticsPanel(props: {
   compact?: boolean;
 }): React.JSX.Element | null {
   const failureEntries = getSyncFailureLogEntries(props.syncState);
-  const [selectedFailureIndex, setSelectedFailureIndex] = useState(0);
-  const selectedFailure = failureEntries[Math.min(selectedFailureIndex, Math.max(failureEntries.length - 1, 0))];
+  const latestFailureIndex = Math.max(failureEntries.length - 1, 0);
+  const [selectedFailureIndex, setSelectedFailureIndex] = useState(latestFailureIndex);
+  const selectedFailure = failureEntries[Math.min(selectedFailureIndex, latestFailureIndex)];
   const diagnostics = selectedFailure ? getSyncDiagnostics(selectedFailure) : null;
   const requestError = props.requestError?.trim() ? props.requestError.trim() : null;
   const canSelectFailures = !props.compact && failureEntries.length > 1;
   const savedFailureCount = props.syncState.erroredIssuesCount ?? failureEntries.length;
 
   useEffect(() => {
-    setSelectedFailureIndex(0);
-  }, [props.syncState.checkedAt, props.syncState.status]);
+    setSelectedFailureIndex(latestFailureIndex);
+  }, [latestFailureIndex, props.syncState.checkedAt, props.syncState.status]);
 
   if (!diagnostics && !requestError) {
     return null;
@@ -4135,7 +4150,7 @@ function SyncDiagnosticsPanel(props: {
       {diagnostics ? (
         <div className={`ghsync-diagnostics__layout${canSelectFailures ? ' ghsync-diagnostics__layout--split' : ''}`}>
           {canSelectFailures ? (
-            <div className="ghsync-diagnostics__failures" role="list" aria-label="Latest sync failures">
+            <ul className="ghsync-diagnostics__failures" aria-label="Latest sync failures">
               {failureEntries.map((failure, index) => {
                 const repositoryLabel = formatSyncFailureRepository(failure.repositoryUrl);
                 const issueLabel =
@@ -4147,21 +4162,26 @@ function SyncDiagnosticsPanel(props: {
                   .join(' · ');
 
                 return (
-                  <button
+                  <li
                     key={`${failure.occurredAt ?? 'unknown'}-${failure.githubIssueNumber ?? 'no-issue'}-${index}`}
-                    type="button"
-                    className={`ghsync-diagnostics__failure${index === selectedFailureIndex ? ' ghsync-diagnostics__failure--active' : ''}`}
-                    onClick={() => setSelectedFailureIndex(index)}
+                    className="ghsync-diagnostics__failure-item"
                   >
-                    <strong className="ghsync-diagnostics__failure-title">
-                      {title || `Failure ${index + 1}`}
-                    </strong>
-                    {meta ? <span className="ghsync-diagnostics__failure-meta">{meta}</span> : null}
-                    <span className="ghsync-diagnostics__failure-preview">{failure.message}</span>
-                  </button>
+                    <button
+                      type="button"
+                      className={`ghsync-diagnostics__failure${index === selectedFailureIndex ? ' ghsync-diagnostics__failure--active' : ''}`}
+                      aria-pressed={index === selectedFailureIndex}
+                      onClick={() => setSelectedFailureIndex(index)}
+                    >
+                      <strong className="ghsync-diagnostics__failure-title">
+                        {title || `Failure ${index + 1}`}
+                      </strong>
+                      {meta ? <span className="ghsync-diagnostics__failure-meta">{meta}</span> : null}
+                      <span className="ghsync-diagnostics__failure-preview">{failure.message}</span>
+                    </button>
+                  </li>
                 );
               })}
-            </div>
+            </ul>
           ) : null}
 
           <div className="ghsync-diagnostics__detail">

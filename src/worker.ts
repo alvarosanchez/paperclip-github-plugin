@@ -1649,9 +1649,9 @@ function buildSyncFailureLogEntry(
 
 function buildRecentSyncFailureLogEntries(failures: SyncProcessingFailure[]): SyncFailureLogEntry[] | undefined {
   const entries = failures
+    .slice(-MAX_SYNC_FAILURE_LOG_ENTRIES)
     .map((failure) => buildSyncFailureLogEntry(failure.error, failure.context, failure.occurredAt))
-    .filter((entry): entry is SyncFailureLogEntry => entry !== undefined)
-    .slice(-MAX_SYNC_FAILURE_LOG_ENTRIES);
+    .filter((entry): entry is SyncFailureLogEntry => entry !== undefined);
 
   return entries.length > 0 ? entries : undefined;
 }
