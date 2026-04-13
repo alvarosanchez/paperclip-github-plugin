@@ -1,147 +1,146 @@
 # paperclip-github-plugin
 
-GitHub Sync is a Paperclip plugin that connects GitHub repositories to Paperclip projects and keeps GitHub issues synchronized into your Paperclip workspace.
+[![npm version](https://img.shields.io/npm/v/paperclip-github-plugin)](https://www.npmjs.com/package/paperclip-github-plugin)
+[![CI](https://img.shields.io/github/actions/workflow/status/alvarosanchez/paperclip-github-plugin/ci.yml?branch=main&label=CI)](https://github.com/alvarosanchez/paperclip-github-plugin/actions/workflows/ci.yml)
+[![Node >=20](https://img.shields.io/badge/node-%3E%3D20-339933?logo=node.js&logoColor=white)](https://www.npmjs.com/package/paperclip-github-plugin)
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](https://github.com/alvarosanchez/paperclip-github-plugin/blob/main/LICENSE)
 
-It is designed for teams that plan in Paperclip but still receive work through GitHub issues. The plugin gives you a Paperclip-native setup flow, secure GitHub token handling through Paperclip secrets or an optional local worker config file, authenticated-deployment detection with required board-access connection when needed, manual sync controls, automatic background sync, and GitHub context directly on synced Paperclip issues.
+GitHub Sync is a Paperclip plugin for teams that plan in Paperclip but still receive work through GitHub issues.
 
-## What the plugin does
+It connects GitHub repositories to Paperclip projects, imports open issues as top-level Paperclip issues, keeps those issues updated over time, and gives Paperclip agents first-class GitHub workflow tools for triage and delivery.
 
-- Connects one or more GitHub repositories to Paperclip projects.
-- Imports GitHub issues as top-level Paperclip issues.
-- Keeps already imported issues updated instead of recreating them.
-- Stores the GitHub token as a Paperclip secret reference instead of persisting the raw token in plugin state.
-- Supports an optional worker-local config file at `~/.paperclip/plugins/github-sync/config.json` for a raw `githubToken` fallback when Paperclip-managed secrets are not available.
-- Can store a per-company Paperclip board API token for worker-side REST calls when Paperclip board access requires sign-in.
-- Adds Paperclip UI surfaces for setup, sync status, manual sync actions, issue details, and GitHub link annotations.
-- Exposes agent tools so Paperclip agents can search GitHub for duplicates, read and update issues, open pull requests, inspect CI, work through review threads, and request reviewers without leaving the plugin surface.
+## Why teams use GitHub Sync
 
-## User-facing features
+GitHub is often where work appears first, but it is not always where teams want to plan, prioritize, and coordinate. GitHub Sync lets GitHub stay the source of incoming work while Paperclip becomes the place where the team manages it.
 
-### Setup and configuration
+With this plugin, you can:
 
-- Hosted settings page inside Paperclip.
-- GitHub token validation before saving.
-- GitHub token saved through Paperclip company secrets; the plugin stores only the secret reference.
-- Optional worker-local config file support at `~/.paperclip/plugins/github-sync/config.json` with a `githubToken` field for global runtime fallback.
-- GitHub token and automatic sync cadence stay shared across the plugin instance, while repository mappings, advanced import defaults, and Paperclip board access are managed per company from the same hosted settings flow.
-- The hosted settings page calls out the current company by name and separates company-scoped setup from shared plugin-wide settings.
-- Automatic detection of authenticated Paperclip deployments through `/api/health`.
-- Paperclip board access connection flow from settings, enforced when the deployment requires authenticated board access for worker-side REST calls.
-- Paperclip board tokens saved through Paperclip company secrets per company; the plugin stores only the secret reference and mirrors that ref into plugin config so workers can resolve it during sync.
-- Support for multiple repository-to-project mappings.
-- When settings are opened inside a company, the repository list only shows that company’s mappings and saving it preserves mappings that belong to other companies.
-- Company-wide advanced settings for imported issues, including a default assignee, a default Paperclip status, and ignored GitHub issue authors.
-- Repository input accepts either `owner/repo` or `https://github.com/owner/repo`.
-- When a company already has Paperclip projects bound to GitHub repository workspaces, the settings page surfaces those existing projects so sync can be enabled without recreating the project.
-- Automatic creation or reuse of the target Paperclip project when a mapping is saved.
-- Automatic binding of the GitHub repository URL to the target Paperclip project workspace.
-- Configurable automatic sync cadence in whole minutes.
-- Project name becomes read-only in the settings UI after the project has been created and linked.
+- connect one or more GitHub repositories to Paperclip projects
+- import open GitHub issues into Paperclip without adding title prefixes or duplicate issues
+- keep descriptions, labels, and status aligned with GitHub over time
+- configure mappings and import defaults per Paperclip company
+- run sync manually or on a schedule
+- give Paperclip agents native GitHub tools for issues, pull requests, CI, and review threads
 
-### Sync behavior
+## What you get in Paperclip
 
-- Manual sync from the settings page, scoped to the current company when settings are opened inside a company.
-- Global toolbar button for syncing from anywhere in Paperclip.
-- Global toolbar and dashboard sync actions target the current company when they are rendered inside one, and fall back to all saved mappings only when no company context is active.
-- Project toolbar button for syncing the repository mapped to a specific Paperclip project.
-- Issue toolbar button for syncing the GitHub issue linked to a specific Paperclip issue.
-- Automatic scheduled sync driven by a job that checks every minute and runs when the saved cadence is due.
-- Background completion for long-running manual or scheduled syncs so the host request can return promptly.
-- Live sync progress and troubleshooting details in the Paperclip UI.
-- Cumulative sync counts and last-run status in plugin state.
+The plugin adds a full in-host workflow instead of a one-off import script:
 
-### Agent tools
+- a hosted settings page for GitHub auth, repository mappings, company defaults, and sync controls
+- a dashboard widget that shows readiness, sync status, and last-run results
+- manual sync actions from global, project, and issue toolbar surfaces
+- a GitHub detail tab on synced Paperclip issues
+- GitHub link annotations on sync-generated status transition comments when the host supports comment annotations
 
-- Repository-scoped search for issues and pull requests to support deduplication during triage.
-- GitHub issue read, comment-read, comment-write, and metadata update tools for agent implementation work.
-- Pull request creation, read, update, changed-file, CI-check, review-thread, and reviewer-request tools for agent delivery work.
-- Review-thread reply plus resolve and unresolve tools so agents can respond to automated review feedback directly from Paperclip.
-- Comment-posting tools automatically append a footer disclosing that a Paperclip AI agent authored the message and which LLM was used; callers must provide the LLM name when posting those messages.
+## How it works
 
-### Issue import and update behavior
+1. Save a GitHub token in the plugin settings.
+2. Connect one or more GitHub repositories to Paperclip projects.
+3. Run a sync manually or let the scheduled job keep things up to date.
 
-- Imports one top-level Paperclip issue per GitHub issue.
-- Can ignore GitHub issues from configured usernames such as `renovate`.
-- Preserves the original GitHub issue title without adding a prefix.
-- Uses the normalized GitHub issue body as the Paperclip issue description.
-- Normalizes GitHub HTML that Paperclip descriptions cannot render cleanly, including constructs such as `<br>`, `<hr>`, `<details>`, `<summary>`, and inline images.
-- Re-syncs descriptions so imported Paperclip issues stay aligned with the latest GitHub issue body.
-- Repairs missing or stale descriptions when Paperclip create/update flows return incomplete issue content.
-- Deduplicates repeated sync runs so previously imported GitHub issues are not recreated.
-- Repairs stale or missing import-registry entries by reusing existing imported Paperclip issues when durable GitHub metadata or older source-link metadata is present.
-- Continues tracking previously imported issues, including closed issues, so status and metadata can still be reconciled after the initial import.
+During sync, the plugin imports one top-level Paperclip issue per GitHub issue, updates already imported issues instead of recreating them, maps GitHub labels into Paperclip labels, and keeps GitHub-specific metadata in dedicated Paperclip surfaces rather than stuffing everything into the issue description.
 
-### Labels and metadata
+Long-running syncs continue in the background, so quick actions do not have to wait for the whole import to finish.
 
-- Maps GitHub labels onto Paperclip issue labels.
-- Prefers exact color matches when multiple Paperclip labels share the same name.
-- Creates missing Paperclip labels through the local Paperclip API when the host URL is known.
-- Re-syncs label changes, including removing labels that were removed on GitHub.
-- Adds a GitHub detail tab on synced Paperclip issues showing:
-  - GitHub repository
-  - GitHub issue number and link
-  - GitHub state and close reason
-  - comment count
-  - linked pull requests
-  - synced labels
-  - last synced time
-- Recovers older linked issues into the detail tab when legacy sync metadata exists, and refreshes that metadata on the next sync.
+## Highlights
 
-### Status synchronization
+### Company-aware configuration
 
-- Open GitHub issue with no linked pull request imports into the configured default Paperclip status, which defaults to `backlog`.
-- Open GitHub issue with unfinished CI on a linked pull request maps to `in_progress`.
-- Open GitHub issue with failing CI or unresolved review threads on a linked pull request maps to `todo`.
-- Open GitHub issue with green CI and all review threads resolved maps to `in_review`.
-- Closed GitHub issue completed as finished work maps to `done`.
-- Closed GitHub issue closed as `not_planned` or `duplicate` maps to `cancelled`.
-- New GitHub comments move an open imported Paperclip issue back to `todo` only when the new comment came from the original issue author or a repository maintainer/admin that the worker can verify through the GitHub API.
-- Existing open issues that are already `backlog` stay in `backlog` until a human changes them in Paperclip.
-- When the plugin changes a Paperclip issue status, it adds a Paperclip comment explaining the transition.
-- When comment annotations are supported by the host, those transition comments also surface GitHub issue and pull request links directly under the comment.
+GitHub tokens and sync cadence are shared at the plugin instance level, while repository mappings, advanced import defaults, and Paperclip board access are managed per company. When you open settings inside a specific company, you only edit that company's mappings and defaults.
 
-### Resilience and safety
+### Project binding that respects existing work
 
-- Raw GitHub tokens are never persisted in plugin state.
-- Raw GitHub tokens loaded from `~/.paperclip/plugins/github-sync/config.json` stay worker-local and are never returned by public data endpoints.
-- Raw Paperclip board tokens are never persisted in plugin state or plugin config.
-- Scheduled sync skips runs that are not due yet.
-- Incomplete setup is surfaced as configuration guidance instead of silently failing.
-- Authenticated deployments are detected before sync starts, and the plugin blocks sync until the required company board access has been connected.
-- GitHub rate limiting pauses sync until the reported reset time and prevents pointless retries while the pause is active.
-- Direct Paperclip REST label and issue calls attach the saved board token automatically when one has been connected for the mapping company.
-- Sync failures retain repository and issue diagnostics to make troubleshooting easier.
+If a company already has a Paperclip project bound to a GitHub repository workspace, the settings UI can reuse that project instead of creating a duplicate. New mappings can also create and bind a Paperclip project automatically.
 
-## Paperclip surfaces added by this plugin
+### Status sync with delivery context
 
-- Dashboard widget with setup/readiness messaging, last sync status, and a link to settings.
-- Settings page for token validation, repository mappings, company-wide advanced defaults, save, and manual sync.
-- Global toolbar action for a full sync.
-- Project toolbar action for targeted project sync.
-- Issue toolbar action for targeted issue sync.
-- Issue detail tab for GitHub metadata.
-- Comment annotation surface for GitHub references attached to sync-generated status transition comments.
+The plugin does more than mirror issue text. It looks at linked pull requests, CI, review threads, and trusted new GitHub comments so imported Paperclip issues can reflect where the work actually is.
+
+### Agent workflows built in
+
+Paperclip agents can search GitHub for duplicates, read and update issues, post comments, create pull requests, inspect changed files and CI, reply to review threads, resolve or unresolve threads, and request reviewers without leaving the Paperclip plugin surface.
 
 ## Requirements
 
 - Node.js 20+
-- `pnpm`
-- A Paperclip host that supports plugin installation
-- A GitHub token with API access to the repositories you want to sync
+- a Paperclip host that supports plugin installation
+- a GitHub token with API access to the repositories you want to sync
 
-## Install from this repository
+## Install from npm
+
+```bash
+npx paperclipai plugin install paperclip-github-plugin
+```
+
+If you are installing into an isolated Paperclip instance, include the CLI flags you normally use for `--data-dir` and `--config`.
+
+```bash
+npx paperclipai plugin install paperclip-github-plugin \
+  --data-dir /path/to/paperclip-data \
+  --config /path/to/paperclip.config.json
+```
+
+## Install from a local checkout
+
+If you are developing the plugin locally or testing an unpublished change, you will also need `pnpm`:
 
 ```bash
 pnpm install
 pnpm build
-npx paperclip plugin install --local "$PWD"
+npx paperclipai plugin install --local "$PWD"
 ```
 
-If you are installing into an isolated local Paperclip instance for testing, include the Paperclip CLI flags you normally use for `--data-dir` and `--config`.
+## First-time setup in Paperclip
 
-## Optional external worker config
+1. Open the plugin settings for **GitHub Sync** from inside the Paperclip company you want to configure.
+2. Paste a GitHub token, validate it, and save it.
+3. If the deployment requires authenticated Paperclip board access, connect it from the same settings page and complete the approval flow.
+4. Add one or more repository mappings for the current company.
+5. For each mapping, either choose an existing GitHub-linked Paperclip project or enter the project name that should receive synced issues.
+6. Optionally configure company-wide defaults for imported issues, including the default assignee, the default Paperclip status, and ignored GitHub usernames.
+7. Choose the automatic sync interval in minutes.
+8. Save the settings and run the first manual sync.
+9. Repeat inside other companies if they need their own mappings, defaults, or board access.
 
-If the Paperclip host cannot provide the GitHub token through environment variables or plugin config, the worker can also read an optional local file:
+Repository input accepts either `owner/repo` or `https://github.com/owner/repo`.
+
+## Synchronization behavior
+
+Imported issues keep the original GitHub title and use the normalized GitHub body as the Paperclip description. The worker also normalizes GitHub HTML that Paperclip descriptions do not render cleanly, including elements such as `<br>`, `<hr>`, `<details>`, `<summary>`, and inline images.
+
+Repeated syncs keep existing imports current instead of creating duplicates again. If the plugin's import registry is stale, the worker can repair deduplication by reusing existing Paperclip issues when durable GitHub link metadata is already present.
+
+When the local Paperclip API is available, the plugin also syncs labels by name, prefers exact color matches when multiple Paperclip labels share the same name, and creates missing Paperclip labels when needed.
+
+### Status mapping
+
+| GitHub condition | Paperclip status |
+| --- | --- |
+| Open issue with no linked pull request | Configured default status, which defaults to `backlog` |
+| Open issue with a linked pull request and unfinished CI | `in_progress` |
+| Open issue with failing CI or unresolved review threads | `todo` |
+| Open issue with green CI and all review threads resolved | `in_review` |
+| Closed issue completed as finished work | `done` |
+| Closed issue closed as `not_planned` or `duplicate` | `cancelled` |
+
+Additional behavior:
+
+- Open imported issues that are already in `backlog` stay in `backlog` until someone changes them in Paperclip.
+- Trusted new GitHub comments from the original issue author or a verified maintainer/admin can move an open imported issue back to `todo`.
+- When the sync changes a Paperclip issue status, it adds a Paperclip comment explaining what changed and why.
+
+## Security and authentication
+
+The plugin is designed to avoid persisting raw credentials in plugin state.
+
+- GitHub tokens saved through the UI are stored as Paperclip secret references.
+- Paperclip board access tokens are also stored as per-company secret references.
+- The worker resolves those secret references at runtime instead of storing raw tokens in plugin state.
+- On authenticated Paperclip deployments, sync is blocked until the relevant company has connected Paperclip board access.
+
+### Optional worker-local token file
+
+If Paperclip-managed secrets are not available, the worker can read a local fallback file at `~/.paperclip/plugins/github-sync/config.json`:
 
 ```json
 {
@@ -149,68 +148,62 @@ If the Paperclip host cannot provide the GitHub token through environment variab
 }
 ```
 
-Save it at `~/.paperclip/plugins/github-sync/config.json`.
-
 Notes:
 
 - This file is read by the worker only.
-- The raw token is not persisted into plugin state or plugin config.
-- A GitHub token secret saved through the Paperclip settings UI still takes precedence over the external file.
+- The raw token is never persisted back into plugin state or plugin config.
+- A GitHub token secret saved through the settings UI takes precedence over the local file.
 
-## First-time setup in Paperclip
+## GitHub agent tools
 
-1. Open Paperclip instance settings and go to the plugin settings for **GitHub Sync** from inside the company you want to configure.
-2. Paste a GitHub token and validate it.
-3. Save the validated token so Paperclip can store it as a secret reference.
-4. If the settings page reports that this Paperclip deployment requires board access, connect **Paperclip board access** from the same settings page and approve the new tab that opens.
-5. Add one or more repository mappings for the current company.
-6. For each mapping, either enable sync for an existing GitHub-linked Paperclip project or enter a GitHub repository and the Paperclip project name that should receive synced issues.
-7. Optionally configure the company-wide advanced defaults for new imports: default assignee, default status, and ignored GitHub usernames.
-8. Choose the automatic sync interval in minutes.
-9. Save the settings.
-10. Repeat inside any other Paperclip companies that should have their own mappings, defaults, or board access.
-11. Run a manual sync to import the first batch of issues.
+The plugin exposes GitHub workflow tools to Paperclip agents, including:
 
-## Expected workflow
+- repository-scoped search for issues and pull requests
+- issue reads, comment reads, comment writes, and metadata updates
+- pull request creation, reads, updates, changed-file inspection, and CI-check inspection
+- review-thread reads, replies, resolve and unresolve actions, and reviewer requests
 
-After setup, the dashboard widget shows whether the integration is ready, syncing, paused, or needs attention. When you open settings or the dashboard inside a company, the repository list and manual sync controls only affect that company. When you open a global instance view with no company context, the sync status and cadence reflect the shared plugin instance.
+When an agent posts a GitHub comment or review-thread reply through the plugin, the message includes a footer disclosing that it was created by a Paperclip AI agent and which model was used.
 
-Imported issues stay linked to GitHub and continue to receive description, label, and status updates. GitHub-specific context stays out of the Paperclip issue description and instead appears in the dedicated GitHub detail tab and sync annotations.
+## Troubleshooting
 
-## Troubleshooting notes
+- If setup is reported as incomplete, confirm that a GitHub token has been saved or that `~/.paperclip/plugins/github-sync/config.json` contains `githubToken`, and make sure at least one mapping has a created Paperclip project.
+- If Paperclip says board access is required, open plugin settings inside the affected company and complete the Paperclip board access flow before retrying sync.
+- If the worker reaches an authenticated HTML page instead of the Paperclip API JSON responses it expects, connect Paperclip board access for that company or set `PAPERCLIP_API_URL` to a worker-accessible Paperclip API origin.
+- If sync says the Paperclip API URL is not trusted, reopen the plugin from the current Paperclip host so the settings UI can refresh the saved origin, or set `PAPERCLIP_API_URL` for the worker.
+- If GitHub rate limiting is hit, the plugin pauses sync until the reported reset time instead of retrying pointlessly.
+- If a manual sync takes longer than the host action window, it continues in the background and updates the UI when it finishes.
 
-- If one company’s mappings disappear after saving another company’s setup, reopen plugin settings inside the affected company and confirm each company’s mappings separately; the settings page now keeps those mapping lists isolated per company.
-- If sync says setup is incomplete, confirm that either a validated token secret has been saved or `~/.paperclip/plugins/github-sync/config.json` contains `githubToken`, at least one repository mapping has a created Paperclip project, and authenticated deployments have connected Paperclip board access for the current company.
-- If token validation fails, confirm the token is still valid and can access the target repositories through the GitHub API.
-- If the dashboard, toolbar, or settings page says board access is required, open plugin settings inside the target company and complete the Paperclip board access approval flow before retrying sync.
-- If sync reports that the Paperclip API returned an authenticated HTML page instead of JSON, the worker is reaching a board URL that requires the browser login session. Connect Paperclip board access from plugin settings for that company, or set `PAPERCLIP_API_URL` for the Paperclip worker to a worker-accessible Paperclip API origin, then rerun sync.
-- If sync says the Paperclip API URL is not trusted, reopen GitHub Sync from the current Paperclip host so the settings UI can refresh the trusted origin in plugin config, or set `PAPERCLIP_API_URL` for the worker.
-- If GitHub rate limiting is hit, the plugin pauses sync until the reset time shown in Paperclip.
-- If a sync takes longer than a quick action window, the plugin continues in the background and updates the UI when it finishes.
-- If older imported issues are missing rich GitHub metadata, run sync once to refresh the link, labels, and pull request details.
+## Development
 
-## Developer scripts
+Run the smallest relevant checks from the repository root:
 
-- `pnpm typecheck` runs TypeScript without emitting files.
-- `pnpm test` runs the package-level automated tests.
-- `pnpm build` bundles the manifest and worker for Node execution and the hosted UI for browser execution into `dist/`.
-- `pnpm dev` watches the manifest, worker, and UI bundles and rebuilds them into `dist/`.
-- `pnpm dev:ui` starts a local Paperclip plugin UI dev server from `dist/ui` on port `4177`.
-- `pnpm test:e2e` builds the plugin, boots an isolated Paperclip instance, installs the plugin, and verifies the hosted settings page renders.
-- `pnpm verify:manual` builds the plugin, boots a Paperclip instance for manual inspection, seeds a project already mapped to `https://github.com/alvarosanchez/paperclip-github-plugin`, seeds a `CEO` agent on the Codex local adapter with model `gpt-5.4`, and opens the plugin settings page.
-- Set `PAPERCLIP_E2E_CEO_BYPASS_APPROVALS_AND_SANDBOX=true` if you want that seeded `CEO` agent to opt into Codex's bypass flag during manual verification.
+```bash
+pnpm typecheck
+pnpm test
+pnpm build
+```
 
-For fast hosted-UI iteration, run `pnpm dev` in one terminal and `pnpm dev:ui` in another.
+Useful scripts:
+
+- `pnpm dev` watches the manifest, worker, and UI bundles and rebuilds them into `dist/`
+- `pnpm dev:ui` starts a local Paperclip plugin UI dev server from `dist/ui` on port `4177`
+- `pnpm test:e2e` builds the plugin, boots an isolated Paperclip instance, installs the plugin, and verifies the hosted settings page renders
+- `pnpm verify:manual` builds the plugin, boots a Paperclip instance for manual inspection, seeds a project already mapped to `https://github.com/alvarosanchez/paperclip-github-plugin`, seeds a `CEO` agent on the Codex local adapter with model `gpt-5.4`, and opens the plugin settings page
+
+For fast hosted UI iteration, run `pnpm dev` in one terminal and `pnpm dev:ui` in another.
+
+If you want the seeded `CEO` agent used in manual verification to opt into Codex's bypass flag, set `PAPERCLIP_E2E_CEO_BYPASS_APPROVALS_AND_SANDBOX=true`.
 
 ## Release process
 
 - Publishing is driven by `.github/workflows/release.yml`.
-- The npm publish job is triggered by a published GitHub Release.
-- The published version is derived from the GitHub release tag, not from the committed `package.json` version.
+- The npm publish job runs from a published GitHub Release.
+- The published version is derived from the GitHub release tag rather than the committed `package.json` version.
 - Tags may be either `1.2.3` or `v1.2.3`; the workflow normalizes both to `1.2.3`.
-- During the release workflow, the package version is stamped from the tag before build and publish, and the built plugin manifest uses that same resolved version.
-- The release workflow is intended for npm trusted publishing through GitHub Actions OIDC, so no long-lived `NPM_TOKEN` secret is required when trusted publishing is configured correctly.
+- During release, the package version is stamped from the tag before build and publish, and the built plugin manifest uses that same resolved version.
+- The workflow is intended for npm trusted publishing through GitHub Actions OIDC, so no long-lived `NPM_TOKEN` secret is required when trusted publishing is configured correctly.
 
 ## License
 
-This repository is licensed under Apache License 2.0. See [LICENSE](LICENSE).
+Apache License 2.0. See [LICENSE](LICENSE).
