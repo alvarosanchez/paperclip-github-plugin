@@ -32,6 +32,7 @@ const PAPERCLIP_LABEL_PAGE_SIZE = 100;
 const MANUAL_SYNC_RESPONSE_GRACE_PERIOD_MS = 500;
 const RUNNING_SYNC_MESSAGE = 'GitHub sync is running in the background. This page will update when it finishes.';
 const SYNC_PROGRESS_PERSIST_INTERVAL_MS = 250;
+const MAX_SYNC_FAILURE_LOG_ENTRIES = 25;
 const GITHUB_SECONDARY_RATE_LIMIT_FALLBACK_MS = 60_000;
 const MISSING_GITHUB_TOKEN_SYNC_MESSAGE = 'Configure a GitHub token before running sync.';
 const MISSING_GITHUB_TOKEN_SYNC_ACTION =
@@ -130,6 +131,7 @@ interface SyncRunState {
   lastRunTrigger?: 'manual' | 'schedule' | 'retry';
   progress?: SyncProgressState;
   errorDetails?: SyncErrorDetails;
+  recentFailures?: SyncFailureLogEntry[];
 }
 
 type SyncFailurePhase =
@@ -167,6 +169,11 @@ interface SyncErrorDetails {
   suggestedAction?: string;
   rateLimitResetAt?: string;
   rateLimitResource?: string;
+}
+
+interface SyncFailureLogEntry extends SyncErrorDetails {
+  message: string;
+  occurredAt: string;
 }
 
 interface GitHubRateLimitPauseDetails {
@@ -684,6 +691,7 @@ interface GitHubReviewThreadRecord {
 interface SyncProcessingFailure {
   error: unknown;
   context: SyncFailureContext;
+  occurredAt: string;
 }
 
 const SUCCESSFUL_CHECK_RUN_CONCLUSIONS = new Set(['SUCCESS', 'NEUTRAL', 'SKIPPED']);
@@ -1233,6 +1241,7 @@ function normalizeSyncConfigurationIssue(value: unknown): SyncConfigurationIssue
   switch (value) {
     case 'missing_token':
     case 'missing_mapping':
+    case 'missing_board_access':
       return value;
     default:
       return undefined;
@@ -1367,6 +1376,42 @@ function normalizeSyncErrorDetails(value: unknown): SyncErrorDetails | undefined
     ...(rateLimitResetAt ? { rateLimitResetAt } : {}),
     ...(rateLimitResource ? { rateLimitResource } : {})
   };
+}
+
+function normalizeSyncFailureLogEntry(value: unknown): SyncFailureLogEntry | undefined {
+  if (!value || typeof value !== 'object') {
+    return undefined;
+  }
+
+  const record = value as Record<string, unknown>;
+  const details = normalizeSyncErrorDetails(record);
+  const message =
+    typeof record.message === 'string' && record.message.trim() ? record.message.trim() : undefined;
+  const occurredAt =
+    typeof record.occurredAt === 'string' && record.occurredAt.trim() ? record.occurredAt.trim() : undefined;
+
+  if (!message || !occurredAt) {
+    return undefined;
+  }
+
+  return {
+    message,
+    occurredAt,
+    ...(details ?? {})
+  };
+}
+
+function normalizeSyncFailureLogEntries(value: unknown): SyncFailureLogEntry[] | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+
+  const entries = value
+    .map((entry) => normalizeSyncFailureLogEntry(entry))
+    .filter((entry): entry is SyncFailureLogEntry => entry !== undefined)
+    .slice(-MAX_SYNC_FAILURE_LOG_ENTRIES);
+
+  return entries.length > 0 ? entries : undefined;
 }
 
 function formatSyncFailurePhase(phase?: SyncFailurePhase): string {
@@ -1567,6 +1612,61 @@ function buildSyncErrorDetails(error: unknown, context: SyncFailureContext): Syn
   };
 }
 
+function createSyncFailureLogEntry(params: {
+  message: string;
+  occurredAt?: string;
+  errorDetails?: SyncErrorDetails;
+}): SyncFailureLogEntry | undefined {
+  const message = params.message.trim();
+  const occurredAt =
+    typeof params.occurredAt === 'string' && params.occurredAt.trim()
+      ? params.occurredAt.trim()
+      : new Date().toISOString();
+  const errorDetails = normalizeSyncErrorDetails(params.errorDetails);
+
+  if (!message) {
+    return undefined;
+  }
+
+  return {
+    message,
+    occurredAt,
+    ...(errorDetails ?? {})
+  };
+}
+
+function buildSyncFailureLogEntry(
+  error: unknown,
+  context: SyncFailureContext,
+  occurredAt?: string
+): SyncFailureLogEntry | undefined {
+  return createSyncFailureLogEntry({
+    message: buildSyncFailureMessage(error, context),
+    occurredAt,
+    errorDetails: buildSyncErrorDetails(error, context)
+  });
+}
+
+function buildRecentSyncFailureLogEntries(failures: SyncProcessingFailure[]): SyncFailureLogEntry[] | undefined {
+  const entries = failures
+    .map((failure) => buildSyncFailureLogEntry(failure.error, failure.context, failure.occurredAt))
+    .filter((entry): entry is SyncFailureLogEntry => entry !== undefined)
+    .slice(-MAX_SYNC_FAILURE_LOG_ENTRIES);
+
+  return entries.length > 0 ? entries : undefined;
+}
+
+function appendRecentSyncFailureLogEntry(
+  entries: SyncFailureLogEntry[] | undefined,
+  entry: SyncFailureLogEntry | undefined
+): SyncFailureLogEntry[] | undefined {
+  if (!entry) {
+    return entries;
+  }
+
+  return [...(entries ?? []), entry].slice(-MAX_SYNC_FAILURE_LOG_ENTRIES);
+}
+
 function createErrorSyncState(params: {
   message: string;
   trigger: 'manual' | 'schedule' | 'retry';
@@ -1576,8 +1676,20 @@ function createErrorSyncState(params: {
   erroredIssuesCount?: number;
   progress?: SyncProgressState;
   errorDetails?: SyncErrorDetails;
+  recentFailures?: SyncFailureLogEntry[];
 }): SyncRunState {
-  const { message, trigger, syncedIssuesCount, createdIssuesCount, skippedIssuesCount, erroredIssuesCount, progress, errorDetails } = params;
+  const {
+    message,
+    trigger,
+    syncedIssuesCount,
+    createdIssuesCount,
+    skippedIssuesCount,
+    erroredIssuesCount,
+    progress,
+    errorDetails,
+    recentFailures
+  } = params;
+  const normalizedRecentFailures = normalizeSyncFailureLogEntries(recentFailures);
 
   return {
     status: 'error',
@@ -1589,7 +1701,8 @@ function createErrorSyncState(params: {
     erroredIssuesCount,
     lastRunTrigger: trigger,
     ...(progress ? { progress: normalizeSyncProgress(progress) } : {}),
-    ...(errorDetails ? { errorDetails } : {})
+    ...(errorDetails ? { errorDetails } : {}),
+    ...(normalizedRecentFailures ? { recentFailures: normalizedRecentFailures } : {})
   };
 }
 
@@ -1603,8 +1716,11 @@ function createRunningSyncState(
     erroredIssuesCount?: number;
     progress?: SyncProgressState;
     message?: string;
+    recentFailures?: SyncFailureLogEntry[];
   } = {}
 ): SyncRunState {
+  const normalizedRecentFailures = normalizeSyncFailureLogEntries(options.recentFailures);
+
   return {
     status: 'running',
     message: options.message ?? RUNNING_SYNC_MESSAGE,
@@ -1614,7 +1730,8 @@ function createRunningSyncState(
     skippedIssuesCount: options.skippedIssuesCount ?? 0,
     erroredIssuesCount: options.erroredIssuesCount ?? 0,
     lastRunTrigger: trigger,
-    ...(options.progress ? { progress: normalizeSyncProgress(options.progress) } : {})
+    ...(options.progress ? { progress: normalizeSyncProgress(options.progress) } : {}),
+    ...(normalizedRecentFailures ? { recentFailures: normalizedRecentFailures } : {})
   };
 }
 
@@ -2288,7 +2405,16 @@ function createSetupConfigurationErrorSyncState(
           phase: 'configuration',
           configurationIssue: 'missing_token',
           suggestedAction: MISSING_GITHUB_TOKEN_SYNC_ACTION
-        }
+        },
+        recentFailures: [
+          {
+            message: MISSING_GITHUB_TOKEN_SYNC_MESSAGE,
+            occurredAt: new Date().toISOString(),
+            phase: 'configuration',
+            configurationIssue: 'missing_token',
+            suggestedAction: MISSING_GITHUB_TOKEN_SYNC_ACTION
+          }
+        ]
       });
     case 'missing_mapping':
       return createErrorSyncState({
@@ -2302,7 +2428,16 @@ function createSetupConfigurationErrorSyncState(
           phase: 'configuration',
           configurationIssue: 'missing_mapping',
           suggestedAction: MISSING_MAPPING_SYNC_ACTION
-        }
+        },
+        recentFailures: [
+          {
+            message: MISSING_MAPPING_SYNC_MESSAGE,
+            occurredAt: new Date().toISOString(),
+            phase: 'configuration',
+            configurationIssue: 'missing_mapping',
+            suggestedAction: MISSING_MAPPING_SYNC_ACTION
+          }
+        ]
       });
     case 'missing_board_access':
       return createErrorSyncState({
@@ -2316,7 +2451,16 @@ function createSetupConfigurationErrorSyncState(
           phase: 'configuration',
           configurationIssue: 'missing_board_access',
           suggestedAction: MISSING_BOARD_ACCESS_SYNC_ACTION
-        }
+        },
+        recentFailures: [
+          {
+            message: MISSING_BOARD_ACCESS_SYNC_MESSAGE,
+            occurredAt: new Date().toISOString(),
+            phase: 'configuration',
+            configurationIssue: 'missing_board_access',
+            suggestedAction: MISSING_BOARD_ACCESS_SYNC_ACTION
+          }
+        ]
       });
   }
 }
@@ -2361,7 +2505,14 @@ async function createUnexpectedSyncErrorResult(
       createdIssuesCount: settings.syncState.createdIssuesCount ?? 0,
       skippedIssuesCount: settings.syncState.skippedIssuesCount ?? 0,
       erroredIssuesCount: 0,
-      errorDetails
+      errorDetails,
+      recentFailures: appendRecentSyncFailureLogEntry(
+        undefined,
+        createSyncFailureLogEntry({
+          message,
+          errorDetails
+        })
+      )
     })
   );
 }
@@ -2430,7 +2581,8 @@ function recordRecoverableSyncFailure(
   const snapshot = cloneSyncFailureContext(context);
   failures.push({
     error,
-    context: snapshot
+    context: snapshot,
+    occurredAt: new Date().toISOString()
   });
 
   ctx.logger.warn('GitHub sync skipped a failed item and continued.', {
@@ -2576,6 +2728,7 @@ function normalizeSyncState(value: unknown): SyncRunState {
   const lastRunTrigger = record.lastRunTrigger;
   const progress = normalizeSyncProgress(record.progress);
   const errorDetails = normalizeSyncErrorDetails(record.errorDetails);
+  const recentFailures = normalizeSyncFailureLogEntries(record.recentFailures);
 
   return {
     status: status === 'running' || status === 'success' || status === 'error' ? status : 'idle',
@@ -2587,7 +2740,8 @@ function normalizeSyncState(value: unknown): SyncRunState {
     erroredIssuesCount: typeof record.erroredIssuesCount === 'number' ? record.erroredIssuesCount : undefined,
     lastRunTrigger: lastRunTrigger === 'manual' || lastRunTrigger === 'schedule' || lastRunTrigger === 'retry' ? lastRunTrigger : undefined,
     ...(progress ? { progress } : {}),
-    ...(errorDetails ? { errorDetails } : {})
+    ...(errorDetails ? { errorDetails } : {}),
+    ...(recentFailures ? { recentFailures } : {})
   };
 }
 
@@ -7135,6 +7289,10 @@ async function performSync(
   }
 
   if (!ctx.issues || typeof ctx.issues.create !== 'function') {
+    const errorDetails: SyncErrorDetails = {
+      phase: 'configuration',
+      suggestedAction: 'Update Paperclip to a runtime that supports plugin issue creation, then retry sync.'
+    };
     const next = {
       ...settings,
       syncState: createErrorSyncState({
@@ -7144,10 +7302,14 @@ async function performSync(
         createdIssuesCount: 0,
         skippedIssuesCount: 0,
         erroredIssuesCount: 0,
-        errorDetails: {
-          phase: 'configuration',
-          suggestedAction: 'Update Paperclip to a runtime that supports plugin issue creation, then retry sync.'
-        }
+        errorDetails,
+        recentFailures: appendRecentSyncFailureLogEntry(
+          undefined,
+          createSyncFailureLogEntry({
+            message: 'This Paperclip runtime does not expose plugin issue creation yet.',
+            errorDetails
+          })
+        )
       })
     };
     await ctx.state.set(SETTINGS_SCOPE, next);
@@ -7190,12 +7352,14 @@ async function performSync(
 
   async function persistRunningProgress(force = false): Promise<void> {
     const progress = normalizeSyncProgress(currentProgress);
+    const recentFailures = buildRecentSyncFailureLogEntries(recoverableFailures);
     const signature = JSON.stringify({
       syncedIssuesCount,
       createdIssuesCount,
       skippedIssuesCount,
       erroredIssuesCount: recoverableFailures.length,
-      progress
+      progress,
+      recentFailures
     });
     const now = Date.now();
 
@@ -7217,7 +7381,8 @@ async function performSync(
         createdIssuesCount,
         skippedIssuesCount,
         erroredIssuesCount: recoverableFailures.length,
-        progress
+        progress,
+        recentFailures
       })
     );
     activeRunningSyncState = currentSettings;
@@ -7566,7 +7731,8 @@ async function performSync(
           skippedIssuesCount,
           erroredIssuesCount: recoverableFailures.length,
           progress: currentProgress,
-          errorDetails
+          errorDetails,
+          recentFailures: buildRecentSyncFailureLogEntries(recoverableFailures)
         })
       };
       await ctx.state.set(SETTINGS_SCOPE, next);
@@ -7604,7 +7770,11 @@ async function performSync(
         skippedIssuesCount,
         erroredIssuesCount: recoverableFailures.length,
         progress: currentProgress,
-        errorDetails
+        errorDetails,
+        recentFailures: appendRecentSyncFailureLogEntry(
+          buildRecentSyncFailureLogEntries(recoverableFailures),
+          buildSyncFailureLogEntry(error, failureContext)
+        )
       })
     };
     await ctx.state.set(SETTINGS_SCOPE, next);

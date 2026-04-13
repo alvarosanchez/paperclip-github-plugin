@@ -97,6 +97,7 @@ The plugin MUST persist repository mappings, company-scoped advanced issue defau
 - The plugin SHOULD expose an issue detail contribution for GitHub metadata.
 - The plugin SHOULD expose manual sync buttons in the global toolbar and on mapped project/issue surfaces when the host renders those slot types.
 - The dashboard widget MUST summarize the current GitHub sync readiness and link to setup.
+- When the latest sync run records issue-level failures, the settings page SHOULD expose a saved failure log with per-failure repository, issue, phase, raw error, and suggested next-step details, and compact surfaces SHOULD still surface at least the latest saved failure snapshot.
 - The settings page MUST render inside the real Paperclip host.
 - The plugin MUST include end-to-end automation that boots a disposable Paperclip instance, installs the plugin, and verifies the settings page renders.
 

@@ -28,6 +28,7 @@ The plugin adds a full in-host workflow instead of a one-off import script:
 
 - a hosted settings page for GitHub auth, repository mappings, company defaults, and sync controls
 - a dashboard widget that shows readiness, sync status, and last-run results
+- saved sync diagnostics that let operators inspect the latest per-issue failures, raw errors, and suggested next steps
 - manual sync actions from global, project, and issue toolbar surfaces
 - a GitHub detail tab on synced Paperclip issues
 - GitHub link annotations on sync-generated status transition comments when the host supports comment annotations
@@ -170,6 +171,7 @@ When an agent posts a GitHub comment or review-thread reply through the plugin, 
 - If setup is reported as incomplete, confirm that a GitHub token has been saved or that `~/.paperclip/plugins/github-sync/config.json` contains `githubToken`, and make sure at least one mapping has a created Paperclip project.
 - If Paperclip says board access is required, open plugin settings inside the affected company and complete the Paperclip board access flow before retrying sync.
 - If the worker reaches an authenticated HTML page instead of the Paperclip API JSON responses it expects, connect Paperclip board access for that company or set `PAPERCLIP_API_URL` to a worker-accessible Paperclip API origin.
+- If a sync run finishes with partial failures, open the saved troubleshooting panel in GitHub Sync to inspect the repository, issue number, raw error, and suggested fix for each recorded failure.
 - If sync says the Paperclip API URL is not trusted, reopen the plugin from the current Paperclip host so the settings UI can refresh the saved origin, or set `PAPERCLIP_API_URL` for the worker.
 - If GitHub rate limiting is hit, the plugin pauses sync until the reported reset time instead of retrying pointlessly.
 - If a manual sync takes longer than the host action window, it continues in the background and updates the UI when it finishes.
