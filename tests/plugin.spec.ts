@@ -10,6 +10,7 @@ import { createTestHarness } from '@paperclipai/plugin-sdk/testing';
 import manifest from '../src/manifest.ts';
 import { requiresPaperclipBoardAccess } from '../src/paperclip-health.ts';
 import { fetchJson, fetchPaperclipHealth, resolveCliAuthPollUrl } from '../src/ui/http.ts';
+import { resolveInstalledGitHubSyncPluginId, resolvePluginSettingsHref } from '../src/ui/plugin-installation.ts';
 import { mergePluginConfig, normalizePluginConfig } from '../src/ui/plugin-config.ts';
 import {
   discoverExistingProjectSyncCandidates,
@@ -277,6 +278,25 @@ test('filterExistingProjectSyncCandidates hides projects already enabled in plug
       sourceType: 'git_repo'
     }
   ]);
+});
+
+test('resolveInstalledGitHubSyncPluginId finds the GitHub Sync installation id from plugin listings', () => {
+  const records = [
+    {
+      id: 'plugin-123',
+      pluginKey: 'paperclip-github-plugin',
+      displayName: 'GitHub Sync'
+    },
+    {
+      id: 'plugin-456',
+      pluginKey: 'another-plugin',
+      displayName: 'Another Plugin'
+    }
+  ];
+
+  assert.equal(resolveInstalledGitHubSyncPluginId(records), 'plugin-123');
+  assert.equal(resolvePluginSettingsHref(records), '/settings/plugins/plugin-123');
+  assert.equal(resolveInstalledGitHubSyncPluginId(records, 'plugin-from-route'), 'plugin-from-route');
 });
 
 function createAgentFixture(params: {

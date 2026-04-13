@@ -4,6 +4,7 @@ import { useHostContext, usePluginAction, usePluginData, usePluginToast } from '
 import { parseRepositoryReference, type ParsedRepositoryReference } from '../github-repo.ts';
 import { requiresPaperclipBoardAccess } from '../paperclip-health.ts';
 import { buildPaperclipUrl, fetchJson, fetchPaperclipHealth, resolveCliAuthPollUrl } from './http.ts';
+import { resolveInstalledGitHubSyncPluginId, resolvePluginSettingsHref } from './plugin-installation.ts';
 import { mergePluginConfig, normalizePluginConfig } from './plugin-config.ts';
 import {
   discoverExistingProjectSyncCandidates,
@@ -2794,6 +2795,26 @@ function getPaperclipApiBaseUrl(): string | undefined {
 }
 
 const syncedPaperclipApiBaseUrlsByPluginId = new Map<string, string>();
+let installedGitHubSyncPluginIdPromise: Promise<string | null> | null = null;
+
+async function resolveCurrentPluginId(pluginId: string | null): Promise<string | null> {
+  if (pluginId) {
+    return pluginId;
+  }
+
+  if (!installedGitHubSyncPluginIdPromise) {
+    installedGitHubSyncPluginIdPromise = fetchJson<unknown>('/api/plugins')
+      .then((records) => resolveInstalledGitHubSyncPluginId(records))
+      .catch(() => null);
+  }
+
+  const resolvedPluginId = await installedGitHubSyncPluginIdPromise;
+  if (!resolvedPluginId) {
+    installedGitHubSyncPluginIdPromise = null;
+  }
+
+  return resolvedPluginId;
+}
 
 async function syncTrustedPaperclipApiBaseUrl(pluginId: string | null): Promise<string | undefined> {
   const paperclipApiBaseUrl = getPaperclipApiBaseUrl();
@@ -2801,21 +2822,22 @@ async function syncTrustedPaperclipApiBaseUrl(pluginId: string | null): Promise<
     return undefined;
   }
 
-  if (!pluginId) {
+  const resolvedPluginId = await resolveCurrentPluginId(pluginId);
+  if (!resolvedPluginId) {
     throw new Error(
       'Unable to sync the trusted Paperclip API origin because the plugin ID is missing. Reload the plugin and try again before saving or syncing.'
     );
   }
 
-  const lastSyncedPaperclipApiBaseUrl = syncedPaperclipApiBaseUrlsByPluginId.get(pluginId);
+  const lastSyncedPaperclipApiBaseUrl = syncedPaperclipApiBaseUrlsByPluginId.get(resolvedPluginId);
   if (lastSyncedPaperclipApiBaseUrl === paperclipApiBaseUrl) {
     return paperclipApiBaseUrl;
   }
 
-  await patchPluginConfig(pluginId, {
+  await patchPluginConfig(resolvedPluginId, {
     paperclipApiBaseUrl
   });
-  syncedPaperclipApiBaseUrlsByPluginId.set(pluginId, paperclipApiBaseUrl);
+  syncedPaperclipApiBaseUrlsByPluginId.set(resolvedPluginId, paperclipApiBaseUrl);
 
   return paperclipApiBaseUrl;
 }
@@ -3408,39 +3430,6 @@ function useResolvedIssueId(params: {
     issueIdentifier: null,
     loading: false
   };
-}
-
-function resolvePluginSettingsHref(records: unknown): string {
-  if (!Array.isArray(records)) {
-    return SETTINGS_INDEX_HREF;
-  }
-
-  for (const entry of records) {
-    if (!entry || typeof entry !== 'object') {
-      continue;
-    }
-
-    const record = entry as Record<string, unknown>;
-    const manifest = record.manifest && typeof record.manifest === 'object' ? record.manifest as Record<string, unknown> : null;
-    const id =
-      getStringValue(record, 'id') ??
-      getStringValue(record, 'pluginId');
-    const key =
-      getStringValue(record, 'pluginKey') ??
-      getStringValue(record, 'key') ??
-      getStringValue(record, 'packageName') ??
-      getStringValue(record, 'name') ??
-      (manifest ? getStringValue(manifest, 'id') : null);
-    const displayName =
-      getStringValue(record, 'displayName') ??
-      (manifest ? getStringValue(manifest, 'displayName') : null);
-
-    if (id && (key === 'paperclip-github-plugin' || displayName === 'GitHub Sync')) {
-      return `${SETTINGS_INDEX_HREF}/${id}`;
-    }
-  }
-
-  return SETTINGS_INDEX_HREF;
 }
 
 function formatSyncProgressRepository(repositoryUrl?: string): string | null {
@@ -4116,7 +4105,7 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
         ? settings.data.paperclipBoardAccessConfigSyncRef
         : undefined;
 
-    if (!companyId || !pluginIdFromLocation || !secretRef) {
+    if (!companyId || !secretRef) {
       return;
     }
 
@@ -4130,7 +4119,12 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
 
     void (async () => {
       try {
-        await patchPluginConfig(pluginIdFromLocation, {
+        const pluginId = await resolveCurrentPluginId(pluginIdFromLocation);
+        if (!pluginId) {
+          throw new Error('Plugin id is required to finish syncing Paperclip board access into plugin config.');
+        }
+
+        await patchPluginConfig(pluginId, {
           paperclipBoardApiTokenRefs: {
             [companyId]: secretRef
           }
@@ -4514,7 +4508,8 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
         throw new Error('Company context is required to save the GitHub token.');
       }
 
-      if (!pluginIdFromLocation) {
+      const pluginId = await resolveCurrentPluginId(pluginIdFromLocation);
+      if (!pluginId) {
         throw new Error('Plugin id is required to save the GitHub token.');
       }
 
@@ -4523,7 +4518,7 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
       const secretName = `github_sync_${companyId.replace(/[^a-z0-9]+/gi, '_').toLowerCase()}`;
       const secret = await resolveOrCreateCompanySecret(companyId, secretName, trimmedToken);
 
-      await patchPluginConfig(pluginIdFromLocation, {
+      await patchPluginConfig(pluginId, {
         githubTokenRef: secret.id
       });
       await saveRegistration({
@@ -4573,7 +4568,8 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
         throw new Error('Company context is required to connect Paperclip board access.');
       }
 
-      if (!pluginIdFromLocation) {
+      const pluginId = await resolveCurrentPluginId(pluginIdFromLocation);
+      if (!pluginId) {
         throw new Error('Plugin id is required to connect Paperclip board access.');
       }
 
@@ -4602,7 +4598,7 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
       const secretName = `paperclip_board_api_${companyId.replace(/[^a-z0-9]+/gi, '_').toLowerCase()}`;
       const secret = await resolveOrCreateCompanySecret(companyId, secretName, boardApiToken);
 
-      await patchPluginConfig(pluginIdFromLocation, {
+      await patchPluginConfig(pluginId, {
         paperclipBoardApiTokenRefs: {
           [companyId]: secret.id
         }

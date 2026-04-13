@@ -7094,6 +7094,7 @@ async function performSync(
   const config = await getResolvedConfig(ctx);
   const importRegistry = normalizeImportRegistry(await ctx.state.get(IMPORT_REGISTRY_SCOPE));
   const token = typeof options.resolvedToken === 'string' ? options.resolvedToken : await resolveGithubToken(ctx);
+  const paperclipApiBaseUrl = getConfiguredPaperclipApiBaseUrl(settings, config);
   const mappings = getSyncableMappingsForTarget(settings.mappings, options.target);
   activePaperclipApiAuthTokensByCompanyId = null;
   const failureContext: SyncFailureContext = {
@@ -7123,7 +7124,7 @@ async function performSync(
   const mappingsMissingBoardAccess = getMappingsMissingPaperclipBoardAccess(settings, config, mappings);
   if (
     mappingsMissingBoardAccess.length > 0
-    && await detectPaperclipBoardAccessRequirement(settings.paperclipApiBaseUrl)
+    && await detectPaperclipBoardAccessRequirement(paperclipApiBaseUrl)
   ) {
     const next = {
       ...settings,
@@ -7265,7 +7266,7 @@ async function performSync(
           });
           availableLabels =
             supportsPaperclipLabelMapping && companyId
-              ? await buildPaperclipLabelDirectory(ctx, companyId, settings.paperclipApiBaseUrl)
+              ? await buildPaperclipLabelDirectory(ctx, companyId, paperclipApiBaseUrl)
               : new Map();
           if (companyId) {
             companyLabelDirectoryCache.set(companyId, availableLabels);
@@ -7377,7 +7378,7 @@ async function performSync(
           });
           availableLabels =
             supportsPaperclipLabelMapping && companyId
-              ? await buildPaperclipLabelDirectory(ctx, companyId, settings.paperclipApiBaseUrl)
+              ? await buildPaperclipLabelDirectory(ctx, companyId, paperclipApiBaseUrl)
               : new Map();
           if (companyId) {
             companyLabelDirectoryCache.set(companyId, availableLabels);
@@ -7461,7 +7462,7 @@ async function performSync(
               advancedSettings,
               issue,
               availableLabels,
-              settings.paperclipApiBaseUrl,
+              paperclipApiBaseUrl,
               importRegistryByIssueId,
               existingImportedPaperclipIssuesByUrl,
               nextRegistry,
@@ -7513,7 +7514,7 @@ async function performSync(
           importedIssuesForSynchronization,
           createdIssueIds,
           availableLabels,
-          settings.paperclipApiBaseUrl,
+          paperclipApiBaseUrl,
           linkedPullRequestsByIssueNumber,
           issueStatusSnapshotCache,
           pullRequestStatusCache,
