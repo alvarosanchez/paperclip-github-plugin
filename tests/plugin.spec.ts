@@ -1,5 +1,5 @@
 import { strict as assert } from 'node:assert';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -9,6 +9,7 @@ import { createTestHarness } from '@paperclipai/plugin-sdk/testing';
 
 import manifest from '../src/manifest.ts';
 import { requiresPaperclipBoardAccess } from '../src/paperclip-health.ts';
+import { normalizeCompanyAssigneeOptionsResponse } from '../src/ui/assignees.ts';
 import { fetchJson, fetchPaperclipHealth, resolveCliAuthPollUrl } from '../src/ui/http.ts';
 import { resolveInstalledGitHubSyncPluginId, resolvePluginSettingsHref } from '../src/ui/plugin-installation.ts';
 import { mergePluginConfig, normalizePluginConfig } from '../src/ui/plugin-config.ts';
@@ -17,6 +18,30 @@ import {
   filterExistingProjectSyncCandidates
 } from '../src/ui/project-bindings.ts';
 import plugin from '../src/worker.ts';
+
+async function importManifestWithPluginVersion(pluginVersion?: string): Promise<typeof manifest> {
+  const previousPluginVersion = process.env.PLUGIN_VERSION;
+  const manifestModuleUrl = new URL(
+    `../src/manifest.ts?plugin-version-test=${encodeURIComponent(pluginVersion ?? 'package')}-${Date.now()}`,
+    import.meta.url
+  );
+
+  if (pluginVersion === undefined) {
+    delete process.env.PLUGIN_VERSION;
+  } else {
+    process.env.PLUGIN_VERSION = pluginVersion;
+  }
+
+  try {
+    return (await import(manifestModuleUrl.href)).default;
+  } finally {
+    if (previousPluginVersion === undefined) {
+      delete process.env.PLUGIN_VERSION;
+    } else {
+      process.env.PLUGIN_VERSION = previousPluginVersion;
+    }
+  }
+}
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -156,6 +181,29 @@ function delay(ms: number): Promise<void> {
     globalThis.setTimeout(resolve, ms);
   });
 }
+
+test(
+  'manifest version defaults to package.json when no build-stamped version is provided',
+  { concurrency: false },
+  async () => {
+    const packageJson = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8')) as {
+      version?: unknown;
+    };
+    const resolvedManifest = await importManifestWithPluginVersion();
+
+    assert.equal(resolvedManifest.version, packageJson.version);
+  }
+);
+
+test(
+  'manifest version prefers the build-stamped plugin version when provided',
+  { concurrency: false },
+  async () => {
+    const resolvedManifest = await importManifestWithPluginVersion('9.9.9-test');
+
+    assert.equal(resolvedManifest.version, '9.9.9-test');
+  }
+);
 
 async function createGitHubAgentToolHarness() {
   const harness = createTestHarness({
@@ -297,6 +345,41 @@ test('resolveInstalledGitHubSyncPluginId finds the GitHub Sync installation id f
   assert.equal(resolveInstalledGitHubSyncPluginId(records), 'plugin-123');
   assert.equal(resolvePluginSettingsHref(records), '/settings/plugins/plugin-123');
   assert.equal(resolveInstalledGitHubSyncPluginId(records, 'plugin-from-route'), 'plugin-from-route');
+});
+
+test('normalizeCompanyAssigneeOptionsResponse keeps assignable agents and trims their labels', () => {
+  assert.deepEqual(
+    normalizeCompanyAssigneeOptionsResponse([
+      {
+        id: 'agent-3',
+        name: 'Casey'
+      },
+      {
+        id: ' agent-2 ',
+        name: ' Bailey ',
+        title: ' Operator ',
+        status: ' idle '
+      },
+      {
+        id: 'agent-1',
+        name: 'Alex',
+        status: 'terminated'
+      },
+      null
+    ]),
+    [
+      {
+        id: 'agent-2',
+        name: 'Bailey',
+        title: 'Operator',
+        status: 'idle'
+      },
+      {
+        id: 'agent-3',
+        name: 'Casey'
+      }
+    ]
+  );
 });
 
 function createAgentFixture(params: {
