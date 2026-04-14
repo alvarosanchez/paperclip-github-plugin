@@ -2811,7 +2811,7 @@ async function buildToolbarSyncState(
   ctx: PluginSetupContext,
   input: Record<string, unknown>
 ): Promise<Record<string, unknown>> {
-  const settings = normalizeSettings(await ctx.state.get(SETTINGS_SCOPE));
+  const settings = await getActiveOrCurrentSyncState(ctx);
   const config = await getResolvedConfig(ctx);
   const githubTokenConfigured = hasConfiguredGithubToken(settings, config);
   const companyId = typeof input.companyId === 'string' && input.companyId.trim() ? input.companyId.trim() : undefined;
@@ -3460,13 +3460,17 @@ async function waitForSyncResultWithinGracePeriod(
 }
 
 async function getActiveOrCurrentSyncState(ctx: PluginSetupContext): Promise<GitHubSyncSettings> {
+  if (activeRunningSyncState?.syncState.status === 'running') {
+    return activeRunningSyncState;
+  }
+
   const current = normalizeSettings(await ctx.state.get(SETTINGS_SCOPE));
 
   if (current.syncState.status === 'running') {
     return current;
   }
 
-  return activeRunningSyncState?.syncState.status === 'running' ? activeRunningSyncState : current;
+  return current;
 }
 
 function updateSyncFailureContext(

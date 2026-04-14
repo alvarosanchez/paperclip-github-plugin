@@ -9033,6 +9033,42 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
     };
   }, [form.syncState.status, settings.refresh]);
 
+  useEffect(() => {
+    const refreshSettings = () => {
+      try {
+        settings.refresh();
+      } catch {
+        return;
+      }
+    };
+
+    if (typeof window === 'undefined' || typeof document === 'undefined') {
+      return;
+    }
+
+    const handleSettingsUpdated = () => {
+      refreshSettings();
+    };
+    const handleWindowFocus = () => {
+      refreshSettings();
+    };
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        refreshSettings();
+      }
+    };
+
+    window.addEventListener(GITHUB_SYNC_SETTINGS_UPDATED_EVENT, handleSettingsUpdated);
+    window.addEventListener('focus', handleWindowFocus);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+
+    return () => {
+      window.removeEventListener(GITHUB_SYNC_SETTINGS_UPDATED_EVENT, handleSettingsUpdated);
+      window.removeEventListener('focus', handleWindowFocus);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
+  }, [settings.refresh]);
+
   const theme = themeMode === 'light' ? LIGHT_PALETTE : DARK_PALETTE;
   const themeVars = buildThemeVars(theme, themeMode);
   const hasCompanyContext = Boolean(hostContext.companyId);
@@ -9669,6 +9705,7 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
         tone: getSyncToastTone(result.syncState)
       });
       armSyncCompletionToast(result.syncState);
+      notifyGitHubSyncSettingsChanged();
 
       try {
         await settings.refresh();
@@ -9715,6 +9752,7 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
         tone: getSyncToastTone(result.syncState)
       });
       armSyncCompletionToast(result.syncState);
+      notifyGitHubSyncSettingsChanged();
 
       try {
         await settings.refresh();
@@ -10537,6 +10575,42 @@ export function GitHubSyncDashboardWidget(): React.JSX.Element {
     };
   }, [displaySyncState.status, settings.refresh]);
 
+  useEffect(() => {
+    const refreshSettings = () => {
+      try {
+        settings.refresh();
+      } catch {
+        return;
+      }
+    };
+
+    if (typeof window === 'undefined' || typeof document === 'undefined') {
+      return;
+    }
+
+    const handleSettingsUpdated = () => {
+      refreshSettings();
+    };
+    const handleWindowFocus = () => {
+      refreshSettings();
+    };
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        refreshSettings();
+      }
+    };
+
+    window.addEventListener(GITHUB_SYNC_SETTINGS_UPDATED_EVENT, handleSettingsUpdated);
+    window.addEventListener('focus', handleWindowFocus);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+
+    return () => {
+      window.removeEventListener(GITHUB_SYNC_SETTINGS_UPDATED_EVENT, handleSettingsUpdated);
+      window.removeEventListener('focus', handleWindowFocus);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
+  }, [settings.refresh]);
+
   async function handleRunSync(): Promise<void> {
     setRunningSync(true);
     setManualSyncRequestError(null);
@@ -10560,6 +10634,7 @@ export function GitHubSyncDashboardWidget(): React.JSX.Element {
         tone: getSyncToastTone(nextSyncState)
       });
       armSyncCompletionToast(nextSyncState);
+      notifyGitHubSyncSettingsChanged();
 
       await settings.refresh();
     } catch (error) {
@@ -10598,6 +10673,7 @@ export function GitHubSyncDashboardWidget(): React.JSX.Element {
         tone: getSyncToastTone(nextSyncState)
       });
       armSyncCompletionToast(nextSyncState);
+      notifyGitHubSyncSettingsChanged();
       await settings.refresh();
     } catch (error) {
       const message = getActionErrorMessage(error, 'Unable to cancel GitHub sync.');
@@ -10779,6 +10855,7 @@ function GitHubSyncToolbarButtonSurface(props: {
   );
   const [runningSync, setRunningSync] = useState(false);
   const [cancellingSync, setCancellingSync] = useState(false);
+  const [syncStateOverride, setSyncStateOverride] = useState<SyncRunState | null>(null);
   const themeMode = useResolvedThemeMode();
   const boardAccessRequirement = usePaperclipBoardAccessRequirement();
   const theme = themeMode === 'light' ? LIGHT_PALETTE : DARK_PALETTE;
@@ -10792,6 +10869,21 @@ function GitHubSyncToolbarButtonSurface(props: {
     githubTokenConfigured: false,
     savedMappingCount: 0
   };
+  const effectiveSyncState =
+    syncStateOverride
+      ? state.syncState.status === 'cancelled'
+        || state.syncState.status === 'success'
+        || state.syncState.status === 'error'
+        || (
+          state.syncState.status === 'running'
+          && (
+            !isSyncCancellationRequested(syncStateOverride)
+            || isSyncCancellationRequested(state.syncState)
+          )
+        )
+          ? state.syncState
+          : syncStateOverride
+      : state.syncState;
   const hasCompanyContext = Boolean(props.companyId);
   const boardAccessConfigured = Boolean(settingsRegistration.data?.paperclipBoardAccessConfigured);
   const boardAccessSetupIssue: SyncConfigurationIssue | null =
@@ -10804,21 +10896,27 @@ function GitHubSyncToolbarButtonSurface(props: {
       ? getSyncSetupMessage(boardAccessSetupIssue, hasCompanyContext)
       : state.message;
   const effectiveLabel = boardAccessSetupIssue ? 'Board access required' : state.label;
-  const syncPersistedRunning = state.syncState.status === 'running';
+  const syncPersistedRunning = effectiveSyncState.status === 'running';
   const syncStartPending = runningSync && !syncPersistedRunning;
-  const syncInFlight = syncStartPending || syncPersistedRunning;
-  const cancellationRequested = syncPersistedRunning && (cancellingSync || isSyncCancellationRequested(state.syncState));
-  const toolbarButtonBusy = toolbarState.loading || (syncPersistedRunning ? cancellationRequested : syncStartPending);
-  const toolbarButtonLabel = syncPersistedRunning ? 'Cancel sync' : effectiveLabel;
+  const allowToolbarCancellation = Boolean(props.entityType);
+  const cancellationRequested = syncPersistedRunning && (cancellingSync || isSyncCancellationRequested(effectiveSyncState));
+  const toolbarButtonBusy =
+    toolbarState.loading
+    || syncStartPending
+    || cancellationRequested
+    || (!allowToolbarCancellation && syncPersistedRunning);
+  const toolbarButtonLabel = syncPersistedRunning && allowToolbarCancellation ? 'Cancel sync' : effectiveLabel;
   const toolbarButtonBusyLabel = toolbarState.loading
     ? 'Loading…'
     : syncPersistedRunning
-      ? 'Cancelling…'
+      ? cancellationRequested
+        ? 'Cancelling…'
+        : 'Syncing…'
       : 'Syncing…';
-  const armSyncCompletionToast = useSyncCompletionToast(state.syncState, toast);
+  const armSyncCompletionToast = useSyncCompletionToast(effectiveSyncState, toast);
 
   useEffect(() => {
-    if (state.syncState.status !== 'running') {
+    if (effectiveSyncState.status !== 'running') {
       return;
     }
 
@@ -10833,7 +10931,28 @@ function GitHubSyncToolbarButtonSurface(props: {
     return () => {
       globalThis.clearInterval(intervalId);
     };
-  }, [state.syncState.status, toolbarState.refresh]);
+  }, [effectiveSyncState.status, toolbarState.refresh]);
+
+  useEffect(() => {
+    if (!syncStateOverride) {
+      return;
+    }
+
+    if (
+      state.syncState.status === 'cancelled'
+      || state.syncState.status === 'success'
+      || state.syncState.status === 'error'
+      || (
+        state.syncState.status === 'running'
+        && (
+          !isSyncCancellationRequested(syncStateOverride)
+          || isSyncCancellationRequested(state.syncState)
+        )
+      )
+    ) {
+      setSyncStateOverride(null);
+    }
+  }, [state.syncState, syncStateOverride]);
 
   useEffect(() => {
     const refreshToolbarState = () => {
@@ -10922,6 +11041,7 @@ function GitHubSyncToolbarButtonSurface(props: {
         syncState?: SyncRunState;
       };
       const nextSyncState = result.syncState ?? EMPTY_SETTINGS.syncState;
+      setSyncStateOverride(nextSyncState);
 
       toast({
         title: getSyncToastTitle(nextSyncState),
@@ -10929,7 +11049,18 @@ function GitHubSyncToolbarButtonSurface(props: {
         tone: getSyncToastTone(nextSyncState)
       });
       armSyncCompletionToast(nextSyncState);
-      toolbarState.refresh();
+      notifyGitHubSyncSettingsChanged();
+      try {
+        void settingsRegistration.refresh();
+      } catch {
+        // Keep going so the toolbar state still refreshes.
+      }
+
+      try {
+        void toolbarState.refresh();
+      } catch {
+        return;
+      }
     } catch (error) {
       toast({
         title: 'Unable to run GitHub sync',
@@ -10952,6 +11083,7 @@ function GitHubSyncToolbarButtonSurface(props: {
         syncState?: SyncRunState;
       };
       const nextSyncState = result.syncState ?? EMPTY_SETTINGS.syncState;
+      setSyncStateOverride(nextSyncState);
 
       toast({
         title: getSyncToastTitle(nextSyncState),
@@ -10959,7 +11091,18 @@ function GitHubSyncToolbarButtonSurface(props: {
         tone: getSyncToastTone(nextSyncState)
       });
       armSyncCompletionToast(nextSyncState);
-      toolbarState.refresh();
+      notifyGitHubSyncSettingsChanged();
+      try {
+        void settingsRegistration.refresh();
+      } catch {
+        // Keep going so the toolbar state still refreshes.
+      }
+
+      try {
+        void toolbarState.refresh();
+      } catch {
+        return;
+      }
     } catch (error) {
       toast({
         title: 'Unable to cancel GitHub sync',
@@ -10985,8 +11128,12 @@ function GitHubSyncToolbarButtonSurface(props: {
         data-variant="outline"
         data-size="sm"
         className={props.entityType ? HOST_ENTITY_BUTTON_CLASSNAME : HOST_GLOBAL_BUTTON_CLASSNAME}
-        disabled={toolbarState.loading || syncStartPending || (syncPersistedRunning ? cancellationRequested : !effectiveCanRun)}
-        onClick={syncPersistedRunning ? handleCancelSync : handleRunSync}
+        disabled={
+          toolbarState.loading
+          || syncStartPending
+          || (syncPersistedRunning ? (allowToolbarCancellation ? cancellationRequested : true) : !effectiveCanRun)
+        }
+        onClick={syncPersistedRunning && allowToolbarCancellation ? handleCancelSync : handleRunSync}
       >
         <LoadingButtonContent
           busy={toolbarButtonBusy}

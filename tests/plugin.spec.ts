@@ -10264,12 +10264,24 @@ test('worker can cancel a long-running manual sync after it has started', async 
     };
     assert.equal(runningResult.syncState.status, 'running');
 
+    const toolbarStateWhileRunning = await harness.getData<{
+      syncState: { status: string; message?: string };
+    }>('sync.toolbarState', {});
+    assert.equal(toolbarStateWhileRunning.syncState.status, 'running');
+
     const cancelResult = await harness.performAction('sync.cancel', {}) as {
       syncState: { status: string; message?: string; cancelRequestedAt?: string };
     };
     assert.equal(cancelResult.syncState.status, 'running');
     assert.equal(cancelResult.syncState.message, 'Cancellation requested. GitHub sync will stop after the current step finishes.');
     assert.ok(cancelResult.syncState.cancelRequestedAt);
+
+    const toolbarStateAfterCancelRequest = await harness.getData<{
+      syncState: { status: string; message?: string; cancelRequestedAt?: string };
+    }>('sync.toolbarState', {});
+    assert.equal(toolbarStateAfterCancelRequest.syncState.status, 'running');
+    assert.equal(toolbarStateAfterCancelRequest.syncState.message, 'Cancellation requested. GitHub sync will stop after the current step finishes.');
+    assert.ok(toolbarStateAfterCancelRequest.syncState.cancelRequestedAt);
 
     await waitFor(() => {
       const current = harness.getState({
