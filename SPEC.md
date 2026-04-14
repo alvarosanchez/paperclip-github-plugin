@@ -10,7 +10,7 @@ The plugin MUST provide a settings page inside Paperclip where an operator can c
 - an optional external config file at `~/.paperclip/plugins/github-sync/config.json` for worker-only global values such as a raw `githubToken`
 - Paperclip board access, which is optional on unauthenticated deployments and required when the Paperclip deployment reports `deploymentMode: "authenticated"`
 - one or more GitHub repository mappings
-- company-scoped advanced defaults for imported issues: default assignee, default Paperclip status, and ignored GitHub issue authors
+- company-scoped advanced defaults for imported issues: default assignee, default Paperclip status, and ignored GitHub issue authors, where a saved username such as `renovate` also matches GitHub bot logins such as `renovate[bot]`
 - the frequency for automatic scheduled sync runs
 - a Paperclip project name per mapping where synchronized issues should be created, including existing Paperclip projects that are already bound to a GitHub repository workspace
 
@@ -41,6 +41,9 @@ The settings page MUST allow saving mappings and triggering a manual sync.
 The plugin MUST persist repository mappings, company-scoped advanced issue defaults, and sync state in plugin state.
 - The worker MUST expose at least one data endpoint for reading the current settings and sync status.
 - The worker MUST expose action endpoints for saving mappings and triggering a manual sync.
+- The worker SHOULD expose project-scoped pull request read models and actions for mapped repositories, including a lightweight queue read, a lightweight open-count read for sidebar badges, an on-demand detail read, and row-level actions for linking a Paperclip issue, merging, closing, and commenting.
+- The worker SHOULD keep the default pull request queue read lightweight, use a lighter repo-wide metrics read for the summary cards, keep a separate cached full-summary path for filtered views, and invalidate those caches after pull request mutations.
+- When resolving a Paperclip issue for a pull request, the worker SHOULD first match GitHub issues referenced in `closingIssuesReferences` to imported Paperclip issues and only fall back to pull-request-created issue links when no closing-issue match exists.
 - The `sync.runNow` action SHOULD return the final sync result when it completes quickly, but MUST otherwise return promptly with the saved `running` state instead of waiting long enough to time out the host request.
 - A manual sync requested from a company-scoped settings or dashboard view MUST only sync repository mappings for that company.
 - The worker SHOULD support targeted manual sync requests for a specific mapped Paperclip project or imported Paperclip issue.
@@ -65,6 +68,7 @@ The plugin MUST persist repository mappings, company-scoped advanced issue defau
 - When a local Paperclip REST call returns an unexpected non-JSON success payload, such as an authenticated HTML sign-in page, the worker MUST treat that response as unavailable, fall back to SDK-based issue mutation when possible, and surface an actionable sync error that points operators to Paperclip board access or `PAPERCLIP_API_URL` when labels still cannot be reconciled.
 - Repeated sync runs MUST skip recreating issues that were already imported for the same mapping.
 - If the plugin-owned import registry is stale or missing, repeated sync runs MUST repair deduplication by reusing an existing imported Paperclip issue in the mapped project when durable GitHub link metadata or, for legacy issues, the description source link matches the GitHub issue URL.
+- The worker SHOULD persist pull request to Paperclip issue links in a plugin-owned entity so project-scoped queue and detail surfaces can reuse durable links without reparsing issue descriptions.
 - Repeated sync runs MUST continue reconciling imported Paperclip issue statuses against the latest GitHub state.
 - When the local Paperclip host API is available, sync-driven Paperclip status transitions SHOULD go through the same issue-update path Paperclip UI uses so timeline activity is recorded for agents and humans.
 - Repeated sync runs MUST continue reconciling imported Paperclip issue labels against the latest mapped GitHub labels, including removing labels that were removed on GitHub.
@@ -96,6 +100,15 @@ The plugin MUST persist repository mappings, company-scoped advanced issue defau
 - The plugin MUST expose a dashboard widget contribution.
 - The plugin MUST expose a settings page contribution.
 - The plugin SHOULD expose an issue detail contribution for GitHub metadata.
+- The plugin SHOULD expose a project sidebar item that opens a project-scoped Pull Requests page for the mapped repository and can show the current open pull request count for mapped projects through a lightweight count read instead of the heavier summary-card metrics path.
+- The project Pull Requests page SHOULD render live open pull request data for the mapped repository, including checks, review summary, unresolved review-thread state, non-review comment counts, age, last-updated timestamps, Paperclip issue linkage, and quick actions.
+- The project Pull Requests page SHOULD surface total, mergeable, reviewable, and failing summary counts and let operators filter the table from those cards.
+- The project Pull Requests page SHOULD paginate the queue in batches of 10 rows.
+- The project Pull Requests page SHOULD deep-link row icons to the relevant GitHub resource where possible.
+- The project Pull Requests page SHOULD render markdown in pull request descriptions and comments instead of showing raw markdown text.
+- The project Pull Requests page SHOULD include a compact inline comment composer in the bottom detail pane.
+- The project Pull Requests page SHOULD support modal quick actions for commenting, reviewing, and re-running CI in addition to merge and close when the pull request state allows them.
+- When a pull request is not yet linked to a Paperclip issue, the project Pull Requests page SHOULD offer an inline create-issue action and wait for the returned Paperclip identifier before rendering the issue link.
 - The plugin SHOULD expose manual sync buttons in the global toolbar and on mapped project/issue surfaces when the host renders those slot types.
 - The dashboard widget MUST summarize the current GitHub sync readiness and link to setup.
 - When the latest sync run records issue-level failures, the settings page SHOULD expose a saved failure log with per-failure repository, issue, phase, raw error, and suggested next-step details, and compact surfaces SHOULD still surface at least the latest saved failure snapshot.

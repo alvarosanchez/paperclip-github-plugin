@@ -375,8 +375,8 @@ async function main() {
 
     await page.getByRole('heading', { name: 'GitHub Sync' }).waitFor({ timeout: 120000 });
     await page.getByText('GitHub Sync settings', { exact: true }).waitFor({ timeout: 120000 });
-    await page.getByRole('heading', { name: 'Connect GitHub', exact: true }).waitFor({ timeout: 120000 });
     await page.getByRole('heading', { name: 'GitHub access', exact: true }).waitFor({ timeout: 120000 });
+    await page.getByRole('heading', { name: 'Paperclip board access', exact: true }).waitFor({ timeout: 120000 });
     await page.getByRole('heading', { name: 'Repositories', exact: true }).waitFor({ timeout: 120000 });
     await page.getByRole('heading', { name: 'Sync', exact: true }).waitFor({ timeout: 120000 });
     await page.getByLabel('GitHub token').waitFor({ timeout: 120000 });

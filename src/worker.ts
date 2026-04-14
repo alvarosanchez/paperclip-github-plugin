@@ -34,6 +34,14 @@ const DEFAULT_IGNORED_GITHUB_ISSUE_USERNAMES = ['renovate'];
 const GITHUB_API_VERSION = '2026-03-10';
 const DEFAULT_PAPERCLIP_LABEL_COLOR = '#6366f1';
 const PAPERCLIP_LABEL_PAGE_SIZE = 100;
+const PROJECT_PULL_REQUEST_SUMMARY_CONCURRENCY = 8;
+const PROJECT_PULL_REQUEST_PAGE_SIZE = 10;
+const PROJECT_PULL_REQUEST_METRICS_BATCH_SIZE = 100;
+const PROJECT_PULL_REQUEST_SUMMARY_BATCH_SIZE = 25;
+const PROJECT_PULL_REQUEST_PAGE_CACHE_TTL_MS = 15_000;
+const PROJECT_PULL_REQUEST_SUMMARY_CACHE_TTL_MS = 45_000;
+const PROJECT_PULL_REQUEST_DETAIL_CACHE_TTL_MS = 15_000;
+const PROJECT_PULL_REQUEST_ISSUE_LOOKUP_CACHE_TTL_MS = 45_000;
 const MANUAL_SYNC_RESPONSE_GRACE_PERIOD_MS = 500;
 const RUNNING_SYNC_MESSAGE = 'GitHub sync is running in the background. This page will update when it finishes.';
 const CANCELLING_SYNC_MESSAGE = 'Cancellation requested. GitHub sync will stop after the current step finishes.';
@@ -51,6 +59,7 @@ const MISSING_BOARD_ACCESS_SYNC_MESSAGE =
 const MISSING_BOARD_ACCESS_SYNC_ACTION =
   'Open plugin settings for each mapped company that sync will touch, connect Paperclip board access, approve the flow, and then run sync again.';
 const ISSUE_LINK_ENTITY_TYPE = 'paperclip-github-plugin.issue-link';
+const PULL_REQUEST_LINK_ENTITY_TYPE = 'paperclip-github-plugin.pull-request-link';
 const COMMENT_ANNOTATION_ENTITY_TYPE = 'paperclip-github-plugin.comment-annotation';
 const EXTERNAL_CONFIG_FILE_PATH_SEGMENTS = ['.paperclip', 'plugins', 'github-sync', 'config.json'] as const;
 const AI_AUTHORED_COMMENT_FOOTER_PREFIX = 'Created by a Paperclip AI agent using ';
@@ -66,6 +75,12 @@ type PaperclipIssueUpdatePatchWithLabels = Parameters<PluginSetupContext['issues
 type PaperclipLabelDirectory = Map<string, PaperclipIssueLabel[]>;
 type PaperclipBoardApiTokenRefs = Record<string, string>;
 type CompanyAdvancedSettingsByCompanyId = Record<string, GitHubSyncAdvancedSettings>;
+type ProjectPullRequestFilter = 'all' | 'mergeable' | 'reviewable' | 'failing';
+
+interface CacheEntry<TValue> {
+  expiresAt: number;
+  value: TValue;
+}
 
 interface PaperclipApiOperationFailure {
   status?: number;
@@ -310,6 +325,12 @@ let activeSyncPromise: Promise<GitHubSyncSettings> | null = null;
 let activeRunningSyncState: GitHubSyncSettings | null = null;
 let activePaperclipApiAuthTokensByCompanyId: Map<string, string> | null = null;
 let activeExternalConfigWarningKey: string | null = null;
+const activeProjectPullRequestPageCache = new Map<string, CacheEntry<Record<string, unknown>>>();
+const activeProjectPullRequestCountCache = new Map<string, CacheEntry<number>>();
+const activeProjectPullRequestMetricsCache = new Map<string, CacheEntry<ProjectPullRequestMetrics>>();
+const activeProjectPullRequestSummaryCache = new Map<string, CacheEntry<CachedProjectPullRequestSummary>>();
+const activeProjectPullRequestDetailCache = new Map<string, CacheEntry<Record<string, unknown> | null>>();
+const activeProjectPullRequestIssueLookupCache = new Map<string, CacheEntry<ProjectPullRequestIssueLookup>>();
 
 class PaperclipLabelSyncError extends Error {
   readonly name = 'PaperclipLabelSyncError';
@@ -682,6 +703,8 @@ interface GitHubIssueCommentRecord {
   body: string;
   url?: string;
   authorLogin?: string;
+  authorUrl?: string;
+  authorAvatarUrl?: string;
   createdAt?: string;
   updatedAt?: string;
 }
@@ -707,6 +730,201 @@ interface GitHubReviewThreadRecord {
   originalStartLine?: number;
   comments: GitHubReviewThreadCommentRecord[];
   totalCommentCount?: number;
+}
+
+interface GitHubPullRequestLinkEntityData {
+  companyId?: string;
+  paperclipProjectId?: string;
+  repositoryUrl: string;
+  githubPullRequestNumber: number;
+  githubPullRequestUrl: string;
+  githubPullRequestState: 'open' | 'closed';
+  title?: string;
+  syncedAt: string;
+}
+
+interface GitHubPullRequestLinkRecord {
+  paperclipIssueId: string;
+  createdAt?: string;
+  updatedAt?: string;
+  title?: string;
+  status?: string;
+  data: GitHubPullRequestLinkEntityData;
+}
+
+interface GitHubProjectPullRequestReviewSummary {
+  approvals: number;
+  changesRequested: number;
+}
+
+interface GitHubProjectPullRequestReviewThreadSummary {
+  unresolvedReviewThreads: number;
+  copilotUnresolvedReviewThreads: number;
+}
+
+interface CachedProjectPullRequestSummary {
+  totalOpenPullRequests: number;
+  pullRequests: Record<string, unknown>[];
+  metrics: ProjectPullRequestMetrics;
+}
+
+interface ProjectPullRequestMetrics {
+  totalOpenPullRequests: number;
+  mergeablePullRequests: number;
+  reviewablePullRequests: number;
+  failingPullRequests: number;
+}
+
+interface ProjectPullRequestIssueLookup {
+  linkedIssuesByGitHubIssueUrl: Map<string, LinkedPaperclipIssueForPullRequest>;
+  fallbackIssuesByPullRequestNumber: Map<number, LinkedPaperclipIssueForPullRequest>;
+}
+
+interface GitHubProjectPullRequestsQueryResult {
+  repository?: {
+    nameWithOwner?: string | null;
+    url?: string | null;
+    pullRequests?: {
+      totalCount?: number | null;
+      pageInfo?: GitHubPageInfo | null;
+      nodes?: Array<{
+        id?: string | null;
+        number?: number | null;
+        title?: string | null;
+        url?: string | null;
+        state?: 'OPEN' | 'CLOSED' | 'MERGED' | null;
+        mergeable?: 'MERGEABLE' | 'CONFLICTING' | 'UNKNOWN' | null;
+        createdAt?: string | null;
+        updatedAt?: string | null;
+        baseRefName?: string | null;
+        headRefName?: string | null;
+        changedFiles?: number | null;
+        commits?: {
+          totalCount?: number | null;
+        } | null;
+        author?: {
+          login?: string | null;
+          url?: string | null;
+          avatarUrl?: string | null;
+        } | null;
+        labels?: {
+          nodes?: Array<{
+            name?: string | null;
+            color?: string | null;
+          } | null> | null;
+        } | null;
+        comments?: {
+          totalCount?: number | null;
+        } | null;
+        closingIssuesReferences?: {
+          nodes?: Array<{
+            number?: number | null;
+            url?: string | null;
+          } | null> | null;
+        } | null;
+        reviews?: {
+          pageInfo?: GitHubPageInfo | null;
+          nodes?: Array<{
+            state?: string | null;
+            author?: {
+              login?: string | null;
+            } | null;
+          } | null> | null;
+        } | null;
+        reviewThreads?: {
+          totalCount?: number | null;
+          pageInfo?: GitHubPageInfo | null;
+          nodes?: Array<{
+            isResolved?: boolean | null;
+            comments?: {
+              nodes?: Array<{
+                author?: {
+                  login?: string | null;
+                } | null;
+              } | null> | null;
+            } | null;
+          } | null> | null;
+        } | null;
+        statusCheckRollup?: {
+          contexts?: {
+            pageInfo?: GitHubPageInfo | null;
+            nodes?: Array<
+              | {
+                  __typename?: 'CheckRun';
+                  status?: string | null;
+                  conclusion?: string | null;
+                }
+              | {
+                  __typename?: 'StatusContext';
+                  state?: string | null;
+                }
+              | null
+            > | null;
+          } | null;
+        } | null;
+      } | null> | null;
+    } | null;
+  } | null;
+}
+
+interface GitHubProjectPullRequestMetricsQueryResult {
+  repository?: {
+    pullRequests?: {
+      totalCount?: number | null;
+      pageInfo?: GitHubPageInfo | null;
+      nodes?: Array<{
+        number?: number | null;
+        mergeable?: 'MERGEABLE' | 'CONFLICTING' | 'UNKNOWN' | null;
+        reviews?: {
+          pageInfo?: GitHubPageInfo | null;
+          nodes?: Array<{
+            state?: string | null;
+            author?: {
+              login?: string | null;
+            } | null;
+          } | null> | null;
+        } | null;
+        reviewThreads?: {
+          pageInfo?: GitHubPageInfo | null;
+          nodes?: Array<{
+            isResolved?: boolean | null;
+            comments?: {
+              nodes?: Array<{
+                author?: {
+                  login?: string | null;
+                } | null;
+              } | null> | null;
+            } | null;
+          } | null> | null;
+        } | null;
+        statusCheckRollup?: {
+          contexts?: {
+            pageInfo?: GitHubPageInfo | null;
+            nodes?: Array<
+              | {
+                  __typename?: 'CheckRun';
+                  status?: string | null;
+                  conclusion?: string | null;
+                }
+              | {
+                  __typename?: 'StatusContext';
+                  state?: string | null;
+                }
+              | null
+            > | null;
+          } | null;
+        } | null;
+      } | null> | null;
+    } | null;
+  } | null;
+}
+
+interface GitHubProjectPullRequestCountQueryResult {
+  repository?: {
+    pullRequests?: {
+      totalCount?: number | null;
+    } | null;
+  } | null;
 }
 
 interface SyncProcessingFailure {
@@ -873,6 +1091,194 @@ const GITHUB_REPOSITORY_OPEN_PULL_REQUEST_STATUSES_QUERY = `
                 }
               }
             }
+          }
+        }
+      }
+    }
+  }
+`;
+
+const GITHUB_PROJECT_PULL_REQUESTS_QUERY = `
+  query GitHubProjectPullRequests($owner: String!, $repo: String!, $after: String, $first: Int!) {
+    repository(owner: $owner, name: $repo) {
+      nameWithOwner
+      url
+      pullRequests(first: $first, after: $after, states: [OPEN], orderBy: { field: UPDATED_AT, direction: DESC }) {
+        totalCount
+        pageInfo {
+          hasNextPage
+          endCursor
+        }
+        nodes {
+          id
+          number
+          title
+          url
+          state
+          mergeable
+          createdAt
+          updatedAt
+          baseRefName
+          headRefName
+          changedFiles
+          commits {
+            totalCount
+          }
+          author {
+            login
+            url
+            avatarUrl
+          }
+          labels(first: 20) {
+            nodes {
+              name
+              color
+            }
+          }
+          comments {
+            totalCount
+          }
+          closingIssuesReferences(first: 10) {
+            nodes {
+              number
+              url
+            }
+          }
+          reviews(first: 100) {
+            pageInfo {
+              hasNextPage
+              endCursor
+            }
+            nodes {
+              state
+              author {
+                login
+              }
+            }
+          }
+          reviewThreads(first: 100) {
+            totalCount
+            pageInfo {
+              hasNextPage
+              endCursor
+            }
+            nodes {
+              isResolved
+              comments(first: 1) {
+                nodes {
+                  author {
+                    login
+                  }
+                }
+              }
+            }
+          }
+          statusCheckRollup {
+            contexts(first: 100) {
+              pageInfo {
+                hasNextPage
+                endCursor
+              }
+              nodes {
+                __typename
+                ... on CheckRun {
+                  status
+                  conclusion
+                }
+                ... on StatusContext {
+                  state
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+`;
+
+const GITHUB_PROJECT_PULL_REQUEST_METRICS_QUERY = `
+  query GitHubProjectPullRequestMetrics($owner: String!, $repo: String!, $after: String, $first: Int!) {
+    repository(owner: $owner, name: $repo) {
+      pullRequests(first: $first, after: $after, states: [OPEN], orderBy: { field: UPDATED_AT, direction: DESC }) {
+        totalCount
+        pageInfo {
+          hasNextPage
+          endCursor
+        }
+        nodes {
+          number
+          mergeable
+          reviews(first: 100) {
+            pageInfo {
+              hasNextPage
+              endCursor
+            }
+            nodes {
+              state
+              author {
+                login
+              }
+            }
+          }
+          reviewThreads(first: 100) {
+            pageInfo {
+              hasNextPage
+              endCursor
+            }
+            nodes {
+              isResolved
+              comments(first: 1) {
+                nodes {
+                  author {
+                    login
+                  }
+                }
+              }
+            }
+          }
+          statusCheckRollup {
+            contexts(first: 100) {
+              pageInfo {
+                hasNextPage
+                endCursor
+              }
+              nodes {
+                __typename
+                ... on CheckRun {
+                  status
+                  conclusion
+                }
+                ... on StatusContext {
+                  state
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+`;
+
+const GITHUB_PROJECT_OPEN_PULL_REQUEST_COUNT_QUERY = `
+  query GitHubProjectOpenPullRequestCount($owner: String!, $repo: String!) {
+    repository(owner: $owner, name: $repo) {
+      pullRequests(first: 1, states: [OPEN]) {
+        totalCount
+      }
+    }
+  }
+`;
+
+const GITHUB_PULL_REQUEST_CLOSING_ISSUES_QUERY = `
+  query GitHubPullRequestClosingIssues($owner: String!, $repo: String!, $pullRequestNumber: Int!) {
+    repository(owner: $owner, name: $repo) {
+      pullRequest(number: $pullRequestNumber) {
+        closingIssuesReferences(first: 10) {
+          nodes {
+            number
+            url
           }
         }
       }
@@ -1064,6 +1470,19 @@ function createCancelledSyncState(params: {
     lastRunTrigger: trigger,
     ...(progress ? { progress: normalizeSyncProgress(progress) } : {})
   };
+}
+
+interface GitHubPullRequestClosingIssuesQueryResult {
+  repository?: {
+    pullRequest?: {
+      closingIssuesReferences?: {
+        nodes?: Array<{
+          number?: number | null;
+          url?: string | null;
+        } | null> | null;
+      } | null;
+    } | null;
+  } | null;
 }
 
 function formatGitHubIssueCountLabel(count: number): string {
@@ -2883,6 +3302,25 @@ function normalizeGitHubUsername(value: unknown): string | undefined {
   return trimmed ? trimmed.toLowerCase() : undefined;
 }
 
+function buildGitHubUsernameAliases(value: unknown): string[] {
+  const normalized = normalizeGitHubUsername(value);
+  if (!normalized) {
+    return [];
+  }
+
+  const aliases = new Set([normalized]);
+  if (normalized.endsWith('[bot]')) {
+    const withoutBotSuffix = normalized.slice(0, -'[bot]'.length);
+    if (withoutBotSuffix) {
+      aliases.add(withoutBotSuffix);
+    }
+  } else {
+    aliases.add(`${normalized}[bot]`);
+  }
+
+  return [...aliases];
+}
+
 function parseIgnoredIssueAuthorUsernames(value: string): string[] {
   return value
     .split(/[\s,]+/g)
@@ -3346,6 +3784,286 @@ function getPageCursor(pageInfo: GitHubPageInfo | null | undefined): string | un
   }
 
   return pageInfo.endCursor;
+}
+
+async function mapWithConcurrency<TInput, TOutput>(
+  items: TInput[],
+  concurrency: number,
+  mapper: (item: TInput, index: number) => Promise<TOutput>
+): Promise<TOutput[]> {
+  if (items.length === 0) {
+    return [];
+  }
+
+  const limit = Math.max(1, Math.floor(concurrency));
+  const results = new Array<TOutput>(items.length);
+  let nextIndex = 0;
+
+  async function worker(): Promise<void> {
+    while (nextIndex < items.length) {
+      const currentIndex = nextIndex;
+      nextIndex += 1;
+      results[currentIndex] = await mapper(items[currentIndex] as TInput, currentIndex);
+    }
+  }
+
+  await Promise.all(
+    Array.from(
+      { length: Math.min(limit, items.length) },
+      async () => worker()
+    )
+  );
+
+  return results;
+}
+
+function getFreshCacheValue<TValue>(
+  cache: Map<string, CacheEntry<TValue>>,
+  key: string,
+  now = Date.now()
+): TValue | null {
+  const entry = cache.get(key);
+  if (!entry) {
+    return null;
+  }
+
+  if (entry.expiresAt <= now) {
+    cache.delete(key);
+    return null;
+  }
+
+  return entry.value;
+}
+
+function setCacheValue<TValue>(
+  cache: Map<string, CacheEntry<TValue>>,
+  key: string,
+  value: TValue,
+  ttlMs: number,
+  now = Date.now()
+): TValue {
+  cache.set(key, {
+    expiresAt: now + ttlMs,
+    value
+  });
+
+  return value;
+}
+
+function normalizeProjectPullRequestFilter(value: unknown): ProjectPullRequestFilter {
+  switch (value) {
+    case 'mergeable':
+    case 'reviewable':
+    case 'failing':
+      return value;
+    default:
+      return 'all';
+  }
+}
+
+function normalizeProjectPullRequestPageIndex(value: unknown): number {
+  if (typeof value === 'number' && Number.isFinite(value) && value >= 0) {
+    return Math.floor(value);
+  }
+
+  if (typeof value === 'string' && value.trim()) {
+    const parsed = Number(value.trim());
+    if (Number.isFinite(parsed) && parsed >= 0) {
+      return Math.floor(parsed);
+    }
+  }
+
+  return 0;
+}
+
+function isCopilotActorLogin(value: string | null | undefined): boolean {
+  const normalizedLogin = normalizeGitHubUsername(value);
+  return Boolean(normalizedLogin && normalizedLogin.includes('copilot'));
+}
+
+function getProjectPullRequestReviewThreadStarterLogin(node: {
+  comments?: {
+    nodes?: Array<{
+      author?: {
+        login?: string | null;
+      } | null;
+    } | null> | null;
+  } | null;
+} | null | undefined): string | undefined {
+  return normalizeGitHubUsername(
+    node?.comments?.nodes?.find((comment) => comment?.author?.login)?.author?.login
+  );
+}
+
+function getDetailedPullRequestReviewThreadStarterLogin(thread: GitHubReviewThreadRecord): string | undefined {
+  const rootComment = thread.comments.find((comment) => !comment.replyToId) ?? thread.comments[0];
+  return normalizeGitHubUsername(rootComment?.authorLogin);
+}
+
+function summarizeProjectPullRequestReviewThreadsFromConnection(connection: {
+  nodes?: Array<{
+    isResolved?: boolean | null;
+    comments?: {
+      nodes?: Array<{
+        author?: {
+          login?: string | null;
+        } | null;
+      } | null> | null;
+    } | null;
+  } | null> | null;
+} | null | undefined): GitHubProjectPullRequestReviewThreadSummary {
+  let unresolvedReviewThreads = 0;
+  let copilotUnresolvedReviewThreads = 0;
+
+  for (const thread of connection?.nodes ?? []) {
+    if (thread?.isResolved !== false) {
+      continue;
+    }
+
+    unresolvedReviewThreads += 1;
+    if (isCopilotActorLogin(getProjectPullRequestReviewThreadStarterLogin(thread))) {
+      copilotUnresolvedReviewThreads += 1;
+    }
+  }
+
+  return {
+    unresolvedReviewThreads,
+    copilotUnresolvedReviewThreads
+  };
+}
+
+function summarizeDetailedPullRequestReviewThreads(
+  threads: GitHubReviewThreadRecord[]
+): GitHubProjectPullRequestReviewThreadSummary {
+  let unresolvedReviewThreads = 0;
+  let copilotUnresolvedReviewThreads = 0;
+
+  for (const thread of threads) {
+    if (thread.isResolved) {
+      continue;
+    }
+
+    unresolvedReviewThreads += 1;
+    if (isCopilotActorLogin(getDetailedPullRequestReviewThreadStarterLogin(thread))) {
+      copilotUnresolvedReviewThreads += 1;
+    }
+  }
+
+  return {
+    unresolvedReviewThreads,
+    copilotUnresolvedReviewThreads
+  };
+}
+
+function normalizeProjectPullRequestClosingIssues(
+  repository: ParsedRepositoryReference,
+  nodes: Array<{
+    number?: number | null;
+    url?: string | null;
+  } | null> | null | undefined
+): Array<{
+  number: number;
+  url: string;
+}> {
+  const seen = new Set<string>();
+  const issues: Array<{
+    number: number;
+    url: string;
+  }> = [];
+
+  for (const node of nodes ?? []) {
+    const issueNumber = typeof node?.number === 'number' && node.number > 0 ? Math.floor(node.number) : undefined;
+    const issueUrl =
+      typeof node?.url === 'string' && node.url.trim()
+        ? normalizeGitHubIssueHtmlUrl(node.url)
+        : issueNumber !== undefined
+          ? buildGitHubIssueUrlFromRepository(repository.url, issueNumber)
+          : undefined;
+
+    if (issueNumber === undefined || !issueUrl || seen.has(issueUrl)) {
+      continue;
+    }
+
+    seen.add(issueUrl);
+    issues.push({
+      number: issueNumber,
+      url: issueUrl
+    });
+  }
+
+  return issues;
+}
+
+function resolveProjectPullRequestReviewable(
+  record: Pick<Record<string, unknown>, 'checksStatus' | 'copilotUnresolvedReviewThreads' | 'githubMergeable'>
+): boolean {
+  return record.githubMergeable === true &&
+    record.checksStatus === 'passed' &&
+    typeof record.copilotUnresolvedReviewThreads === 'number' &&
+    record.copilotUnresolvedReviewThreads === 0;
+}
+
+function resolveProjectPullRequestMergeable(
+  record: Pick<Record<string, unknown>, 'checksStatus' | 'reviewApprovals' | 'unresolvedReviewThreads' | 'githubMergeable'>
+): boolean {
+  return record.githubMergeable === true &&
+    record.checksStatus === 'passed' &&
+    typeof record.reviewApprovals === 'number' &&
+    record.reviewApprovals > 0 &&
+    typeof record.unresolvedReviewThreads === 'number' &&
+    record.unresolvedReviewThreads === 0;
+}
+
+function matchesProjectPullRequestFilter(
+  record: Record<string, unknown>,
+  filter: ProjectPullRequestFilter
+): boolean {
+  switch (filter) {
+    case 'mergeable':
+      return record.mergeable === true;
+    case 'reviewable':
+      return record.reviewable === true;
+    case 'failing':
+      return record.checksStatus === 'failed';
+    default:
+      return true;
+  }
+}
+
+function buildProjectPullRequestMetrics(
+  pullRequests: Record<string, unknown>[],
+  totalOpenPullRequests: number
+): ProjectPullRequestMetrics {
+  return {
+    totalOpenPullRequests,
+    mergeablePullRequests: pullRequests.filter((pullRequest) => pullRequest.mergeable === true).length,
+    reviewablePullRequests: pullRequests.filter((pullRequest) => pullRequest.reviewable === true).length,
+    failingPullRequests: pullRequests.filter((pullRequest) => pullRequest.checksStatus === 'failed').length
+  };
+}
+
+function sliceProjectPullRequestRecords(
+  pullRequests: Record<string, unknown>[],
+  pageIndex: number,
+  pageSize = PROJECT_PULL_REQUEST_PAGE_SIZE
+): {
+  pullRequests: Record<string, unknown>[];
+  pageIndex: number;
+  hasNextPage: boolean;
+  hasPreviousPage: boolean;
+} {
+  const effectivePageSize = Math.max(1, Math.floor(pageSize));
+  const maxPageIndex = Math.max(0, Math.ceil(pullRequests.length / effectivePageSize) - 1);
+  const normalizedPageIndex = Math.min(Math.max(0, Math.floor(pageIndex)), maxPageIndex);
+  const start = normalizedPageIndex * effectivePageSize;
+  const end = start + effectivePageSize;
+
+  return {
+    pullRequests: pullRequests.slice(start, end),
+    pageIndex: normalizedPageIndex,
+    hasNextPage: end < pullRequests.length,
+    hasPreviousPage: normalizedPageIndex > 0
+  };
 }
 
 function classifyGitHubPullRequestCiState(contexts: GitHubCiContextRecord[]): GitHubPullRequestCiState {
@@ -3845,11 +4563,26 @@ async function warmGitHubPullRequestStatusCache(
   } while (after);
 }
 
-async function hasGitHubPullRequestUnresolvedReviewThreads(
+function countUnresolvedGitHubReviewThreads(nodes: Array<{
+  isResolved?: boolean | null;
+} | null>): number {
+  let unresolvedCount = 0;
+
+  for (const node of nodes) {
+    if (node?.isResolved === false) {
+      unresolvedCount += 1;
+    }
+  }
+
+  return unresolvedCount;
+}
+
+async function countGitHubPullRequestUnresolvedReviewThreads(
   octokit: Octokit,
   repository: ParsedRepositoryReference,
   pullRequestNumber: number
-): Promise<boolean> {
+): Promise<number> {
+  let unresolvedCount = 0;
   let after: string | undefined;
 
   do {
@@ -3864,15 +4597,20 @@ async function hasGitHubPullRequestUnresolvedReviewThreads(
     );
 
     const reviewThreads = response.repository?.pullRequest?.reviewThreads;
-    const nodes = reviewThreads?.nodes ?? [];
-    if (nodes.some((node) => node?.isResolved === false)) {
-      return true;
-    }
+    unresolvedCount += countUnresolvedGitHubReviewThreads(reviewThreads?.nodes ?? []);
 
     after = getPageCursor(reviewThreads?.pageInfo);
   } while (after);
 
-  return false;
+  return unresolvedCount;
+}
+
+async function hasGitHubPullRequestUnresolvedReviewThreads(
+  octokit: Octokit,
+  repository: ParsedRepositoryReference,
+  pullRequestNumber: number
+): Promise<boolean> {
+  return (await countGitHubPullRequestUnresolvedReviewThreads(octokit, repository, pullRequestNumber)) > 0;
 }
 
 async function getGitHubPullRequestCiState(
@@ -4548,6 +5286,53 @@ function normalizeGitHubIssueLinkEntityData(value: unknown): GitHubIssueLinkEnti
   };
 }
 
+function normalizeGitHubPullRequestLinkEntityData(value: unknown): GitHubPullRequestLinkEntityData | null {
+  if (!value || typeof value !== 'object') {
+    return null;
+  }
+
+  const record = value as Record<string, unknown>;
+  const repositoryUrl =
+    typeof record.repositoryUrl === 'string' && record.repositoryUrl.trim()
+      ? getNormalizedMappingRepositoryUrl({
+          repositoryUrl: record.repositoryUrl
+        })
+      : undefined;
+  const githubPullRequestNumber =
+    typeof record.githubPullRequestNumber === 'number' && record.githubPullRequestNumber > 0
+      ? Math.floor(record.githubPullRequestNumber)
+      : undefined;
+  const githubPullRequestUrl =
+    typeof record.githubPullRequestUrl === 'string' && record.githubPullRequestUrl.trim()
+      ? record.githubPullRequestUrl.trim()
+      : undefined;
+  const githubPullRequestState =
+    record.githubPullRequestState === 'closed'
+      ? 'closed'
+      : record.githubPullRequestState === 'open'
+        ? 'open'
+        : undefined;
+  const title = typeof record.title === 'string' && record.title.trim() ? record.title.trim() : undefined;
+  const syncedAt = typeof record.syncedAt === 'string' && record.syncedAt.trim() ? record.syncedAt.trim() : undefined;
+
+  if (!repositoryUrl || githubPullRequestNumber === undefined || !githubPullRequestUrl || !githubPullRequestState || !syncedAt) {
+    return null;
+  }
+
+  return {
+    ...(typeof record.companyId === 'string' && record.companyId.trim() ? { companyId: record.companyId.trim() } : {}),
+    ...(typeof record.paperclipProjectId === 'string' && record.paperclipProjectId.trim()
+      ? { paperclipProjectId: record.paperclipProjectId.trim() }
+      : {}),
+    repositoryUrl,
+    githubPullRequestNumber,
+    githubPullRequestUrl,
+    githubPullRequestState,
+    ...(title ? { title } : {}),
+    syncedAt
+  };
+}
+
 function normalizeStoredStatusTransitionCommentAnnotation(value: unknown): StoredStatusTransitionCommentAnnotation | null {
   if (!value || typeof value !== 'object') {
     return null;
@@ -4649,6 +5434,73 @@ async function listGitHubIssueLinkRecords(
   return records;
 }
 
+async function listGitHubPullRequestLinkRecords(
+  ctx: PluginSetupContext,
+  query: {
+    paperclipIssueId?: string;
+    externalId?: string;
+  } = {}
+): Promise<GitHubPullRequestLinkRecord[]> {
+  const records: GitHubPullRequestLinkRecord[] = [];
+  const requestedIssueId = query.paperclipIssueId?.trim() || undefined;
+  const requestedExternalId = query.externalId?.trim() || undefined;
+
+  for (let offset = 0; ; ) {
+    const page = await ctx.entities.list({
+      entityType: PULL_REQUEST_LINK_ENTITY_TYPE,
+      scopeKind: 'issue',
+      ...(requestedIssueId ? { scopeId: requestedIssueId } : {}),
+      ...(requestedExternalId ? { externalId: requestedExternalId } : {}),
+      limit: PAPERCLIP_LABEL_PAGE_SIZE,
+      offset
+    });
+
+    if (page.length === 0) {
+      break;
+    }
+
+    for (const entry of page) {
+      if (entry.scopeKind !== 'issue' || !entry.scopeId) {
+        continue;
+      }
+
+      if (requestedIssueId && entry.scopeId !== requestedIssueId) {
+        continue;
+      }
+
+      if (requestedExternalId && entry.externalId !== requestedExternalId) {
+        continue;
+      }
+
+      const data = normalizeGitHubPullRequestLinkEntityData(entry.data);
+      if (!data) {
+        continue;
+      }
+
+      records.push({
+        paperclipIssueId: entry.scopeId,
+        ...(typeof entry.createdAt === 'string' ? { createdAt: entry.createdAt } : {}),
+        ...(typeof entry.updatedAt === 'string' ? { updatedAt: entry.updatedAt } : {}),
+        ...(typeof entry.title === 'string' && entry.title.trim() ? { title: entry.title.trim() } : {}),
+        ...(typeof entry.status === 'string' && entry.status.trim() ? { status: entry.status.trim() } : {}),
+        data
+      });
+    }
+
+    if (
+      page.length < PAPERCLIP_LABEL_PAGE_SIZE
+      || (requestedIssueId && records.length > 0)
+      || (requestedExternalId && page.length < PAPERCLIP_LABEL_PAGE_SIZE)
+    ) {
+      break;
+    }
+
+    offset += page.length;
+  }
+
+  return records;
+}
+
 async function findStoredStatusTransitionCommentAnnotation(
   ctx: PluginSetupContext,
   params: {
@@ -4727,6 +5579,41 @@ async function upsertGitHubIssueLinkRecord(
       commentsCount: githubIssue.commentsCount,
       linkedPullRequestNumbers: normalizeLinkedPullRequestNumbers(linkedPullRequestNumbers),
       labels: githubIssue.labels,
+      syncedAt: new Date().toISOString()
+    }
+  });
+}
+
+async function upsertGitHubPullRequestLinkRecord(
+  ctx: PluginSetupContext,
+  params: {
+    companyId: string;
+    projectId: string;
+    issueId: string;
+    repositoryUrl: string;
+    pullRequestNumber: number;
+    pullRequestUrl: string;
+    pullRequestTitle: string;
+    pullRequestState: 'open' | 'closed';
+  }
+): Promise<void> {
+  await ctx.entities.upsert({
+    entityType: PULL_REQUEST_LINK_ENTITY_TYPE,
+    scopeKind: 'issue',
+    scopeId: params.issueId,
+    externalId: params.pullRequestUrl,
+    title: `GitHub pull request #${params.pullRequestNumber}`,
+    status: params.pullRequestState,
+    data: {
+      companyId: params.companyId,
+      paperclipProjectId: params.projectId,
+      repositoryUrl: getNormalizedMappingRepositoryUrl({
+        repositoryUrl: params.repositoryUrl
+      }),
+      githubPullRequestNumber: params.pullRequestNumber,
+      githubPullRequestUrl: params.pullRequestUrl,
+      githubPullRequestState: params.pullRequestState,
+      title: params.pullRequestTitle,
       syncedAt: new Date().toISOString()
     }
   });
@@ -6071,7 +6958,14 @@ function shouldIgnoreGitHubIssue(
   issue: GitHubIssueRecord,
   advancedSettings: GitHubSyncAdvancedSettings
 ): boolean {
-  return Boolean(issue.authorLogin && advancedSettings.ignoredIssueAuthorUsernames.includes(issue.authorLogin));
+  if (!issue.authorLogin || advancedSettings.ignoredIssueAuthorUsernames.length === 0) {
+    return false;
+  }
+
+  const issueAuthorAliases = new Set(buildGitHubUsernameAliases(issue.authorLogin));
+  return advancedSettings.ignoredIssueAuthorUsernames.some((ignoredUsername) =>
+    buildGitHubUsernameAliases(ignoredUsername).some((alias) => issueAuthorAliases.has(alias))
+  );
 }
 
 async function applyDefaultAssigneeToPaperclipIssue(
@@ -7087,6 +7981,8 @@ async function listAllGitHubIssueComments(
         body: comment.body ?? '',
         url: comment.html_url ?? undefined,
         authorLogin: normalizeGitHubUserLogin(comment.user?.login),
+        authorUrl: comment.user?.html_url ?? undefined,
+        authorAvatarUrl: comment.user?.avatar_url ?? undefined,
         createdAt: comment.created_at ?? undefined,
         updatedAt: comment.updated_at ?? undefined
       });
@@ -7094,6 +7990,1696 @@ async function listAllGitHubIssueComments(
   }
 
   return comments;
+}
+
+async function listPaperclipIssuesForProject(
+  ctx: PluginSetupContext,
+  companyId: string,
+  projectId: string
+): Promise<Issue[]> {
+  const issues: Issue[] = [];
+
+  for (let offset = 0; ; ) {
+    const page = await ctx.issues.list({
+      companyId,
+      projectId,
+      limit: PAPERCLIP_LABEL_PAGE_SIZE,
+      offset
+    });
+
+    if (page.length === 0) {
+      break;
+    }
+
+    issues.push(...page);
+
+    if (page.length < PAPERCLIP_LABEL_PAGE_SIZE) {
+      break;
+    }
+
+    offset += page.length;
+  }
+
+  return issues;
+}
+
+function buildProjectPullRequestPerson(input: {
+  login?: string | null;
+  url?: string | null;
+  name?: string | null;
+  avatarUrl?: string | null;
+}): {
+  name: string;
+  handle: string;
+  profileUrl: string;
+  avatarUrl?: string;
+} {
+  const normalizedLogin = normalizeGitHubUsername(input.login) ?? 'unknown';
+  const displayName =
+    typeof input.name === 'string' && input.name.trim() ? input.name.trim() : normalizedLogin;
+  const profileUrl =
+    typeof input.url === 'string' && input.url.trim() ? input.url.trim() : `https://github.com/${normalizedLogin}`;
+  const avatarUrl = typeof input.avatarUrl === 'string' && input.avatarUrl.trim() ? input.avatarUrl.trim() : undefined;
+
+  return {
+    name: displayName,
+    handle: `@${normalizedLogin}`,
+    profileUrl,
+    ...(avatarUrl ? { avatarUrl } : {})
+  };
+}
+
+function normalizeProjectPullRequestLabels(
+  nodes: Array<{
+    name?: string | null;
+    color?: string | null;
+  } | null> | null | undefined
+): GitHubIssueLabelRecord[] {
+  if (!Array.isArray(nodes)) {
+    return [];
+  }
+
+  const seen = new Set<string>();
+  const labels: GitHubIssueLabelRecord[] = [];
+
+  for (const entry of nodes) {
+    const name = typeof entry?.name === 'string' ? entry.name.trim() : '';
+    if (!name) {
+      continue;
+    }
+
+    const key = normalizeLabelName(name);
+    if (seen.has(key)) {
+      continue;
+    }
+
+    seen.add(key);
+    labels.push({
+      name,
+      ...(normalizeHexColor(entry?.color) ? { color: normalizeHexColor(entry?.color) } : {})
+    });
+  }
+
+  return labels;
+}
+
+function summarizeGitHubPullRequestReviewsFromEntries(
+  entries: Array<{
+    state?: string | null;
+    authorLogin?: string | null;
+  }>
+): GitHubProjectPullRequestReviewSummary {
+  const latestStateByReviewer = new Map<string, 'APPROVED' | 'CHANGES_REQUESTED'>();
+  let anonymousApprovals = 0;
+  let anonymousChangesRequested = 0;
+
+  for (const entry of entries) {
+    const state = typeof entry.state === 'string' ? entry.state.trim().toUpperCase() : '';
+    const authorLogin = normalizeGitHubUsername(entry.authorLogin);
+
+    if (state === 'APPROVED') {
+      if (authorLogin) {
+        latestStateByReviewer.set(authorLogin, 'APPROVED');
+      } else {
+        anonymousApprovals += 1;
+      }
+      continue;
+    }
+
+    if (state === 'CHANGES_REQUESTED') {
+      if (authorLogin) {
+        latestStateByReviewer.set(authorLogin, 'CHANGES_REQUESTED');
+      } else {
+        anonymousChangesRequested += 1;
+      }
+      continue;
+    }
+
+    if (state === 'DISMISSED' && authorLogin) {
+      latestStateByReviewer.delete(authorLogin);
+    }
+  }
+
+  let approvals = anonymousApprovals;
+  let changesRequested = anonymousChangesRequested;
+
+  for (const state of latestStateByReviewer.values()) {
+    if (state === 'APPROVED') {
+      approvals += 1;
+    } else if (state === 'CHANGES_REQUESTED') {
+      changesRequested += 1;
+    }
+  }
+
+  return {
+    approvals,
+    changesRequested
+  };
+}
+
+function summarizeGitHubPullRequestReviewNodes(
+  nodes: Array<{
+    state?: string | null;
+    author?: {
+      login?: string | null;
+    } | null;
+  } | null> | null | undefined
+): GitHubProjectPullRequestReviewSummary {
+  const entries = (nodes ?? []).map((node) => ({
+    state: node?.state ?? undefined,
+    authorLogin: node?.author?.login ?? undefined
+  }));
+
+  return summarizeGitHubPullRequestReviewsFromEntries(entries);
+}
+
+async function listGitHubPullRequestReviewSummary(
+  octokit: Octokit,
+  repository: ParsedRepositoryReference,
+  pullRequestNumber: number
+): Promise<GitHubProjectPullRequestReviewSummary> {
+  const entries: Array<{
+    state?: string | null;
+    authorLogin?: string | null;
+  }> = [];
+
+  for await (const response of octokit.paginate.iterator(octokit.rest.pulls.listReviews, {
+    owner: repository.owner,
+    repo: repository.repo,
+    pull_number: pullRequestNumber,
+    per_page: 100,
+    headers: {
+      'X-GitHub-Api-Version': GITHUB_API_VERSION
+    }
+  })) {
+    for (const review of response.data) {
+      entries.push({
+        state: review.state ?? undefined,
+        authorLogin: review.user?.login ?? undefined
+      });
+    }
+  }
+
+  return summarizeGitHubPullRequestReviewsFromEntries(entries);
+}
+
+type LinkedPaperclipIssueForPullRequest = {
+  paperclipIssueId: string;
+  paperclipIssueKey?: string;
+};
+
+function buildProjectPullRequestScopeCacheKey(
+  params: {
+    companyId: string;
+    projectId: string;
+    repositoryUrl: string;
+  }
+): string {
+  return `${params.companyId}:${params.projectId}:${getNormalizedMappingRepositoryUrl({
+    repositoryUrl: params.repositoryUrl
+  })}`;
+}
+
+function buildProjectPullRequestPageCacheKey(
+  scope: ResolvedProjectPullRequestScope,
+  filter: ProjectPullRequestFilter,
+  pageIndex: number,
+  cursor?: string
+): string {
+  return `${buildProjectPullRequestScopeCacheKey({
+    companyId: scope.companyId,
+    projectId: scope.projectId,
+    repositoryUrl: scope.repository.url
+  })}:page:${filter}:${pageIndex}:${cursor ?? ''}`;
+}
+
+function buildProjectPullRequestDetailCacheKey(
+  scope: ResolvedProjectPullRequestScope,
+  pullRequestNumber: number
+): string {
+  return `${buildProjectPullRequestScopeCacheKey({
+    companyId: scope.companyId,
+    projectId: scope.projectId,
+    repositoryUrl: scope.repository.url
+  })}:detail:${pullRequestNumber}`;
+}
+
+function invalidateProjectPullRequestCaches(scope: Pick<ResolvedProjectPullRequestScope, 'companyId' | 'projectId' | 'repository'>): void {
+  const cacheKeyPrefix = `${buildProjectPullRequestScopeCacheKey({
+    companyId: scope.companyId,
+    projectId: scope.projectId,
+    repositoryUrl: scope.repository.url
+  })}:`;
+
+  for (const cache of [
+    activeProjectPullRequestPageCache,
+    activeProjectPullRequestCountCache,
+    activeProjectPullRequestMetricsCache,
+    activeProjectPullRequestSummaryCache,
+    activeProjectPullRequestDetailCache,
+    activeProjectPullRequestIssueLookupCache
+  ]) {
+    for (const key of cache.keys()) {
+      if (key.startsWith(cacheKeyPrefix)) {
+        cache.delete(key);
+      }
+    }
+  }
+}
+
+function selectImportedPaperclipIssueReference(
+  current: {
+    paperclipIssueId: string;
+    paperclipIssueKey?: string;
+    createdAt?: unknown;
+  } | undefined,
+  next: {
+    paperclipIssueId: string;
+    paperclipIssueKey?: string;
+    createdAt?: unknown;
+  }
+): {
+  paperclipIssueId: string;
+  paperclipIssueKey?: string;
+  createdAt?: unknown;
+} {
+  if (!current) {
+    return next;
+  }
+
+  return compareImportedPaperclipIssueCreatedAt(
+    {
+      id: next.paperclipIssueId,
+      createdAt: next.createdAt
+    },
+    {
+      id: current.paperclipIssueId,
+      createdAt: current.createdAt
+    }
+  ) < 0
+    ? next
+    : current;
+}
+
+async function buildProjectPullRequestIssueLookup(
+  ctx: PluginSetupContext,
+  scope: ResolvedProjectPullRequestScope
+): Promise<ProjectPullRequestIssueLookup> {
+  const cacheKey = `${buildProjectPullRequestScopeCacheKey({
+    companyId: scope.companyId,
+    projectId: scope.projectId,
+    repositoryUrl: scope.repository.url
+  })}:issue-lookup`;
+  const cachedLookup = getFreshCacheValue(activeProjectPullRequestIssueLookupCache, cacheKey);
+  if (cachedLookup) {
+    return cachedLookup;
+  }
+
+  const [projectIssues, issueLinks, pullRequestLinks] = await Promise.all([
+    listPaperclipIssuesForProject(ctx, scope.companyId, scope.projectId),
+    listGitHubIssueLinkRecords(ctx),
+    listGitHubPullRequestLinkRecords(ctx)
+  ]);
+  const issuesById = new Map(projectIssues.map((issue) => [issue.id, issue] as const));
+  const normalizedRepositoryUrl = scope.repository.url;
+  const linkedIssuesByGitHubIssueUrl = new Map<string, {
+    paperclipIssueId: string;
+    paperclipIssueKey?: string;
+    createdAt?: unknown;
+  }>();
+
+  for (const record of issueLinks) {
+    if (record.data.repositoryUrl !== normalizedRepositoryUrl) {
+      continue;
+    }
+
+    if (record.data.companyId && record.data.companyId !== scope.companyId) {
+      continue;
+    }
+
+    if (record.data.paperclipProjectId && record.data.paperclipProjectId !== scope.projectId) {
+      continue;
+    }
+
+    const linkedIssue = issuesById.get(record.paperclipIssueId);
+    linkedIssuesByGitHubIssueUrl.set(
+      record.data.githubIssueUrl,
+      selectImportedPaperclipIssueReference(
+        linkedIssuesByGitHubIssueUrl.get(record.data.githubIssueUrl),
+        {
+          paperclipIssueId: record.paperclipIssueId,
+          ...(linkedIssue?.identifier ? { paperclipIssueKey: linkedIssue.identifier } : {}),
+          createdAt: record.createdAt
+        }
+      )
+    );
+  }
+
+  for (const issue of projectIssues) {
+    const githubIssueUrl = extractImportedGitHubIssueUrlFromDescription(issue.description);
+    if (!githubIssueUrl) {
+      continue;
+    }
+
+    linkedIssuesByGitHubIssueUrl.set(
+      githubIssueUrl,
+      selectImportedPaperclipIssueReference(
+        linkedIssuesByGitHubIssueUrl.get(githubIssueUrl),
+        {
+          paperclipIssueId: issue.id,
+          ...(issue.identifier ? { paperclipIssueKey: issue.identifier } : {}),
+          createdAt: issue.createdAt
+        }
+      )
+    );
+  }
+
+  const fallbackIssuesByPullRequestNumber = new Map<number, LinkedPaperclipIssueForPullRequest>();
+  const sortedLinks = [...pullRequestLinks].sort((left, right) => {
+    const rightTimestamp = Date.parse(right.updatedAt ?? right.createdAt ?? '');
+    const leftTimestamp = Date.parse(left.updatedAt ?? left.createdAt ?? '');
+    const safeRightTimestamp = Number.isFinite(rightTimestamp) ? rightTimestamp : 0;
+    const safeLeftTimestamp = Number.isFinite(leftTimestamp) ? leftTimestamp : 0;
+    return safeRightTimestamp - safeLeftTimestamp;
+  });
+
+  for (const record of sortedLinks) {
+    if (record.data.repositoryUrl !== normalizedRepositoryUrl) {
+      continue;
+    }
+
+    if (record.data.companyId && record.data.companyId !== scope.companyId) {
+      continue;
+    }
+
+    if (record.data.paperclipProjectId && record.data.paperclipProjectId !== scope.projectId) {
+      continue;
+    }
+
+    if (fallbackIssuesByPullRequestNumber.has(record.data.githubPullRequestNumber)) {
+      continue;
+    }
+
+    const linkedIssue = issuesById.get(record.paperclipIssueId);
+    fallbackIssuesByPullRequestNumber.set(record.data.githubPullRequestNumber, {
+      paperclipIssueId: record.paperclipIssueId,
+      ...(linkedIssue?.identifier ? { paperclipIssueKey: linkedIssue.identifier } : {})
+    });
+  }
+
+  return setCacheValue(
+    activeProjectPullRequestIssueLookupCache,
+    cacheKey,
+    {
+      linkedIssuesByGitHubIssueUrl: new Map(
+        [...linkedIssuesByGitHubIssueUrl.entries()].map(([githubIssueUrl, value]) => [
+          githubIssueUrl,
+          {
+            paperclipIssueId: value.paperclipIssueId,
+            ...(value.paperclipIssueKey ? { paperclipIssueKey: value.paperclipIssueKey } : {})
+          }
+        ])
+      ),
+      fallbackIssuesByPullRequestNumber
+    },
+    PROJECT_PULL_REQUEST_ISSUE_LOOKUP_CACHE_TTL_MS
+  );
+}
+
+function resolveLinkedPaperclipIssueForPullRequest(
+  pullRequestNumber: number,
+  closingIssues: Array<{
+    number: number;
+    url: string;
+  }>,
+  issueLookup: ProjectPullRequestIssueLookup
+): LinkedPaperclipIssueForPullRequest | undefined {
+  for (const closingIssue of closingIssues) {
+    const linkedIssue = issueLookup.linkedIssuesByGitHubIssueUrl.get(closingIssue.url);
+    if (linkedIssue) {
+      return linkedIssue;
+    }
+  }
+
+  return issueLookup.fallbackIssuesByPullRequestNumber.get(pullRequestNumber);
+}
+
+function getProjectPullRequestStatus(
+  state: 'OPEN' | 'CLOSED' | 'MERGED' | null | undefined
+): 'open' | 'closed' | 'merged' {
+  switch (state) {
+    case 'MERGED':
+      return 'merged';
+    case 'CLOSED':
+      return 'closed';
+    default:
+      return 'open';
+  }
+}
+
+async function buildProjectPullRequestSummaryRecord(
+  octokit: Octokit,
+  repository: ParsedRepositoryReference,
+  node: NonNullable<NonNullable<NonNullable<GitHubProjectPullRequestsQueryResult['repository']>['pullRequests']>['nodes']>[number],
+  issueLookup: ProjectPullRequestIssueLookup,
+  pullRequestStatusCache: Map<number, GitHubPullRequestStatusSnapshot>
+): Promise<Record<string, unknown> | null> {
+  if (!node || typeof node.number !== 'number' || !node.url || !node.title?.trim()) {
+    return null;
+  }
+
+  const statusSnapshot = tryBuildGitHubPullRequestStatusSnapshotFromBatchNode({
+    number: node.number,
+    reviewThreads: node.reviewThreads,
+    statusCheckRollup: node.statusCheckRollup
+  }) ?? await getGitHubPullRequestStatusSnapshot(octokit, repository, node.number, pullRequestStatusCache);
+  const reviewThreadSummary = node.reviewThreads?.pageInfo?.hasNextPage
+    ? summarizeDetailedPullRequestReviewThreads(
+        await listDetailedPullRequestReviewThreads(octokit, repository, node.number)
+      )
+    : summarizeProjectPullRequestReviewThreadsFromConnection(node.reviewThreads);
+  const reviewSummary = node.reviews?.pageInfo?.hasNextPage
+    ? await listGitHubPullRequestReviewSummary(octokit, repository, node.number)
+    : summarizeGitHubPullRequestReviewNodes(node.reviews?.nodes);
+  const closingIssues = normalizeProjectPullRequestClosingIssues(repository, node.closingIssuesReferences?.nodes);
+  const linkedIssue = resolveLinkedPaperclipIssueForPullRequest(node.number, closingIssues, issueLookup);
+  const author = buildProjectPullRequestPerson({
+    login: node.author?.login,
+    url: node.author?.url,
+    avatarUrl: node.author?.avatarUrl
+  });
+  const checksStatus =
+    statusSnapshot.ciState === 'green'
+      ? 'passed'
+      : statusSnapshot.ciState === 'red'
+        ? 'failed'
+        : 'pending';
+  const githubMergeable = node.mergeable === 'MERGEABLE';
+  const reviewable = resolveProjectPullRequestReviewable({
+    checksStatus,
+    copilotUnresolvedReviewThreads: reviewThreadSummary.copilotUnresolvedReviewThreads,
+    githubMergeable
+  });
+  const mergeable = resolveProjectPullRequestMergeable({
+    checksStatus,
+    reviewApprovals: reviewSummary.approvals,
+    unresolvedReviewThreads: reviewThreadSummary.unresolvedReviewThreads,
+    githubMergeable
+  });
+
+  return {
+    id: node.id ?? `github-pull-request-${repository.owner}-${repository.repo}-${node.number}`,
+    number: node.number,
+    title: node.title.trim(),
+    labels: normalizeProjectPullRequestLabels(node.labels?.nodes),
+    author,
+    assignees: [],
+    checksStatus,
+    githubMergeable,
+    reviewable,
+    reviewApprovals: reviewSummary.approvals,
+    reviewChangesRequested: reviewSummary.changesRequested,
+    reviewCommentCount: 0,
+    unresolvedReviewThreads: reviewThreadSummary.unresolvedReviewThreads,
+    copilotUnresolvedReviewThreads: reviewThreadSummary.copilotUnresolvedReviewThreads,
+    commentsCount:
+      typeof node.comments?.totalCount === 'number' && node.comments.totalCount >= 0
+        ? Math.floor(node.comments.totalCount)
+        : 0,
+    createdAt: node.createdAt ?? new Date().toISOString(),
+    updatedAt: node.updatedAt ?? node.createdAt ?? new Date().toISOString(),
+    ...(linkedIssue?.paperclipIssueId ? { paperclipIssueId: linkedIssue.paperclipIssueId } : {}),
+    ...(linkedIssue?.paperclipIssueKey ? { paperclipIssueKey: linkedIssue.paperclipIssueKey } : {}),
+    mergeable,
+    status: getProjectPullRequestStatus(node.state),
+    githubUrl: node.url,
+    checksUrl: `${node.url}/checks`,
+    reviewsUrl: `${node.url}/files`,
+    reviewThreadsUrl: `${node.url}/files`,
+    commentsUrl: node.url,
+    baseBranch: node.baseRefName ?? '',
+    headBranch: node.headRefName ?? '',
+    commits: typeof node.commits?.totalCount === 'number' && node.commits.totalCount >= 0 ? Math.floor(node.commits.totalCount) : 0,
+    changedFiles: typeof node.changedFiles === 'number' && node.changedFiles >= 0 ? Math.floor(node.changedFiles) : 0
+  };
+}
+
+async function listProjectPullRequestSummaryRecords(
+  ctx: PluginSetupContext,
+  octokit: Octokit,
+  scope: ResolvedProjectPullRequestScope,
+  options?: {
+    after?: string;
+    first?: number;
+    collectAll?: boolean;
+  }
+): Promise<{
+  pullRequests: Record<string, unknown>[];
+  totalOpenPullRequests: number;
+  hasNextPage: boolean;
+  nextCursor?: string;
+}> {
+  const issueLookup = await buildProjectPullRequestIssueLookup(ctx, scope);
+  const pullRequestStatusCache = new Map<number, GitHubPullRequestStatusSnapshot>();
+  const pullRequests: Record<string, unknown>[] = [];
+  const first = Math.max(1, Math.floor(options?.first ?? PROJECT_PULL_REQUEST_PAGE_SIZE));
+  let after = typeof options?.after === 'string' && options.after.trim() ? options.after.trim() : undefined;
+  let totalOpenPullRequests = 0;
+  let hasNextPage = false;
+  let nextCursor: string | undefined;
+
+  do {
+    const response = await octokit.graphql<GitHubProjectPullRequestsQueryResult>(
+      GITHUB_PROJECT_PULL_REQUESTS_QUERY,
+      {
+        owner: scope.repository.owner,
+        repo: scope.repository.repo,
+        first,
+        after
+      }
+    );
+
+    const connection = response.repository?.pullRequests;
+    if (typeof connection?.totalCount === 'number' && connection.totalCount >= 0) {
+      totalOpenPullRequests = Math.floor(connection.totalCount);
+    }
+
+    const pageNodes = (connection?.nodes ?? []).filter((node): node is NonNullable<typeof node> => node !== null);
+    const pageRecords = await mapWithConcurrency(
+      pageNodes,
+      PROJECT_PULL_REQUEST_SUMMARY_CONCURRENCY,
+      async (node) =>
+        buildProjectPullRequestSummaryRecord(
+          octokit,
+          scope.repository,
+          node,
+          issueLookup,
+          pullRequestStatusCache
+        )
+    );
+
+    pullRequests.push(...pageRecords.filter((record): record is Record<string, unknown> => Boolean(record)));
+    nextCursor = getPageCursor(connection?.pageInfo);
+    hasNextPage = Boolean(connection?.pageInfo?.hasNextPage && nextCursor);
+
+    if (!options?.collectAll) {
+      break;
+    }
+
+    after = nextCursor;
+  } while (after);
+
+  return {
+    pullRequests,
+    totalOpenPullRequests,
+    hasNextPage,
+    ...(nextCursor ? { nextCursor } : {})
+  };
+}
+
+async function buildProjectPullRequestMetricCounts(
+  octokit: Octokit,
+  repository: ParsedRepositoryReference,
+  node: NonNullable<NonNullable<NonNullable<GitHubProjectPullRequestMetricsQueryResult['repository']>['pullRequests']>['nodes']>[number],
+  pullRequestStatusCache: Map<number, GitHubPullRequestStatusSnapshot>
+): Promise<Pick<ProjectPullRequestMetrics, 'mergeablePullRequests' | 'reviewablePullRequests' | 'failingPullRequests'>> {
+  if (!node || typeof node.number !== 'number') {
+    return {
+      mergeablePullRequests: 0,
+      reviewablePullRequests: 0,
+      failingPullRequests: 0
+    };
+  }
+
+  const statusSnapshot = tryBuildGitHubPullRequestStatusSnapshotFromBatchNode({
+    number: node.number,
+    reviewThreads: node.reviewThreads,
+    statusCheckRollup: node.statusCheckRollup
+  }) ?? await getGitHubPullRequestStatusSnapshot(octokit, repository, node.number, pullRequestStatusCache);
+  const reviewThreadSummary = node.reviewThreads?.pageInfo?.hasNextPage
+    ? summarizeDetailedPullRequestReviewThreads(
+        await listDetailedPullRequestReviewThreads(octokit, repository, node.number)
+      )
+    : summarizeProjectPullRequestReviewThreadsFromConnection(node.reviewThreads);
+  const reviewSummary = node.reviews?.pageInfo?.hasNextPage
+    ? await listGitHubPullRequestReviewSummary(octokit, repository, node.number)
+    : summarizeGitHubPullRequestReviewNodes(node.reviews?.nodes);
+  const checksStatus =
+    statusSnapshot.ciState === 'green'
+      ? 'passed'
+      : statusSnapshot.ciState === 'red'
+        ? 'failed'
+        : 'pending';
+  const githubMergeable = node.mergeable === 'MERGEABLE';
+  const reviewable = resolveProjectPullRequestReviewable({
+    checksStatus,
+    copilotUnresolvedReviewThreads: reviewThreadSummary.copilotUnresolvedReviewThreads,
+    githubMergeable
+  });
+  const mergeable = resolveProjectPullRequestMergeable({
+    checksStatus,
+    reviewApprovals: reviewSummary.approvals,
+    unresolvedReviewThreads: reviewThreadSummary.unresolvedReviewThreads,
+    githubMergeable
+  });
+
+  return {
+    mergeablePullRequests: mergeable ? 1 : 0,
+    reviewablePullRequests: reviewable ? 1 : 0,
+    failingPullRequests: checksStatus === 'failed' ? 1 : 0
+  };
+}
+
+async function listProjectPullRequestCount(
+  octokit: Octokit,
+  scope: ResolvedProjectPullRequestScope
+): Promise<number> {
+  const response = await octokit.graphql<GitHubProjectPullRequestCountQueryResult>(
+    GITHUB_PROJECT_OPEN_PULL_REQUEST_COUNT_QUERY,
+    {
+      owner: scope.repository.owner,
+      repo: scope.repository.repo
+    }
+  );
+
+  const totalCount = response.repository?.pullRequests?.totalCount;
+  return typeof totalCount === 'number' && totalCount >= 0 ? Math.floor(totalCount) : 0;
+}
+
+async function listProjectPullRequestMetrics(
+  octokit: Octokit,
+  scope: ResolvedProjectPullRequestScope
+): Promise<ProjectPullRequestMetrics> {
+  const pullRequestStatusCache = new Map<number, GitHubPullRequestStatusSnapshot>();
+  let totalOpenPullRequests = 0;
+  let mergeablePullRequests = 0;
+  let reviewablePullRequests = 0;
+  let failingPullRequests = 0;
+  let after: string | undefined;
+
+  do {
+    const response = await octokit.graphql<GitHubProjectPullRequestMetricsQueryResult>(
+      GITHUB_PROJECT_PULL_REQUEST_METRICS_QUERY,
+      {
+        owner: scope.repository.owner,
+        repo: scope.repository.repo,
+        first: PROJECT_PULL_REQUEST_METRICS_BATCH_SIZE,
+        after
+      }
+    );
+
+    const connection = response.repository?.pullRequests;
+    if (typeof connection?.totalCount === 'number' && connection.totalCount >= 0) {
+      totalOpenPullRequests = Math.floor(connection.totalCount);
+    }
+
+    const pageNodes = (connection?.nodes ?? []).filter((node): node is NonNullable<typeof node> => node !== null);
+    const pageMetrics = await mapWithConcurrency(
+      pageNodes,
+      PROJECT_PULL_REQUEST_SUMMARY_CONCURRENCY,
+      async (node) => buildProjectPullRequestMetricCounts(octokit, scope.repository, node, pullRequestStatusCache)
+    );
+
+    for (const pageMetric of pageMetrics) {
+      mergeablePullRequests += pageMetric.mergeablePullRequests;
+      reviewablePullRequests += pageMetric.reviewablePullRequests;
+      failingPullRequests += pageMetric.failingPullRequests;
+    }
+
+    after = getPageCursor(connection?.pageInfo);
+  } while (after);
+
+  return {
+    totalOpenPullRequests,
+    mergeablePullRequests,
+    reviewablePullRequests,
+    failingPullRequests
+  };
+}
+
+function buildProjectPullRequestMetricsCacheKey(
+  scope: Pick<ResolvedProjectPullRequestScope, 'companyId' | 'projectId' | 'repository'>
+): string {
+  return `${buildProjectPullRequestScopeCacheKey({
+    companyId: scope.companyId,
+    projectId: scope.projectId,
+    repositoryUrl: scope.repository.url
+  })}:metrics`;
+}
+
+function buildProjectPullRequestCountCacheKey(
+  scope: Pick<ResolvedProjectPullRequestScope, 'companyId' | 'projectId' | 'repository'>
+): string {
+  return `${buildProjectPullRequestScopeCacheKey({
+    companyId: scope.companyId,
+    projectId: scope.projectId,
+    repositoryUrl: scope.repository.url
+  })}:count`;
+}
+
+async function getOrLoadCachedProjectPullRequestCount(
+  ctx: PluginSetupContext,
+  scope: ResolvedProjectPullRequestScope,
+  octokit?: Octokit
+): Promise<number> {
+  const summaryCacheKey = `${buildProjectPullRequestScopeCacheKey({
+    companyId: scope.companyId,
+    projectId: scope.projectId,
+    repositoryUrl: scope.repository.url
+  })}:summary`;
+  const cachedSummary = getFreshCacheValue(activeProjectPullRequestSummaryCache, summaryCacheKey);
+  if (cachedSummary) {
+    return cachedSummary.totalOpenPullRequests;
+  }
+
+  const metricsCacheKey = buildProjectPullRequestMetricsCacheKey(scope);
+  const cachedMetrics = getFreshCacheValue(activeProjectPullRequestMetricsCache, metricsCacheKey);
+  if (cachedMetrics) {
+    return cachedMetrics.totalOpenPullRequests;
+  }
+
+  const countCacheKey = buildProjectPullRequestCountCacheKey(scope);
+  const cachedCount = getFreshCacheValue(activeProjectPullRequestCountCache, countCacheKey);
+  if (cachedCount !== null) {
+    return cachedCount;
+  }
+
+  const resolvedOctokit = octokit ?? await createGitHubToolOctokit(ctx);
+  const totalOpenPullRequests = await listProjectPullRequestCount(resolvedOctokit, scope);
+
+  return setCacheValue(
+    activeProjectPullRequestCountCache,
+    countCacheKey,
+    totalOpenPullRequests,
+    PROJECT_PULL_REQUEST_SUMMARY_CACHE_TTL_MS
+  );
+}
+
+async function getOrLoadCachedProjectPullRequestMetrics(
+  ctx: PluginSetupContext,
+  scope: ResolvedProjectPullRequestScope,
+  octokit?: Octokit
+): Promise<ProjectPullRequestMetrics> {
+  const summaryCacheKey = `${buildProjectPullRequestScopeCacheKey({
+    companyId: scope.companyId,
+    projectId: scope.projectId,
+    repositoryUrl: scope.repository.url
+  })}:summary`;
+  const cachedSummary = getFreshCacheValue(activeProjectPullRequestSummaryCache, summaryCacheKey);
+  if (cachedSummary) {
+    return cachedSummary.metrics;
+  }
+
+  const metricsCacheKey = buildProjectPullRequestMetricsCacheKey(scope);
+  const cachedMetrics = getFreshCacheValue(activeProjectPullRequestMetricsCache, metricsCacheKey);
+  if (cachedMetrics) {
+    return cachedMetrics;
+  }
+
+  const resolvedOctokit = octokit ?? await createGitHubToolOctokit(ctx);
+  const metrics = await listProjectPullRequestMetrics(resolvedOctokit, scope);
+
+  return setCacheValue(
+    activeProjectPullRequestMetricsCache,
+    metricsCacheKey,
+    metrics,
+    PROJECT_PULL_REQUEST_SUMMARY_CACHE_TTL_MS
+  );
+}
+
+async function getOrLoadCachedProjectPullRequestSummary(
+  ctx: PluginSetupContext,
+  scope: ResolvedProjectPullRequestScope,
+  octokit?: Octokit
+): Promise<CachedProjectPullRequestSummary> {
+  const cacheKey = `${buildProjectPullRequestScopeCacheKey({
+    companyId: scope.companyId,
+    projectId: scope.projectId,
+    repositoryUrl: scope.repository.url
+  })}:summary`;
+  const cachedSummary = getFreshCacheValue(activeProjectPullRequestSummaryCache, cacheKey);
+  if (cachedSummary) {
+    return cachedSummary;
+  }
+
+  const resolvedOctokit = octokit ?? await createGitHubToolOctokit(ctx);
+  const summary = await listProjectPullRequestSummaryRecords(ctx, resolvedOctokit, scope, {
+    collectAll: true,
+    first: PROJECT_PULL_REQUEST_SUMMARY_BATCH_SIZE
+  });
+  const metrics = buildProjectPullRequestMetrics(summary.pullRequests, summary.totalOpenPullRequests);
+  setCacheValue(
+    activeProjectPullRequestMetricsCache,
+    buildProjectPullRequestMetricsCacheKey(scope),
+    metrics,
+    PROJECT_PULL_REQUEST_SUMMARY_CACHE_TTL_MS
+  );
+
+  return setCacheValue(
+    activeProjectPullRequestSummaryCache,
+    cacheKey,
+    {
+      totalOpenPullRequests: summary.totalOpenPullRequests,
+      pullRequests: summary.pullRequests,
+      metrics
+    },
+    PROJECT_PULL_REQUEST_SUMMARY_CACHE_TTL_MS
+  );
+}
+
+function buildPaperclipIssueDescriptionFromPullRequest(params: {
+  repository: ParsedRepositoryReference;
+  pullRequestNumber: number;
+  pullRequestUrl: string;
+  body?: string | null;
+}): string {
+  const importLine =
+    `Imported from GitHub pull request [#${params.pullRequestNumber}](${params.pullRequestUrl})`
+    + ` in ${formatRepositoryLabel(params.repository)}.`;
+  const body = typeof params.body === 'string' ? params.body.trim() : '';
+  return body ? `${importLine}\n\n${body}` : importLine;
+}
+
+interface ResolvedProjectPullRequestScope {
+  companyId: string;
+  projectId: string;
+  projectLabel: string;
+  mapping: RepositoryMapping;
+  repository: ParsedRepositoryReference;
+  mappingCount: number;
+}
+
+async function requireProjectPullRequestScope(
+  ctx: PluginSetupContext,
+  input: Record<string, unknown>
+): Promise<ResolvedProjectPullRequestScope> {
+  const companyId = normalizeCompanyId(input.companyId);
+  const projectId = typeof input.projectId === 'string' && input.projectId.trim() ? input.projectId.trim() : undefined;
+
+  if (!companyId || !projectId) {
+    throw new Error('A company id and project id are required to load project pull requests.');
+  }
+
+  const settings = normalizeSettings(await ctx.state.get(SETTINGS_SCOPE));
+  const mappings = getSyncableMappingsForTarget(settings.mappings, {
+    kind: 'project',
+    companyId,
+    projectId,
+    displayLabel: 'project'
+  });
+  if (mappings.length === 0) {
+    throw new Error('No saved GitHub repository mapping matches this Paperclip project.');
+  }
+
+  const requestedRepositoryUrl =
+    typeof input.repositoryUrl === 'string' && input.repositoryUrl.trim()
+      ? getNormalizedMappingRepositoryUrl({
+          repositoryUrl: input.repositoryUrl
+        })
+      : undefined;
+  const sortedMappings = [...mappings].sort((left, right) =>
+    getNormalizedMappingRepositoryUrl(left).localeCompare(getNormalizedMappingRepositoryUrl(right))
+  );
+  const mapping = requestedRepositoryUrl
+    ? sortedMappings.find((entry) => getNormalizedMappingRepositoryUrl(entry) === requestedRepositoryUrl)
+    : sortedMappings[0];
+
+  if (!mapping) {
+    throw new Error('This Paperclip project is not mapped to the requested GitHub repository.');
+  }
+
+  return {
+    companyId,
+    projectId,
+    projectLabel: mapping.paperclipProjectName.trim() || 'Project',
+    mapping,
+    repository: requireRepositoryReference(mapping.repositoryUrl),
+    mappingCount: sortedMappings.length
+  };
+}
+
+async function buildProjectPullRequestsPageData(
+  ctx: PluginSetupContext,
+  input: Record<string, unknown>
+): Promise<Record<string, unknown>> {
+  const filter = normalizeProjectPullRequestFilter(input.filter);
+  const pageIndex = normalizeProjectPullRequestPageIndex(input.pageIndex);
+  const cursor = typeof input.cursor === 'string' && input.cursor.trim() ? input.cursor.trim() : undefined;
+  const companyId = normalizeCompanyId(input.companyId);
+  const projectId = typeof input.projectId === 'string' && input.projectId.trim() ? input.projectId.trim() : null;
+
+  if (!companyId || !projectId) {
+    return {
+      status: 'missing_project',
+      projectId,
+      projectLabel: 'Project',
+      repositoryLabel: '',
+      repositoryUrl: '',
+      repositoryDescription: '',
+      filter,
+      pageIndex: 0,
+      pageSize: PROJECT_PULL_REQUEST_PAGE_SIZE,
+      hasNextPage: false,
+      hasPreviousPage: false,
+      totalFilteredPullRequests: 0,
+      pullRequests: [],
+      message: 'Open this page from a mapped Paperclip project.'
+    };
+  }
+
+  const settings = normalizeSettings(await ctx.state.get(SETTINGS_SCOPE));
+  const projectMappings = getSyncableMappingsForTarget(settings.mappings, {
+    kind: 'project',
+    companyId,
+    projectId,
+    displayLabel: 'project'
+  });
+  if (projectMappings.length === 0) {
+    return {
+      status: 'unmapped',
+      projectId,
+      projectLabel: 'Project',
+      repositoryLabel: '',
+      repositoryUrl: '',
+      repositoryDescription: '',
+      filter,
+      pageIndex: 0,
+      pageSize: PROJECT_PULL_REQUEST_PAGE_SIZE,
+      hasNextPage: false,
+      hasPreviousPage: false,
+      totalFilteredPullRequests: 0,
+      pullRequests: [],
+      message: 'No GitHub repository is mapped to this project yet.'
+    };
+  }
+
+  const scope = await requireProjectPullRequestScope(ctx, input);
+  const config = await getResolvedConfig(ctx);
+  if (!hasConfiguredGithubToken(settings, config)) {
+    return {
+      status: 'missing_token',
+      projectId,
+      projectLabel: scope.projectLabel,
+      repositoryLabel: formatRepositoryLabel(scope.repository),
+      repositoryUrl: scope.repository.url,
+      repositoryDescription: '',
+      filter,
+      pageIndex: 0,
+      pageSize: PROJECT_PULL_REQUEST_PAGE_SIZE,
+      hasNextPage: false,
+      hasPreviousPage: false,
+      totalFilteredPullRequests: 0,
+      pullRequests: [],
+      message: 'Configure a GitHub token before opening pull requests.'
+    };
+  }
+
+  try {
+    const octokit = await createGitHubToolOctokit(ctx);
+    const scopeCacheKey = buildProjectPullRequestScopeCacheKey({
+      companyId: scope.companyId,
+      projectId: scope.projectId,
+      repositoryUrl: scope.repository.url
+    });
+    const cachedFullSummary = getFreshCacheValue(
+      activeProjectPullRequestSummaryCache,
+      `${scopeCacheKey}:summary`
+    );
+
+    if (filter !== 'all' || cachedFullSummary) {
+      const summary = cachedFullSummary ?? await getOrLoadCachedProjectPullRequestSummary(ctx, scope, octokit);
+      const filteredPullRequests = summary.pullRequests.filter((pullRequest) =>
+        matchesProjectPullRequestFilter(pullRequest, filter)
+      );
+      const page = sliceProjectPullRequestRecords(filteredPullRequests, pageIndex, PROJECT_PULL_REQUEST_PAGE_SIZE);
+
+      return {
+        status: 'ready',
+        projectId,
+        projectLabel: scope.projectLabel,
+        repositoryLabel: formatRepositoryLabel(scope.repository),
+        repositoryUrl: scope.repository.url,
+        repositoryDescription: '',
+        filter,
+        pageIndex: page.pageIndex,
+        pageSize: PROJECT_PULL_REQUEST_PAGE_SIZE,
+        hasNextPage: page.hasNextPage,
+        hasPreviousPage: page.hasPreviousPage,
+        totalFilteredPullRequests: filteredPullRequests.length,
+        totalOpenPullRequests: summary.totalOpenPullRequests,
+        pullRequests: page.pullRequests
+      };
+    }
+
+    const pageCacheKey = buildProjectPullRequestPageCacheKey(scope, filter, pageIndex, cursor);
+    const cachedPage = getFreshCacheValue(activeProjectPullRequestPageCache, pageCacheKey);
+    if (cachedPage) {
+      return cachedPage;
+    }
+
+    const summary = await listProjectPullRequestSummaryRecords(ctx, octokit, scope, {
+      after: cursor,
+      first: PROJECT_PULL_REQUEST_PAGE_SIZE
+    });
+
+    return setCacheValue(
+      activeProjectPullRequestPageCache,
+      pageCacheKey,
+      {
+        status: 'ready',
+        projectId,
+        projectLabel: scope.projectLabel,
+        repositoryLabel: formatRepositoryLabel(scope.repository),
+        repositoryUrl: scope.repository.url,
+        repositoryDescription: '',
+        filter,
+        pageIndex,
+        pageSize: PROJECT_PULL_REQUEST_PAGE_SIZE,
+        hasNextPage: summary.hasNextPage,
+        hasPreviousPage: pageIndex > 0,
+        totalFilteredPullRequests: summary.totalOpenPullRequests,
+        totalOpenPullRequests: summary.totalOpenPullRequests,
+        ...(summary.nextCursor ? { nextCursor: summary.nextCursor } : {}),
+        pullRequests: summary.pullRequests
+      },
+      PROJECT_PULL_REQUEST_PAGE_CACHE_TTL_MS
+    );
+  } catch (error) {
+    return {
+      status: 'error',
+      projectId,
+      projectLabel: scope.projectLabel,
+      repositoryLabel: formatRepositoryLabel(scope.repository),
+      repositoryUrl: scope.repository.url,
+      repositoryDescription: '',
+      filter,
+      pageIndex,
+      pageSize: PROJECT_PULL_REQUEST_PAGE_SIZE,
+      hasNextPage: false,
+      hasPreviousPage: pageIndex > 0,
+      totalFilteredPullRequests: 0,
+      pullRequests: [],
+      message: getErrorMessage(error)
+    };
+  }
+}
+
+async function buildProjectPullRequestMetricsData(
+  ctx: PluginSetupContext,
+  input: Record<string, unknown>
+): Promise<Record<string, unknown>> {
+  const companyId = normalizeCompanyId(input.companyId);
+  const projectId = typeof input.projectId === 'string' && input.projectId.trim() ? input.projectId.trim() : null;
+
+  if (!companyId || !projectId) {
+    return {
+      status: 'missing_project',
+      projectId,
+      totalOpenPullRequests: 0,
+      mergeablePullRequests: 0,
+      reviewablePullRequests: 0,
+      failingPullRequests: 0
+    };
+  }
+
+  const settings = normalizeSettings(await ctx.state.get(SETTINGS_SCOPE));
+  const projectMappings = getSyncableMappingsForTarget(settings.mappings, {
+    kind: 'project',
+    companyId,
+    projectId,
+    displayLabel: 'project'
+  });
+  if (projectMappings.length === 0) {
+    return {
+      status: 'unmapped',
+      projectId,
+      totalOpenPullRequests: 0,
+      mergeablePullRequests: 0,
+      reviewablePullRequests: 0,
+      failingPullRequests: 0
+    };
+  }
+
+  const config = await getResolvedConfig(ctx);
+  if (!hasConfiguredGithubToken(settings, config)) {
+    return {
+      status: 'missing_token',
+      projectId,
+      totalOpenPullRequests: 0,
+      mergeablePullRequests: 0,
+      reviewablePullRequests: 0,
+      failingPullRequests: 0
+    };
+  }
+
+  try {
+    const scope = await requireProjectPullRequestScope(ctx, input);
+    const metrics = await getOrLoadCachedProjectPullRequestMetrics(ctx, scope);
+    return {
+      status: 'ready',
+      projectId,
+      ...metrics
+    };
+  } catch (error) {
+    return {
+      status: 'error',
+      projectId,
+      message: getErrorMessage(error)
+    };
+  }
+}
+
+async function buildProjectPullRequestCountData(
+  ctx: PluginSetupContext,
+  input: Record<string, unknown>
+): Promise<Record<string, unknown>> {
+  const companyId = normalizeCompanyId(input.companyId);
+  const projectId = typeof input.projectId === 'string' && input.projectId.trim() ? input.projectId.trim() : null;
+
+  if (!companyId || !projectId) {
+    return {
+      status: 'missing_project',
+      projectId,
+      totalOpenPullRequests: 0
+    };
+  }
+
+  const settings = normalizeSettings(await ctx.state.get(SETTINGS_SCOPE));
+  const projectMappings = getSyncableMappingsForTarget(settings.mappings, {
+    kind: 'project',
+    companyId,
+    projectId,
+    displayLabel: 'project'
+  });
+  if (projectMappings.length === 0) {
+    return {
+      status: 'unmapped',
+      projectId,
+      totalOpenPullRequests: 0
+    };
+  }
+
+  const config = await getResolvedConfig(ctx);
+  if (!hasConfiguredGithubToken(settings, config)) {
+    return {
+      status: 'missing_token',
+      projectId,
+      totalOpenPullRequests: 0
+    };
+  }
+
+  try {
+    const scope = await requireProjectPullRequestScope(ctx, input);
+    const totalOpenPullRequests = await getOrLoadCachedProjectPullRequestCount(ctx, scope);
+    return {
+      status: 'ready',
+      projectId,
+      totalOpenPullRequests
+    };
+  } catch (error) {
+    return {
+      status: 'error',
+      projectId,
+      totalOpenPullRequests: 0,
+      message: getErrorMessage(error)
+    };
+  }
+}
+
+async function listProjectPullRequestClosingIssues(
+  octokit: Octokit,
+  repository: ParsedRepositoryReference,
+  pullRequestNumber: number
+): Promise<Array<{
+  number: number;
+  url: string;
+}>> {
+  const response = await octokit.graphql<GitHubPullRequestClosingIssuesQueryResult>(
+    GITHUB_PULL_REQUEST_CLOSING_ISSUES_QUERY,
+    {
+      owner: repository.owner,
+      repo: repository.repo,
+      pullRequestNumber
+    }
+  );
+
+  return normalizeProjectPullRequestClosingIssues(
+    repository,
+    response.repository?.pullRequest?.closingIssuesReferences?.nodes
+  );
+}
+
+function getPullRequestApiState(value: {
+  state?: string | null;
+  merged?: boolean | null;
+}): 'open' | 'closed' | 'merged' {
+  if (value.merged === true) {
+    return 'merged';
+  }
+
+  return value.state === 'closed' ? 'closed' : 'open';
+}
+
+async function buildProjectPullRequestDetailData(
+  ctx: PluginSetupContext,
+  input: Record<string, unknown>
+): Promise<Record<string, unknown> | null> {
+  const pullRequestNumber = normalizeToolPositiveInteger(input.pullRequestNumber);
+  if (!pullRequestNumber) {
+    return null;
+  }
+
+  const scope = await requireProjectPullRequestScope(ctx, input);
+  const detailCacheKey = buildProjectPullRequestDetailCacheKey(scope, pullRequestNumber);
+  const cachedDetail = getFreshCacheValue(activeProjectPullRequestDetailCache, detailCacheKey);
+  if (cachedDetail !== null) {
+    return cachedDetail;
+  }
+
+  const octokit = await createGitHubToolOctokit(ctx);
+  const response = await octokit.rest.pulls.get({
+    owner: scope.repository.owner,
+    repo: scope.repository.repo,
+    pull_number: pullRequestNumber,
+    headers: {
+      'X-GitHub-Api-Version': GITHUB_API_VERSION
+    }
+  });
+  const issueLookup = await buildProjectPullRequestIssueLookup(ctx, scope);
+  const pullRequest = response.data;
+  const [statusSnapshot, reviewSummary, reviewThreads, comments, closingIssues] = await Promise.all([
+    getGitHubPullRequestStatusSnapshot(octokit, scope.repository, pullRequestNumber, new Map()),
+    listGitHubPullRequestReviewSummary(octokit, scope.repository, pullRequestNumber),
+    listDetailedPullRequestReviewThreads(octokit, scope.repository, pullRequestNumber),
+    listAllGitHubIssueComments(octokit, scope.repository, pullRequestNumber),
+    listProjectPullRequestClosingIssues(octokit, scope.repository, pullRequestNumber)
+  ]);
+  const linkedIssue = resolveLinkedPaperclipIssueForPullRequest(
+    pullRequestNumber,
+    closingIssues,
+    issueLookup
+  );
+  const reviewThreadSummary = summarizeDetailedPullRequestReviewThreads(reviewThreads);
+  const author = buildProjectPullRequestPerson({
+    login: pullRequest.user?.login,
+    url: pullRequest.user?.html_url,
+    avatarUrl: pullRequest.user?.avatar_url
+  });
+  const timeline: Array<Record<string, unknown>> = [];
+  const trimmedBody = pullRequest.body?.trim() ?? '';
+
+  if (trimmedBody) {
+    timeline.push({
+      id: `github-pull-request-${pullRequestNumber}-description`,
+      kind: 'description',
+      author,
+      createdAt: pullRequest.created_at ?? new Date().toISOString(),
+      body: trimmedBody
+    });
+  }
+
+  for (const comment of comments) {
+    timeline.push({
+      id: `github-pull-request-${pullRequestNumber}-comment-${comment.id}`,
+      kind: 'comment',
+      author: buildProjectPullRequestPerson({
+        login: comment.authorLogin,
+        url: comment.authorUrl,
+        avatarUrl: comment.authorAvatarUrl
+      }),
+      createdAt: comment.createdAt ?? comment.updatedAt ?? pullRequest.updated_at ?? new Date().toISOString(),
+      body: comment.body
+    });
+  }
+
+  timeline.sort((left, right) =>
+    Date.parse(String(left.createdAt ?? '')) - Date.parse(String(right.createdAt ?? ''))
+  );
+
+  const checksStatus =
+    statusSnapshot.ciState === 'green'
+      ? 'passed'
+      : statusSnapshot.ciState === 'red'
+        ? 'failed'
+        : 'pending';
+  const githubMergeable = pullRequest.mergeable === true;
+  const reviewable = resolveProjectPullRequestReviewable({
+    checksStatus,
+    copilotUnresolvedReviewThreads: reviewThreadSummary.copilotUnresolvedReviewThreads,
+    githubMergeable
+  });
+  const mergeable = resolveProjectPullRequestMergeable({
+    checksStatus,
+    reviewApprovals: reviewSummary.approvals,
+    unresolvedReviewThreads: reviewThreadSummary.unresolvedReviewThreads,
+    githubMergeable
+  });
+
+  return setCacheValue(
+    activeProjectPullRequestDetailCache,
+    detailCacheKey,
+    {
+      id: `github-pull-request-${scope.repository.owner}-${scope.repository.repo}-${pullRequestNumber}`,
+      number: pullRequest.number,
+      title: pullRequest.title,
+      labels: normalizeGitHubIssueLabels((pullRequest as GitHubApiIssueRecord).labels),
+      author,
+      assignees: (pullRequest.assignees ?? []).map((assignee) => buildProjectPullRequestPerson({
+        login: assignee?.login,
+        url: assignee?.html_url,
+        avatarUrl: assignee?.avatar_url
+      })),
+      checksStatus,
+      githubMergeable,
+      reviewable,
+      reviewApprovals: reviewSummary.approvals,
+      reviewChangesRequested: reviewSummary.changesRequested,
+      reviewCommentCount:
+        typeof pullRequest.review_comments === 'number' && pullRequest.review_comments >= 0
+          ? Math.floor(pullRequest.review_comments)
+          : 0,
+      unresolvedReviewThreads: reviewThreadSummary.unresolvedReviewThreads,
+      copilotUnresolvedReviewThreads: reviewThreadSummary.copilotUnresolvedReviewThreads,
+      commentsCount:
+        typeof pullRequest.comments === 'number' && pullRequest.comments >= 0
+          ? Math.floor(pullRequest.comments)
+          : comments.length,
+      createdAt: pullRequest.created_at ?? new Date().toISOString(),
+      updatedAt: pullRequest.updated_at ?? pullRequest.created_at ?? new Date().toISOString(),
+      ...(linkedIssue?.paperclipIssueId ? { paperclipIssueId: linkedIssue.paperclipIssueId } : {}),
+      ...(linkedIssue?.paperclipIssueKey ? { paperclipIssueKey: linkedIssue.paperclipIssueKey } : {}),
+      mergeable,
+      status: getPullRequestApiState({
+        state: pullRequest.state,
+        merged: pullRequest.merged
+      }),
+      githubUrl: pullRequest.html_url,
+      checksUrl: `${pullRequest.html_url}/checks`,
+      reviewsUrl: `${pullRequest.html_url}/files`,
+      reviewThreadsUrl: `${pullRequest.html_url}/files`,
+      commentsUrl: pullRequest.html_url,
+      baseBranch: pullRequest.base.ref,
+      headBranch: pullRequest.head.ref,
+      commits: typeof pullRequest.commits === 'number' && pullRequest.commits >= 0 ? pullRequest.commits : 0,
+      changedFiles:
+        typeof pullRequest.changed_files === 'number' && pullRequest.changed_files >= 0
+          ? pullRequest.changed_files
+          : 0,
+      timeline
+    },
+    PROJECT_PULL_REQUEST_DETAIL_CACHE_TTL_MS
+  );
+}
+
+async function createProjectPullRequestPaperclipIssue(
+  ctx: PluginSetupContext,
+  input: Record<string, unknown>
+): Promise<Record<string, unknown>> {
+  const pullRequestNumber = normalizeToolPositiveInteger(input.pullRequestNumber);
+  if (!pullRequestNumber) {
+    throw new Error('pullRequestNumber is required.');
+  }
+
+  if (!ctx.issues || typeof ctx.issues.create !== 'function') {
+    throw new Error('This Paperclip runtime does not expose plugin issue creation yet.');
+  }
+
+  const scope = await requireProjectPullRequestScope(ctx, input);
+  const octokit = await createGitHubToolOctokit(ctx);
+  const pullRequestResponse = await octokit.rest.pulls.get({
+    owner: scope.repository.owner,
+    repo: scope.repository.repo,
+    pull_number: pullRequestNumber,
+    headers: {
+      'X-GitHub-Api-Version': GITHUB_API_VERSION
+    }
+  });
+  const pullRequest = pullRequestResponse.data;
+  const pullRequestUrl = pullRequest.html_url;
+  const existingLinks = await listGitHubPullRequestLinkRecords(ctx, {
+    externalId: pullRequestUrl
+  });
+  const existingLink = existingLinks.find((record) =>
+    record.data.githubPullRequestNumber === pullRequestNumber &&
+    record.data.repositoryUrl === scope.repository.url &&
+    (!record.data.companyId || record.data.companyId === scope.companyId) &&
+    (!record.data.paperclipProjectId || record.data.paperclipProjectId === scope.projectId)
+  );
+  const existingIssue = existingLink
+    ? await ctx.issues.get(existingLink.paperclipIssueId, scope.companyId)
+    : null;
+
+  if (existingLink && existingIssue) {
+    return {
+      paperclipIssueId: existingIssue.id,
+      ...(existingIssue.identifier ? { paperclipIssueKey: existingIssue.identifier } : {}),
+      alreadyLinked: true
+    };
+  }
+
+  const requestedTitle = typeof input.title === 'string' && input.title.trim() ? input.title.trim() : pullRequest.title.trim();
+  const createdIssue = await ctx.issues.create({
+    companyId: scope.companyId,
+    projectId: scope.projectId,
+    title: requestedTitle,
+    description: buildPaperclipIssueDescriptionFromPullRequest({
+      repository: scope.repository,
+      pullRequestNumber,
+      pullRequestUrl,
+      body: pullRequest.body
+    })
+  });
+  const resolvedIssue = await ctx.issues.get(createdIssue.id, scope.companyId) ?? createdIssue;
+
+  await upsertGitHubPullRequestLinkRecord(ctx, {
+    companyId: scope.companyId,
+    projectId: scope.projectId,
+    issueId: resolvedIssue.id,
+    repositoryUrl: scope.repository.url,
+    pullRequestNumber,
+    pullRequestUrl,
+    pullRequestTitle: pullRequest.title,
+    pullRequestState: getPullRequestApiState({
+      state: pullRequest.state,
+      merged: pullRequest.merged
+    }) === 'open'
+      ? 'open'
+      : 'closed'
+  });
+  invalidateProjectPullRequestCaches(scope);
+
+  return {
+    paperclipIssueId: resolvedIssue.id,
+    ...(resolvedIssue.identifier ? { paperclipIssueKey: resolvedIssue.identifier } : {}),
+    alreadyLinked: false
+  };
+}
+
+async function mergeProjectPullRequest(
+  ctx: PluginSetupContext,
+  input: Record<string, unknown>
+): Promise<Record<string, unknown>> {
+  const pullRequestNumber = normalizeToolPositiveInteger(input.pullRequestNumber);
+  if (!pullRequestNumber) {
+    throw new Error('pullRequestNumber is required.');
+  }
+
+  const scope = await requireProjectPullRequestScope(ctx, input);
+  const octokit = await createGitHubToolOctokit(ctx);
+  const response = await octokit.rest.pulls.merge({
+    owner: scope.repository.owner,
+    repo: scope.repository.repo,
+    pull_number: pullRequestNumber,
+    headers: {
+      'X-GitHub-Api-Version': GITHUB_API_VERSION
+    }
+  });
+
+  if (response.data.merged !== true) {
+    throw new Error(response.data.message ?? `GitHub did not merge pull request #${pullRequestNumber}.`);
+  }
+
+  invalidateProjectPullRequestCaches(scope);
+  return {
+    githubUrl: `${scope.repository.url}/pull/${pullRequestNumber}`,
+    status: 'merged'
+  };
+}
+
+async function closeProjectPullRequest(
+  ctx: PluginSetupContext,
+  input: Record<string, unknown>
+): Promise<Record<string, unknown>> {
+  const pullRequestNumber = normalizeToolPositiveInteger(input.pullRequestNumber);
+  if (!pullRequestNumber) {
+    throw new Error('pullRequestNumber is required.');
+  }
+
+  const scope = await requireProjectPullRequestScope(ctx, input);
+  const octokit = await createGitHubToolOctokit(ctx);
+  const response = await octokit.rest.pulls.update({
+    owner: scope.repository.owner,
+    repo: scope.repository.repo,
+    pull_number: pullRequestNumber,
+    state: 'closed',
+    headers: {
+      'X-GitHub-Api-Version': GITHUB_API_VERSION
+    }
+  });
+
+  invalidateProjectPullRequestCaches(scope);
+  return {
+    githubUrl: response.data.html_url ?? `${scope.repository.url}/pull/${pullRequestNumber}`,
+    status: getPullRequestApiState({
+      state: response.data.state,
+      merged: response.data.merged
+    })
+  };
+}
+
+async function addProjectPullRequestComment(
+  ctx: PluginSetupContext,
+  input: Record<string, unknown>
+): Promise<Record<string, unknown>> {
+  const pullRequestNumber = normalizeToolPositiveInteger(input.pullRequestNumber);
+  if (!pullRequestNumber) {
+    throw new Error('pullRequestNumber is required.');
+  }
+
+  const body = typeof input.body === 'string' ? input.body.trim() : '';
+  if (!body) {
+    throw new Error('Comment body cannot be empty.');
+  }
+
+  const scope = await requireProjectPullRequestScope(ctx, input);
+  const octokit = await createGitHubToolOctokit(ctx);
+  const response = await octokit.rest.issues.createComment({
+    owner: scope.repository.owner,
+    repo: scope.repository.repo,
+    issue_number: pullRequestNumber,
+    body,
+    headers: {
+      'X-GitHub-Api-Version': GITHUB_API_VERSION
+    }
+  });
+
+  invalidateProjectPullRequestCaches(scope);
+  return {
+    commentId: response.data.id,
+    commentUrl: response.data.html_url ?? `${scope.repository.url}/pull/${pullRequestNumber}`
+  };
+}
+
+async function reviewProjectPullRequest(
+  ctx: PluginSetupContext,
+  input: Record<string, unknown>
+): Promise<Record<string, unknown>> {
+  const pullRequestNumber = normalizeToolPositiveInteger(input.pullRequestNumber);
+  if (!pullRequestNumber) {
+    throw new Error('pullRequestNumber is required.');
+  }
+
+  const reviewType =
+    input.review === 'approve'
+      ? 'APPROVE'
+      : input.review === 'request_changes'
+        ? 'REQUEST_CHANGES'
+        : undefined;
+  if (!reviewType) {
+    throw new Error('review must be "approve" or "request_changes".');
+  }
+
+  const body = typeof input.body === 'string' ? input.body.trim() : '';
+  const scope = await requireProjectPullRequestScope(ctx, input);
+  const octokit = await createGitHubToolOctokit(ctx);
+  const response = await octokit.rest.pulls.createReview({
+    owner: scope.repository.owner,
+    repo: scope.repository.repo,
+    pull_number: pullRequestNumber,
+    event: reviewType,
+    ...(body ? { body } : {}),
+    headers: {
+      'X-GitHub-Api-Version': GITHUB_API_VERSION
+    }
+  });
+
+  invalidateProjectPullRequestCaches(scope);
+  return {
+    reviewId: response.data.id,
+    review:
+      reviewType === 'APPROVE'
+        ? 'approved'
+        : 'changes_requested',
+    reviewUrl: response.data.html_url ?? `${scope.repository.url}/pull/${pullRequestNumber}`
+  };
+}
+
+function isFailedCheckSuiteConclusion(value: string | null | undefined): boolean {
+  switch (value?.trim().toLowerCase()) {
+    case 'action_required':
+    case 'cancelled':
+    case 'failure':
+    case 'stale':
+    case 'timed_out':
+      return true;
+    default:
+      return false;
+  }
+}
+
+async function rerunProjectPullRequestCi(
+  ctx: PluginSetupContext,
+  input: Record<string, unknown>
+): Promise<Record<string, unknown>> {
+  const pullRequestNumber = normalizeToolPositiveInteger(input.pullRequestNumber);
+  if (!pullRequestNumber) {
+    throw new Error('pullRequestNumber is required.');
+  }
+
+  const scope = await requireProjectPullRequestScope(ctx, input);
+  const octokit = await createGitHubToolOctokit(ctx);
+  const pullRequestResponse = await octokit.rest.pulls.get({
+    owner: scope.repository.owner,
+    repo: scope.repository.repo,
+    pull_number: pullRequestNumber,
+    headers: {
+      'X-GitHub-Api-Version': GITHUB_API_VERSION
+    }
+  });
+
+  const checkSuitesResponse = await octokit.rest.checks.listSuitesForRef({
+    owner: scope.repository.owner,
+    repo: scope.repository.repo,
+    ref: pullRequestResponse.data.head.sha,
+    per_page: 100,
+    headers: {
+      'X-GitHub-Api-Version': GITHUB_API_VERSION
+    }
+  });
+
+  const rerunnableSuites = checkSuitesResponse.data.check_suites.filter((suite) =>
+    suite.status === 'completed' && isFailedCheckSuiteConclusion(suite.conclusion)
+  );
+  if (rerunnableSuites.length === 0) {
+    throw new Error('No failed GitHub check suites are available to re-run for this pull request.');
+  }
+
+  for (const suite of rerunnableSuites) {
+    await octokit.rest.checks.rerequestSuite({
+      owner: scope.repository.owner,
+      repo: scope.repository.repo,
+      check_suite_id: suite.id,
+      headers: {
+        'X-GitHub-Api-Version': GITHUB_API_VERSION
+      }
+    });
+  }
+
+  invalidateProjectPullRequestCaches(scope);
+  return {
+    rerunCheckSuiteCount: rerunnableSuites.length,
+    githubUrl: `${scope.repository.url}/pull/${pullRequestNumber}/checks`
+  };
 }
 
 async function listAllPullRequestFiles(
@@ -8869,6 +11455,26 @@ const plugin = definePlugin({
       return buildToolbarSyncState(ctx, record);
     });
 
+    ctx.data.register('project.pullRequests.page', async (input) => {
+      const record = input && typeof input === 'object' ? input as Record<string, unknown> : {};
+      return buildProjectPullRequestsPageData(ctx, record);
+    });
+
+    ctx.data.register('project.pullRequests.metrics', async (input) => {
+      const record = input && typeof input === 'object' ? input as Record<string, unknown> : {};
+      return buildProjectPullRequestMetricsData(ctx, record);
+    });
+
+    ctx.data.register('project.pullRequests.count', async (input) => {
+      const record = input && typeof input === 'object' ? input as Record<string, unknown> : {};
+      return buildProjectPullRequestCountData(ctx, record);
+    });
+
+    ctx.data.register('project.pullRequests.detail', async (input) => {
+      const record = input && typeof input === 'object' ? input as Record<string, unknown> : {};
+      return buildProjectPullRequestDetailData(ctx, record);
+    });
+
     ctx.data.register('issue.githubDetails', async (input) => {
       const record = input && typeof input === 'object' ? input as Record<string, unknown> : {};
       return buildIssueGitHubDetails(ctx, record);
@@ -9014,6 +11620,36 @@ const plugin = definePlugin({
       }
 
       return validateGithubToken(trimmedToken);
+    });
+
+    ctx.actions.register('project.pullRequests.createIssue', async (input) => {
+      const record = input && typeof input === 'object' ? input as Record<string, unknown> : {};
+      return createProjectPullRequestPaperclipIssue(ctx, record);
+    });
+
+    ctx.actions.register('project.pullRequests.merge', async (input) => {
+      const record = input && typeof input === 'object' ? input as Record<string, unknown> : {};
+      return mergeProjectPullRequest(ctx, record);
+    });
+
+    ctx.actions.register('project.pullRequests.close', async (input) => {
+      const record = input && typeof input === 'object' ? input as Record<string, unknown> : {};
+      return closeProjectPullRequest(ctx, record);
+    });
+
+    ctx.actions.register('project.pullRequests.addComment', async (input) => {
+      const record = input && typeof input === 'object' ? input as Record<string, unknown> : {};
+      return addProjectPullRequestComment(ctx, record);
+    });
+
+    ctx.actions.register('project.pullRequests.review', async (input) => {
+      const record = input && typeof input === 'object' ? input as Record<string, unknown> : {};
+      return reviewProjectPullRequest(ctx, record);
+    });
+
+    ctx.actions.register('project.pullRequests.rerunCi', async (input) => {
+      const record = input && typeof input === 'object' ? input as Record<string, unknown> : {};
+      return rerunProjectPullRequestCi(ctx, record);
     });
 
     ctx.actions.register('sync.runNow', async (input) => {

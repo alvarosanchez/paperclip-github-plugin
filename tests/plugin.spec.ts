@@ -231,6 +231,32 @@ async function createGitHubAgentToolHarness() {
   return harness;
 }
 
+async function createProjectPullRequestsHarness() {
+  const harness = createTestHarness({
+    manifest,
+    config: {
+      githubToken: 'ghp_test_token'
+    }
+  });
+  await plugin.definition.setup(harness.ctx);
+  await harness.performAction('settings.saveRegistration', {
+    mappings: [
+      {
+        id: 'mapping-a',
+        repositoryUrl: 'paperclipai/example-repo',
+        paperclipProjectName: 'Engineering',
+        paperclipProjectId: 'project-1',
+        companyId: 'company-1'
+      }
+    ],
+    syncState: {
+      status: 'idle'
+    }
+  });
+
+  return harness;
+}
+
 test('discoverExistingProjectSyncCandidates normalizes GitHub workspaces and ignores non-GitHub links', () => {
   const candidates = discoverExistingProjectSyncCandidates({
     projects: [
@@ -1250,12 +1276,13 @@ test('normalizePluginConfig canonicalizes the trusted Paperclip API origin and d
   );
 });
 
-test('manifest exposes GitHub Sync dashboard and settings UI metadata, config schema, and job', () => {
+test('manifest exposes GitHub Sync page, sidebar, dashboard, and settings UI metadata, config schema, and job', () => {
   assert.equal(manifest.id, 'paperclip-github-plugin');
   assert.equal(manifest.apiVersion, 1);
   assert.equal(manifest.entrypoints.worker, './dist/worker.js');
   assert.equal(manifest.jobs?.[0]?.jobKey, 'sync.github-issues');
   assert.equal(manifest.jobs?.[0]?.schedule, '* * * * *');
+  assert.ok(manifest.capabilities.includes('ui.sidebar.register'));
   assert.ok(manifest.capabilities.some((capability) => capability === 'ui.dashboardWidget.register'));
   assert.ok(manifest.capabilities.includes('ui.detailTab.register'));
   assert.ok(manifest.capabilities.includes('ui.commentAnnotation.register'));
@@ -1267,24 +1294,931 @@ test('manifest exposes GitHub Sync dashboard and settings UI metadata, config sc
   assert.ok(manifest.capabilities.includes('agents.read'));
   assert.equal((manifest.instanceConfigSchema as { properties?: Record<string, unknown> }).properties?.githubTokenRef ? 'present' : 'missing', 'present');
   assert.equal((manifest.instanceConfigSchema as { properties?: Record<string, unknown> }).properties?.paperclipBoardApiTokenRefs ? 'present' : 'missing', 'present');
+  const pullRequestsPageSlot = manifest.ui?.slots?.find((slot) => slot.id === 'paperclip-github-plugin-project-pull-requests-page');
+  const projectSidebarItemSlot = manifest.ui?.slots?.find((slot) => slot.id === 'paperclip-github-plugin-project-pull-requests-sidebar-item');
   const settingsSlot = manifest.ui?.slots?.find((slot) => slot.type === 'settingsPage');
   const dashboardSlot = manifest.ui?.slots?.find((slot) => slot.type === 'dashboardWidget');
   const issueDetailSlot = manifest.ui?.slots?.find((slot) => slot.type === 'detailTab');
   const commentAnnotationSlot = manifest.ui?.slots?.find((slot) => slot.type === 'commentAnnotation');
   const globalToolbarSlot = manifest.ui?.slots?.find((slot) => slot.type === 'globalToolbarButton');
   const entityToolbarSlot = manifest.ui?.slots?.find((slot) => slot.type === 'toolbarButton');
+  assert.ok(pullRequestsPageSlot);
+  assert.ok(projectSidebarItemSlot);
   assert.ok(settingsSlot);
   assert.ok(dashboardSlot);
   assert.ok(issueDetailSlot);
   assert.ok(commentAnnotationSlot);
   assert.ok(globalToolbarSlot);
   assert.ok(entityToolbarSlot);
+  assert.equal(pullRequestsPageSlot?.type, 'page');
+  assert.equal(pullRequestsPageSlot?.exportName, 'GitHubSyncProjectPullRequestsPage');
+  assert.equal(pullRequestsPageSlot?.routePath, 'github-pull-requests');
+  assert.equal(projectSidebarItemSlot?.type, 'projectSidebarItem');
+  assert.equal(projectSidebarItemSlot?.exportName, 'GitHubSyncProjectPullRequestsSidebarItem');
+  assert.deepEqual(projectSidebarItemSlot?.entityTypes, ['project']);
+  assert.equal(projectSidebarItemSlot?.order, 40);
   assert.equal(settingsSlot?.exportName, 'GitHubSyncSettingsPage');
   assert.equal(dashboardSlot?.exportName, 'GitHubSyncDashboardWidget');
   assert.equal(issueDetailSlot?.exportName, 'GitHubSyncIssueDetailTab');
   assert.equal(commentAnnotationSlot?.exportName, 'GitHubSyncCommentAnnotation');
   assert.equal(globalToolbarSlot?.exportName, 'GitHubSyncGlobalToolbarButton');
   assert.equal(entityToolbarSlot?.exportName, 'GitHubSyncEntityToolbarButton');
+});
+
+test('project.pullRequests.page returns live GitHub pull request summaries for the mapped repository', async () => {
+  const harness = await createProjectPullRequestsHarness();
+  const linkedIssue = await harness.ctx.issues.create({
+    companyId: 'company-1',
+    projectId: 'project-1',
+    title: 'Linked pull request issue'
+  });
+  const originalList = harness.ctx.issues.list;
+  harness.ctx.issues.list = async (input) => {
+    const issues = await originalList(input);
+    return issues.map((issue) =>
+      issue.id === linkedIssue.id
+        ? {
+            ...issue,
+            identifier: 'PAP-101'
+          }
+        : issue
+    );
+  };
+  await harness.ctx.entities.upsert({
+    entityType: 'paperclip-github-plugin.issue-link',
+    scopeKind: 'issue',
+    scopeId: linkedIssue.id,
+    externalId: 'https://github.com/paperclipai/example-repo/issues/17',
+    title: 'GitHub issue #17',
+    status: 'open',
+    data: {
+      companyId: 'company-1',
+      paperclipProjectId: 'project-1',
+      repositoryUrl: 'https://github.com/paperclipai/example-repo',
+      githubIssueId: 17001,
+      githubIssueNumber: 17,
+      githubIssueUrl: 'https://github.com/paperclipai/example-repo/issues/17',
+      githubIssueState: 'open',
+      commentsCount: 2,
+      linkedPullRequestNumbers: [42],
+      labels: [],
+      syncedAt: '2026-04-13T09:15:00.000Z'
+    }
+  });
+
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input, init) => {
+    const requestUrl = getRequestUrl(input);
+    if (requestUrl === 'https://api.github.com/graphql') {
+      const { query } = getGraphqlRequest(init);
+      if (query.includes('GitHubProjectPullRequests')) {
+        return graphqlResponse({
+          repository: {
+            nameWithOwner: 'paperclipai/example-repo',
+            url: 'https://github.com/paperclipai/example-repo',
+            pullRequests: {
+              totalCount: 1,
+              pageInfo: {
+                hasNextPage: false,
+                endCursor: null
+              },
+              nodes: [
+                {
+                  id: 'PR_kwDOAA1',
+                  number: 42,
+                  title: 'Ship the live project PR queue',
+                  url: 'https://github.com/paperclipai/example-repo/pull/42',
+                  state: 'OPEN',
+                  mergeable: 'MERGEABLE',
+                  createdAt: '2026-04-10T08:00:00.000Z',
+                  updatedAt: '2026-04-13T09:15:00.000Z',
+                  baseRefName: 'main',
+                  headRefName: 'feature/project-pr-page',
+                  changedFiles: 7,
+                  commits: {
+                    totalCount: 4
+                  },
+                  author: {
+                    login: 'alvaro',
+                    url: 'https://github.com/alvaro',
+                    avatarUrl: 'https://avatars.githubusercontent.com/u/1?v=4'
+                  },
+                  assignees: {
+                    nodes: [
+                      {
+                        login: 'reviewer',
+                        name: 'Reviewer',
+                        url: 'https://github.com/reviewer',
+                        avatarUrl: 'https://avatars.githubusercontent.com/u/2?v=4'
+                      }
+                    ]
+                  },
+                  labels: {
+                    nodes: [
+                      {
+                        name: 'ui',
+                        color: '2563eb'
+                      }
+                    ]
+                  },
+                  comments: {
+                    totalCount: 3
+                  },
+                  closingIssuesReferences: {
+                    nodes: [
+                      {
+                        number: 17,
+                        url: 'https://github.com/paperclipai/example-repo/issues/17'
+                      }
+                    ]
+                  },
+                  reviews: {
+                    pageInfo: {
+                      hasNextPage: false,
+                      endCursor: null
+                    },
+                    nodes: [
+                      {
+                        state: 'APPROVED',
+                        author: {
+                          login: 'reviewer'
+                        }
+                      }
+                    ]
+                  },
+                  reviewThreads: {
+                    totalCount: 1,
+                    pageInfo: {
+                      hasNextPage: false,
+                      endCursor: null
+                    },
+                    nodes: [
+                      {
+                        isResolved: true
+                      }
+                    ]
+                  },
+                  statusCheckRollup: {
+                    contexts: {
+                      pageInfo: {
+                        hasNextPage: false,
+                        endCursor: null
+                      },
+                      nodes: [
+                        {
+                          __typename: 'CheckRun',
+                          status: 'COMPLETED',
+                          conclusion: 'SUCCESS'
+                        }
+                      ]
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        });
+      }
+    }
+
+    throw new Error(`Unexpected fetch during project.pullRequests.page test: ${requestUrl}`);
+  };
+
+  try {
+    const data = await harness.getData<{
+      status: string;
+      repositoryLabel: string;
+      pageSize?: number;
+      totalOpenPullRequests?: number;
+      pullRequests: Array<{
+        number: number;
+        checksStatus: string;
+        reviewable?: boolean;
+        reviewApprovals: number;
+        reviewChangesRequested: number;
+        unresolvedReviewThreads: number;
+        paperclipIssueId?: string;
+        paperclipIssueKey?: string;
+        mergeable: boolean;
+      }>;
+    }>('project.pullRequests.page', {
+      companyId: 'company-1',
+      projectId: 'project-1'
+    });
+
+    assert.equal(data.status, 'ready');
+    assert.equal(data.repositoryLabel, 'paperclipai/example-repo');
+    assert.equal(data.pageSize, 10);
+    assert.equal(data.totalOpenPullRequests, 1);
+    assert.equal(data.pullRequests.length, 1);
+    assert.equal(data.pullRequests[0]?.number, 42);
+    assert.equal(data.pullRequests[0]?.checksStatus, 'passed');
+    assert.equal(data.pullRequests[0]?.reviewApprovals, 1);
+    assert.equal(data.pullRequests[0]?.reviewChangesRequested, 0);
+    assert.equal(data.pullRequests[0]?.unresolvedReviewThreads, 0);
+    assert.equal(data.pullRequests[0]?.paperclipIssueId, linkedIssue.id);
+    assert.equal(data.pullRequests[0]?.paperclipIssueKey, 'PAP-101');
+    assert.equal(data.pullRequests[0]?.reviewable, true);
+    assert.equal(data.pullRequests[0]?.mergeable, true);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('project.pullRequests.detail returns the GitHub conversation in timeline order', async () => {
+  const harness = createTestHarness({
+    manifest,
+    config: {
+      githubToken: 'ghp_test_token'
+    }
+  });
+  await plugin.definition.setup(harness.ctx);
+  await harness.performAction('settings.saveRegistration', {
+    mappings: [
+      {
+        id: 'mapping-detail',
+        repositoryUrl: 'paperclipai/example-repo',
+        paperclipProjectName: 'PR Detail',
+        paperclipProjectId: 'project-detail',
+        companyId: 'company-detail'
+      }
+    ],
+    syncState: {
+      status: 'idle'
+    }
+  });
+  const linkedIssue = await harness.ctx.issues.create({
+    companyId: 'company-detail',
+    projectId: 'project-detail',
+    title: 'Linked GitHub issue'
+  });
+  const originalList = harness.ctx.issues.list;
+  harness.ctx.issues.list = async (input) => {
+    const issues = await originalList(input);
+    return issues.map((issue) =>
+      issue.id === linkedIssue.id
+        ? {
+            ...issue,
+            identifier: 'PAP-202'
+          }
+        : issue
+    );
+  };
+  await harness.ctx.entities.upsert({
+    entityType: 'paperclip-github-plugin.issue-link',
+    scopeKind: 'issue',
+    scopeId: linkedIssue.id,
+    externalId: 'https://github.com/paperclipai/example-repo/issues/17',
+    title: 'GitHub issue #17',
+    status: 'open',
+    data: {
+      companyId: 'company-detail',
+      paperclipProjectId: 'project-detail',
+      repositoryUrl: 'https://github.com/paperclipai/example-repo',
+      githubIssueId: 17001,
+      githubIssueNumber: 17,
+      githubIssueUrl: 'https://github.com/paperclipai/example-repo/issues/17',
+      githubIssueState: 'open',
+      commentsCount: 1,
+      linkedPullRequestNumbers: [42],
+      labels: [],
+      syncedAt: '2026-04-13T09:15:00.000Z'
+    }
+  });
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input, init) => {
+    const requestUrl = new URL(getRequestUrl(input));
+    if (requestUrl.toString() === 'https://api.github.com/graphql') {
+      const { query } = getGraphqlRequest(init);
+      if (query.includes('GitHubPullRequestClosingIssues')) {
+        return graphqlResponse({
+          repository: {
+            pullRequest: {
+              closingIssuesReferences: {
+                nodes: [
+                  {
+                    number: 17,
+                    url: 'https://github.com/paperclipai/example-repo/issues/17'
+                  }
+                ]
+              }
+            }
+          }
+        });
+      }
+
+      if (query.includes('GitHubPullRequestReviewThreads')) {
+        return graphqlResponse({
+          repository: {
+            pullRequest: {
+              reviewThreads: {
+                pageInfo: {
+                  hasNextPage: false,
+                  endCursor: null
+                },
+                nodes: [
+                  {
+                    isResolved: false
+                  }
+                ]
+              }
+            }
+          }
+        });
+      }
+
+      if (query.includes('GitHubPullRequestCiContexts')) {
+        return graphqlResponse({
+          repository: {
+            pullRequest: {
+              statusCheckRollup: {
+                contexts: {
+                  pageInfo: {
+                    hasNextPage: false,
+                    endCursor: null
+                  },
+                  nodes: [
+                    {
+                      __typename: 'CheckRun',
+                      status: 'COMPLETED',
+                      conclusion: 'SUCCESS'
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        });
+      }
+    }
+
+    if (requestUrl.pathname === '/repos/paperclipai/example-repo/pulls/42') {
+      return jsonResponse({
+        number: 42,
+        title: 'Ship the live project PR queue',
+        body: 'Implements the live PR queue.\n\n- worker data\n- quick actions',
+        html_url: 'https://github.com/paperclipai/example-repo/pull/42',
+        state: 'open',
+        merged: false,
+        mergeable: true,
+        created_at: '2026-04-10T08:00:00.000Z',
+        updated_at: '2026-04-13T09:15:00.000Z',
+        comments: 1,
+        review_comments: 2,
+        commits: 4,
+        changed_files: 7,
+        user: {
+          login: 'alvaro',
+          html_url: 'https://github.com/alvaro',
+          avatar_url: 'https://avatars.githubusercontent.com/u/1?v=4'
+        },
+        assignees: [],
+        base: {
+          ref: 'main'
+        },
+        head: {
+          ref: 'feature/project-pr-page'
+        },
+        labels: [
+          {
+            name: 'ui',
+            color: '2563eb'
+          }
+        ]
+      });
+    }
+
+    if (requestUrl.pathname === '/repos/paperclipai/example-repo/pulls/42/reviews') {
+      return jsonResponse([
+        {
+          state: 'APPROVED',
+          user: {
+            login: 'reviewer'
+          }
+        }
+      ]);
+    }
+
+    if (requestUrl.pathname === '/repos/paperclipai/example-repo/issues/42/comments') {
+      return jsonResponse([
+        {
+          id: 9001,
+          body: 'Looks good from the Paperclip side.',
+          html_url: 'https://github.com/paperclipai/example-repo/pull/42#issuecomment-9001',
+          user: {
+            login: 'reviewer',
+            html_url: 'https://github.com/reviewer',
+            avatar_url: 'https://avatars.githubusercontent.com/u/2?v=4'
+          },
+          created_at: '2026-04-11T10:30:00.000Z',
+          updated_at: '2026-04-11T10:30:00.000Z'
+        }
+      ]);
+    }
+
+    throw new Error(`Unexpected fetch during project.pullRequests.detail test: ${requestUrl}`);
+  };
+
+  try {
+    const detail = await harness.getData<{
+      number: number;
+      reviewApprovals: number;
+      reviewCommentCount: number;
+      paperclipIssueId?: string;
+      paperclipIssueKey?: string;
+      timeline: Array<{
+        kind: string;
+        body: string;
+        author: {
+          handle: string;
+        };
+      }>;
+    } | null>('project.pullRequests.detail', {
+      companyId: 'company-detail',
+      projectId: 'project-detail',
+      pullRequestNumber: 42
+    });
+
+    assert.ok(detail);
+    assert.equal(detail?.number, 42);
+    assert.equal(detail?.reviewApprovals, 1);
+    assert.equal(detail?.reviewCommentCount, 2);
+    assert.equal(detail?.paperclipIssueId, linkedIssue.id);
+    assert.equal(detail?.paperclipIssueKey, 'PAP-202');
+    assert.equal(detail?.timeline.length, 2);
+    assert.equal(detail?.timeline[0]?.kind, 'description');
+    assert.match(detail?.timeline[0]?.body ?? '', /live PR queue/);
+    assert.equal(detail?.timeline[1]?.kind, 'comment');
+    assert.equal(detail?.timeline[1]?.author.handle, '@reviewer');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('project.pullRequests.createIssue creates and then reuses the linked Paperclip issue', async () => {
+  const harness = await createProjectPullRequestsHarness();
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    const requestUrl = new URL(getRequestUrl(input));
+    if (requestUrl.pathname === '/repos/paperclipai/example-repo/pulls/42') {
+      return jsonResponse({
+        number: 42,
+        title: 'Ship the live project PR queue',
+        body: 'Implements the live PR queue.',
+        html_url: 'https://github.com/paperclipai/example-repo/pull/42',
+        state: 'open',
+        merged: false
+      });
+    }
+
+    throw new Error(`Unexpected fetch during project.pullRequests.createIssue test: ${requestUrl}`);
+  };
+
+  try {
+    const firstResult = await harness.performAction<{
+      paperclipIssueId: string;
+      alreadyLinked?: boolean;
+    }>('project.pullRequests.createIssue', {
+      companyId: 'company-1',
+      projectId: 'project-1',
+      pullRequestNumber: 42,
+      title: 'Track PR queue delivery'
+    });
+    const createdIssue = await harness.ctx.issues.get(firstResult.paperclipIssueId, 'company-1');
+    const secondResult = await harness.performAction<{
+      paperclipIssueId: string;
+      alreadyLinked?: boolean;
+    }>('project.pullRequests.createIssue', {
+      companyId: 'company-1',
+      projectId: 'project-1',
+      pullRequestNumber: 42,
+      title: 'Track PR queue delivery'
+    });
+
+    assert.ok(createdIssue);
+    assert.equal(createdIssue?.projectId, 'project-1');
+    assert.match(createdIssue?.description ?? '', /Imported from GitHub pull request \[#42\]/);
+    assert.equal(firstResult.alreadyLinked, false);
+    assert.equal(secondResult.alreadyLinked, true);
+    assert.equal(secondResult.paperclipIssueId, firstResult.paperclipIssueId);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('project.pullRequests.merge merges the selected pull request', async () => {
+  const harness = await createProjectPullRequestsHarness();
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input, init) => {
+    const requestUrl = new URL(getRequestUrl(input));
+    const method = input instanceof Request ? input.method : init?.method ?? 'GET';
+
+    if (requestUrl.pathname === '/repos/paperclipai/example-repo/pulls/42/merge' && method === 'PUT') {
+      return jsonResponse({
+        sha: 'abc123',
+        merged: true,
+        message: 'Pull Request successfully merged'
+      });
+    }
+
+    throw new Error(`Unexpected fetch during project.pullRequests.merge test: ${requestUrl}`);
+  };
+
+  try {
+    const result = await harness.performAction<{
+      githubUrl: string;
+      status: string;
+    }>('project.pullRequests.merge', {
+      companyId: 'company-1',
+      projectId: 'project-1',
+      pullRequestNumber: 42
+    });
+
+    assert.equal(result.status, 'merged');
+    assert.equal(result.githubUrl, 'https://github.com/paperclipai/example-repo/pull/42');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('project.pullRequests.close closes the selected pull request', async () => {
+  const harness = await createProjectPullRequestsHarness();
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input, init) => {
+    const requestUrl = new URL(getRequestUrl(input));
+    const method = input instanceof Request ? input.method : init?.method ?? 'GET';
+
+    if (requestUrl.pathname === '/repos/paperclipai/example-repo/pulls/42' && method === 'PATCH') {
+      return jsonResponse({
+        html_url: 'https://github.com/paperclipai/example-repo/pull/42',
+        state: 'closed',
+        merged: false
+      });
+    }
+
+    throw new Error(`Unexpected fetch during project.pullRequests.close test: ${requestUrl}`);
+  };
+
+  try {
+    const result = await harness.performAction<{
+      githubUrl: string;
+      status: string;
+    }>('project.pullRequests.close', {
+      companyId: 'company-1',
+      projectId: 'project-1',
+      pullRequestNumber: 42
+    });
+
+    assert.equal(result.status, 'closed');
+    assert.equal(result.githubUrl, 'https://github.com/paperclipai/example-repo/pull/42');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('project.pullRequests.addComment posts a GitHub issue comment to the pull request', async () => {
+  const harness = await createProjectPullRequestsHarness();
+  const originalFetch = globalThis.fetch;
+  let postedBody = '';
+  globalThis.fetch = async (input, init) => {
+    const requestUrl = new URL(getRequestUrl(input));
+    const method = input instanceof Request ? input.method : init?.method ?? 'GET';
+
+    if (requestUrl.pathname === '/repos/paperclipai/example-repo/issues/42/comments' && method === 'POST') {
+      const body = getJsonRequestBody(init);
+      postedBody = typeof body?.body === 'string' ? body.body : '';
+      return jsonResponse({
+        id: 9001,
+        html_url: 'https://github.com/paperclipai/example-repo/pull/42#issuecomment-9001'
+      });
+    }
+
+    throw new Error(`Unexpected fetch during project.pullRequests.addComment test: ${requestUrl}`);
+  };
+
+  try {
+    const result = await harness.performAction<{
+      commentId: number;
+      commentUrl: string;
+    }>('project.pullRequests.addComment', {
+      companyId: 'company-1',
+      projectId: 'project-1',
+      pullRequestNumber: 42,
+      body: 'Ship it'
+    });
+
+    assert.equal(postedBody, 'Ship it');
+    assert.equal(result.commentId, 9001);
+    assert.equal(result.commentUrl, 'https://github.com/paperclipai/example-repo/pull/42#issuecomment-9001');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('project.pullRequests.count returns a lightweight open pull request total for the mapped repository', async () => {
+  const harness = await createProjectPullRequestsHarness();
+  const originalFetch = globalThis.fetch;
+  let sawCountQuery = false;
+  globalThis.fetch = async (input, init) => {
+    const requestUrl = getRequestUrl(input);
+    if (requestUrl === 'https://api.github.com/graphql') {
+      const { query } = getGraphqlRequest(init);
+      if (query.includes('GitHubProjectOpenPullRequestCount')) {
+        sawCountQuery = true;
+        assert.ok(!query.includes('reviewThreads('));
+        assert.ok(!query.includes('statusCheckRollup'));
+        assert.ok(!query.includes('reviews('));
+        return graphqlResponse({
+          repository: {
+            pullRequests: {
+              totalCount: 162
+            }
+          }
+        });
+      }
+    }
+
+    throw new Error(`Unexpected fetch during project.pullRequests.count test: ${requestUrl}`);
+  };
+
+  try {
+    const result = await harness.getData<{
+      status: string;
+      totalOpenPullRequests: number;
+    }>('project.pullRequests.count', {
+      companyId: 'company-1',
+      projectId: 'project-1'
+    });
+
+    assert.equal(sawCountQuery, true);
+    assert.equal(result.status, 'ready');
+    assert.equal(result.totalOpenPullRequests, 162);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('project.pullRequests.metrics returns aggregate counts for the mapped repository', async () => {
+  const harness = await createProjectPullRequestsHarness();
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input, init) => {
+    const requestUrl = getRequestUrl(input);
+    if (requestUrl === 'https://api.github.com/graphql') {
+      const { query } = getGraphqlRequest(init);
+      if (query.includes('GitHubProjectPullRequestMetrics')) {
+        return graphqlResponse({
+          repository: {
+            pullRequests: {
+              totalCount: 3,
+              pageInfo: {
+                hasNextPage: false,
+                endCursor: null
+              },
+              nodes: [
+                {
+                  number: 41,
+                  mergeable: 'MERGEABLE',
+                  reviews: {
+                    pageInfo: { hasNextPage: false, endCursor: null },
+                    nodes: [
+                      {
+                        state: 'APPROVED',
+                        author: {
+                          login: 'reviewer'
+                        }
+                      }
+                    ]
+                  },
+                  reviewThreads: {
+                    totalCount: 1,
+                    pageInfo: { hasNextPage: false, endCursor: null },
+                    nodes: [
+                      {
+                        isResolved: true,
+                        comments: {
+                          nodes: [
+                            {
+                              author: {
+                                login: 'reviewer'
+                              }
+                            }
+                          ]
+                        }
+                      }
+                    ]
+                  },
+                  statusCheckRollup: {
+                    contexts: {
+                      pageInfo: { hasNextPage: false, endCursor: null },
+                      nodes: [
+                        {
+                          __typename: 'CheckRun',
+                          status: 'COMPLETED',
+                          conclusion: 'SUCCESS'
+                        }
+                      ]
+                    }
+                  }
+                },
+                {
+                  number: 42,
+                  mergeable: 'MERGEABLE',
+                  reviews: {
+                    pageInfo: { hasNextPage: false, endCursor: null },
+                    nodes: []
+                  },
+                  reviewThreads: {
+                    totalCount: 1,
+                    pageInfo: { hasNextPage: false, endCursor: null },
+                    nodes: [
+                      {
+                        isResolved: false,
+                        comments: {
+                          nodes: [
+                            {
+                              author: {
+                                login: 'human-reviewer'
+                              }
+                            }
+                          ]
+                        }
+                      }
+                    ]
+                  },
+                  statusCheckRollup: {
+                    contexts: {
+                      pageInfo: { hasNextPage: false, endCursor: null },
+                      nodes: [
+                        {
+                          __typename: 'CheckRun',
+                          status: 'COMPLETED',
+                          conclusion: 'SUCCESS'
+                        }
+                      ]
+                    }
+                  }
+                },
+                {
+                  number: 43,
+                  mergeable: 'MERGEABLE',
+                  reviews: {
+                    pageInfo: { hasNextPage: false, endCursor: null },
+                    nodes: []
+                  },
+                  reviewThreads: {
+                    totalCount: 0,
+                    pageInfo: { hasNextPage: false, endCursor: null },
+                    nodes: []
+                  },
+                  statusCheckRollup: {
+                    contexts: {
+                      pageInfo: { hasNextPage: false, endCursor: null },
+                      nodes: [
+                        {
+                          __typename: 'CheckRun',
+                          status: 'COMPLETED',
+                          conclusion: 'FAILURE'
+                        }
+                      ]
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        });
+      }
+    }
+
+    throw new Error(`Unexpected fetch during project.pullRequests.metrics test: ${requestUrl}`);
+  };
+
+  try {
+    const result = await harness.getData<{
+      status: string;
+      totalOpenPullRequests: number;
+      mergeablePullRequests: number;
+      reviewablePullRequests: number;
+      failingPullRequests: number;
+    }>('project.pullRequests.metrics', {
+      companyId: 'company-1',
+      projectId: 'project-1'
+    });
+
+    assert.equal(result.status, 'ready');
+    assert.equal(result.totalOpenPullRequests, 3);
+    assert.equal(result.mergeablePullRequests, 1);
+    assert.equal(result.reviewablePullRequests, 2);
+    assert.equal(result.failingPullRequests, 1);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('project.pullRequests.review submits a GitHub pull request review', async () => {
+  const harness = await createProjectPullRequestsHarness();
+  const originalFetch = globalThis.fetch;
+  let requestBody: Record<string, unknown> | null = null;
+  globalThis.fetch = async (input, init) => {
+    const requestUrl = new URL(getRequestUrl(input));
+    const method = input instanceof Request ? input.method : init?.method ?? 'GET';
+
+    if (requestUrl.pathname === '/repos/paperclipai/example-repo/pulls/42/reviews' && method === 'POST') {
+      requestBody = getJsonRequestBody(init);
+      return jsonResponse({
+        id: 7001,
+        html_url: 'https://github.com/paperclipai/example-repo/pull/42#pullrequestreview-7001'
+      });
+    }
+
+    throw new Error(`Unexpected fetch during project.pullRequests.review test: ${requestUrl}`);
+  };
+
+  try {
+    const result = await harness.performAction<{
+      reviewId: number;
+      review: string;
+      reviewUrl: string;
+    }>('project.pullRequests.review', {
+      companyId: 'company-1',
+      projectId: 'project-1',
+      pullRequestNumber: 42,
+      review: 'approve',
+      body: 'Ship it'
+    });
+
+    assert.deepEqual(requestBody, {
+      event: 'APPROVE',
+      body: 'Ship it'
+    });
+    assert.equal(result.reviewId, 7001);
+    assert.equal(result.review, 'approved');
+    assert.equal(result.reviewUrl, 'https://github.com/paperclipai/example-repo/pull/42#pullrequestreview-7001');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('project.pullRequests.rerunCi rerequests failed check suites for the selected pull request', async () => {
+  const harness = await createProjectPullRequestsHarness();
+  const originalFetch = globalThis.fetch;
+  const rerequestedSuites: number[] = [];
+  globalThis.fetch = async (input, init) => {
+    const requestUrl = new URL(getRequestUrl(input));
+    const method = input instanceof Request ? input.method : init?.method ?? 'GET';
+
+    if (requestUrl.pathname === '/repos/paperclipai/example-repo/pulls/42' && method === 'GET') {
+      return jsonResponse({
+        head: {
+          sha: 'abc123'
+        }
+      });
+    }
+
+    if (requestUrl.pathname === '/repos/paperclipai/example-repo/commits/abc123/check-suites' && method === 'GET') {
+      return jsonResponse({
+        total_count: 2,
+        check_suites: [
+          {
+            id: 71,
+            status: 'completed',
+            conclusion: 'failure'
+          },
+          {
+            id: 72,
+            status: 'completed',
+            conclusion: 'success'
+          }
+        ]
+      });
+    }
+
+    if (requestUrl.pathname === '/repos/paperclipai/example-repo/check-suites/71/rerequest' && method === 'POST') {
+      rerequestedSuites.push(71);
+      return new Response(null, {
+        status: 201
+      });
+    }
+
+    throw new Error(`Unexpected fetch during project.pullRequests.rerunCi test: ${requestUrl}`);
+  };
+
+  try {
+    const result = await harness.performAction<{
+      rerunCheckSuiteCount: number;
+      githubUrl: string;
+    }>('project.pullRequests.rerunCi', {
+      companyId: 'company-1',
+      projectId: 'project-1',
+      pullRequestNumber: 42
+    });
+
+    assert.deepEqual(rerequestedSuites, [71]);
+    assert.equal(result.rerunCheckSuiteCount, 1);
+    assert.equal(result.githubUrl, 'https://github.com/paperclipai/example-repo/pull/42/checks');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test('worker exposes toolbar sync state for global, project, and issue surfaces', async () => {
@@ -5575,7 +6509,7 @@ test('sync applies company-wide advanced defaults and ignores configured GitHub 
           state: 'open',
           comments: 0,
           user: {
-            login: 'renovate'
+            login: 'renovate[bot]'
           }
         }
       ]);

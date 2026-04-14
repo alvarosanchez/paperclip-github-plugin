@@ -1,5 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { useHostContext, usePluginAction, usePluginData, usePluginToast } from '@paperclipai/plugin-sdk/ui';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 
 import { parseRepositoryReference, type ParsedRepositoryReference } from '../github-repo.ts';
 import { requiresPaperclipBoardAccess } from '../paperclip-health.ts';
@@ -236,6 +238,131 @@ interface CliAuthIdentityResponse {
 
 interface PluginConfigResponse {
   configJson?: Record<string, unknown> | null;
+}
+
+const PROJECT_PULL_REQUESTS_PAGE_ROUTE_PATH = 'github-pull-requests';
+
+type PreviewPullRequestStatus = 'open' | 'merged' | 'closed';
+type PreviewPullRequestCheckStatus = 'pending' | 'failed' | 'passed';
+type PreviewPullRequestFilter = 'all' | 'mergeable' | 'reviewable' | 'failing';
+
+interface PreviewPullRequestLabel {
+  name: string;
+  color: string;
+}
+
+interface PreviewPullRequestPerson {
+  name: string;
+  handle: string;
+  profileUrl: string;
+  avatarUrl?: string;
+}
+
+interface PreviewPullRequestTimelineEntry {
+  id: string;
+  kind: 'description' | 'comment';
+  author: PreviewPullRequestPerson;
+  createdAt: string;
+  body: string;
+}
+
+interface PreviewPullRequestRecord {
+  id: string;
+  number: number;
+  title: string;
+  labels: PreviewPullRequestLabel[];
+  author: PreviewPullRequestPerson;
+  assignees: PreviewPullRequestPerson[];
+  checksStatus: PreviewPullRequestCheckStatus;
+  githubMergeable?: boolean;
+  reviewable?: boolean;
+  reviewApprovals: number;
+  reviewChangesRequested: number;
+  reviewCommentCount: number;
+  unresolvedReviewThreads: number;
+  copilotUnresolvedReviewThreads?: number;
+  commentsCount: number;
+  createdAt: string;
+  updatedAt: string;
+  paperclipIssueId?: string;
+  paperclipIssueKey?: string;
+  mergeable: boolean;
+  status: PreviewPullRequestStatus;
+  githubUrl: string;
+  checksUrl: string;
+  reviewsUrl: string;
+  reviewThreadsUrl: string;
+  commentsUrl: string;
+  baseBranch: string;
+  headBranch: string;
+  commits: number;
+  changedFiles: number;
+  timeline?: PreviewPullRequestTimelineEntry[];
+}
+
+interface PreviewPullRequestProjectData {
+  status?: 'ready' | 'missing_project' | 'unmapped' | 'missing_token' | 'error';
+  projectId: string | null;
+  projectLabel: string;
+  repositoryLabel: string;
+  repositoryUrl: string;
+  repositoryDescription: string;
+  filter?: PreviewPullRequestFilter;
+  pageIndex?: number;
+  pageSize?: number;
+  hasNextPage?: boolean;
+  hasPreviousPage?: boolean;
+  nextCursor?: string;
+  totalFilteredPullRequests?: number;
+  totalOpenPullRequests?: number;
+  message?: string;
+  pullRequests: PreviewPullRequestRecord[];
+}
+
+interface PreviewPullRequestMetricsData {
+  status?: 'ready' | 'missing_project' | 'unmapped' | 'missing_token' | 'error';
+  projectId: string | null;
+  totalOpenPullRequests?: number;
+  mergeablePullRequests?: number;
+  reviewablePullRequests?: number;
+  failingPullRequests?: number;
+  message?: string;
+}
+
+interface PreviewPullRequestCountData {
+  status?: 'ready' | 'missing_project' | 'unmapped' | 'missing_token' | 'error';
+  projectId: string | null;
+  totalOpenPullRequests?: number;
+  message?: string;
+}
+
+interface PreviewPullRequestPageControls {
+  filter: PreviewPullRequestFilter;
+  pageIndex: number;
+  pageCursors: Array<string | null>;
+}
+
+interface PreviewPullRequestPageQueryState {
+  filter: PreviewPullRequestFilter;
+  pageIndex: number;
+  cursor: string | null;
+}
+
+interface ProjectPullRequestIssueActionResult {
+  paperclipIssueId: string;
+  paperclipIssueKey?: string;
+  alreadyLinked?: boolean;
+}
+
+interface ProjectPullRequestReviewActionResult {
+  reviewId?: number;
+  review: 'approved' | 'changes_requested';
+  reviewUrl?: string;
+}
+
+interface ProjectPullRequestRerunCiActionResult {
+  rerunCheckSuiteCount?: number;
+  githubUrl?: string;
 }
 
 type ThemeMode = 'light' | 'dark';
@@ -1839,6 +1966,1013 @@ const PAGE_STYLES = `
 ${SHARED_PROGRESS_STYLES}
 `;
 
+const PROJECT_PULL_REQUESTS_PAGE_STYLES = `
+.ghsync-prs-page {
+  display: grid;
+  gap: 12px;
+}
+
+.ghsync-prs-page__header {
+  display: block;
+}
+
+.ghsync-prs-page__kicker {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  width: fit-content;
+  padding: 0 10px;
+  min-height: 28px;
+  border-radius: 999px;
+  border: 1px solid var(--ghsync-info-border);
+  background: color-mix(in srgb, var(--ghsync-info-bg) 72%, var(--ghsync-surface));
+  color: var(--ghsync-info-text);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.ghsync-prs-page__banner {
+  display: grid;
+  gap: 10px;
+  padding: 14px 16px;
+  border: 1px solid var(--ghsync-border-soft);
+  border-radius: 16px;
+  background:
+    linear-gradient(140deg, color-mix(in srgb, var(--ghsync-surfaceRaised) 78%, var(--ghsync-info-bg)) 0%, var(--ghsync-surface) 44%, color-mix(in srgb, var(--ghsync-surface) 90%, var(--ghsync-success-bg)) 100%);
+  box-shadow: var(--ghsync-shadow);
+}
+
+.ghsync-prs-page__banner-top {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+
+.ghsync-prs-page__banner-copy {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.ghsync-prs-page__banner-copy h2 {
+  margin: 0;
+  color: var(--ghsync-title);
+  font-size: 20px;
+  line-height: 1.1;
+}
+
+.ghsync-prs-page__banner-copy p {
+  margin: 0;
+  max-width: 720px;
+  color: var(--ghsync-muted);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.ghsync-prs-page__banner-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.ghsync-prs-page__summary-grid {
+  display: grid;
+  gap: 6px;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.ghsync-prs-page__summary-card {
+  display: grid;
+  gap: 3px;
+  padding: 9px 11px;
+  border-radius: 12px;
+  border: 1px solid var(--ghsync-border-soft);
+  background: color-mix(in srgb, var(--ghsync-surface) 84%, var(--ghsync-surfaceRaised));
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 140ms ease, background-color 140ms ease, box-shadow 140ms ease, transform 140ms ease;
+}
+
+.ghsync-prs-page__summary-card:hover:not(:disabled) {
+  border-color: var(--ghsync-border);
+  transform: translateY(-1px);
+}
+
+.ghsync-prs-page__summary-card--open {
+  border-color: color-mix(in srgb, var(--ghsync-info-border) 78%, var(--ghsync-border-soft));
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--ghsync-info-bg) 72%, var(--ghsync-surface)), var(--ghsync-surface));
+}
+
+.ghsync-prs-page__summary-card--mergeable {
+  border-color: color-mix(in srgb, var(--ghsync-success-border) 80%, var(--ghsync-border-soft));
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--ghsync-success-bg) 84%, var(--ghsync-surface)), var(--ghsync-surface));
+}
+
+.ghsync-prs-page__summary-card--reviewable {
+  border-color: color-mix(in srgb, var(--ghsync-warning-border) 84%, var(--ghsync-border-soft));
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--ghsync-warning-bg) 82%, var(--ghsync-surface)), var(--ghsync-surface));
+}
+
+.ghsync-prs-page__summary-card--failing {
+  border-color: color-mix(in srgb, var(--ghsync-danger-border) 78%, var(--ghsync-border-soft));
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--ghsync-danger-bg) 80%, var(--ghsync-surface)), var(--ghsync-surface));
+}
+
+.ghsync-prs-page__summary-card--pending {
+  border-color: color-mix(in srgb, var(--ghsync-warning-border) 82%, var(--ghsync-border-soft));
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--ghsync-warning-bg) 82%, var(--ghsync-surface)), var(--ghsync-surface));
+}
+
+.ghsync-prs-page__summary-card--linked {
+  border-color: color-mix(in srgb, var(--ghsync-success-border) 78%, var(--ghsync-border-soft));
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--ghsync-success-bg) 78%, var(--ghsync-surface)), var(--ghsync-surface));
+}
+
+.ghsync-prs-page__summary-card strong {
+  color: var(--ghsync-title);
+  font-size: 20px;
+  line-height: 1.05;
+}
+
+.ghsync-prs-page__summary-card span {
+  color: var(--ghsync-muted);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.ghsync-prs-page__summary-card p {
+  margin: 0;
+  color: var(--ghsync-muted);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.ghsync-prs-page__summary-card--active {
+  border-color: var(--ghsync-title);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--ghsync-title) 18%, transparent);
+}
+
+.ghsync-prs-page__summary-card:disabled {
+  cursor: default;
+  opacity: 0.68;
+  transform: none;
+}
+
+.ghsync-prs-page__summary-link {
+  color: var(--ghsync-info-text);
+  font-size: 12px;
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.ghsync-prs-page__summary-link:hover {
+  text-decoration: underline;
+}
+
+.ghsync-prs-page__table-card,
+.ghsync-prs-detail-card {
+  overflow: hidden;
+}
+
+.ghsync-prs-page__table-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.ghsync-prs-page__table-head p {
+  margin: 0;
+  color: var(--ghsync-muted);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.ghsync-prs-page__table-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.ghsync-prs-page__pagination {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.ghsync-prs-page__table-wrap {
+  overflow: auto;
+}
+
+.ghsync-prs-table {
+  width: 100%;
+  min-width: 1240px;
+  border-collapse: separate;
+  border-spacing: 0;
+}
+
+.ghsync-prs-table th,
+.ghsync-prs-table td {
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--ghsync-border-soft);
+  text-align: left;
+  vertical-align: top;
+}
+
+.ghsync-prs-table th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: color-mix(in srgb, var(--ghsync-surface) 92%, var(--ghsync-surfaceRaised));
+  color: var(--ghsync-muted);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.ghsync-prs-table tbody tr {
+  transition: background-color 140ms ease;
+}
+
+.ghsync-prs-table tbody tr:hover {
+  background: color-mix(in srgb, var(--ghsync-surfaceRaised) 82%, transparent);
+}
+
+.ghsync-prs-table__row--selected {
+  background: color-mix(in srgb, var(--ghsync-info-bg) 40%, var(--ghsync-surface));
+}
+
+.ghsync-prs-table th.ghsync-prs-table__cell--center,
+.ghsync-prs-table td.ghsync-prs-table__cell--center {
+  text-align: center;
+  vertical-align: middle;
+  white-space: nowrap;
+}
+
+.ghsync-prs-table__id {
+  color: var(--ghsync-title);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.ghsync-prs-table__title-cell {
+  min-width: 260px;
+}
+
+.ghsync-prs-table__title-button {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--ghsync-title);
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 1.45;
+  text-align: left;
+  cursor: pointer;
+}
+
+.ghsync-prs-table__title-button:hover {
+  color: var(--ghsync-info-text);
+}
+
+.ghsync-prs-table__title-button--selected {
+  color: var(--ghsync-info-text);
+}
+
+.ghsync-prs-table__labels {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-top: 8px;
+}
+
+.ghsync-prs-table__label {
+  display: inline-flex;
+  align-items: center;
+  min-height: 22px;
+  padding: 0 8px;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.ghsync-prs-table__person {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: inherit;
+  text-decoration: none;
+}
+
+.ghsync-prs-table__person:hover .ghsync-prs-table__person-name {
+  color: var(--ghsync-info-text);
+}
+
+.ghsync-prs-table__person-copy {
+  display: grid;
+  gap: 2px;
+}
+
+.ghsync-prs-table__person-name {
+  color: var(--ghsync-title);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.ghsync-prs-table__person-handle {
+  color: var(--ghsync-muted);
+  font-size: 11px;
+}
+
+.ghsync-prs-avatar,
+.ghsync-prs-avatar-stack__item {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 999px;
+  color: white;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  flex: 0 0 auto;
+}
+
+.ghsync-prs-avatar img,
+.ghsync-prs-avatar-stack__item img {
+  width: 100%;
+  height: 100%;
+  border-radius: inherit;
+  object-fit: cover;
+  display: block;
+}
+
+.ghsync-prs-avatar-stack {
+  display: flex;
+  align-items: center;
+}
+
+.ghsync-prs-avatar-stack__item {
+  margin-left: -8px;
+  border: 2px solid var(--ghsync-surface);
+}
+
+.ghsync-prs-avatar-stack__item:first-child {
+  margin-left: 0;
+}
+
+.ghsync-prs-icon {
+  width: 15px;
+  height: 15px;
+  flex: 0 0 auto;
+}
+
+.ghsync-prs-table__icon-link,
+.ghsync-prs-table__icon-button,
+.ghsync-prs-page__meta-link,
+.ghsync-prs-page__meta-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 28px;
+  min-width: 28px;
+  padding: 0 8px;
+  border-radius: 8px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--ghsync-muted);
+  font-size: 12px;
+  font-weight: 600;
+  text-decoration: none;
+  cursor: pointer;
+  transition: background-color 140ms ease, color 140ms ease, border-color 140ms ease;
+}
+
+.ghsync-prs-table__icon-link:hover,
+.ghsync-prs-table__icon-button:hover,
+.ghsync-prs-page__meta-link:hover,
+.ghsync-prs-page__meta-button:hover {
+  color: var(--ghsync-title);
+  border-color: var(--ghsync-border);
+  background: var(--ghsync-surfaceRaised);
+}
+
+.ghsync-prs-table__icon-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.42;
+}
+
+.ghsync-prs-table__status--passed {
+  color: var(--ghsync-success-text);
+}
+
+.ghsync-prs-table__status--failed {
+  color: var(--ghsync-danger-text);
+}
+
+.ghsync-prs-table__status--pending {
+  color: var(--ghsync-warning-text);
+}
+
+.ghsync-prs-table__metric-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--ghsync-title);
+  font-size: 12px;
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.ghsync-prs-table__metric-link:hover {
+  color: var(--ghsync-info-text);
+}
+
+.ghsync-prs-table__metric-link--muted {
+  color: var(--ghsync-muted);
+}
+
+.ghsync-prs-table__issue-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--ghsync-info-text);
+  font-size: 12px;
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.ghsync-prs-table__issue-link:hover {
+  text-decoration: underline;
+}
+
+.ghsync-prs-table__quick-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.ghsync-prs-table__time {
+  color: var(--ghsync-title);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.ghsync-prs-table__time-subtitle {
+  display: block;
+  margin-top: 4px;
+  color: var(--ghsync-muted);
+  font-size: 11px;
+}
+
+.ghsync-prs-detail {
+  display: grid;
+}
+
+.ghsync-prs-detail__header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.ghsync-prs-detail__header h3 {
+  margin: 0;
+  color: var(--ghsync-title);
+  font-size: 18px;
+  line-height: 1.35;
+}
+
+.ghsync-prs-detail__header p {
+  margin: 6px 0 0;
+  color: var(--ghsync-muted);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.ghsync-prs-detail__actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.ghsync-prs-detail__layout {
+  display: grid;
+  gap: 14px;
+  grid-template-columns: minmax(0, 1.7fr) minmax(280px, 0.9fr);
+  padding: 14px 18px 18px;
+  align-items: start;
+  min-height: 0;
+}
+
+.ghsync-prs-timeline {
+  display: grid;
+  gap: 10px;
+  align-content: start;
+  max-height: 640px;
+  overflow: auto;
+  padding-right: 4px;
+}
+
+.ghsync-prs-timeline__entry {
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  border-radius: 8px;
+  border: 1px solid var(--ghsync-border-soft);
+  background: color-mix(in srgb, var(--ghsync-surface) 92%, transparent);
+  align-content: start;
+}
+
+.ghsync-prs-timeline__entry--description {
+  border-color: color-mix(in srgb, var(--ghsync-info-border) 55%, var(--ghsync-border-soft));
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--ghsync-surface) 90%, var(--ghsync-info-bg)), var(--ghsync-surface));
+}
+
+.ghsync-prs-timeline__entry-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.ghsync-prs-timeline__entry-author {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.ghsync-prs-timeline__entry-meta {
+  display: grid;
+  gap: 0;
+  min-width: 0;
+}
+
+.ghsync-prs-timeline .ghsync-prs-avatar {
+  width: 24px;
+  height: 24px;
+  font-size: 10px;
+}
+
+.ghsync-prs-timeline__entry-meta strong {
+  color: var(--ghsync-title);
+  font-size: 12px;
+  line-height: 1.3;
+}
+
+.ghsync-prs-timeline__entry-meta span,
+.ghsync-prs-timeline__entry-time {
+  color: var(--ghsync-muted);
+  font-size: 12px;
+}
+
+.ghsync-prs-timeline__entry-body {
+  color: var(--ghsync-text);
+  font-size: 14px;
+  line-height: 1.65;
+}
+
+.ghsync-prs-markdown {
+  color: var(--ghsync-text);
+  font-size: 14px;
+  line-height: 1.65;
+}
+
+.ghsync-prs-markdown > :first-child {
+  margin-top: 0;
+}
+
+.ghsync-prs-markdown > :last-child {
+  margin-bottom: 0;
+}
+
+.ghsync-prs-markdown p,
+.ghsync-prs-markdown ul,
+.ghsync-prs-markdown ol,
+.ghsync-prs-markdown pre,
+.ghsync-prs-markdown blockquote,
+.ghsync-prs-markdown table {
+  margin: 0 0 0.8em;
+}
+
+.ghsync-prs-markdown ul,
+.ghsync-prs-markdown ol {
+  padding-left: 1.25rem;
+}
+
+.ghsync-prs-markdown li + li {
+  margin-top: 0.18em;
+}
+
+.ghsync-prs-markdown a {
+  color: var(--ghsync-info-text);
+  text-decoration: none;
+}
+
+.ghsync-prs-markdown a:hover {
+  text-decoration: underline;
+}
+
+.ghsync-prs-markdown strong {
+  color: var(--ghsync-title);
+}
+
+.ghsync-prs-markdown code {
+  padding: 0.15rem 0.35rem;
+  border-radius: 6px;
+  background: var(--ghsync-surfaceRaised);
+  border: 1px solid var(--ghsync-border-soft);
+  color: var(--ghsync-title);
+  font-size: 0.92em;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+}
+
+.ghsync-prs-markdown pre {
+  overflow: auto;
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--ghsync-border-soft);
+  background: var(--ghsync-surfaceRaised);
+}
+
+.ghsync-prs-markdown pre code {
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+
+.ghsync-prs-markdown blockquote {
+  padding-left: 12px;
+  border-left: 2px solid var(--ghsync-border);
+  color: var(--ghsync-muted);
+}
+
+.ghsync-prs-comment-box {
+  display: grid;
+  gap: 8px;
+}
+
+.ghsync-prs-comment-box__label {
+  color: var(--ghsync-title);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.ghsync-prs-comment-box__editor {
+  border-radius: 8px;
+  border: 1px solid var(--ghsync-border-soft);
+  background: transparent;
+  padding: 10px 12px;
+}
+
+.ghsync-prs-comment-box__editor:focus-within {
+  border-color: var(--ghsync-border);
+  background: color-mix(in srgb, var(--ghsync-surface) 92%, transparent);
+}
+
+.ghsync-prs-comment-box__input {
+  width: 100%;
+  min-height: 88px;
+  border: 0;
+  background: transparent;
+  color: var(--ghsync-input-text);
+  font-size: 14px;
+  line-height: 1.6;
+  resize: vertical;
+  padding: 0;
+  outline: none;
+}
+
+.ghsync-prs-comment-box__input::placeholder {
+  color: var(--ghsync-muted);
+}
+
+.ghsync-prs-comment-box__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.ghsync-prs-meta {
+  display: grid;
+  gap: 8px;
+  align-content: start;
+  max-height: 640px;
+  overflow: auto;
+  padding-right: 4px;
+}
+
+.ghsync-prs-meta__section {
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  border-radius: 10px;
+  border: 1px solid var(--ghsync-border-soft);
+  background: var(--ghsync-surfaceAlt);
+}
+
+.ghsync-prs-meta__section h4 {
+  margin: 0;
+  color: var(--ghsync-title);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.ghsync-prs-meta__rows {
+  display: grid;
+  gap: 8px;
+}
+
+.ghsync-prs-meta__row {
+  display: grid;
+  gap: 4px;
+}
+
+.ghsync-prs-meta__label {
+  color: var(--ghsync-muted);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.ghsync-prs-meta__value {
+  color: var(--ghsync-title);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.ghsync-prs-meta__value--stack {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.ghsync-prs-meta__value a {
+  color: var(--ghsync-info-text);
+  text-decoration: none;
+}
+
+.ghsync-prs-meta__value a:hover {
+  text-decoration: underline;
+}
+
+.ghsync-prs-meta__links {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.ghsync-prs-meta__labels {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.ghsync-prs-detail__empty {
+  display: grid;
+  gap: 12px;
+  padding: 18px;
+  color: var(--ghsync-muted);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.ghsync-prs-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(10, 10, 12, 0.48);
+  backdrop-filter: blur(10px);
+}
+
+.ghsync-prs-modal {
+  width: min(520px, 100%);
+  display: grid;
+  gap: 16px;
+  padding: 20px;
+  border-radius: 18px;
+  border: 1px solid var(--ghsync-border);
+  background: var(--ghsync-surface);
+  box-shadow: 0 28px 80px rgba(2, 6, 23, 0.34);
+}
+
+.ghsync-prs-modal__header {
+  display: grid;
+  gap: 6px;
+}
+
+.ghsync-prs-modal__header h3 {
+  margin: 0;
+  color: var(--ghsync-title);
+  font-size: 18px;
+}
+
+.ghsync-prs-modal__header p {
+  margin: 0;
+  color: var(--ghsync-muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.ghsync-prs-modal__textarea {
+  width: 100%;
+  min-height: 132px;
+  border-radius: 10px;
+  border: 1px solid var(--ghsync-input-border);
+  background: var(--ghsync-input-bg);
+  color: var(--ghsync-input-text);
+  font: inherit;
+  line-height: 1.6;
+  padding: 10px 12px;
+  resize: vertical;
+  outline: none;
+}
+
+.ghsync-prs-modal__textarea:focus {
+  border-color: var(--ghsync-border);
+}
+
+.ghsync-prs-modal__textarea::placeholder {
+  color: var(--ghsync-muted);
+}
+
+.ghsync-prs-modal__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.ghsync-prs-modal__actions--spread {
+  justify-content: space-between;
+  align-items: center;
+}
+
+.ghsync-prs-modal__split-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+@media (max-width: 1120px) {
+  .ghsync-prs-page__summary-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .ghsync-prs-detail__layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .ghsync-prs-timeline,
+  .ghsync-prs-meta {
+    max-height: none;
+    overflow: visible;
+    padding-right: 0;
+  }
+}
+
+@media (max-width: 720px) {
+  .ghsync-prs-page__banner,
+  .ghsync-prs-detail__layout {
+    padding: 16px;
+  }
+
+  .ghsync-prs-page__banner-top,
+  .ghsync-prs-detail__header,
+  .ghsync-prs-modal__actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .ghsync-prs-page__summary-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .ghsync-prs-page__banner-actions .ghsync__button,
+  .ghsync-prs-detail__actions .ghsync__button,
+  .ghsync-prs-modal__split-actions .ghsync__button {
+    width: 100%;
+  }
+
+  .ghsync-prs-modal__split-actions {
+    width: 100%;
+    flex-direction: column;
+  }
+
+  .ghsync-prs-modal-backdrop {
+    padding: 16px;
+  }
+}
+`;
+
+const PROJECT_PULL_REQUESTS_SIDEBAR_STYLES = `
+.ghsync-prs-sidebar {
+  color: var(--ghsync-text);
+  font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+.ghsync-prs-sidebar__link {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  justify-content: space-between;
+  min-height: 30px;
+  width: 100%;
+  padding: 0 10px;
+  border-radius: 10px;
+  border: 1px solid transparent;
+  color: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  text-decoration: none;
+  transition: background-color 140ms ease, color 140ms ease, border-color 140ms ease;
+}
+
+.ghsync-prs-sidebar__link:hover {
+  border-color: var(--ghsync-border);
+  background: color-mix(in srgb, var(--ghsync-surfaceRaised) 84%, transparent);
+  color: var(--ghsync-title);
+}
+
+.ghsync-prs-sidebar__link[aria-current="page"] {
+  border-color: var(--ghsync-info-border);
+  background: color-mix(in srgb, var(--ghsync-info-bg) 66%, var(--ghsync-surface));
+  color: var(--ghsync-info-text);
+}
+
+.ghsync-prs-sidebar__label {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.ghsync-prs-sidebar__icon {
+  width: 14px;
+  height: 14px;
+  flex: 0 0 auto;
+}
+
+.ghsync-prs-sidebar__count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 20px;
+  height: 20px;
+  padding: 0 7px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--ghsync-title) 92%, white);
+  color: color-mix(in srgb, var(--ghsync-surface) 88%, black);
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.ghsync-prs-sidebar__link[aria-current="page"] .ghsync-prs-sidebar__count {
+  background: color-mix(in srgb, var(--ghsync-info-text) 18%, var(--ghsync-surface));
+  color: var(--ghsync-info-text);
+}
+`;
+
 const WIDGET_STYLES = `
 .ghsync-widget {
   color: var(--ghsync-text);
@@ -2974,6 +4108,31 @@ async function resolveCurrentPluginId(pluginId: string | null): Promise<string |
   return resolvedPluginId;
 }
 
+async function fetchPluginDataResult<T>(params: {
+  pluginId: string | null;
+  dataKey: string;
+  companyId?: string | null;
+  dataParams: Record<string, unknown>;
+}): Promise<T> {
+  const resolvedPluginId = await resolveCurrentPluginId(params.pluginId);
+  if (!resolvedPluginId) {
+    throw new Error('Could not resolve the installed GitHub Sync plugin id.');
+  }
+
+  const response = await fetchJson<{ data: T }>(`/api/plugins/${resolvedPluginId}/data/${params.dataKey}`, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json'
+    },
+    body: JSON.stringify({
+      ...(params.companyId ? { companyId: params.companyId } : {}),
+      params: params.dataParams
+    })
+  });
+
+  return response.data;
+}
+
 async function syncTrustedPaperclipApiBaseUrl(pluginId: string | null): Promise<string | undefined> {
   const paperclipApiBaseUrl = getPaperclipApiBaseUrl();
   if (!paperclipApiBaseUrl) {
@@ -3011,6 +4170,409 @@ function formatDate(value?: string, fallback = 'Never'): string {
   }
 
   return parsed.toLocaleString();
+}
+
+const RELATIVE_TIME_FORMATTER = new Intl.RelativeTimeFormat(undefined, {
+  numeric: 'auto'
+});
+
+function formatRelativeTime(value?: string, fallback = 'Never'): string {
+  if (!value) {
+    return fallback;
+  }
+
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    return fallback;
+  }
+
+  const diffMs = parsed.getTime() - Date.now();
+  const absoluteDiffMs = Math.abs(diffMs);
+  const units: Array<{ unit: Intl.RelativeTimeFormatUnit; durationMs: number }> = [
+    { unit: 'year', durationMs: 365 * 24 * 60 * 60 * 1_000 },
+    { unit: 'month', durationMs: 30 * 24 * 60 * 60 * 1_000 },
+    { unit: 'week', durationMs: 7 * 24 * 60 * 60 * 1_000 },
+    { unit: 'day', durationMs: 24 * 60 * 60 * 1_000 },
+    { unit: 'hour', durationMs: 60 * 60 * 1_000 },
+    { unit: 'minute', durationMs: 60 * 1_000 }
+  ];
+
+  if (absoluteDiffMs < 45 * 1_000) {
+    return 'just now';
+  }
+
+  for (const entry of units) {
+    if (absoluteDiffMs >= entry.durationMs) {
+      return RELATIVE_TIME_FORMATTER.format(Math.round(diffMs / entry.durationMs), entry.unit);
+    }
+  }
+
+  return RELATIVE_TIME_FORMATTER.format(Math.round(diffMs / 1_000), 'second');
+}
+
+function formatShortDateTime(value?: string, fallback = 'Unknown time'): string {
+  if (!value) {
+    return fallback;
+  }
+
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    return fallback;
+  }
+
+  return parsed.toLocaleString(undefined, {
+    dateStyle: 'medium',
+    timeStyle: 'short'
+  });
+}
+
+function pluralize(count: number, singular: string, plural = `${singular}s`): string {
+  return `${count} ${count === 1 ? singular : plural}`;
+}
+
+function hashString(value: string): number {
+  let hash = 0;
+  for (const character of value) {
+    hash = ((hash << 5) - hash + character.charCodeAt(0)) | 0;
+  }
+
+  return Math.abs(hash);
+}
+
+function getInitials(name: string): string {
+  const parts = name
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 2);
+
+  if (parts.length === 0) {
+    return '?';
+  }
+
+  return parts.map((part) => part[0]?.toUpperCase() ?? '').join('');
+}
+
+function hexToRgba(value: string, alpha: number): string {
+  const normalized = value.replace('#', '').trim();
+  const expanded =
+    normalized.length === 3
+      ? normalized.split('').map((character) => `${character}${character}`).join('')
+      : normalized;
+
+  if (!/^[0-9a-f]{6}$/i.test(expanded)) {
+    return `rgba(99, 102, 241, ${alpha})`;
+  }
+
+  const red = Number.parseInt(expanded.slice(0, 2), 16);
+  const green = Number.parseInt(expanded.slice(2, 4), 16);
+  const blue = Number.parseInt(expanded.slice(4, 6), 16);
+  return `rgba(${red}, ${green}, ${blue}, ${alpha})`;
+}
+
+function getPreviewAvatarColor(handle: string): string {
+  const palette = ['#2563eb', '#0891b2', '#7c3aed', '#ea580c', '#0f766e', '#be123c', '#4f46e5'];
+  return palette[hashString(handle) % palette.length] ?? palette[0];
+}
+
+function buildProjectPullRequestsPageHref(companyPrefix: string | null, projectId: string | null): string {
+  const prefix = companyPrefix?.trim() ? `/${encodeURIComponent(companyPrefix.trim())}` : '';
+  const searchParams = new URLSearchParams();
+
+  if (projectId?.trim()) {
+    searchParams.set('projectId', projectId.trim());
+  }
+
+  const queryString = searchParams.toString();
+  return `${prefix}/${PROJECT_PULL_REQUESTS_PAGE_ROUTE_PATH}${queryString ? `?${queryString}` : ''}`;
+}
+
+function getProjectPullRequestsPageProjectId(search: string): string | null {
+  const query = search.startsWith('?') ? search : `?${search}`;
+  const searchParams = new URLSearchParams(query);
+  const projectId = searchParams.get('projectId');
+  return projectId?.trim() ? projectId.trim() : null;
+}
+
+function installGitHubSyncLocationObserver(): void {
+  if (gitHubSyncLocationObserverInstalled || typeof window === 'undefined') {
+    return;
+  }
+
+  gitHubSyncLocationObserverInstalled = true;
+  const notifyLocationChanged = () => {
+    window.dispatchEvent(new Event(GITHUB_SYNC_LOCATION_CHANGED_EVENT));
+  };
+  const originalPushState = window.history.pushState.bind(window.history);
+  const originalReplaceState = window.history.replaceState.bind(window.history);
+
+  window.history.pushState = function pushState(...args) {
+    const result = originalPushState(...args);
+    notifyLocationChanged();
+    return result;
+  };
+
+  window.history.replaceState = function replaceState(...args) {
+    const result = originalReplaceState(...args);
+    notifyLocationChanged();
+    return result;
+  };
+
+  window.addEventListener('popstate', notifyLocationChanged);
+}
+
+function useCurrentLocationSnapshot(): { pathname: string; search: string } {
+  const [snapshot, setSnapshot] = useState(() => ({
+    pathname: typeof window === 'undefined' ? '' : window.location.pathname,
+    search: typeof window === 'undefined' ? '' : window.location.search
+  }));
+
+  useEffect(() => {
+    if (typeof window === 'undefined') {
+      return;
+    }
+
+    installGitHubSyncLocationObserver();
+
+    const updateSnapshot = () => {
+      setSnapshot({
+        pathname: window.location.pathname,
+        search: window.location.search
+      });
+    };
+
+    updateSnapshot();
+    window.addEventListener(GITHUB_SYNC_LOCATION_CHANGED_EVENT, updateSnapshot);
+
+    return () => {
+      window.removeEventListener(GITHUB_SYNC_LOCATION_CHANGED_EVENT, updateSnapshot);
+    };
+  }, []);
+
+  return snapshot;
+}
+
+function getPaperclipIssueHref(
+  companyPrefix: string | null,
+  issueKeyOrId?: string | null
+): string | undefined {
+  if (!issueKeyOrId?.trim()) {
+    return undefined;
+  }
+
+  const prefix = companyPrefix?.trim() ? `/${encodeURIComponent(companyPrefix.trim())}` : '';
+  return `${prefix}/issues/${encodeURIComponent(issueKeyOrId.trim())}`;
+}
+
+function getPreviewPullRequestCheckLabel(status: PreviewPullRequestCheckStatus): string {
+  switch (status) {
+    case 'passed':
+      return 'Checks passing';
+    case 'failed':
+      return 'Checks failing';
+    default:
+      return 'Checks pending';
+  }
+}
+
+function getPreviewPullRequestCheckToneClass(status: PreviewPullRequestCheckStatus): string {
+  switch (status) {
+    case 'passed':
+      return 'ghsync-prs-table__status--passed';
+    case 'failed':
+      return 'ghsync-prs-table__status--failed';
+    default:
+      return 'ghsync-prs-table__status--pending';
+  }
+}
+
+function getPreviewPullRequestFilterLabel(filter: PreviewPullRequestFilter): string {
+  switch (filter) {
+    case 'mergeable':
+      return 'Mergeable';
+    case 'reviewable':
+      return 'Reviewable';
+    case 'failing':
+      return 'Failing';
+    default:
+      return 'Total PRs';
+  }
+}
+
+function formatProjectPullRequestRange(pageIndex: number, pageSize: number, totalCount: number): string {
+  if (totalCount <= 0) {
+    return '0';
+  }
+
+  const start = pageIndex * pageSize + 1;
+  const end = Math.min(totalCount, start + pageSize - 1);
+  return `${start}-${end} of ${totalCount}`;
+}
+
+const EMPTY_PROJECT_PULL_REQUESTS_DATA: PreviewPullRequestProjectData = {
+  status: 'missing_project',
+  projectId: null,
+  projectLabel: 'Project',
+  repositoryLabel: '',
+  repositoryUrl: '',
+  repositoryDescription: '',
+  filter: 'all',
+  pageIndex: 0,
+  pageSize: 10,
+  hasNextPage: false,
+  hasPreviousPage: false,
+  totalFilteredPullRequests: 0,
+  pullRequests: []
+};
+
+const EMPTY_PROJECT_PULL_REQUEST_METRICS_DATA: PreviewPullRequestMetricsData = {
+  status: 'missing_project',
+  projectId: null
+};
+
+interface PreviewIconProps {
+  className?: string;
+}
+
+function PreviewIconBase(props: React.SVGProps<SVGSVGElement>): React.JSX.Element {
+  const { children, ...rest } = props;
+  return (
+    <svg
+      viewBox="0 0 16 16"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.5"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+      {...rest}
+    >
+      {children}
+    </svg>
+  );
+}
+
+function PullRequestIcon({ className }: PreviewIconProps): React.JSX.Element {
+  return (
+    <PreviewIconBase className={className}>
+      <circle cx="4" cy="3" r="1.75" />
+      <circle cx="12" cy="6" r="1.75" />
+      <circle cx="4" cy="13" r="1.75" />
+      <path d="M5.75 3v7a3 3 0 0 0 3 3h1.5" />
+      <path d="M5.75 13V9a3 3 0 0 1 3-3h1.5" />
+    </PreviewIconBase>
+  );
+}
+
+function CheckPassedIcon({ className }: PreviewIconProps): React.JSX.Element {
+  return (
+    <PreviewIconBase className={className}>
+      <circle cx="8" cy="8" r="6" />
+      <path d="M5.25 8.2 7.1 10 11 6" />
+    </PreviewIconBase>
+  );
+}
+
+function CheckFailedIcon({ className }: PreviewIconProps): React.JSX.Element {
+  return (
+    <PreviewIconBase className={className}>
+      <circle cx="8" cy="8" r="6" />
+      <path d="m5.75 5.75 4.5 4.5" />
+      <path d="m10.25 5.75-4.5 4.5" />
+    </PreviewIconBase>
+  );
+}
+
+function CheckPendingIcon({ className }: PreviewIconProps): React.JSX.Element {
+  return (
+    <PreviewIconBase className={className}>
+      <circle cx="8" cy="8" r="6" />
+      <path d="M8 4.75V8l2.25 1.5" />
+    </PreviewIconBase>
+  );
+}
+
+function CommentIcon({ className }: PreviewIconProps): React.JSX.Element {
+  return (
+    <PreviewIconBase className={className}>
+      <path d="M3.5 4.5A2.5 2.5 0 0 1 6 2h4a2.5 2.5 0 0 1 2.5 2.5v3A2.5 2.5 0 0 1 10 10H7l-2.75 2v-2H6A2.5 2.5 0 0 1 3.5 7.5Z" />
+    </PreviewIconBase>
+  );
+}
+
+function PlusCircleIcon({ className }: PreviewIconProps): React.JSX.Element {
+  return (
+    <PreviewIconBase className={className}>
+      <circle cx="8" cy="8" r="6" />
+      <path d="M8 5v6" />
+      <path d="M5 8h6" />
+    </PreviewIconBase>
+  );
+}
+
+function MergeIcon({ className }: PreviewIconProps): React.JSX.Element {
+  return (
+    <PreviewIconBase className={className}>
+      <circle cx="4" cy="3" r="1.5" />
+      <circle cx="12" cy="5.5" r="1.5" />
+      <circle cx="12" cy="12.5" r="1.5" />
+      <path d="M5.5 3.2c3.1 0 4 1.1 4 3v3.2" />
+      <path d="M5.5 3.2v7.6c0 1.1.9 2 2 2h2.9" />
+    </PreviewIconBase>
+  );
+}
+
+function CloseIcon({ className }: PreviewIconProps): React.JSX.Element {
+  return (
+    <PreviewIconBase className={className}>
+      <path d="m4.5 4.5 7 7" />
+      <path d="m11.5 4.5-7 7" />
+    </PreviewIconBase>
+  );
+}
+
+function ExternalLinkIcon({ className }: PreviewIconProps): React.JSX.Element {
+  return (
+    <PreviewIconBase className={className}>
+      <path d="M9.5 3H13v3.5" />
+      <path d="M7 9l6-6" />
+      <path d="M11 9.5v1A1.5 1.5 0 0 1 9.5 12h-5A1.5 1.5 0 0 1 3 10.5v-5A1.5 1.5 0 0 1 4.5 4h1" />
+    </PreviewIconBase>
+  );
+}
+
+function ReviewIcon({ className }: PreviewIconProps): React.JSX.Element {
+  return (
+    <PreviewIconBase className={className}>
+      <path d="M2.75 3.5h10.5v6H8.75l-2.75 3v-3h-3.25z" />
+      <path d="m6.1 6.8 1.15 1.15 2.35-2.45" />
+    </PreviewIconBase>
+  );
+}
+
+function RefreshIcon({ className }: PreviewIconProps): React.JSX.Element {
+  return (
+    <PreviewIconBase className={className}>
+      <path d="M12.75 4.25V2H10.5" />
+      <path d="M12.75 2 9.9 4.85" />
+      <path d="M12 8A4 4 0 1 1 8 4c.85 0 1.63.26 2.28.7" />
+    </PreviewIconBase>
+  );
+}
+
+function StatusIcon(props: {
+  status: PreviewPullRequestCheckStatus;
+  className?: string;
+}): React.JSX.Element {
+  if (props.status === 'passed') {
+    return <CheckPassedIcon className={props.className} />;
+  }
+
+  if (props.status === 'failed') {
+    return <CheckFailedIcon className={props.className} />;
+  }
+
+  return <CheckPendingIcon className={props.className} />;
 }
 
 function getPluginIdFromLocation(): string | null {
@@ -3409,6 +4971,8 @@ function getToneClass(tone: Tone): string {
 
 const SETTINGS_INDEX_HREF = '/instance/settings/plugins';
 const GITHUB_SYNC_SETTINGS_UPDATED_EVENT = 'paperclip-github-plugin:settings-updated';
+const GITHUB_SYNC_LOCATION_CHANGED_EVENT = 'paperclip-github-plugin:location-changed';
+let gitHubSyncLocationObserverInstalled = false;
 
 function getStringValue(record: Record<string, unknown>, key: string): string | null {
   const value = record[key];
@@ -4238,6 +5802,1708 @@ function SyncDiagnosticsPanel(props: {
         </div>
       ) : null}
     </section>
+  );
+}
+
+function PreviewAvatar(props: {
+  person: PreviewPullRequestPerson;
+  stacked?: boolean;
+}): React.JSX.Element {
+  const backgroundColor = getPreviewAvatarColor(props.person.handle);
+  const className = props.stacked ? 'ghsync-prs-avatar-stack__item' : 'ghsync-prs-avatar';
+
+  return (
+    <span
+      className={className}
+      style={{ backgroundColor }}
+      title={`${props.person.name} (${props.person.handle})`}
+      aria-hidden="true"
+    >
+      {props.person.avatarUrl ? (
+        <img src={props.person.avatarUrl} alt="" loading="lazy" />
+      ) : (
+        getInitials(props.person.name)
+      )}
+    </span>
+  );
+}
+
+function PreviewMarkdown(props: {
+  body: string;
+}): React.JSX.Element {
+  return (
+    <div className="ghsync-prs-markdown paperclip-markdown prose prose-sm max-w-none break-words overflow-hidden">
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm]}
+        components={{
+          a: ({ href, children, ...anchorProps }) => (
+            <a {...anchorProps} href={href} target="_blank" rel="noreferrer">
+              {children}
+            </a>
+          )
+        }}
+      >
+        {props.body}
+      </ReactMarkdown>
+    </div>
+  );
+}
+
+export function GitHubSyncProjectPullRequestsSidebarItem(): React.JSX.Element | null {
+  const hostContext = useHostContext();
+  const location = useCurrentLocationSnapshot();
+  const themeMode = useResolvedThemeMode();
+  const theme = themeMode === 'light' ? LIGHT_PALETTE : DARK_PALETTE;
+  const themeVars = buildThemeVars(theme, themeMode);
+  const pullRequestCount = usePluginData<PreviewPullRequestCountData>(
+    'project.pullRequests.count',
+    hostContext.entityType === 'project' && hostContext.companyId && hostContext.entityId
+      ? {
+          companyId: hostContext.companyId,
+          projectId: hostContext.entityId
+        }
+      : {}
+  );
+
+  if (hostContext.entityType !== 'project' || !hostContext.entityId) {
+    return null;
+  }
+
+  if ((pullRequestCount.loading && !pullRequestCount.data) || pullRequestCount.data?.status === 'unmapped') {
+    return null;
+  }
+
+  const href = buildProjectPullRequestsPageHref(hostContext.companyPrefix, hostContext.entityId);
+  const pageBaseHref = buildProjectPullRequestsPageHref(hostContext.companyPrefix, null);
+  const currentProjectId = getProjectPullRequestsPageProjectId(location.search);
+  const isCurrent = location.pathname === pageBaseHref && currentProjectId === hostContext.entityId;
+  const openPullRequestsCount =
+    typeof pullRequestCount.data?.totalOpenPullRequests === 'number' && pullRequestCount.data.totalOpenPullRequests > 0
+      ? pullRequestCount.data.totalOpenPullRequests
+      : null;
+
+  return (
+    <div className="ghsync-prs-sidebar" style={themeVars}>
+      <style>{PROJECT_PULL_REQUESTS_SIDEBAR_STYLES}</style>
+      <a
+        className="ghsync-prs-sidebar__link"
+        href={href}
+        aria-current={isCurrent ? 'page' : undefined}
+        title="Open pull requests for this project"
+      >
+        <span className="ghsync-prs-sidebar__label">
+          <PullRequestIcon className="ghsync-prs-sidebar__icon" />
+          <span>Pull requests</span>
+        </span>
+        {openPullRequestsCount !== null ? (
+          <span className="ghsync-prs-sidebar__count" aria-label={`${openPullRequestsCount} open pull requests`}>
+            {openPullRequestsCount}
+          </span>
+        ) : null}
+      </a>
+    </div>
+  );
+}
+
+export function GitHubSyncProjectPullRequestsPage(): React.JSX.Element {
+  const hostContext = useHostContext();
+  const toast = usePluginToast();
+  const location = useCurrentLocationSnapshot();
+  const pluginIdFromLocation = getPluginIdFromLocation();
+  const projectId = getProjectPullRequestsPageProjectId(location.search);
+  const themeMode = useResolvedThemeMode();
+  const theme = themeMode === 'light' ? LIGHT_PALETTE : DARK_PALETTE;
+  const themeVars = buildThemeVars(theme, themeMode);
+  const [pageControls, setPageControls] = useState<PreviewPullRequestPageControls>({
+    filter: 'all',
+    pageIndex: 0,
+    pageCursors: [null]
+  });
+  const activeFilter = pageControls.filter;
+  const pageIndex = pageControls.pageIndex;
+  const currentCursor = pageControls.pageCursors[pageIndex] ?? null;
+  const [pullRequestsPageData, setPullRequestsPageData] = useState<PreviewPullRequestProjectData | null>(null);
+  const [pullRequestsPageError, setPullRequestsPageError] = useState<Error | null>(null);
+  const [pullRequestsPageLoading, setPullRequestsPageLoading] = useState(false);
+  const [pullRequestsPageQueryState, setPullRequestsPageQueryState] = useState<PreviewPullRequestPageQueryState | null>(null);
+  const [pullRequestsPageRefreshNonce, setPullRequestsPageRefreshNonce] = useState(0);
+  const pullRequestsPageRequestIdRef = useRef(0);
+  const pullRequestMetrics = usePluginData<PreviewPullRequestMetricsData>(
+    'project.pullRequests.metrics',
+    hostContext.companyId && projectId
+      ? {
+          companyId: hostContext.companyId,
+          projectId
+        }
+      : {
+          ...(projectId ? { projectId } : {})
+        }
+  );
+  const createPaperclipIssue = usePluginAction('project.pullRequests.createIssue');
+  const mergePullRequest = usePluginAction('project.pullRequests.merge');
+  const closePullRequest = usePluginAction('project.pullRequests.close');
+  const addPullRequestComment = usePluginAction('project.pullRequests.addComment');
+  const reviewPullRequest = usePluginAction('project.pullRequests.review');
+  const rerunPullRequestCi = usePluginAction('project.pullRequests.rerunCi');
+  const [selectedPullRequestId, setSelectedPullRequestId] = useState<string | null>(null);
+  const [issueDraftPullRequestId, setIssueDraftPullRequestId] = useState<string | null>(null);
+  const [issueDraftTitle, setIssueDraftTitle] = useState('');
+  const [commentModalPullRequestId, setCommentModalPullRequestId] = useState<string | null>(null);
+  const [commentModalDraft, setCommentModalDraft] = useState('');
+  const [reviewModalPullRequestId, setReviewModalPullRequestId] = useState<string | null>(null);
+  const [reviewModalDraft, setReviewModalDraft] = useState('');
+  const [rerunCiPullRequestId, setRerunCiPullRequestId] = useState<string | null>(null);
+  const [commentDraft, setCommentDraft] = useState('');
+  const [isTableCollapsed, setIsTableCollapsed] = useState(false);
+  const [pendingActionKey, setPendingActionKey] = useState<string | null>(null);
+  const [issueLinkOverridesByPullRequestId, setIssueLinkOverridesByPullRequestId] = useState<
+    Record<string, {
+      paperclipIssueId: string;
+      paperclipIssueKey?: string;
+    }>
+  >({});
+  const pageData = pullRequestsPageData ?? {
+    ...EMPTY_PROJECT_PULL_REQUESTS_DATA,
+    projectId
+  };
+  const metricsData = pullRequestMetrics.data ?? {
+    ...EMPTY_PROJECT_PULL_REQUEST_METRICS_DATA,
+    projectId
+  };
+  const showInitialLoadingState = pullRequestsPageLoading && !pullRequestsPageData;
+  const pageStatus = pageData.status ?? (pullRequestsPageError ? 'error' : 'ready');
+  const displayedPullRequests = pageData.pullRequests
+    .filter((pullRequest) => pullRequest.status === 'open')
+    .map((pullRequest) => {
+      const override = issueLinkOverridesByPullRequestId[pullRequest.id];
+      return override
+        ? {
+            ...pullRequest,
+            paperclipIssueId: override.paperclipIssueId,
+            ...(override.paperclipIssueKey ? { paperclipIssueKey: override.paperclipIssueKey } : {})
+          }
+        : pullRequest;
+    });
+  const totalOpenPullRequests =
+    typeof metricsData.totalOpenPullRequests === 'number' && metricsData.totalOpenPullRequests >= 0
+      ? metricsData.totalOpenPullRequests
+      : typeof pageData.totalOpenPullRequests === 'number' && pageData.totalOpenPullRequests >= 0
+        ? pageData.totalOpenPullRequests
+        : displayedPullRequests.length;
+  const totalFilteredPullRequests =
+    typeof pageData.totalFilteredPullRequests === 'number' && pageData.totalFilteredPullRequests >= 0
+      ? pageData.totalFilteredPullRequests
+      : displayedPullRequests.length;
+  const resolvedPageIndex = typeof pageData.pageIndex === 'number' && pageData.pageIndex >= 0 ? pageData.pageIndex : pageIndex;
+  const resolvedPageSize = typeof pageData.pageSize === 'number' && pageData.pageSize > 0 ? pageData.pageSize : 10;
+  const mergeablePullRequestsCount =
+    typeof metricsData.mergeablePullRequests === 'number' && metricsData.mergeablePullRequests >= 0
+      ? metricsData.mergeablePullRequests
+      : undefined;
+  const reviewablePullRequestsCount =
+    typeof metricsData.reviewablePullRequests === 'number' && metricsData.reviewablePullRequests >= 0
+      ? metricsData.reviewablePullRequests
+      : undefined;
+  const failingPullRequestsCount =
+    typeof metricsData.failingPullRequests === 'number' && metricsData.failingPullRequests >= 0
+      ? metricsData.failingPullRequests
+      : undefined;
+  const metricsReady = metricsData.status === 'ready';
+  const resolvedPageFilter =
+    pageData.filter === 'all' || pageData.filter === 'mergeable' || pageData.filter === 'reviewable' || pageData.filter === 'failing'
+      ? pageData.filter
+      : activeFilter;
+  const pageDataMatchesCurrentQuery =
+    pullRequestsPageQueryState?.filter === activeFilter &&
+    pullRequestsPageQueryState.pageIndex === pageIndex &&
+    pullRequestsPageQueryState.cursor === currentCursor;
+
+  useEffect(() => {
+    const currentCompanyId = hostContext.companyId;
+    if (!currentCompanyId || !projectId) {
+      setPullRequestsPageData(null);
+      setPullRequestsPageError(null);
+      setPullRequestsPageLoading(false);
+      return;
+    }
+
+    const requestId = pullRequestsPageRequestIdRef.current + 1;
+    pullRequestsPageRequestIdRef.current = requestId;
+    setPullRequestsPageLoading(true);
+    setPullRequestsPageError(null);
+
+    void fetchPluginDataResult<PreviewPullRequestProjectData>({
+      pluginId: pluginIdFromLocation,
+      dataKey: 'project.pullRequests.page',
+      companyId: currentCompanyId,
+      dataParams: {
+        companyId: currentCompanyId,
+        projectId,
+        filter: activeFilter,
+        pageIndex,
+        ...(currentCursor ? { cursor: currentCursor } : {})
+      }
+    })
+      .then((result) => {
+        if (pullRequestsPageRequestIdRef.current !== requestId) {
+          return;
+        }
+
+        setPullRequestsPageQueryState({
+          filter: activeFilter,
+          pageIndex,
+          cursor: currentCursor
+        });
+        setPullRequestsPageData(result);
+        setPullRequestsPageError(null);
+      })
+      .catch((error) => {
+        if (pullRequestsPageRequestIdRef.current !== requestId) {
+          return;
+        }
+
+        setPullRequestsPageError(error instanceof Error ? error : new Error('Could not load pull requests.'));
+      })
+      .finally(() => {
+        if (pullRequestsPageRequestIdRef.current !== requestId) {
+          return;
+        }
+
+        setPullRequestsPageLoading(false);
+      });
+  }, [activeFilter, currentCursor, hostContext.companyId, pageIndex, pluginIdFromLocation, projectId, pullRequestsPageRefreshNonce]);
+
+  useEffect(() => {
+    if (pageStatus === 'ready' && !pullRequestsPageLoading && resolvedPageFilter === activeFilter && resolvedPageIndex !== pageIndex) {
+      if (!pageDataMatchesCurrentQuery) {
+        return;
+      }
+
+      setPageControls((current) =>
+        current.pageIndex === resolvedPageIndex
+          ? current
+          : {
+              ...current,
+              pageIndex: resolvedPageIndex
+            }
+      );
+    }
+  }, [activeFilter, pageDataMatchesCurrentQuery, pageIndex, pageStatus, pullRequestsPageLoading, resolvedPageFilter, resolvedPageIndex]);
+
+  useEffect(() => {
+    if (displayedPullRequests.length === 0) {
+      if (selectedPullRequestId !== null) {
+        setSelectedPullRequestId(null);
+      }
+      setIsTableCollapsed(false);
+      return;
+    }
+
+    const selectedPullRequestStillVisible = displayedPullRequests.some((pullRequest) => pullRequest.id === selectedPullRequestId);
+    if (!selectedPullRequestStillVisible) {
+      setSelectedPullRequestId(displayedPullRequests[0]?.id ?? null);
+      setIsTableCollapsed(false);
+    }
+  }, [displayedPullRequests, selectedPullRequestId]);
+
+  useEffect(() => {
+    setIssueDraftPullRequestId(null);
+    setIssueDraftTitle('');
+    setCommentModalPullRequestId(null);
+    setCommentModalDraft('');
+    setReviewModalPullRequestId(null);
+    setReviewModalDraft('');
+    setRerunCiPullRequestId(null);
+    setCommentDraft('');
+    setPullRequestsPageData(null);
+    setPullRequestsPageError(null);
+    setPullRequestsPageLoading(false);
+    setIssueLinkOverridesByPullRequestId({});
+    setPageControls({
+      filter: 'all',
+      pageIndex: 0,
+      pageCursors: [null]
+    });
+    setIsTableCollapsed(false);
+  }, [hostContext.companyId, projectId]);
+
+  const selectedPullRequestSummary = displayedPullRequests.find((pullRequest) => pullRequest.id === selectedPullRequestId) ?? null;
+  const selectedPullRequestDetails = usePluginData<PreviewPullRequestRecord | null>(
+    'project.pullRequests.detail',
+    hostContext.companyId && projectId && selectedPullRequestSummary
+      ? {
+          companyId: hostContext.companyId,
+          projectId,
+          repositoryUrl: pageData.repositoryUrl,
+          pullRequestNumber: selectedPullRequestSummary.number
+        }
+      : {}
+  );
+  const selectedPullRequest = selectedPullRequestSummary
+    ? {
+        ...selectedPullRequestSummary,
+        ...(selectedPullRequestDetails.data ?? {})
+      }
+    : selectedPullRequestDetails.data ?? null;
+  const issueModalPullRequest = displayedPullRequests.find((pullRequest) => pullRequest.id === issueDraftPullRequestId) ?? null;
+  const commentModalPullRequest = displayedPullRequests.find((pullRequest) => pullRequest.id === commentModalPullRequestId) ?? null;
+  const reviewModalPullRequest = displayedPullRequests.find((pullRequest) => pullRequest.id === reviewModalPullRequestId) ?? null;
+  const rerunCiModalPullRequest = displayedPullRequests.find((pullRequest) => pullRequest.id === rerunCiPullRequestId) ?? null;
+  const labelBackgroundAlpha = themeMode === 'light' ? 0.12 : 0.18;
+  const labelBorderAlpha = themeMode === 'light' ? 0.24 : 0.36;
+  const selectedPullRequestIssueHref = selectedPullRequest
+    ? getPaperclipIssueHref(
+        hostContext.companyPrefix,
+        selectedPullRequest.paperclipIssueKey ?? selectedPullRequest.paperclipIssueId ?? null
+      )
+    : undefined;
+  const selectedPullRequestIssueLabel = selectedPullRequest?.paperclipIssueKey
+    ?? (selectedPullRequest?.paperclipIssueId ? 'Open issue' : null);
+
+  useEffect(() => {
+    setCommentDraft('');
+  }, [selectedPullRequestId]);
+
+  function refreshPullRequests(): void {
+    setPullRequestsPageRefreshNonce((current) => current + 1);
+
+    try {
+      selectedPullRequestDetails.refresh();
+    } catch {
+      void 0;
+    }
+
+    try {
+      pullRequestMetrics.refresh();
+    } catch {
+      void 0;
+    }
+  }
+
+  function resetPaging(filter: PreviewPullRequestFilter): void {
+    setPageControls({
+      filter,
+      pageIndex: 0,
+      pageCursors: [null]
+    });
+    setIsTableCollapsed(false);
+  }
+
+  function handleNextPage(): void {
+    if (!pageData.hasNextPage) {
+      return;
+    }
+
+    setPageControls((current) => {
+      const nextPageIndex = current.pageIndex + 1;
+      const nextPageCursors = current.pageCursors.slice(0, current.pageIndex + 1);
+      nextPageCursors[nextPageIndex] = pageData.nextCursor ?? null;
+      return {
+        ...current,
+        pageIndex: nextPageIndex,
+        pageCursors: nextPageCursors
+      };
+    });
+    setIsTableCollapsed(false);
+  }
+
+  function handlePreviousPage(): void {
+    if (!pageData.hasPreviousPage && pageIndex === 0) {
+      return;
+    }
+
+    setPageControls((current) => ({
+      ...current,
+      pageIndex: Math.max(current.pageIndex - 1, 0)
+    }));
+    setIsTableCollapsed(false);
+  }
+
+  function handleSelectPullRequest(pullRequest: PreviewPullRequestRecord): void {
+    setSelectedPullRequestId(pullRequest.id);
+    setIsTableCollapsed(true);
+  }
+
+  function closeCreateIssueModal(): void {
+    setIssueDraftPullRequestId(null);
+    setIssueDraftTitle('');
+  }
+
+  function closeCommentModal(): void {
+    setCommentModalPullRequestId(null);
+    setCommentModalDraft('');
+  }
+
+  function closeReviewModal(): void {
+    setReviewModalPullRequestId(null);
+    setReviewModalDraft('');
+  }
+
+  function closeRerunCiModal(): void {
+    setRerunCiPullRequestId(null);
+  }
+
+  function applyIssueLinkOverride(
+    pullRequestId: string,
+    result: ProjectPullRequestIssueActionResult
+  ): void {
+    setIssueLinkOverridesByPullRequestId((current) => ({
+      ...current,
+      [pullRequestId]: {
+        paperclipIssueId: result.paperclipIssueId,
+        ...(result.paperclipIssueKey ? { paperclipIssueKey: result.paperclipIssueKey } : {})
+      }
+    }));
+  }
+
+  function openCreateIssueModal(pullRequest: PreviewPullRequestRecord): void {
+    setIssueDraftPullRequestId(pullRequest.id);
+    setIssueDraftTitle(pullRequest.title);
+  }
+
+  async function handleCreatePaperclipIssue(): Promise<void> {
+    if (!issueModalPullRequest || !hostContext.companyId || !projectId) {
+      return;
+    }
+
+    const nextIssueTitle = issueDraftTitle.trim();
+    if (!nextIssueTitle) {
+      toast({
+        title: 'Issue title required',
+        body: 'Enter an issue title.',
+        tone: 'error'
+      });
+      return;
+    }
+
+    const actionKey = `create-issue:${issueModalPullRequest.id}`;
+    setPendingActionKey(actionKey);
+
+    try {
+      const result = await createPaperclipIssue({
+        companyId: hostContext.companyId,
+        projectId,
+        repositoryUrl: pageData.repositoryUrl,
+        pullRequestNumber: issueModalPullRequest.number,
+        title: nextIssueTitle
+      }) as ProjectPullRequestIssueActionResult;
+      applyIssueLinkOverride(issueModalPullRequest.id, result);
+      closeCreateIssueModal();
+      refreshPullRequests();
+      toast({
+        title: result.paperclipIssueKey
+          ? `${result.paperclipIssueKey}${result.alreadyLinked ? ' already linked' : ' linked'}`
+          : result.alreadyLinked
+            ? 'Issue already linked'
+            : 'Issue created',
+        body: result.alreadyLinked
+          ? `Paperclip issue is already linked to #${issueModalPullRequest.number}.`
+          : `Linked #${issueModalPullRequest.number} to a Paperclip issue.`,
+        tone: 'success'
+      });
+    } catch (error) {
+      toast({
+        title: 'Could not create the Paperclip issue',
+        body: error instanceof Error ? error.message : 'Paperclip rejected the request.',
+        tone: 'error'
+      });
+    } finally {
+      setPendingActionKey((current) => current === actionKey ? null : current);
+    }
+  }
+
+  async function handleMergePullRequest(pullRequest: PreviewPullRequestRecord): Promise<void> {
+    if (!hostContext.companyId || !projectId) {
+      return;
+    }
+
+    const actionKey = `merge:${pullRequest.id}`;
+    setPendingActionKey(actionKey);
+
+    try {
+      await mergePullRequest({
+        companyId: hostContext.companyId,
+        projectId,
+        repositoryUrl: pageData.repositoryUrl,
+        pullRequestNumber: pullRequest.number
+      });
+      toast({
+        title: `Merged #${pullRequest.number}`,
+        body: 'The queue was refreshed.',
+        tone: 'success'
+      });
+      refreshPullRequests();
+    } catch (error) {
+      toast({
+        title: `Could not merge #${pullRequest.number}`,
+        body: error instanceof Error ? error.message : 'GitHub rejected the merge.',
+        tone: 'error'
+      });
+    } finally {
+      setPendingActionKey((current) => current === actionKey ? null : current);
+    }
+  }
+
+  async function handleClosePullRequest(pullRequest: PreviewPullRequestRecord): Promise<void> {
+    if (!hostContext.companyId || !projectId) {
+      return;
+    }
+
+    const actionKey = `close:${pullRequest.id}`;
+    setPendingActionKey(actionKey);
+
+    try {
+      await closePullRequest({
+        companyId: hostContext.companyId,
+        projectId,
+        repositoryUrl: pageData.repositoryUrl,
+        pullRequestNumber: pullRequest.number
+      });
+      toast({
+        title: `Closed #${pullRequest.number}`,
+        body: 'The queue was refreshed.',
+        tone: 'warn'
+      });
+      refreshPullRequests();
+    } catch (error) {
+      toast({
+        title: `Could not close #${pullRequest.number}`,
+        body: error instanceof Error ? error.message : 'GitHub rejected the close action.',
+        tone: 'error'
+      });
+    } finally {
+      setPendingActionKey((current) => current === actionKey ? null : current);
+    }
+  }
+
+  async function handleAddComment(): Promise<void> {
+    if (!selectedPullRequest || !hostContext.companyId || !projectId) {
+      return;
+    }
+
+    const nextComment = commentDraft.trim();
+    if (!nextComment) {
+      return;
+    }
+
+    const actionKey = `comment:${selectedPullRequest.id}`;
+    setPendingActionKey(actionKey);
+
+    try {
+      await addPullRequestComment({
+        companyId: hostContext.companyId,
+        projectId,
+        repositoryUrl: pageData.repositoryUrl,
+        pullRequestNumber: selectedPullRequest.number,
+        body: nextComment
+      });
+      setCommentDraft('');
+      refreshPullRequests();
+      toast({
+        title: 'Comment added',
+        body: `Posted a GitHub comment on #${selectedPullRequest.number}.`,
+        tone: 'success'
+      });
+    } catch (error) {
+      toast({
+        title: 'Could not add the comment',
+        body: error instanceof Error ? error.message : 'GitHub rejected the comment.',
+        tone: 'error'
+      });
+    } finally {
+      setPendingActionKey((current) => current === actionKey ? null : current);
+    }
+  }
+
+  async function handleAddModalComment(): Promise<void> {
+    if (!commentModalPullRequest || !hostContext.companyId || !projectId) {
+      return;
+    }
+
+    const nextComment = commentModalDraft.trim();
+    if (!nextComment) {
+      return;
+    }
+
+    const actionKey = `comment-modal:${commentModalPullRequest.id}`;
+    setPendingActionKey(actionKey);
+
+    try {
+      await addPullRequestComment({
+        companyId: hostContext.companyId,
+        projectId,
+        repositoryUrl: pageData.repositoryUrl,
+        pullRequestNumber: commentModalPullRequest.number,
+        body: nextComment
+      });
+      closeCommentModal();
+      refreshPullRequests();
+      toast({
+        title: 'Comment added',
+        body: `Posted a GitHub comment on #${commentModalPullRequest.number}.`,
+        tone: 'success'
+      });
+    } catch (error) {
+      toast({
+        title: 'Could not add the comment',
+        body: error instanceof Error ? error.message : 'GitHub rejected the comment.',
+        tone: 'error'
+      });
+    } finally {
+      setPendingActionKey((current) => current === actionKey ? null : current);
+    }
+  }
+
+  async function handleReviewPullRequest(review: 'approve' | 'request_changes'): Promise<void> {
+    if (!reviewModalPullRequest || !hostContext.companyId || !projectId) {
+      return;
+    }
+
+    const actionKey = `review:${reviewModalPullRequest.id}:${review}`;
+    setPendingActionKey(actionKey);
+
+    try {
+      const result = await reviewPullRequest({
+        companyId: hostContext.companyId,
+        projectId,
+        repositoryUrl: pageData.repositoryUrl,
+        pullRequestNumber: reviewModalPullRequest.number,
+        review,
+        body: reviewModalDraft.trim()
+      }) as ProjectPullRequestReviewActionResult;
+      closeReviewModal();
+      refreshPullRequests();
+      toast({
+        title: result.review === 'approved' ? `Approved #${reviewModalPullRequest.number}` : `Requested changes on #${reviewModalPullRequest.number}`,
+        body: result.review === 'approved' ? 'GitHub review submitted.' : 'GitHub change request submitted.',
+        tone: 'success'
+      });
+    } catch (error) {
+      toast({
+        title: 'Could not submit the review',
+        body: error instanceof Error ? error.message : 'GitHub rejected the review.',
+        tone: 'error'
+      });
+    } finally {
+      setPendingActionKey((current) => current === actionKey ? null : current);
+    }
+  }
+
+  async function handleRerunCi(): Promise<void> {
+    if (!rerunCiModalPullRequest || !hostContext.companyId || !projectId) {
+      return;
+    }
+
+    const actionKey = `rerun-ci:${rerunCiModalPullRequest.id}`;
+    setPendingActionKey(actionKey);
+
+    try {
+      const result = await rerunPullRequestCi({
+        companyId: hostContext.companyId,
+        projectId,
+        repositoryUrl: pageData.repositoryUrl,
+        pullRequestNumber: rerunCiModalPullRequest.number
+      }) as ProjectPullRequestRerunCiActionResult;
+      closeRerunCiModal();
+      refreshPullRequests();
+      toast({
+        title: `Re-ran CI for #${rerunCiModalPullRequest.number}`,
+        body: result.rerunCheckSuiteCount && result.rerunCheckSuiteCount > 1
+          ? `Requested ${result.rerunCheckSuiteCount} check suites.`
+          : 'Requested a CI re-run.',
+        tone: 'success'
+      });
+    } catch (error) {
+      toast({
+        title: 'Could not re-run CI',
+        body: error instanceof Error ? error.message : 'GitHub rejected the request.',
+        tone: 'error'
+      });
+    } finally {
+      setPendingActionKey((current) => current === actionKey ? null : current);
+    }
+  }
+
+  const visibleTablePullRequests = isTableCollapsed && selectedPullRequestSummary
+    ? [selectedPullRequestSummary]
+    : displayedPullRequests;
+  const tableSummaryLabel = pageStatus === 'ready'
+    ? `${formatProjectPullRequestRange(resolvedPageIndex, resolvedPageSize, totalFilteredPullRequests)} in ${pageData.repositoryLabel}`
+    : pageData.message ?? pullRequestsPageError?.message ?? 'Loading pull requests.';
+  const summaryCards: Array<{
+    filter: PreviewPullRequestFilter;
+    value: number | undefined;
+    label: string;
+    helper: string;
+    toneClassName: string;
+  }> = [
+    {
+      filter: 'all',
+      value: totalOpenPullRequests,
+      label: 'Total PRs',
+      helper: `${pluralize(totalOpenPullRequests, 'open pull request')}`,
+      toneClassName: 'ghsync-prs-page__summary-card--open'
+    },
+    {
+      filter: 'mergeable',
+      value: mergeablePullRequestsCount,
+      label: 'Mergeable',
+      helper: 'Ready to merge',
+      toneClassName: 'ghsync-prs-page__summary-card--mergeable'
+    },
+    {
+      filter: 'reviewable',
+      value: reviewablePullRequestsCount,
+      label: 'Reviewable',
+      helper: 'Ready for review',
+      toneClassName: 'ghsync-prs-page__summary-card--reviewable'
+    },
+    {
+      filter: 'failing',
+      value: failingPullRequestsCount,
+      label: 'Failing',
+      helper: 'Checks failing',
+      toneClassName: 'ghsync-prs-page__summary-card--failing'
+    }
+  ];
+
+  return (
+    <div className="ghsync" style={themeVars}>
+      <style>{PAGE_STYLES}</style>
+      <style>{PROJECT_PULL_REQUESTS_PAGE_STYLES}</style>
+
+      <div className="ghsync-prs-page">
+        <header className="ghsync-prs-page__header">
+          <section className="ghsync-prs-page__banner">
+            <div className="ghsync-prs-page__banner-top">
+              <div className="ghsync-prs-page__banner-copy">
+                <div className="ghsync__section-tags">
+                  <span className="ghsync__scope-pill ghsync__scope-pill--company">{pageData.projectLabel}</span>
+                  <span className="ghsync__scope-pill ghsync__scope-pill--global">{pageData.repositoryLabel}</span>
+                </div>
+                <h2>Open pull requests</h2>
+              </div>
+
+              <div className="ghsync-prs-page__banner-actions">
+                <button
+                  type="button"
+                  className={getPluginActionClassName({ variant: 'secondary' })}
+                  onClick={refreshPullRequests}
+                >
+                  Refresh
+                </button>
+                {pageData.repositoryUrl ? (
+                  <a
+                    className={getPluginActionClassName({ variant: 'secondary' })}
+                    href={pageData.repositoryUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    <ExternalLinkIcon className="ghsync-prs-icon" />
+                    <span>Open repository</span>
+                  </a>
+                ) : null}
+              </div>
+            </div>
+
+            <div className="ghsync-prs-page__summary-grid">
+              {summaryCards.map((card) => (
+                <button
+                  key={card.filter}
+                  type="button"
+                  className={[
+                    'ghsync-prs-page__summary-card',
+                    card.toneClassName,
+                    activeFilter === card.filter ? 'ghsync-prs-page__summary-card--active' : ''
+                  ].join(' ')}
+                  onClick={() => resetPaging(card.filter)}
+                  disabled={card.filter !== 'all' && !metricsReady}
+                  aria-pressed={activeFilter === card.filter}
+                >
+                  <span>{card.label}</span>
+                  <strong>{typeof card.value === 'number' ? card.value : '—'}</strong>
+                  <p>{card.helper}</p>
+                </button>
+              ))}
+            </div>
+          </section>
+        </header>
+
+        <section className="ghsync__card ghsync-prs-page__table-card">
+          <div className="ghsync__card-header ghsync-prs-page__table-head">
+            <div>
+              <h3>Open pull request queue</h3>
+              <p>
+                {pageStatus === 'ready'
+                  ? `${getPreviewPullRequestFilterLabel(activeFilter)} · ${tableSummaryLabel}`
+                  : pageData.message ?? pullRequestsPageError?.message ?? 'Loading pull requests.'}
+              </p>
+            </div>
+
+            <div className="ghsync-prs-page__table-meta">
+              {pageStatus === 'ready' ? (
+                <>
+                  <span className={`ghsync__badge ${getToneClass('info')}`}>
+                    {formatProjectPullRequestRange(resolvedPageIndex, resolvedPageSize, totalFilteredPullRequests)}
+                  </span>
+                  {isTableCollapsed ? (
+                    <button
+                      type="button"
+                      className={getPluginActionClassName({ variant: 'secondary', size: 'sm' })}
+                      onClick={() => setIsTableCollapsed(false)}
+                    >
+                      Show all
+                    </button>
+                  ) : null}
+                  <div className="ghsync-prs-page__pagination">
+                    <button
+                      type="button"
+                      className={getPluginActionClassName({ variant: 'secondary', size: 'sm' })}
+                      onClick={handlePreviousPage}
+                      disabled={!pageData.hasPreviousPage}
+                    >
+                      Previous
+                    </button>
+                    <button
+                      type="button"
+                      className={getPluginActionClassName({ variant: 'secondary', size: 'sm' })}
+                      onClick={handleNextPage}
+                      disabled={!pageData.hasNextPage}
+                    >
+                      Next
+                    </button>
+                  </div>
+                </>
+              ) : null}
+            </div>
+          </div>
+
+          {showInitialLoadingState ? (
+            <div className="ghsync-prs-detail__empty">
+              <strong>Loading pull requests…</strong>
+            </div>
+          ) : pageStatus !== 'ready' ? (
+            <div className="ghsync-prs-detail__empty">
+              <strong>
+                {pageStatus === 'unmapped'
+                  ? 'No mapped repository.'
+                  : pageStatus === 'missing_token'
+                    ? 'GitHub token required.'
+                    : pageStatus === 'error'
+                      ? 'Could not load pull requests.'
+                      : 'Project context required.'}
+              </strong>
+              <span>{pageData.message ?? pullRequestsPageError?.message}</span>
+            </div>
+          ) : displayedPullRequests.length === 0 ? (
+            <div className="ghsync-prs-detail__empty">
+              <strong>No {activeFilter === 'all' ? 'open' : activeFilter} pull requests.</strong>
+            </div>
+          ) : (
+            <div className="ghsync-prs-page__table-wrap">
+              <table className="ghsync-prs-table">
+                <thead>
+                  <tr>
+                    <th scope="col">ID</th>
+                    <th scope="col">Title</th>
+                    <th scope="col">Author</th>
+                    <th scope="col" className="ghsync-prs-table__cell--center">Checks</th>
+                    <th scope="col" className="ghsync-prs-table__cell--center">Reviews</th>
+                    <th scope="col" className="ghsync-prs-table__cell--center">Review threads</th>
+                    <th scope="col" className="ghsync-prs-table__cell--center">Comments</th>
+                    <th scope="col" className="ghsync-prs-table__cell--center">Age</th>
+                    <th scope="col" className="ghsync-prs-table__cell--center">Last updated</th>
+                    <th scope="col" className="ghsync-prs-table__cell--center">Paperclip issue</th>
+                    <th scope="col" className="ghsync-prs-table__cell--center">Quick actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {visibleTablePullRequests.map((pullRequest) => {
+                    const hasReviewSummary = pullRequest.reviewApprovals > 0 || pullRequest.reviewChangesRequested > 0;
+                    const hasResolvedReviewThreads =
+                      pullRequest.unresolvedReviewThreads === 0 &&
+                      (hasReviewSummary || (pullRequest.copilotUnresolvedReviewThreads ?? 0) === 0);
+                    const pullRequestIssueHref = getPaperclipIssueHref(
+                      hostContext.companyPrefix,
+                      pullRequest.paperclipIssueKey ?? pullRequest.paperclipIssueId ?? null
+                    );
+                    const pullRequestIssueLabel = pullRequest.paperclipIssueKey ?? (pullRequest.paperclipIssueId ? 'Open issue' : null);
+                    const mergeActionKey = `merge:${pullRequest.id}`;
+                    const reviewActionKey = `review:${pullRequest.id}`;
+                    const rerunCiActionKey = `rerun-ci:${pullRequest.id}`;
+                    const closeActionKey = `close:${pullRequest.id}`;
+
+                    return (
+                      <tr
+                        key={pullRequest.id}
+                        className={pullRequest.id === selectedPullRequest?.id ? 'ghsync-prs-table__row--selected' : undefined}
+                      >
+                        <td>
+                          <span className="ghsync-prs-table__id">#{pullRequest.number}</span>
+                        </td>
+
+                        <td className="ghsync-prs-table__title-cell">
+                          <button
+                            type="button"
+                            className={`ghsync-prs-table__title-button${pullRequest.id === selectedPullRequest?.id ? ' ghsync-prs-table__title-button--selected' : ''}`}
+                            onClick={() => handleSelectPullRequest(pullRequest)}
+                          >
+                            {pullRequest.title}
+                          </button>
+                          <div className="ghsync-prs-table__labels">
+                            {pullRequest.labels.map((label) => (
+                              <span
+                                key={label.name}
+                                className="ghsync-prs-table__label"
+                                style={{
+                                  color: label.color,
+                                  backgroundColor: hexToRgba(label.color, labelBackgroundAlpha),
+                                  borderColor: hexToRgba(label.color, labelBorderAlpha)
+                                }}
+                              >
+                                {label.name}
+                              </span>
+                            ))}
+                          </div>
+                        </td>
+
+                        <td>
+                          <a
+                            className="ghsync-prs-table__person"
+                            href={pullRequest.author.profileUrl}
+                            target="_blank"
+                            rel="noreferrer"
+                          >
+                            <PreviewAvatar person={pullRequest.author} />
+                            <span className="ghsync-prs-table__person-copy">
+                              <span className="ghsync-prs-table__person-name">{pullRequest.author.name}</span>
+                              <span className="ghsync-prs-table__person-handle">{pullRequest.author.handle}</span>
+                            </span>
+                          </a>
+                        </td>
+
+                        <td className="ghsync-prs-table__cell--center">
+                          <a
+                            className={`ghsync-prs-table__icon-link ${getPreviewPullRequestCheckToneClass(pullRequest.checksStatus)}`}
+                            href={pullRequest.checksUrl}
+                            target="_blank"
+                            rel="noreferrer"
+                            title={`${getPreviewPullRequestCheckLabel(pullRequest.checksStatus)} on GitHub`}
+                          >
+                            <StatusIcon status={pullRequest.checksStatus} className="ghsync-prs-icon" />
+                          </a>
+                        </td>
+
+                        <td className="ghsync-prs-table__cell--center">
+                          {hasReviewSummary ? (
+                            <a className="ghsync-prs-table__metric-link" href={pullRequest.reviewsUrl} target="_blank" rel="noreferrer">
+                              {pullRequest.reviewApprovals > 0 ? (
+                                <>
+                                  <CheckPassedIcon className="ghsync-prs-icon" />
+                                  <span>{pullRequest.reviewApprovals}</span>
+                                </>
+                              ) : null}
+                              {pullRequest.reviewChangesRequested > 0 ? (
+                                <>
+                                  <CheckFailedIcon className="ghsync-prs-icon" />
+                                  <span>{pullRequest.reviewChangesRequested}</span>
+                                </>
+                              ) : null}
+                            </a>
+                          ) : null}
+                        </td>
+
+                        <td className="ghsync-prs-table__cell--center">
+                          {pullRequest.unresolvedReviewThreads > 0 ? (
+                            <a className="ghsync-prs-table__metric-link" href={pullRequest.reviewThreadsUrl} target="_blank" rel="noreferrer">
+                              <CommentIcon className="ghsync-prs-icon" />
+                              <span>{pullRequest.unresolvedReviewThreads}</span>
+                            </a>
+                          ) : hasResolvedReviewThreads ? (
+                            <a className="ghsync-prs-table__metric-link" href={pullRequest.reviewThreadsUrl} target="_blank" rel="noreferrer">
+                              <CheckPassedIcon className="ghsync-prs-icon" />
+                            </a>
+                          ) : null}
+                        </td>
+
+                        <td className="ghsync-prs-table__cell--center">
+                          {pullRequest.commentsCount > 0 ? (
+                            <a className="ghsync-prs-table__metric-link" href={pullRequest.commentsUrl} target="_blank" rel="noreferrer">
+                              <CommentIcon className="ghsync-prs-icon" />
+                              <span>{pullRequest.commentsCount}</span>
+                            </a>
+                          ) : null}
+                        </td>
+
+                        <td className="ghsync-prs-table__cell--center">
+                          <span className="ghsync-prs-table__time" title={formatShortDateTime(pullRequest.createdAt)}>
+                            {formatRelativeTime(pullRequest.createdAt)}
+                          </span>
+                        </td>
+
+                        <td className="ghsync-prs-table__cell--center">
+                          <span className="ghsync-prs-table__time" title={formatShortDateTime(pullRequest.updatedAt)}>
+                            {formatRelativeTime(pullRequest.updatedAt)}
+                          </span>
+                        </td>
+
+                        <td className="ghsync-prs-table__cell--center">
+                          {pullRequestIssueHref && pullRequestIssueLabel ? (
+                            <a className="ghsync-prs-table__issue-link" href={pullRequestIssueHref}>
+                              {pullRequestIssueLabel}
+                            </a>
+                          ) : (
+                            <button
+                              type="button"
+                              className="ghsync-prs-table__icon-button"
+                              onClick={() => openCreateIssueModal(pullRequest)}
+                              title={`Create a Paperclip issue for #${pullRequest.number}`}
+                            >
+                              <PlusCircleIcon className="ghsync-prs-icon" />
+                            </button>
+                          )}
+                        </td>
+
+                        <td className="ghsync-prs-table__cell--center">
+                          <div className="ghsync-prs-table__quick-actions">
+                            <button
+                              type="button"
+                              className="ghsync-prs-table__icon-button"
+                              title={`Comment on #${pullRequest.number}`}
+                              onClick={() => {
+                                setCommentModalPullRequestId(pullRequest.id);
+                                setCommentModalDraft('');
+                              }}
+                              disabled={pendingActionKey === `comment-modal:${pullRequest.id}`}
+                            >
+                              <CommentIcon className="ghsync-prs-icon" />
+                            </button>
+                            {pullRequest.reviewable ? (
+                              <button
+                                type="button"
+                                className="ghsync-prs-table__icon-button"
+                                title={`Review #${pullRequest.number}`}
+                                onClick={() => {
+                                  setReviewModalPullRequestId(pullRequest.id);
+                                  setReviewModalDraft('');
+                                }}
+                                disabled={pendingActionKey === reviewActionKey}
+                              >
+                                <ReviewIcon className="ghsync-prs-icon" />
+                              </button>
+                            ) : null}
+                            {pullRequest.checksStatus === 'failed' ? (
+                              <button
+                                type="button"
+                                className="ghsync-prs-table__icon-button"
+                                title={`Re-run CI for #${pullRequest.number}`}
+                                onClick={() => setRerunCiPullRequestId(pullRequest.id)}
+                                disabled={pendingActionKey === rerunCiActionKey}
+                              >
+                                <RefreshIcon className="ghsync-prs-icon" />
+                              </button>
+                            ) : null}
+                            {pullRequest.mergeable ? (
+                              <button
+                                type="button"
+                                className="ghsync-prs-table__icon-button"
+                                title={`Merge #${pullRequest.number}`}
+                                onClick={() => {
+                                  void handleMergePullRequest(pullRequest);
+                                }}
+                                disabled={pendingActionKey === mergeActionKey}
+                              >
+                                <MergeIcon className="ghsync-prs-icon" />
+                              </button>
+                            ) : null}
+                            <button
+                              type="button"
+                              className="ghsync-prs-table__icon-button"
+                              title={`Close #${pullRequest.number}`}
+                              onClick={() => {
+                                void handleClosePullRequest(pullRequest);
+                              }}
+                              disabled={pendingActionKey === closeActionKey}
+                            >
+                              <CloseIcon className="ghsync-prs-icon" />
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </section>
+
+        <section className="ghsync__card ghsync-prs-detail-card">
+          <div className="ghsync__card-header ghsync-prs-detail__header">
+            {selectedPullRequest ? (
+              <>
+                <div>
+                  <div className="ghsync__section-tags">
+                    <span className="ghsync__scope-pill ghsync__scope-pill--global">{pageData.repositoryLabel}</span>
+                    <span className={`ghsync__badge ${getToneClass(selectedPullRequest.checksStatus === 'failed' ? 'danger' : selectedPullRequest.checksStatus === 'pending' ? 'warning' : 'success')}`}>
+                      {getPreviewPullRequestCheckLabel(selectedPullRequest.checksStatus)}
+                    </span>
+                    {selectedPullRequestIssueLabel ? (
+                      <span className={`ghsync__badge ${getToneClass('info')}`}>{selectedPullRequestIssueLabel}</span>
+                    ) : (
+                      <span className={`ghsync__badge ${getToneClass('warning')}`}>Missing Paperclip issue</span>
+                    )}
+                  </div>
+                  <h3>{selectedPullRequest.title}</h3>
+                  <p>
+                    #{selectedPullRequest.number} opened {formatRelativeTime(selectedPullRequest.createdAt)} by {selectedPullRequest.author.handle}
+                  </p>
+                </div>
+
+                <div className="ghsync-prs-detail__actions">
+                  <a
+                    className={getPluginActionClassName({ variant: 'secondary', size: 'sm' })}
+                    href={selectedPullRequest.githubUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    <ExternalLinkIcon className="ghsync-prs-icon" />
+                    <span>Open on GitHub</span>
+                  </a>
+                  {selectedPullRequestIssueHref && selectedPullRequestIssueLabel ? (
+                    <a
+                      className={getPluginActionClassName({ variant: 'secondary', size: 'sm' })}
+                      href={selectedPullRequestIssueHref}
+                    >
+                      {selectedPullRequestIssueLabel}
+                    </a>
+                  ) : (
+                    <button
+                      type="button"
+                      className={getPluginActionClassName({ variant: 'secondary', size: 'sm' })}
+                      onClick={() => openCreateIssueModal(selectedPullRequest)}
+                    >
+                      <PlusCircleIcon className="ghsync-prs-icon" />
+                      <span>Create Paperclip issue</span>
+                    </button>
+                  )}
+                  {selectedPullRequest.reviewable ? (
+                    <button
+                      type="button"
+                      className={getPluginActionClassName({ variant: 'secondary', size: 'sm' })}
+                      onClick={() => {
+                        setReviewModalPullRequestId(selectedPullRequest.id);
+                        setReviewModalDraft('');
+                      }}
+                      disabled={pendingActionKey === `review:${selectedPullRequest.id}:approve`}
+                    >
+                      <ReviewIcon className="ghsync-prs-icon" />
+                      <span>Review</span>
+                    </button>
+                  ) : null}
+                  {selectedPullRequest.checksStatus === 'failed' ? (
+                    <button
+                      type="button"
+                      className={getPluginActionClassName({ variant: 'secondary', size: 'sm' })}
+                      onClick={() => setRerunCiPullRequestId(selectedPullRequest.id)}
+                      disabled={pendingActionKey === `rerun-ci:${selectedPullRequest.id}`}
+                    >
+                      <RefreshIcon className="ghsync-prs-icon" />
+                      <span>Re-run CI</span>
+                    </button>
+                  ) : null}
+                  {selectedPullRequest.mergeable ? (
+                    <button
+                      type="button"
+                      className={getPluginActionClassName({ variant: 'primary', size: 'sm' })}
+                      onClick={() => {
+                        void handleMergePullRequest(selectedPullRequest);
+                      }}
+                      disabled={pendingActionKey === `merge:${selectedPullRequest.id}`}
+                    >
+                      <MergeIcon className="ghsync-prs-icon" />
+                      <span>Merge</span>
+                    </button>
+                  ) : null}
+                  <button
+                    type="button"
+                    className={getPluginActionClassName({ variant: 'danger', size: 'sm' })}
+                    onClick={() => {
+                      void handleClosePullRequest(selectedPullRequest);
+                    }}
+                    disabled={pendingActionKey === `close:${selectedPullRequest.id}`}
+                  >
+                    <CloseIcon className="ghsync-prs-icon" />
+                    <span>Close</span>
+                  </button>
+                </div>
+              </>
+            ) : (
+              <div className="ghsync-prs-detail__empty">
+                <strong>{pageStatus === 'ready' ? 'Select a pull request.' : 'Pull request details will appear here.'}</strong>
+                {pageStatus !== 'ready' ? <span>{pageData.message ?? pullRequestsPageError?.message}</span> : null}
+              </div>
+            )}
+          </div>
+
+          {selectedPullRequest ? (
+            <div className="ghsync-prs-detail__layout">
+              <div className="ghsync-prs-timeline">
+                {selectedPullRequestDetails.loading && !(selectedPullRequest.timeline?.length ?? 0) ? (
+                  <div className="ghsync-prs-detail__empty">
+                    <strong>Loading conversation…</strong>
+                  </div>
+                ) : selectedPullRequestDetails.error ? (
+                  <div className="ghsync-prs-detail__empty">
+                    <strong>Could not load the conversation.</strong>
+                    <span>{selectedPullRequestDetails.error.message}</span>
+                  </div>
+                ) : (
+                  (selectedPullRequest.timeline ?? []).map((entry) => (
+                    <article
+                      key={entry.id}
+                      className={`ghsync-prs-timeline__entry${entry.kind === 'description' ? ' ghsync-prs-timeline__entry--description' : ''}`}
+                    >
+                      <div className="ghsync-prs-timeline__entry-head">
+                        <div className="ghsync-prs-timeline__entry-author">
+                          <PreviewAvatar person={entry.author} />
+                          <div className="ghsync-prs-timeline__entry-meta">
+                            <strong>{entry.author.name}</strong>
+                            <span>{entry.author.handle}</span>
+                          </div>
+                        </div>
+                        <span className="ghsync-prs-timeline__entry-time" title={formatShortDateTime(entry.createdAt)}>
+                          {formatRelativeTime(entry.createdAt)}
+                        </span>
+                      </div>
+                      <div className="ghsync-prs-timeline__entry-body">
+                        <PreviewMarkdown body={entry.body} />
+                      </div>
+                    </article>
+                  ))
+                )}
+
+                <div className="ghsync-prs-comment-box">
+                  <label className="ghsync-prs-comment-box__label" htmlFor="ghsync-prs-comment-box">
+                    Add comment
+                  </label>
+                  <div className="ghsync-prs-comment-box__editor">
+                    <textarea
+                      id="ghsync-prs-comment-box"
+                      className="ghsync-prs-comment-box__input"
+                      value={commentDraft}
+                      onChange={(event) => setCommentDraft(event.currentTarget.value)}
+                      placeholder="Add comment"
+                    />
+                  </div>
+                  <div className="ghsync-prs-comment-box__actions">
+                    <button
+                      type="button"
+                      className={getPluginActionClassName({ variant: 'primary', size: 'sm' })}
+                      onClick={() => {
+                        void handleAddComment();
+                      }}
+                      disabled={!commentDraft.trim() || pendingActionKey === `comment:${selectedPullRequest.id}`}
+                    >
+                      Comment
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              <aside className="ghsync-prs-meta">
+                <section className="ghsync-prs-meta__section">
+                  <h4>Overview</h4>
+                  <div className="ghsync-prs-meta__rows">
+                    <div className="ghsync-prs-meta__row">
+                      <span className="ghsync-prs-meta__label">Author</span>
+                      <div className="ghsync-prs-meta__value ghsync-prs-meta__value--stack">
+                        <PreviewAvatar person={selectedPullRequest.author} />
+                        <span>{selectedPullRequest.author.name} ({selectedPullRequest.author.handle})</span>
+                      </div>
+                    </div>
+
+                    <div className="ghsync-prs-meta__row">
+                      <span className="ghsync-prs-meta__label">Assignees</span>
+                      <div className="ghsync-prs-meta__value ghsync-prs-meta__value--stack">
+                        {selectedPullRequest.assignees.length > 0 ? (
+                          <>
+                            <div className="ghsync-prs-avatar-stack">
+                              {selectedPullRequest.assignees.map((assignee) => (
+                                <PreviewAvatar key={assignee.handle} person={assignee} stacked />
+                              ))}
+                            </div>
+                            <span>{selectedPullRequest.assignees.map((assignee) => assignee.handle).join(', ')}</span>
+                          </>
+                        ) : (
+                          <span>Unassigned</span>
+                        )}
+                      </div>
+                    </div>
+
+                    <div className="ghsync-prs-meta__row">
+                      <span className="ghsync-prs-meta__label">Branches</span>
+                      <div className="ghsync-prs-meta__value">{selectedPullRequest.headBranch} → {selectedPullRequest.baseBranch}</div>
+                    </div>
+
+                    <div className="ghsync-prs-meta__row">
+                      <span className="ghsync-prs-meta__label">Diff size</span>
+                      <div className="ghsync-prs-meta__value">
+                        {pluralize(selectedPullRequest.commits, 'commit')} · {pluralize(selectedPullRequest.changedFiles, 'file')}
+                      </div>
+                    </div>
+                  </div>
+                </section>
+
+                <section className="ghsync-prs-meta__section">
+                  <h4>Delivery state</h4>
+                  <div className="ghsync-prs-meta__rows">
+                    <div className="ghsync-prs-meta__row">
+                      <span className="ghsync-prs-meta__label">Checks</span>
+                      <div className="ghsync-prs-meta__value ghsync-prs-meta__value--stack">
+                        <StatusIcon
+                          status={selectedPullRequest.checksStatus}
+                          className={`ghsync-prs-icon ${getPreviewPullRequestCheckToneClass(selectedPullRequest.checksStatus)}`}
+                        />
+                        <a href={selectedPullRequest.checksUrl} target="_blank" rel="noreferrer">
+                          {getPreviewPullRequestCheckLabel(selectedPullRequest.checksStatus)}
+                        </a>
+                      </div>
+                    </div>
+
+                    <div className="ghsync-prs-meta__row">
+                      <span className="ghsync-prs-meta__label">Reviews</span>
+                      <div className="ghsync-prs-meta__value">
+                        {pluralize(selectedPullRequest.reviewApprovals, 'approval')} ·{' '}
+                        {pluralize(selectedPullRequest.reviewChangesRequested, 'change request')}
+                        {selectedPullRequest.reviewCommentCount && selectedPullRequest.reviewCommentCount > 0
+                          ? ` · ${pluralize(selectedPullRequest.reviewCommentCount, 'review comment')}`
+                          : ''}
+                      </div>
+                    </div>
+
+                    <div className="ghsync-prs-meta__row">
+                      <span className="ghsync-prs-meta__label">Review threads</span>
+                      <div className="ghsync-prs-meta__value">
+                        {selectedPullRequest.unresolvedReviewThreads > 0
+                          ? `${pluralize(selectedPullRequest.unresolvedReviewThreads, 'unresolved thread')}`
+                          : 'All review threads resolved'}
+                      </div>
+                    </div>
+
+                    <div className="ghsync-prs-meta__row">
+                      <span className="ghsync-prs-meta__label">Copilot review</span>
+                      <div className="ghsync-prs-meta__value">
+                        {(selectedPullRequest.copilotUnresolvedReviewThreads ?? 0) > 0
+                          ? `${pluralize(selectedPullRequest.copilotUnresolvedReviewThreads ?? 0, 'unresolved Copilot thread')}`
+                          : 'Resolved'}
+                      </div>
+                    </div>
+
+                    <div className="ghsync-prs-meta__row">
+                      <span className="ghsync-prs-meta__label">Comments</span>
+                      <div className="ghsync-prs-meta__value">{pluralize(selectedPullRequest.commentsCount, 'comment')}</div>
+                    </div>
+
+                    <div className="ghsync-prs-meta__row">
+                      <span className="ghsync-prs-meta__label">Age</span>
+                      <div className="ghsync-prs-meta__value" title={formatShortDateTime(selectedPullRequest.createdAt)}>
+                        {formatRelativeTime(selectedPullRequest.createdAt)}
+                      </div>
+                    </div>
+
+                    <div className="ghsync-prs-meta__row">
+                      <span className="ghsync-prs-meta__label">Last updated</span>
+                      <div className="ghsync-prs-meta__value" title={formatShortDateTime(selectedPullRequest.updatedAt)}>
+                        {formatRelativeTime(selectedPullRequest.updatedAt)}
+                      </div>
+                    </div>
+
+                    <div className="ghsync-prs-meta__row">
+                      <span className="ghsync-prs-meta__label">Mergeability</span>
+                      <div className="ghsync-prs-meta__value">
+                        {selectedPullRequest.mergeable ? 'Mergeable now' : 'Blocked until checks and review feedback settle'}
+                      </div>
+                    </div>
+                  </div>
+                </section>
+
+                <section className="ghsync-prs-meta__section">
+                  <h4>Links</h4>
+                  <div className="ghsync-prs-meta__rows">
+                    <div className="ghsync-prs-meta__row">
+                      <span className="ghsync-prs-meta__label">Resources</span>
+                      <div className="ghsync-prs-meta__links">
+                        <a className="ghsync-prs-page__meta-link" href={selectedPullRequest.githubUrl} target="_blank" rel="noreferrer">
+                          <ExternalLinkIcon className="ghsync-prs-icon" />
+                          <span>PR</span>
+                        </a>
+                        <a className="ghsync-prs-page__meta-link" href={selectedPullRequest.checksUrl} target="_blank" rel="noreferrer">
+                          <StatusIcon status={selectedPullRequest.checksStatus} className="ghsync-prs-icon" />
+                          <span>Checks</span>
+                        </a>
+                        <a className="ghsync-prs-page__meta-link" href={selectedPullRequest.reviewsUrl} target="_blank" rel="noreferrer">
+                          <CommentIcon className="ghsync-prs-icon" />
+                          <span>Reviews</span>
+                        </a>
+                      </div>
+                    </div>
+
+                    <div className="ghsync-prs-meta__row">
+                      <span className="ghsync-prs-meta__label">Paperclip issue</span>
+                      <div className="ghsync-prs-meta__value">
+                        {selectedPullRequestIssueHref && selectedPullRequestIssueLabel ? (
+                          <a href={selectedPullRequestIssueHref}>{selectedPullRequestIssueLabel}</a>
+                        ) : (
+                          <button
+                            type="button"
+                            className="ghsync-prs-page__meta-button"
+                            onClick={() => openCreateIssueModal(selectedPullRequest)}
+                          >
+                            <PlusCircleIcon className="ghsync-prs-icon" />
+                            <span>Create issue</span>
+                          </button>
+                        )}
+                      </div>
+                    </div>
+
+                    <div className="ghsync-prs-meta__row">
+                      <span className="ghsync-prs-meta__label">Labels</span>
+                      <div className="ghsync-prs-meta__labels">
+                        {selectedPullRequest.labels.map((label) => (
+                          <span
+                            key={label.name}
+                            className="ghsync-prs-table__label"
+                            style={{
+                              color: label.color,
+                              backgroundColor: hexToRgba(label.color, labelBackgroundAlpha),
+                              borderColor: hexToRgba(label.color, labelBorderAlpha)
+                            }}
+                          >
+                            {label.name}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                </section>
+              </aside>
+            </div>
+          ) : (
+            <div className="ghsync-prs-detail__empty">
+              <strong>No open pull requests.</strong>
+            </div>
+          )}
+        </section>
+
+        {issueModalPullRequest ? (
+          <div
+            className="ghsync-prs-modal-backdrop"
+            onClick={closeCreateIssueModal}
+          >
+            <div
+              className="ghsync-prs-modal"
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="ghsync-prs-modal-title"
+              onClick={(event) => event.stopPropagation()}
+            >
+              <div className="ghsync-prs-modal__header">
+                <div className="ghsync__section-tags">
+                  <span className="ghsync__scope-pill ghsync__scope-pill--company">Paperclip</span>
+                </div>
+                <h3 id="ghsync-prs-modal-title">Create Paperclip issue</h3>
+                <p>#{issueModalPullRequest.number}</p>
+              </div>
+
+              <div className="ghsync__field">
+                <label htmlFor="ghsync-prs-modal-issue-title">Issue title</label>
+                <input
+                  id="ghsync-prs-modal-issue-title"
+                  className="ghsync__input"
+                  type="text"
+                  value={issueDraftTitle}
+                  onChange={(event) => setIssueDraftTitle(event.currentTarget.value)}
+                  placeholder={issueModalPullRequest.title}
+                />
+              </div>
+
+              <div className="ghsync-prs-modal__actions">
+                <button
+                  type="button"
+                  className={getPluginActionClassName({ variant: 'secondary' })}
+                  onClick={closeCreateIssueModal}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  className={getPluginActionClassName({ variant: 'primary' })}
+                  onClick={() => {
+                    void handleCreatePaperclipIssue();
+                  }}
+                  disabled={!issueDraftTitle.trim() || pendingActionKey === `create-issue:${issueModalPullRequest.id}`}
+                >
+                  Create issue
+                </button>
+              </div>
+            </div>
+          </div>
+        ) : null}
+
+        {commentModalPullRequest ? (
+          <div
+            className="ghsync-prs-modal-backdrop"
+            onClick={closeCommentModal}
+          >
+            <div
+              className="ghsync-prs-modal"
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="ghsync-prs-comment-modal-title"
+              onClick={(event) => event.stopPropagation()}
+            >
+              <div className="ghsync-prs-modal__header">
+                <h3 id="ghsync-prs-comment-modal-title">Comment on #{commentModalPullRequest.number}</h3>
+              </div>
+
+              <div className="ghsync__field">
+                <label htmlFor="ghsync-prs-modal-comment-body">Comment</label>
+                <textarea
+                  id="ghsync-prs-modal-comment-body"
+                  className="ghsync-prs-modal__textarea"
+                  value={commentModalDraft}
+                  onChange={(event) => setCommentModalDraft(event.currentTarget.value)}
+                  placeholder="Add comment"
+                />
+              </div>
+
+              <div className="ghsync-prs-modal__actions">
+                <button
+                  type="button"
+                  className={getPluginActionClassName({ variant: 'secondary' })}
+                  onClick={closeCommentModal}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  className={getPluginActionClassName({ variant: 'primary' })}
+                  onClick={() => {
+                    void handleAddModalComment();
+                  }}
+                  disabled={!commentModalDraft.trim() || pendingActionKey === `comment-modal:${commentModalPullRequest.id}`}
+                >
+                  Comment
+                </button>
+              </div>
+            </div>
+          </div>
+        ) : null}
+
+        {reviewModalPullRequest ? (
+          <div
+            className="ghsync-prs-modal-backdrop"
+            onClick={closeReviewModal}
+          >
+            <div
+              className="ghsync-prs-modal"
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="ghsync-prs-review-modal-title"
+              onClick={(event) => event.stopPropagation()}
+            >
+              <div className="ghsync-prs-modal__header">
+                <h3 id="ghsync-prs-review-modal-title">Review #{reviewModalPullRequest.number}</h3>
+              </div>
+
+              <div className="ghsync__field">
+                <label htmlFor="ghsync-prs-modal-review-body">Comment</label>
+                <textarea
+                  id="ghsync-prs-modal-review-body"
+                  className="ghsync-prs-modal__textarea"
+                  value={reviewModalDraft}
+                  onChange={(event) => setReviewModalDraft(event.currentTarget.value)}
+                  placeholder="Optional comment"
+                />
+              </div>
+
+              <div className="ghsync-prs-modal__actions ghsync-prs-modal__actions--spread">
+                <button
+                  type="button"
+                  className={getPluginActionClassName({ variant: 'secondary' })}
+                  onClick={closeReviewModal}
+                >
+                  Cancel
+                </button>
+                <div className="ghsync-prs-modal__split-actions">
+                  <button
+                    type="button"
+                    className={getPluginActionClassName({ variant: 'danger' })}
+                    onClick={() => {
+                      void handleReviewPullRequest('request_changes');
+                    }}
+                    disabled={pendingActionKey === `review:${reviewModalPullRequest.id}:request_changes`}
+                  >
+                    Request changes
+                  </button>
+                  <button
+                    type="button"
+                    className={getPluginActionClassName({ variant: 'primary' })}
+                    onClick={() => {
+                      void handleReviewPullRequest('approve');
+                    }}
+                    disabled={pendingActionKey === `review:${reviewModalPullRequest.id}:approve`}
+                  >
+                    Approve
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        ) : null}
+
+        {rerunCiModalPullRequest ? (
+          <div
+            className="ghsync-prs-modal-backdrop"
+            onClick={closeRerunCiModal}
+          >
+            <div
+              className="ghsync-prs-modal"
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="ghsync-prs-rerun-modal-title"
+              onClick={(event) => event.stopPropagation()}
+            >
+              <div className="ghsync-prs-modal__header">
+                <h3 id="ghsync-prs-rerun-modal-title">Re-run CI for #{rerunCiModalPullRequest.number}</h3>
+                <p>Failed check suites will be requested again.</p>
+              </div>
+
+              <div className="ghsync-prs-modal__actions">
+                <button
+                  type="button"
+                  className={getPluginActionClassName({ variant: 'secondary' })}
+                  onClick={closeRerunCiModal}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  className={getPluginActionClassName({ variant: 'primary' })}
+                  onClick={() => {
+                    void handleRerunCi();
+                  }}
+                  disabled={pendingActionKey === `rerun-ci:${rerunCiModalPullRequest.id}`}
+                >
+                  Re-run CI
+                </button>
+              </div>
+            </div>
+          </div>
+        ) : null}
+      </div>
+    </div>
   );
 }
 

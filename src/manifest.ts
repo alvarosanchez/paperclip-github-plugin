@@ -22,6 +22,7 @@ export const manifest: PaperclipPluginManifestV1 = {
   author: 'Álvaro Sánchez-Mariscal',
   categories: ['connector', 'ui'],
   capabilities: [
+    'ui.sidebar.register',
     'ui.page.register',
     DASHBOARD_WIDGET_CAPABILITY,
     'ui.detailTab.register',
@@ -76,6 +77,21 @@ export const manifest: PaperclipPluginManifestV1 = {
   },
   ui: {
     slots: [
+      {
+        type: 'page',
+        id: 'paperclip-github-plugin-project-pull-requests-page',
+        displayName: 'Pull Requests',
+        exportName: 'GitHubSyncProjectPullRequestsPage',
+        routePath: 'github-pull-requests'
+      },
+      {
+        type: 'projectSidebarItem',
+        id: 'paperclip-github-plugin-project-pull-requests-sidebar-item',
+        displayName: 'Pull Requests',
+        exportName: 'GitHubSyncProjectPullRequestsSidebarItem',
+        entityTypes: ['project'],
+        order: 40
+      },
       {
         type: 'dashboardWidget',
         id: 'paperclip-github-plugin-dashboard-widget',

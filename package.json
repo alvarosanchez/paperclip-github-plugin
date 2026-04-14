@@ -42,7 +42,9 @@
   "dependencies": {
     "@octokit/rest": "^22.0.1",
     "@paperclipai/plugin-sdk": "^2026.403.0",
-    "react": "^19.2.5"
+    "react": "^19.2.5",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1"
   },
   "devDependencies": {
     "@types/node": "24.12.2",

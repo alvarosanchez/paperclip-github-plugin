@@ -20,6 +20,7 @@ With this plugin, you can:
 - keep descriptions, labels, and status aligned with GitHub over time
 - configure mappings and import defaults per Paperclip company
 - run sync manually or on a schedule
+- triage open pull requests from mapped Paperclip projects in a hosted queue
 - give Paperclip agents native GitHub tools for issues, pull requests, CI, and review threads
 
 ## What you get in Paperclip
@@ -29,6 +30,7 @@ The plugin adds a full in-host workflow instead of a one-off import script:
 - a hosted settings page for GitHub auth, repository mappings, company defaults, and sync controls
 - a dashboard widget that shows readiness, sync status, and last-run results
 - saved sync diagnostics that let operators inspect the latest per-issue failures, raw errors, and suggested next steps
+- a project sidebar item that opens a live project-scoped Pull Requests page for the mapped repository and can show the open PR count through a lightweight badge read
 - manual sync actions from global, project, and issue toolbar surfaces
 - a GitHub detail tab on synced Paperclip issues
 - GitHub link annotations on sync-generated status transition comments when the host supports comment annotations
@@ -56,6 +58,12 @@ If a company already has a Paperclip project bound to a GitHub repository worksp
 ### Status sync with delivery context
 
 The plugin does more than mirror issue text. It looks at linked pull requests, CI, review threads, and trusted new GitHub comments so imported Paperclip issues can reflect where the work actually is.
+
+### Project pull request command center
+
+Each mapped project can expose a **Pull Requests** entry in the sidebar that opens a live GitHub queue page for that repository. The sidebar badge uses a lightweight total-count read, while the page keeps the default queue fast by loading only the current 10-row page, uses a lightweight repo-wide metrics read for the summary cards, keeps a heavier cached summary path for filtered views, shows total, mergeable, reviewable, and failing cards that filter the table, paginates larger repositories, keeps a compact bottom detail pane with markdown-rendered conversation and an inline comment composer, supports comment, review, re-run CI, merge, and close quick actions, and lets operators create or open the linked Paperclip issue directly from the queue.
+
+Paperclip issue linkage on the queue prefers the GitHub issue that the pull request closes, so imported GitHub issues and delivery work stay connected in the same project view. If a pull request has no closing-issue-backed link yet, the queue falls back to the Paperclip issue created directly from that pull request and updates the table immediately when that create action returns.
 
 ### Agent workflows built in
 
@@ -98,7 +106,7 @@ npx paperclipai plugin install --local "$PWD"
 3. If the deployment requires authenticated Paperclip board access, connect it from the same settings page and complete the approval flow.
 4. Add one or more repository mappings for the current company.
 5. For each mapping, either choose an existing GitHub-linked Paperclip project or enter the project name that should receive synced issues.
-6. Optionally configure company-wide defaults for imported issues, including the default assignee, the default Paperclip status, and ignored GitHub usernames.
+6. Optionally configure company-wide defaults for imported issues, including the default assignee, the default Paperclip status, and ignored GitHub usernames. Bot aliases such as `renovate[bot]` are matched when you save `renovate`.
 7. Choose the automatic sync interval in minutes.
 8. Save the settings and run the first manual sync.
 9. Repeat inside other companies if they need their own mappings, defaults, or board access.
