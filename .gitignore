@@ -11,6 +11,7 @@ coverage
 .paperclip/
 
 .playwright-cli/
+output/
 tests/e2e/results/
 .paperclip-sdk
 
