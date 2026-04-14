@@ -103,12 +103,16 @@ The plugin MUST persist repository mappings, company-scoped advanced issue defau
 - The plugin SHOULD expose a project sidebar item that opens a project-scoped Pull Requests page for the mapped repository and can show the current open pull request count for mapped projects through a lightweight count read instead of the heavier summary-card metrics path.
 - The project Pull Requests page SHOULD render live open pull request data for the mapped repository, including checks, review summary, unresolved review-thread state, non-review comment counts, age, last-updated timestamps, Paperclip issue linkage, and quick actions.
 - The project Pull Requests page SHOULD surface total, mergeable, reviewable, and failing summary counts and let operators filter the table from those cards.
+- The project Pull Requests page SHOULD keep KPI-triggered filtered views fast by reusing cached repo-wide filter indexes and fetching only the visible filtered rows instead of rebuilding every row summary on each click.
+- The project Pull Requests page SHOULD favor repository-scoped caches for totals, KPI aggregates, and per-pull-request review or CI insights, and SHOULD expose an explicit refresh path that invalidates those caches on demand.
 - The project Pull Requests page SHOULD paginate the queue in batches of 10 rows.
 - The project Pull Requests page SHOULD deep-link row icons to the relevant GitHub resource where possible.
-- The project Pull Requests page SHOULD render markdown in pull request descriptions and comments instead of showing raw markdown text.
+- The project Pull Requests page SHOULD render markdown and supported inline HTML in pull request descriptions and comments instead of showing raw author text.
 - The project Pull Requests page SHOULD include a compact inline comment composer in the bottom detail pane.
-- The project Pull Requests page SHOULD support modal quick actions for commenting, reviewing, and re-running CI in addition to merge and close when the pull request state allows them.
-- When a pull request is not yet linked to a Paperclip issue, the project Pull Requests page SHOULD offer an inline create-issue action and wait for the returned Paperclip identifier before rendering the issue link.
+- The project Pull Requests page SHOULD support modal quick actions for commenting, reviewing, re-running CI, and confirming close actions in addition to merge when the pull request state allows them.
+- When GitHub rejects a pull request comment or review action, the worker and UI SHOULD preserve actionable permission or validation guidance instead of collapsing it to a generic error.
+- When a pull request is linked to a Paperclip issue, the project Pull Requests page SHOULD open that issue in a plugin-provided right drawer so operators can stay on the queue page, while still allowing explicit navigation away when desired.
+- When a pull request is not yet linked to a Paperclip issue, the project Pull Requests page SHOULD offer an inline create-issue action and wait for the returned Paperclip identifier before rendering the issue link or opening its drawer.
 - The plugin SHOULD expose manual sync buttons in the global toolbar and on mapped project/issue surfaces when the host renders those slot types.
 - The dashboard widget MUST summarize the current GitHub sync readiness and link to setup.
 - When the latest sync run records issue-level failures, the settings page SHOULD expose a saved failure log with per-failure repository, issue, phase, raw error, and suggested next-step details, and compact surfaces SHOULD still surface at least the latest saved failure snapshot.

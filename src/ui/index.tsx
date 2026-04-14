@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { useHostContext, usePluginAction, usePluginData, usePluginToast } from '@paperclipai/plugin-sdk/ui';
+import rehypeRaw from 'rehype-raw';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 
@@ -69,6 +70,62 @@ function getPluginActionClassName(options?: {
   const sizeClassName = size === 'sm' ? HOST_INLINE_BUTTON_SIZE_CLASSNAME : HOST_ACTION_BUTTON_SIZE_CLASSNAME;
 
   return ['ghsync__button', variantClassName, sizeClassName, options?.extraClassName].filter(Boolean).join(' ');
+}
+
+function LoadingSpinner(props: {
+  className?: string;
+  size?: 'sm' | 'md' | 'lg';
+  label?: string;
+}): React.JSX.Element {
+  const sizeClassName =
+    props.size === 'sm'
+      ? 'ghsync__spinner--sm'
+      : props.size === 'lg'
+        ? 'ghsync__spinner--lg'
+        : 'ghsync__spinner--md';
+
+  return (
+    <span
+      role="status"
+      aria-label={props.label ?? 'Loading'}
+      className={['ghsync__spinner', sizeClassName, props.className].filter(Boolean).join(' ')}
+    />
+  );
+}
+
+function LoadingButtonContent(props: {
+  busy: boolean;
+  label: string;
+  busyLabel?: string;
+  icon?: React.ReactNode;
+}): React.JSX.Element {
+  if (!props.busy && !props.icon) {
+    return <>{props.label}</>;
+  }
+
+  return (
+    <span className="ghsync__button-content">
+      {props.busy ? <LoadingSpinner size="sm" className="ghsync__button-spinner" /> : props.icon ?? null}
+      <span>{props.busy ? props.busyLabel ?? props.label : props.label}</span>
+    </span>
+  );
+}
+
+function LoadingIconButtonContent(props: {
+  busy: boolean;
+  icon: React.ReactNode;
+  busyLabel: string;
+}): React.JSX.Element {
+  return props.busy
+    ? <LoadingSpinner size="sm" className="ghsync-prs-icon" label={props.busyLabel} />
+    : <>{props.icon}</>;
+}
+
+function LoadingSkeleton(props: {
+  className?: string;
+  style?: React.CSSProperties;
+}): React.JSX.Element {
+  return <span aria-hidden="true" className={['ghsync__skeleton', props.className].filter(Boolean).join(' ')} style={props.style} />;
 }
 
 interface RepositoryMapping {
@@ -363,6 +420,48 @@ interface ProjectPullRequestReviewActionResult {
 interface ProjectPullRequestRerunCiActionResult {
   rerunCheckSuiteCount?: number;
   githubUrl?: string;
+}
+
+interface PaperclipIssueDrawerState {
+  issueId?: string | null;
+  issueKey?: string | null;
+}
+
+interface PaperclipIssueDrawerAgent {
+  id: string;
+  name: string;
+  title?: string;
+}
+
+interface PaperclipIssueDrawerLabel {
+  name: string;
+  color?: string;
+}
+
+interface PaperclipIssueDrawerComment {
+  id: string;
+  body: string;
+  createdAt: string;
+  updatedAt: string;
+  authorLabel: string;
+  authorKind: 'agent' | 'user' | 'system';
+  authorTitle?: string;
+}
+
+interface PaperclipIssueDrawerData {
+  issueId: string;
+  issueIdentifier?: string;
+  title: string;
+  description: string;
+  status: PaperclipIssueStatus;
+  priority: 'critical' | 'high' | 'medium' | 'low';
+  projectName?: string;
+  assignee?: PaperclipIssueDrawerAgent | null;
+  labels: PaperclipIssueDrawerLabel[];
+  commentCount: number;
+  comments: PaperclipIssueDrawerComment[];
+  createdAt: string;
+  updatedAt: string;
 }
 
 type ThemeMode = 'light' | 'dark';
@@ -763,6 +862,46 @@ function useSyncCompletionToast(
   };
 }
 
+function getActionErrorMessage(error: unknown, fallback: string): string {
+  if (error && typeof error === 'object') {
+    const code =
+      'code' in error && typeof (error as { code?: unknown }).code === 'string'
+        ? (error as { code: string }).code.trim()
+        : '';
+    const message =
+      'message' in error && typeof (error as { message?: unknown }).message === 'string'
+        ? (error as { message: string }).message.trim()
+        : '';
+    const details = 'details' in error ? (error as { details?: unknown }).details : undefined;
+    const detailsMessage =
+      details && typeof details === 'object' && 'message' in details && typeof (details as { message?: unknown }).message === 'string'
+        ? (details as { message: string }).message.trim()
+        : '';
+
+    if (code === 'WORKER_ERROR' && detailsMessage) {
+      return detailsMessage;
+    }
+
+    if (message) {
+      return message;
+    }
+
+    if (detailsMessage) {
+      return detailsMessage;
+    }
+  }
+
+  if (typeof error === 'string' && error.trim()) {
+    return error.trim();
+  }
+
+  if (error instanceof Error && error.message.trim()) {
+    return error.message.trim();
+  }
+
+  return fallback;
+}
+
 const SHARED_PROGRESS_STYLES = `
 .ghsync-progress {
   display: grid;
@@ -872,6 +1011,110 @@ const SHARED_PROGRESS_STYLES = `
   .ghsync-diagnostics__layout--split {
     grid-template-columns: 1fr;
   }
+}
+`;
+
+const SHARED_LOADING_STYLES = `
+@keyframes ghsync-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes ghsync-skeleton-shimmer {
+  0% {
+    background-position: 200% 0;
+  }
+
+  100% {
+    background-position: -200% 0;
+  }
+}
+
+.ghsync__spinner {
+  display: inline-block;
+  flex: 0 0 auto;
+  border-radius: 999px;
+  border: 1.75px solid currentColor;
+  border-right-color: transparent;
+  animation: ghsync-spin 0.8s linear infinite;
+}
+
+.ghsync__spinner--sm {
+  width: 12px;
+  height: 12px;
+}
+
+.ghsync__spinner--md {
+  width: 16px;
+  height: 16px;
+  border-width: 2px;
+}
+
+.ghsync__spinner--lg {
+  width: 20px;
+  height: 20px;
+  border-width: 2px;
+}
+
+.ghsync__button-content {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.ghsync__loading-inline {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--ghsync-muted);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.5;
+}
+
+.ghsync__loading-state {
+  display: grid;
+  justify-items: center;
+  gap: 10px;
+  padding: 20px 18px;
+  text-align: center;
+  color: var(--ghsync-muted);
+}
+
+.ghsync__loading-state strong {
+  color: var(--ghsync-title);
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.ghsync__loading-state--compact {
+  display: inline-flex;
+  align-items: center;
+  justify-items: initial;
+  gap: 8px;
+  padding: 0;
+  text-align: left;
+}
+
+.ghsync__loading-state--compact strong {
+  font-size: 12px;
+}
+
+.ghsync__skeleton {
+  display: block;
+  border-radius: 999px;
+  background:
+    linear-gradient(
+      90deg,
+      color-mix(in srgb, var(--ghsync-surfaceRaised) 82%, var(--ghsync-border-soft)) 0%,
+      color-mix(in srgb, var(--ghsync-surface) 92%, var(--ghsync-surfaceRaised)) 50%,
+      color-mix(in srgb, var(--ghsync-surfaceRaised) 82%, var(--ghsync-border-soft)) 100%
+    );
+  background-size: 200% 100%;
+  animation: ghsync-skeleton-shimmer 1.35s ease-in-out infinite;
 }
 `;
 
@@ -1963,6 +2206,7 @@ const PAGE_STYLES = `
   }
 }
 
+${SHARED_LOADING_STYLES}
 ${SHARED_PROGRESS_STYLES}
 `;
 
@@ -2120,6 +2364,24 @@ const PROJECT_PULL_REQUESTS_PAGE_STYLES = `
   line-height: 1.35;
 }
 
+.ghsync-prs-page__summary-card-value,
+.ghsync-prs-page__summary-card-helper {
+  display: flex;
+  align-items: center;
+}
+
+.ghsync-prs-page__summary-card-value {
+  min-height: 21px;
+}
+
+.ghsync-prs-page__summary-card-helper {
+  min-height: 15px;
+}
+
+.ghsync-prs-page__summary-card--loading {
+  cursor: default;
+}
+
 .ghsync-prs-page__summary-card--active {
   border-color: var(--ghsync-title);
   box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--ghsync-title) 18%, transparent);
@@ -2169,19 +2431,73 @@ const PROJECT_PULL_REQUESTS_PAGE_STYLES = `
   flex-wrap: wrap;
 }
 
+.ghsync-prs-page__table-loading {
+  margin-right: 2px;
+}
+
 .ghsync-prs-page__pagination {
   display: inline-flex;
   align-items: center;
   gap: 6px;
 }
 
+.ghsync-prs-page__panel-loading {
+  min-height: 176px;
+  align-content: center;
+}
+
+.ghsync-prs-page__table-surface {
+  position: relative;
+}
+
+.ghsync-prs-page__table-surface--loading .ghsync-prs-page__table-wrap {
+  filter: blur(4px);
+  opacity: 0.46;
+  transform: scale(0.996);
+  transition: filter 180ms ease, opacity 180ms ease, transform 180ms ease;
+}
+
 .ghsync-prs-page__table-wrap {
   overflow: auto;
 }
 
+.ghsync-prs-page__table-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+}
+
+.ghsync-prs-page__table-overlay::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: color-mix(in srgb, var(--ghsync-surface) 44%, transparent);
+  backdrop-filter: blur(10px);
+}
+
+.ghsync-prs-page__table-overlay-card {
+  position: relative;
+  z-index: 1;
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 16px;
+  border-radius: 999px;
+  border: 1px solid var(--ghsync-border);
+  background: color-mix(in srgb, var(--ghsync-surface) 90%, transparent);
+  box-shadow: var(--ghsync-shadow);
+  color: var(--ghsync-title);
+  font-size: 12px;
+  font-weight: 700;
+}
+
 .ghsync-prs-table {
   width: 100%;
-  min-width: 1240px;
+  min-width: 1296px;
   border-collapse: separate;
   border-spacing: 0;
 }
@@ -2214,6 +2530,10 @@ const PROJECT_PULL_REQUESTS_PAGE_STYLES = `
   background: color-mix(in srgb, var(--ghsync-surfaceRaised) 82%, transparent);
 }
 
+.ghsync-prs-table tbody tr.ghsync-prs-table__row--skeleton:hover {
+  background: transparent;
+}
+
 .ghsync-prs-table__row--selected {
   background: color-mix(in srgb, var(--ghsync-info-bg) 40%, var(--ghsync-surface));
 }
@@ -2225,11 +2545,23 @@ const PROJECT_PULL_REQUESTS_PAGE_STYLES = `
   white-space: nowrap;
 }
 
+.ghsync-prs-table__skeleton-stack {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .ghsync-prs-table__id {
   color: var(--ghsync-title);
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
   font-size: 12px;
   font-weight: 700;
+}
+
+.ghsync-prs-table__id-cell {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .ghsync-prs-table__title-cell {
@@ -2419,20 +2751,219 @@ const PROJECT_PULL_REQUESTS_PAGE_STYLES = `
   display: inline-flex;
   align-items: center;
   gap: 6px;
+  padding: 0;
+  border: 0;
+  background: transparent;
   color: var(--ghsync-info-text);
   font-size: 12px;
   font-weight: 700;
   text-decoration: none;
+  cursor: pointer;
 }
 
 .ghsync-prs-table__issue-link:hover {
   text-decoration: underline;
 }
 
+.ghsync-prs-issue-drawer-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 55;
+  background: rgba(10, 10, 12, 0.24);
+  backdrop-filter: blur(6px);
+}
+
+.ghsync-prs-issue-drawer {
+  position: absolute;
+  top: 18px;
+  right: 18px;
+  bottom: 18px;
+  width: min(980px, calc(100vw - 48px));
+  display: grid;
+  grid-template-rows: auto 1fr;
+  border-radius: 20px;
+  border: 1px solid var(--ghsync-border);
+  background: var(--ghsync-surface);
+  box-shadow: 0 28px 90px rgba(2, 6, 23, 0.34);
+  overflow: hidden;
+}
+
+.ghsync-prs-issue-drawer__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 16px 18px;
+  border-bottom: 1px solid var(--ghsync-border-soft);
+  background: color-mix(in srgb, var(--ghsync-surface) 86%, var(--ghsync-surfaceAlt));
+}
+
+.ghsync-prs-issue-drawer__title {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.ghsync-prs-issue-drawer__title h3 {
+  margin: 0;
+  color: var(--ghsync-title);
+  font-size: 18px;
+  line-height: 1.3;
+}
+
+.ghsync-prs-issue-drawer__subtitle {
+  margin: 0;
+  color: var(--ghsync-muted);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.ghsync-prs-issue-drawer__actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.ghsync-prs-issue-drawer__body {
+  position: relative;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--ghsync-surfaceAlt);
+}
+
+.ghsync-prs-issue-drawer__content {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 280px;
+  min-height: 100%;
+}
+
+.ghsync-prs-issue-drawer__main {
+  min-width: 0;
+  display: grid;
+  gap: 18px;
+  padding: 18px;
+  overflow: auto;
+}
+
+.ghsync-prs-issue-drawer__headline {
+  display: grid;
+  gap: 10px;
+}
+
+.ghsync-prs-issue-drawer__headline h4 {
+  margin: 0;
+  color: var(--ghsync-title);
+  font-size: 22px;
+  line-height: 1.25;
+}
+
+.ghsync-prs-issue-drawer__headline p {
+  margin: 0;
+  color: var(--ghsync-muted);
+  font-size: 13px;
+}
+
+.ghsync-prs-issue-drawer__timeline {
+  display: grid;
+  gap: 14px;
+}
+
+.ghsync-prs-issue-drawer__sidebar {
+  min-width: 0;
+  padding: 18px;
+  border-left: 1px solid var(--ghsync-border-soft);
+  background: color-mix(in srgb, var(--ghsync-surface) 94%, var(--ghsync-surfaceAlt));
+  overflow: auto;
+}
+
+.ghsync-prs-issue-drawer__comment-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.ghsync-prs-issue-drawer__comment-author {
+  display: grid;
+  gap: 2px;
+}
+
+.ghsync-prs-issue-drawer__comment-author strong {
+  color: var(--ghsync-title);
+}
+
+.ghsync-prs-issue-drawer__comment-author span,
+.ghsync-prs-issue-drawer__empty-copy {
+  color: var(--ghsync-muted);
+  font-size: 13px;
+}
+
+.ghsync-prs-issue-drawer__state {
+  height: 100%;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  text-align: center;
+  gap: 10px;
+}
+
+.ghsync-prs-issue-drawer__state strong {
+  color: var(--ghsync-title);
+  font-size: 16px;
+}
+
+.ghsync-prs-issue-drawer__state span {
+  max-width: 420px;
+  color: var(--ghsync-muted);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.ghsync-prs-issue-drawer__loading,
+.ghsync-prs-issue-drawer__state {
+  background: var(--ghsync-surfaceAlt);
+}
+
+.ghsync-prs-issue-drawer__loading {
+  inset: 0;
+  min-height: 0;
+}
+
+.ghsync-prs-issue-drawer__loading {
+  position: absolute;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.ghsync-prs-issue-drawer__loading-card {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 16px;
+  border-radius: 999px;
+  border: 1px solid var(--ghsync-border);
+  background: color-mix(in srgb, var(--ghsync-surface) 92%, transparent);
+  box-shadow: var(--ghsync-shadow);
+  color: var(--ghsync-title);
+  font-size: 12px;
+  font-weight: 700;
+}
+
 .ghsync-prs-table__quick-actions {
   display: flex;
   align-items: center;
+  justify-content: center;
+  width: max-content;
+  margin-inline: auto;
   gap: 6px;
+  flex-wrap: nowrap;
+}
+
+.ghsync-prs-table__cell--actions {
+  min-width: 174px;
 }
 
 .ghsync-prs-table__time {
@@ -2497,6 +3028,10 @@ const PROJECT_PULL_REQUESTS_PAGE_STYLES = `
   max-height: 640px;
   overflow: auto;
   padding-right: 4px;
+}
+
+.ghsync-prs-timeline__loading-note {
+  margin-bottom: 2px;
 }
 
 .ghsync-prs-timeline__entry {
@@ -2812,6 +3347,13 @@ const PROJECT_PULL_REQUESTS_PAGE_STYLES = `
   line-height: 1.5;
 }
 
+.ghsync-prs-modal__copy {
+  margin: 0;
+  color: var(--ghsync-muted);
+  font-size: 14px;
+  line-height: 1.6;
+}
+
 .ghsync-prs-modal__textarea {
   width: 100%;
   min-height: 132px;
@@ -2900,6 +3442,29 @@ const PROJECT_PULL_REQUESTS_PAGE_STYLES = `
 
   .ghsync-prs-modal-backdrop {
     padding: 16px;
+  }
+
+  .ghsync-prs-issue-drawer {
+    top: 10px;
+    right: 10px;
+    bottom: 10px;
+    left: 10px;
+    width: auto;
+  }
+
+  .ghsync-prs-issue-drawer__content {
+    grid-template-columns: 1fr;
+  }
+
+  .ghsync-prs-issue-drawer__sidebar {
+    border-left: 0;
+    border-top: 1px solid var(--ghsync-border-soft);
+  }
+
+  .ghsync-prs-issue-drawer__header,
+  .ghsync-prs-issue-drawer__actions {
+    align-items: stretch;
+    flex-direction: column;
   }
 }
 `;
@@ -3366,6 +3931,7 @@ const WIDGET_STYLES = `
   }
 }
 
+${SHARED_LOADING_STYLES}
 ${SHARED_PROGRESS_STYLES}
 `;
 
@@ -3561,6 +4127,8 @@ const EXTENSION_SURFACE_STYLES = `
   .ghsync-issue-detail__title h3 {
     margin: 0;
   }
+
+  ${SHARED_LOADING_STYLES}
 `;
 
 function createEmptyMapping(index: number): RepositoryMapping {
@@ -4396,6 +4964,54 @@ function getPreviewPullRequestFilterLabel(filter: PreviewPullRequestFilter): str
       return 'Failing';
     default:
       return 'Total PRs';
+  }
+}
+
+function getPaperclipIssueStatusMeta(status: PaperclipIssueStatus): { label: string; tone: Tone } {
+  const option = PAPERCLIP_STATUS_OPTIONS.find((entry) => entry.value === status);
+  if (!option) {
+    return {
+      label: status.replace(/_/g, ' '),
+      tone: 'neutral'
+    };
+  }
+
+  const toneByOption: Record<SelectTone, Tone> = {
+    neutral: 'neutral',
+    blue: 'info',
+    yellow: 'warning',
+    violet: 'info',
+    green: 'success',
+    red: 'danger'
+  };
+
+  return {
+    label: option.label,
+    tone: toneByOption[option.tone] ?? 'neutral'
+  };
+}
+
+function getPaperclipIssuePriorityMeta(priority: PaperclipIssueDrawerData['priority']): { label: string; tone: Tone } {
+  switch (priority) {
+    case 'critical':
+      return { label: 'Critical', tone: 'danger' };
+    case 'high':
+      return { label: 'High', tone: 'warning' };
+    case 'medium':
+      return { label: 'Medium', tone: 'info' };
+    default:
+      return { label: 'Low', tone: 'neutral' };
+  }
+}
+
+function getPaperclipIssueCommentAuthorTone(authorKind: PaperclipIssueDrawerComment['authorKind']): Tone {
+  switch (authorKind) {
+    case 'agent':
+      return 'info';
+    case 'user':
+      return 'success';
+    default:
+      return 'neutral';
   }
 }
 
@@ -5834,6 +6450,7 @@ function PreviewMarkdown(props: {
   return (
     <div className="ghsync-prs-markdown paperclip-markdown prose prose-sm max-w-none break-words overflow-hidden">
       <ReactMarkdown
+        rehypePlugins={[rehypeRaw]}
         remarkPlugins={[remarkGfm]}
         components={{
           a: ({ href, children, ...anchorProps }) => (
@@ -5935,26 +6552,28 @@ export function GitHubSyncProjectPullRequestsPage(): React.JSX.Element {
           companyId: hostContext.companyId,
           projectId
         }
-      : {
-          ...(projectId ? { projectId } : {})
-        }
+      : {}
   );
   const createPaperclipIssue = usePluginAction('project.pullRequests.createIssue');
+  const refreshPullRequestsAction = usePluginAction('project.pullRequests.refresh');
   const mergePullRequest = usePluginAction('project.pullRequests.merge');
   const closePullRequest = usePluginAction('project.pullRequests.close');
   const addPullRequestComment = usePluginAction('project.pullRequests.addComment');
   const reviewPullRequest = usePluginAction('project.pullRequests.review');
   const rerunPullRequestCi = usePluginAction('project.pullRequests.rerunCi');
   const [selectedPullRequestId, setSelectedPullRequestId] = useState<string | null>(null);
-  const [issueDraftPullRequestId, setIssueDraftPullRequestId] = useState<string | null>(null);
+  const [issueModalPullRequest, setIssueModalPullRequest] = useState<PreviewPullRequestRecord | null>(null);
   const [issueDraftTitle, setIssueDraftTitle] = useState('');
+  const [issueDrawer, setIssueDrawer] = useState<PaperclipIssueDrawerState | null>(null);
   const [commentModalPullRequestId, setCommentModalPullRequestId] = useState<string | null>(null);
   const [commentModalDraft, setCommentModalDraft] = useState('');
   const [reviewModalPullRequestId, setReviewModalPullRequestId] = useState<string | null>(null);
   const [reviewModalDraft, setReviewModalDraft] = useState('');
   const [rerunCiPullRequestId, setRerunCiPullRequestId] = useState<string | null>(null);
+  const [closeModalPullRequest, setCloseModalPullRequest] = useState<PreviewPullRequestRecord | null>(null);
   const [commentDraft, setCommentDraft] = useState('');
   const [isTableCollapsed, setIsTableCollapsed] = useState(false);
+  const [refreshPending, setRefreshPending] = useState(false);
   const [pendingActionKey, setPendingActionKey] = useState<string | null>(null);
   const [issueLinkOverridesByPullRequestId, setIssueLinkOverridesByPullRequestId] = useState<
     Record<string, {
@@ -5962,6 +6581,27 @@ export function GitHubSyncProjectPullRequestsPage(): React.JSX.Element {
       paperclipIssueKey?: string;
     }>
   >({});
+  const hasPullRequestsPageContext = Boolean(hostContext.companyId && projectId);
+  const issueDrawerResolution = usePluginData<IssueIdentifierResolutionData | null>(
+    'issue.resolveByIdentifier',
+    hostContext.companyId && issueDrawer?.issueKey && !issueDrawer.issueId
+      ? {
+          companyId: hostContext.companyId,
+          ...(projectId ? { projectId } : {}),
+          issueIdentifier: issueDrawer.issueKey
+        }
+      : {}
+  );
+  const resolvedIssueDrawerId = issueDrawer?.issueId ?? issueDrawerResolution.data?.issueId ?? null;
+  const issueDrawerDetails = usePluginData<PaperclipIssueDrawerData | null>(
+    'project.pullRequests.paperclipIssue',
+    hostContext.companyId && resolvedIssueDrawerId
+      ? {
+          companyId: hostContext.companyId,
+          issueId: resolvedIssueDrawerId
+        }
+      : {}
+  );
   const pageData = pullRequestsPageData ?? {
     ...EMPTY_PROJECT_PULL_REQUESTS_DATA,
     projectId
@@ -5970,7 +6610,7 @@ export function GitHubSyncProjectPullRequestsPage(): React.JSX.Element {
     ...EMPTY_PROJECT_PULL_REQUEST_METRICS_DATA,
     projectId
   };
-  const showInitialLoadingState = pullRequestsPageLoading && !pullRequestsPageData;
+  const showInitialLoadingState = hasPullRequestsPageContext && !pullRequestsPageData && !pullRequestsPageError;
   const pageStatus = pageData.status ?? (pullRequestsPageError ? 'error' : 'ready');
   const displayedPullRequests = pageData.pullRequests
     .filter((pullRequest) => pullRequest.status === 'open')
@@ -6062,7 +6702,7 @@ export function GitHubSyncProjectPullRequestsPage(): React.JSX.Element {
           return;
         }
 
-        setPullRequestsPageError(error instanceof Error ? error : new Error('Could not load pull requests.'));
+        setPullRequestsPageError(new Error(getActionErrorMessage(error, 'Could not load pull requests.')));
       })
       .finally(() => {
         if (pullRequestsPageRequestIdRef.current !== requestId) {
@@ -6101,19 +6741,22 @@ export function GitHubSyncProjectPullRequestsPage(): React.JSX.Element {
 
     const selectedPullRequestStillVisible = displayedPullRequests.some((pullRequest) => pullRequest.id === selectedPullRequestId);
     if (!selectedPullRequestStillVisible) {
-      setSelectedPullRequestId(displayedPullRequests[0]?.id ?? null);
+      setSelectedPullRequestId(null);
       setIsTableCollapsed(false);
     }
   }, [displayedPullRequests, selectedPullRequestId]);
 
   useEffect(() => {
-    setIssueDraftPullRequestId(null);
+    setSelectedPullRequestId(null);
+    setIssueModalPullRequest(null);
     setIssueDraftTitle('');
+    setIssueDrawer(null);
     setCommentModalPullRequestId(null);
     setCommentModalDraft('');
     setReviewModalPullRequestId(null);
     setReviewModalDraft('');
     setRerunCiPullRequestId(null);
+    setCloseModalPullRequest(null);
     setCommentDraft('');
     setPullRequestsPageData(null);
     setPullRequestsPageError(null);
@@ -6144,8 +6787,7 @@ export function GitHubSyncProjectPullRequestsPage(): React.JSX.Element {
         ...selectedPullRequestSummary,
         ...(selectedPullRequestDetails.data ?? {})
       }
-    : selectedPullRequestDetails.data ?? null;
-  const issueModalPullRequest = displayedPullRequests.find((pullRequest) => pullRequest.id === issueDraftPullRequestId) ?? null;
+    : null;
   const commentModalPullRequest = displayedPullRequests.find((pullRequest) => pullRequest.id === commentModalPullRequestId) ?? null;
   const reviewModalPullRequest = displayedPullRequests.find((pullRequest) => pullRequest.id === reviewModalPullRequestId) ?? null;
   const rerunCiModalPullRequest = displayedPullRequests.find((pullRequest) => pullRequest.id === rerunCiPullRequestId) ?? null;
@@ -6159,25 +6801,104 @@ export function GitHubSyncProjectPullRequestsPage(): React.JSX.Element {
     : undefined;
   const selectedPullRequestIssueLabel = selectedPullRequest?.paperclipIssueKey
     ?? (selectedPullRequest?.paperclipIssueId ? 'Open issue' : null);
+  const issueDrawerData = issueDrawerDetails.data
+    && issueDrawerDetails.data.issueId === resolvedIssueDrawerId
+      ? issueDrawerDetails.data
+      : null;
+  const issueDrawerIdentifier = issueDrawerData?.issueIdentifier ?? issueDrawer?.issueKey ?? resolvedIssueDrawerId ?? null;
+  const issueDrawerHref = getPaperclipIssueHref(hostContext.companyPrefix, issueDrawerIdentifier);
+  const issueDrawerLoading = Boolean(
+    issueDrawer
+      && (
+        (!resolvedIssueDrawerId && issueDrawerResolution.loading)
+        || (resolvedIssueDrawerId && issueDrawerDetails.loading && !issueDrawerData)
+      )
+  );
+  const issueDrawerError = issueDrawer
+    ? (!resolvedIssueDrawerId && issueDrawerResolution.error
+        ? issueDrawerResolution.error
+        : issueDrawerDetails.error ?? null)
+    : null;
+  const issueDrawerStatusMeta = issueDrawerData ? getPaperclipIssueStatusMeta(issueDrawerData.status) : null;
+  const issueDrawerPriorityMeta = issueDrawerData ? getPaperclipIssuePriorityMeta(issueDrawerData.priority) : null;
+  const issueDrawerProjectLabel = issueDrawerData?.projectName?.trim() || pageData.projectLabel || 'Unknown';
+  const refreshBusy = refreshPending || pullRequestsPageLoading;
+  const tableRefreshing = (refreshPending || pullRequestsPageLoading) && !showInitialLoadingState;
+  const selectedPullRequestCommentPending = selectedPullRequest
+    ? pendingActionKey === `comment:${selectedPullRequest.id}`
+    : false;
+  const selectedPullRequestReviewPending = selectedPullRequest
+    ? Boolean(pendingActionKey?.startsWith(`review:${selectedPullRequest.id}:`))
+    : false;
+  const selectedPullRequestRerunCiPending = selectedPullRequest
+    ? pendingActionKey === `rerun-ci:${selectedPullRequest.id}`
+    : false;
+  const selectedPullRequestMergePending = selectedPullRequest
+    ? pendingActionKey === `merge:${selectedPullRequest.id}`
+    : false;
+  const selectedPullRequestClosePending = selectedPullRequest
+    ? pendingActionKey === `close:${selectedPullRequest.id}`
+    : false;
+  const issueModalPending = issueModalPullRequest
+    ? pendingActionKey === `create-issue:${issueModalPullRequest.id}`
+    : false;
+  const commentModalPending = commentModalPullRequest
+    ? pendingActionKey === `comment-modal:${commentModalPullRequest.id}`
+    : false;
+  const reviewModalApprovePending = reviewModalPullRequest
+    ? pendingActionKey === `review:${reviewModalPullRequest.id}:approve`
+    : false;
+  const reviewModalRequestChangesPending = reviewModalPullRequest
+    ? pendingActionKey === `review:${reviewModalPullRequest.id}:request_changes`
+    : false;
+  const reviewModalPending = reviewModalPullRequest
+    ? Boolean(pendingActionKey?.startsWith(`review:${reviewModalPullRequest.id}:`))
+    : false;
+  const rerunCiModalPending = rerunCiModalPullRequest
+    ? pendingActionKey === `rerun-ci:${rerunCiModalPullRequest.id}`
+    : false;
+  const closeModalPending = closeModalPullRequest
+    ? pendingActionKey === `close:${closeModalPullRequest.id}`
+    : false;
 
   useEffect(() => {
     setCommentDraft('');
   }, [selectedPullRequestId]);
 
-  function refreshPullRequests(): void {
+  function reloadPullRequestsView(): void {
     setPullRequestsPageRefreshNonce((current) => current + 1);
 
-    try {
-      selectedPullRequestDetails.refresh();
-    } catch {
-      void 0;
+    void Promise.resolve(selectedPullRequestDetails.refresh()).catch(() => undefined);
+    void Promise.resolve(pullRequestMetrics.refresh()).catch(() => undefined);
+  }
+
+  async function handleRefreshPullRequests(): Promise<void> {
+    if (!hostContext.companyId || !projectId) {
+      reloadPullRequestsView();
+      return;
     }
 
+    setRefreshPending(true);
     try {
-      pullRequestMetrics.refresh();
-    } catch {
-      void 0;
+      await refreshPullRequestsAction({
+        companyId: hostContext.companyId,
+        projectId,
+        ...(pageData.repositoryUrl ? { repositoryUrl: pageData.repositoryUrl } : {})
+      });
+    } catch (error) {
+      toast({
+        title: 'Could not refresh pull requests',
+        body: getActionErrorMessage(error, 'The cache refresh request failed.'),
+        tone: 'error'
+      });
+    } finally {
+      reloadPullRequestsView();
+      setRefreshPending(false);
     }
+  }
+
+  function refreshAfterMutation(): void {
+    reloadPullRequestsView();
   }
 
   function resetPaging(filter: PreviewPullRequestFilter): void {
@@ -6225,8 +6946,12 @@ export function GitHubSyncProjectPullRequestsPage(): React.JSX.Element {
   }
 
   function closeCreateIssueModal(): void {
-    setIssueDraftPullRequestId(null);
+    setIssueModalPullRequest(null);
     setIssueDraftTitle('');
+  }
+
+  function closeIssueDrawer(): void {
+    setIssueDrawer(null);
   }
 
   function closeCommentModal(): void {
@@ -6243,6 +6968,10 @@ export function GitHubSyncProjectPullRequestsPage(): React.JSX.Element {
     setRerunCiPullRequestId(null);
   }
 
+  function closeClosePullRequestModal(): void {
+    setCloseModalPullRequest(null);
+  }
+
   function applyIssueLinkOverride(
     pullRequestId: string,
     result: ProjectPullRequestIssueActionResult
@@ -6257,9 +6986,48 @@ export function GitHubSyncProjectPullRequestsPage(): React.JSX.Element {
   }
 
   function openCreateIssueModal(pullRequest: PreviewPullRequestRecord): void {
-    setIssueDraftPullRequestId(pullRequest.id);
+    setIssueModalPullRequest(pullRequest);
     setIssueDraftTitle(pullRequest.title);
   }
+
+  function openPaperclipIssueDrawer(issue?: PaperclipIssueDrawerState | null): void {
+    const issueId = issue?.issueId?.trim() ? issue.issueId.trim() : null;
+    const issueKey = issue?.issueKey?.trim() ? issue.issueKey.trim() : null;
+    if (!issueId && !issueKey) {
+      return;
+    }
+
+    setIssueDrawer({
+      ...(issueId ? { issueId } : {}),
+      ...(issueKey ? { issueKey } : {})
+    });
+  }
+
+  function openCommentModal(pullRequestId: string): void {
+    setCommentModalPullRequestId(pullRequestId);
+    setCommentModalDraft('');
+  }
+
+  function openClosePullRequestModal(pullRequest: PreviewPullRequestRecord): void {
+    setCloseModalPullRequest(pullRequest);
+  }
+
+  useEffect(() => {
+    if (!issueDrawer) {
+      return undefined;
+    }
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        closeIssueDrawer();
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [issueDrawer]);
 
   async function handleCreatePaperclipIssue(): Promise<void> {
     if (!issueModalPullRequest || !hostContext.companyId || !projectId) {
@@ -6288,8 +7056,12 @@ export function GitHubSyncProjectPullRequestsPage(): React.JSX.Element {
         title: nextIssueTitle
       }) as ProjectPullRequestIssueActionResult;
       applyIssueLinkOverride(issueModalPullRequest.id, result);
+      openPaperclipIssueDrawer({
+        issueId: result.paperclipIssueId,
+        issueKey: result.paperclipIssueKey
+      });
       closeCreateIssueModal();
-      refreshPullRequests();
+      refreshAfterMutation();
       toast({
         title: result.paperclipIssueKey
           ? `${result.paperclipIssueKey}${result.alreadyLinked ? ' already linked' : ' linked'}`
@@ -6304,7 +7076,7 @@ export function GitHubSyncProjectPullRequestsPage(): React.JSX.Element {
     } catch (error) {
       toast({
         title: 'Could not create the Paperclip issue',
-        body: error instanceof Error ? error.message : 'Paperclip rejected the request.',
+        body: getActionErrorMessage(error, 'Paperclip rejected the request.'),
         tone: 'error'
       });
     } finally {
@@ -6332,11 +7104,11 @@ export function GitHubSyncProjectPullRequestsPage(): React.JSX.Element {
         body: 'The queue was refreshed.',
         tone: 'success'
       });
-      refreshPullRequests();
+      refreshAfterMutation();
     } catch (error) {
       toast({
         title: `Could not merge #${pullRequest.number}`,
-        body: error instanceof Error ? error.message : 'GitHub rejected the merge.',
+        body: getActionErrorMessage(error, 'GitHub rejected the merge.'),
         tone: 'error'
       });
     } finally {
@@ -6364,11 +7136,12 @@ export function GitHubSyncProjectPullRequestsPage(): React.JSX.Element {
         body: 'The queue was refreshed.',
         tone: 'warn'
       });
-      refreshPullRequests();
+      setCloseModalPullRequest((current) => current?.id === pullRequest.id ? null : current);
+      refreshAfterMutation();
     } catch (error) {
       toast({
         title: `Could not close #${pullRequest.number}`,
-        body: error instanceof Error ? error.message : 'GitHub rejected the close action.',
+        body: getActionErrorMessage(error, 'GitHub rejected the close action.'),
         tone: 'error'
       });
     } finally {
@@ -6398,7 +7171,7 @@ export function GitHubSyncProjectPullRequestsPage(): React.JSX.Element {
         body: nextComment
       });
       setCommentDraft('');
-      refreshPullRequests();
+      refreshAfterMutation();
       toast({
         title: 'Comment added',
         body: `Posted a GitHub comment on #${selectedPullRequest.number}.`,
@@ -6407,7 +7180,7 @@ export function GitHubSyncProjectPullRequestsPage(): React.JSX.Element {
     } catch (error) {
       toast({
         title: 'Could not add the comment',
-        body: error instanceof Error ? error.message : 'GitHub rejected the comment.',
+        body: getActionErrorMessage(error, 'GitHub rejected the comment.'),
         tone: 'error'
       });
     } finally {
@@ -6437,7 +7210,7 @@ export function GitHubSyncProjectPullRequestsPage(): React.JSX.Element {
         body: nextComment
       });
       closeCommentModal();
-      refreshPullRequests();
+      refreshAfterMutation();
       toast({
         title: 'Comment added',
         body: `Posted a GitHub comment on #${commentModalPullRequest.number}.`,
@@ -6446,7 +7219,7 @@ export function GitHubSyncProjectPullRequestsPage(): React.JSX.Element {
     } catch (error) {
       toast({
         title: 'Could not add the comment',
-        body: error instanceof Error ? error.message : 'GitHub rejected the comment.',
+        body: getActionErrorMessage(error, 'GitHub rejected the comment.'),
         tone: 'error'
       });
     } finally {
@@ -6472,7 +7245,7 @@ export function GitHubSyncProjectPullRequestsPage(): React.JSX.Element {
         body: reviewModalDraft.trim()
       }) as ProjectPullRequestReviewActionResult;
       closeReviewModal();
-      refreshPullRequests();
+      refreshAfterMutation();
       toast({
         title: result.review === 'approved' ? `Approved #${reviewModalPullRequest.number}` : `Requested changes on #${reviewModalPullRequest.number}`,
         body: result.review === 'approved' ? 'GitHub review submitted.' : 'GitHub change request submitted.',
@@ -6481,7 +7254,7 @@ export function GitHubSyncProjectPullRequestsPage(): React.JSX.Element {
     } catch (error) {
       toast({
         title: 'Could not submit the review',
-        body: error instanceof Error ? error.message : 'GitHub rejected the review.',
+        body: getActionErrorMessage(error, 'GitHub rejected the review.'),
         tone: 'error'
       });
     } finally {
@@ -6505,7 +7278,7 @@ export function GitHubSyncProjectPullRequestsPage(): React.JSX.Element {
         pullRequestNumber: rerunCiModalPullRequest.number
       }) as ProjectPullRequestRerunCiActionResult;
       closeRerunCiModal();
-      refreshPullRequests();
+      refreshAfterMutation();
       toast({
         title: `Re-ran CI for #${rerunCiModalPullRequest.number}`,
         body: result.rerunCheckSuiteCount && result.rerunCheckSuiteCount > 1
@@ -6516,7 +7289,7 @@ export function GitHubSyncProjectPullRequestsPage(): React.JSX.Element {
     } catch (error) {
       toast({
         title: 'Could not re-run CI',
-        body: error instanceof Error ? error.message : 'GitHub rejected the request.',
+        body: getActionErrorMessage(error, 'GitHub rejected the request.'),
         tone: 'error'
       });
     } finally {
@@ -6530,40 +7303,65 @@ export function GitHubSyncProjectPullRequestsPage(): React.JSX.Element {
   const tableSummaryLabel = pageStatus === 'ready'
     ? `${formatProjectPullRequestRange(resolvedPageIndex, resolvedPageSize, totalFilteredPullRequests)} in ${pageData.repositoryLabel}`
     : pageData.message ?? pullRequestsPageError?.message ?? 'Loading pull requests.';
+  const summaryCardsPending = showInitialLoadingState || (pageStatus === 'ready' && !metricsReady && !pullRequestMetrics.error);
+  const loadingTableRows = Array.from({ length: 6 }, (_, index) => index);
+  const tableOverlayLabel = showInitialLoadingState ? 'Loading pull requests…' : 'Updating pull requests…';
+  const pullRequestsTableHead = (
+    <thead>
+      <tr>
+        <th scope="col">ID</th>
+        <th scope="col">Title</th>
+        <th scope="col">Author</th>
+        <th scope="col" className="ghsync-prs-table__cell--center">Checks</th>
+        <th scope="col" className="ghsync-prs-table__cell--center">Reviews</th>
+        <th scope="col" className="ghsync-prs-table__cell--center">Review threads</th>
+        <th scope="col" className="ghsync-prs-table__cell--center">Comments</th>
+        <th scope="col" className="ghsync-prs-table__cell--center">Age</th>
+        <th scope="col" className="ghsync-prs-table__cell--center">Last updated</th>
+        <th scope="col" className="ghsync-prs-table__cell--center">Paperclip issue</th>
+        <th scope="col" className="ghsync-prs-table__cell--center ghsync-prs-table__cell--actions">Quick actions</th>
+      </tr>
+    </thead>
+  );
   const summaryCards: Array<{
     filter: PreviewPullRequestFilter;
     value: number | undefined;
     label: string;
     helper: string;
     toneClassName: string;
+    loading: boolean;
   }> = [
     {
       filter: 'all',
-      value: totalOpenPullRequests,
+      value: pageStatus === 'ready' ? totalOpenPullRequests : undefined,
       label: 'Total PRs',
-      helper: `${pluralize(totalOpenPullRequests, 'open pull request')}`,
-      toneClassName: 'ghsync-prs-page__summary-card--open'
+      helper: pageStatus === 'ready' ? `${pluralize(totalOpenPullRequests, 'open pull request')}` : 'Open pull requests',
+      toneClassName: 'ghsync-prs-page__summary-card--open',
+      loading: showInitialLoadingState
     },
     {
       filter: 'mergeable',
-      value: mergeablePullRequestsCount,
+      value: pageStatus === 'ready' && metricsReady ? mergeablePullRequestsCount : undefined,
       label: 'Mergeable',
       helper: 'Ready to merge',
-      toneClassName: 'ghsync-prs-page__summary-card--mergeable'
+      toneClassName: 'ghsync-prs-page__summary-card--mergeable',
+      loading: summaryCardsPending
     },
     {
       filter: 'reviewable',
-      value: reviewablePullRequestsCount,
+      value: pageStatus === 'ready' && metricsReady ? reviewablePullRequestsCount : undefined,
       label: 'Reviewable',
       helper: 'Ready for review',
-      toneClassName: 'ghsync-prs-page__summary-card--reviewable'
+      toneClassName: 'ghsync-prs-page__summary-card--reviewable',
+      loading: summaryCardsPending
     },
     {
       filter: 'failing',
-      value: failingPullRequestsCount,
+      value: pageStatus === 'ready' && metricsReady ? failingPullRequestsCount : undefined,
       label: 'Failing',
       helper: 'Checks failing',
-      toneClassName: 'ghsync-prs-page__summary-card--failing'
+      toneClassName: 'ghsync-prs-page__summary-card--failing',
+      loading: summaryCardsPending
     }
   ];
 
@@ -6588,9 +7386,16 @@ export function GitHubSyncProjectPullRequestsPage(): React.JSX.Element {
                 <button
                   type="button"
                   className={getPluginActionClassName({ variant: 'secondary' })}
-                  onClick={refreshPullRequests}
+                  onClick={() => {
+                    void handleRefreshPullRequests();
+                  }}
+                  disabled={refreshBusy}
                 >
-                  Refresh
+                  <LoadingButtonContent
+                    busy={refreshBusy}
+                    label="Refresh"
+                    busyLabel="Refreshing…"
+                  />
                 </button>
                 {pageData.repositoryUrl ? (
                   <a
@@ -6614,15 +7419,24 @@ export function GitHubSyncProjectPullRequestsPage(): React.JSX.Element {
                   className={[
                     'ghsync-prs-page__summary-card',
                     card.toneClassName,
+                    card.loading ? 'ghsync-prs-page__summary-card--loading' : '',
                     activeFilter === card.filter ? 'ghsync-prs-page__summary-card--active' : ''
                   ].join(' ')}
                   onClick={() => resetPaging(card.filter)}
-                  disabled={card.filter !== 'all' && !metricsReady}
+                  disabled={refreshBusy || card.loading || (card.filter !== 'all' && !metricsReady)}
                   aria-pressed={activeFilter === card.filter}
                 >
                   <span>{card.label}</span>
-                  <strong>{typeof card.value === 'number' ? card.value : '—'}</strong>
-                  <p>{card.helper}</p>
+                  <div className="ghsync-prs-page__summary-card-value">
+                    {card.loading ? (
+                      <LoadingSpinner size="sm" label={`Loading ${card.label.toLowerCase()}`} />
+                    ) : (
+                      <strong>{typeof card.value === 'number' ? card.value : '—'}</strong>
+                    )}
+                  </div>
+                  <div className="ghsync-prs-page__summary-card-helper">
+                    <p>{card.helper}</p>
+                  </div>
                 </button>
               ))}
             </div>
@@ -6660,7 +7474,7 @@ export function GitHubSyncProjectPullRequestsPage(): React.JSX.Element {
                       type="button"
                       className={getPluginActionClassName({ variant: 'secondary', size: 'sm' })}
                       onClick={handlePreviousPage}
-                      disabled={!pageData.hasPreviousPage}
+                      disabled={refreshBusy || !pageData.hasPreviousPage}
                     >
                       Previous
                     </button>
@@ -6668,7 +7482,7 @@ export function GitHubSyncProjectPullRequestsPage(): React.JSX.Element {
                       type="button"
                       className={getPluginActionClassName({ variant: 'secondary', size: 'sm' })}
                       onClick={handleNextPage}
-                      disabled={!pageData.hasNextPage}
+                      disabled={refreshBusy || !pageData.hasNextPage}
                     >
                       Next
                     </button>
@@ -6679,8 +7493,76 @@ export function GitHubSyncProjectPullRequestsPage(): React.JSX.Element {
           </div>
 
           {showInitialLoadingState ? (
-            <div className="ghsync-prs-detail__empty">
-              <strong>Loading pull requests…</strong>
+            <div className="ghsync-prs-page__table-surface ghsync-prs-page__table-surface--loading">
+              <div className="ghsync-prs-page__table-wrap">
+                <table className="ghsync-prs-table" aria-hidden="true">
+                  {pullRequestsTableHead}
+                  <tbody>
+                    {loadingTableRows.map((rowIndex) => (
+                      <tr key={`loading-row-${rowIndex}`} className="ghsync-prs-table__row--skeleton">
+                        <td>
+                          <div className="ghsync-prs-table__id-cell">
+                            <LoadingSkeleton style={{ width: 34, height: 11, borderRadius: 6 }} />
+                            <LoadingSkeleton style={{ width: 20, height: 20, borderRadius: 8 }} />
+                          </div>
+                        </td>
+                        <td className="ghsync-prs-table__title-cell">
+                          <div className="ghsync-prs-table__labels" style={{ marginTop: 0, gap: 10 }}>
+                            <LoadingSkeleton style={{ width: rowIndex % 2 === 0 ? 220 : 176, height: 12, borderRadius: 6 }} />
+                          </div>
+                          <div className="ghsync-prs-table__labels">
+                            <LoadingSkeleton style={{ width: 58, height: 18, borderRadius: 999 }} />
+                            <LoadingSkeleton style={{ width: 72, height: 18, borderRadius: 999 }} />
+                          </div>
+                        </td>
+                        <td>
+                          <div className="ghsync-prs-table__skeleton-stack">
+                            <LoadingSkeleton style={{ width: 28, height: 28, borderRadius: 999 }} />
+                            <div style={{ display: 'grid', gap: 6 }}>
+                              <LoadingSkeleton style={{ width: 86, height: 11, borderRadius: 6 }} />
+                              <LoadingSkeleton style={{ width: 62, height: 10, borderRadius: 6 }} />
+                            </div>
+                          </div>
+                        </td>
+                        <td className="ghsync-prs-table__cell--center">
+                          <LoadingSkeleton style={{ width: 20, height: 20 }} />
+                        </td>
+                        <td className="ghsync-prs-table__cell--center">
+                          <LoadingSkeleton style={{ width: 42, height: 11, borderRadius: 6, marginInline: 'auto' }} />
+                        </td>
+                        <td className="ghsync-prs-table__cell--center">
+                          <LoadingSkeleton style={{ width: 26, height: 11, borderRadius: 6, marginInline: 'auto' }} />
+                        </td>
+                        <td className="ghsync-prs-table__cell--center">
+                          <LoadingSkeleton style={{ width: 26, height: 11, borderRadius: 6, marginInline: 'auto' }} />
+                        </td>
+                        <td className="ghsync-prs-table__cell--center">
+                          <LoadingSkeleton style={{ width: 58, height: 11, borderRadius: 6, marginInline: 'auto' }} />
+                        </td>
+                        <td className="ghsync-prs-table__cell--center">
+                          <LoadingSkeleton style={{ width: 58, height: 11, borderRadius: 6, marginInline: 'auto' }} />
+                        </td>
+                        <td className="ghsync-prs-table__cell--center">
+                          <LoadingSkeleton style={{ width: 62, height: 20, borderRadius: 999, marginInline: 'auto' }} />
+                        </td>
+                        <td className="ghsync-prs-table__cell--center ghsync-prs-table__cell--actions">
+                          <div style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+                            <LoadingSkeleton style={{ width: 20, height: 20, borderRadius: 8 }} />
+                            <LoadingSkeleton style={{ width: 20, height: 20, borderRadius: 8 }} />
+                            <LoadingSkeleton style={{ width: 20, height: 20, borderRadius: 8 }} />
+                          </div>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              <div className="ghsync-prs-page__table-overlay" aria-live="polite">
+                <div className="ghsync-prs-page__table-overlay-card">
+                  <LoadingSpinner size="md" />
+                  <span>{tableOverlayLabel}</span>
+                </div>
+              </div>
             </div>
           ) : pageStatus !== 'ready' ? (
             <div className="ghsync-prs-detail__empty">
@@ -6700,23 +7582,10 @@ export function GitHubSyncProjectPullRequestsPage(): React.JSX.Element {
               <strong>No {activeFilter === 'all' ? 'open' : activeFilter} pull requests.</strong>
             </div>
           ) : (
-            <div className="ghsync-prs-page__table-wrap">
+            <div className={`ghsync-prs-page__table-surface${tableRefreshing ? ' ghsync-prs-page__table-surface--loading' : ''}`}>
+              <div className="ghsync-prs-page__table-wrap">
               <table className="ghsync-prs-table">
-                <thead>
-                  <tr>
-                    <th scope="col">ID</th>
-                    <th scope="col">Title</th>
-                    <th scope="col">Author</th>
-                    <th scope="col" className="ghsync-prs-table__cell--center">Checks</th>
-                    <th scope="col" className="ghsync-prs-table__cell--center">Reviews</th>
-                    <th scope="col" className="ghsync-prs-table__cell--center">Review threads</th>
-                    <th scope="col" className="ghsync-prs-table__cell--center">Comments</th>
-                    <th scope="col" className="ghsync-prs-table__cell--center">Age</th>
-                    <th scope="col" className="ghsync-prs-table__cell--center">Last updated</th>
-                    <th scope="col" className="ghsync-prs-table__cell--center">Paperclip issue</th>
-                    <th scope="col" className="ghsync-prs-table__cell--center">Quick actions</th>
-                  </tr>
-                </thead>
+                {pullRequestsTableHead}
                 <tbody>
                   {visibleTablePullRequests.map((pullRequest) => {
                     const hasReviewSummary = pullRequest.reviewApprovals > 0 || pullRequest.reviewChangesRequested > 0;
@@ -6729,9 +7598,15 @@ export function GitHubSyncProjectPullRequestsPage(): React.JSX.Element {
                     );
                     const pullRequestIssueLabel = pullRequest.paperclipIssueKey ?? (pullRequest.paperclipIssueId ? 'Open issue' : null);
                     const mergeActionKey = `merge:${pullRequest.id}`;
-                    const reviewActionKey = `review:${pullRequest.id}`;
+                    const commentModalActionKey = `comment-modal:${pullRequest.id}`;
+                    const reviewActionPrefix = `review:${pullRequest.id}:`;
                     const rerunCiActionKey = `rerun-ci:${pullRequest.id}`;
                     const closeActionKey = `close:${pullRequest.id}`;
+                    const commentModalPending = pendingActionKey === commentModalActionKey;
+                    const reviewPending = Boolean(pendingActionKey?.startsWith(reviewActionPrefix));
+                    const rerunCiPending = pendingActionKey === rerunCiActionKey;
+                    const mergePending = pendingActionKey === mergeActionKey;
+                    const closePending = pendingActionKey === closeActionKey;
 
                     return (
                       <tr
@@ -6739,7 +7614,19 @@ export function GitHubSyncProjectPullRequestsPage(): React.JSX.Element {
                         className={pullRequest.id === selectedPullRequest?.id ? 'ghsync-prs-table__row--selected' : undefined}
                       >
                         <td>
-                          <span className="ghsync-prs-table__id">#{pullRequest.number}</span>
+                          <div className="ghsync-prs-table__id-cell">
+                            <span className="ghsync-prs-table__id">#{pullRequest.number}</span>
+                            <a
+                              className="ghsync-prs-table__icon-link"
+                              href={pullRequest.githubUrl}
+                              target="_blank"
+                              rel="noreferrer"
+                              title={`Open PR #${pullRequest.number} on GitHub`}
+                              aria-label={`Open PR #${pullRequest.number} on GitHub`}
+                            >
+                              <GitHubMarkIcon className="ghsync-prs-icon" />
+                            </a>
+                          </div>
                         </td>
 
                         <td className="ghsync-prs-table__title-cell">
@@ -6849,9 +7736,16 @@ export function GitHubSyncProjectPullRequestsPage(): React.JSX.Element {
 
                         <td className="ghsync-prs-table__cell--center">
                           {pullRequestIssueHref && pullRequestIssueLabel ? (
-                            <a className="ghsync-prs-table__issue-link" href={pullRequestIssueHref}>
+                            <button
+                              type="button"
+                              className="ghsync-prs-table__issue-link"
+                              onClick={() => openPaperclipIssueDrawer({
+                                issueId: pullRequest.paperclipIssueId,
+                                issueKey: pullRequest.paperclipIssueKey
+                              })}
+                            >
                               {pullRequestIssueLabel}
-                            </a>
+                            </button>
                           ) : (
                             <button
                               type="button"
@@ -6864,19 +7758,20 @@ export function GitHubSyncProjectPullRequestsPage(): React.JSX.Element {
                           )}
                         </td>
 
-                        <td className="ghsync-prs-table__cell--center">
+                        <td className="ghsync-prs-table__cell--center ghsync-prs-table__cell--actions">
                           <div className="ghsync-prs-table__quick-actions">
                             <button
                               type="button"
                               className="ghsync-prs-table__icon-button"
                               title={`Comment on #${pullRequest.number}`}
-                              onClick={() => {
-                                setCommentModalPullRequestId(pullRequest.id);
-                                setCommentModalDraft('');
-                              }}
-                              disabled={pendingActionKey === `comment-modal:${pullRequest.id}`}
+                              onClick={() => openCommentModal(pullRequest.id)}
+                              disabled={commentModalPending}
                             >
-                              <CommentIcon className="ghsync-prs-icon" />
+                              <LoadingIconButtonContent
+                                busy={commentModalPending}
+                                busyLabel={`Commenting on #${pullRequest.number}`}
+                                icon={<CommentIcon className="ghsync-prs-icon" />}
+                              />
                             </button>
                             {pullRequest.reviewable ? (
                               <button
@@ -6887,9 +7782,13 @@ export function GitHubSyncProjectPullRequestsPage(): React.JSX.Element {
                                   setReviewModalPullRequestId(pullRequest.id);
                                   setReviewModalDraft('');
                                 }}
-                                disabled={pendingActionKey === reviewActionKey}
+                                disabled={reviewPending}
                               >
-                                <ReviewIcon className="ghsync-prs-icon" />
+                                <LoadingIconButtonContent
+                                  busy={reviewPending}
+                                  busyLabel={`Reviewing #${pullRequest.number}`}
+                                  icon={<ReviewIcon className="ghsync-prs-icon" />}
+                                />
                               </button>
                             ) : null}
                             {pullRequest.checksStatus === 'failed' ? (
@@ -6898,9 +7797,13 @@ export function GitHubSyncProjectPullRequestsPage(): React.JSX.Element {
                                 className="ghsync-prs-table__icon-button"
                                 title={`Re-run CI for #${pullRequest.number}`}
                                 onClick={() => setRerunCiPullRequestId(pullRequest.id)}
-                                disabled={pendingActionKey === rerunCiActionKey}
+                                disabled={rerunCiPending}
                               >
-                                <RefreshIcon className="ghsync-prs-icon" />
+                                <LoadingIconButtonContent
+                                  busy={rerunCiPending}
+                                  busyLabel={`Re-running CI for #${pullRequest.number}`}
+                                  icon={<RefreshIcon className="ghsync-prs-icon" />}
+                                />
                               </button>
                             ) : null}
                             {pullRequest.mergeable ? (
@@ -6911,21 +7814,30 @@ export function GitHubSyncProjectPullRequestsPage(): React.JSX.Element {
                                 onClick={() => {
                                   void handleMergePullRequest(pullRequest);
                                 }}
-                                disabled={pendingActionKey === mergeActionKey}
+                                disabled={mergePending}
                               >
-                                <MergeIcon className="ghsync-prs-icon" />
+                                <LoadingIconButtonContent
+                                  busy={mergePending}
+                                  busyLabel={`Merging #${pullRequest.number}`}
+                                  icon={<MergeIcon className="ghsync-prs-icon" />}
+                                />
                               </button>
                             ) : null}
                             <button
                               type="button"
                               className="ghsync-prs-table__icon-button"
-                              title={`Close #${pullRequest.number}`}
+                              title={`Close PR #${pullRequest.number}`}
+                              aria-label={`Close PR #${pullRequest.number}`}
                               onClick={() => {
-                                void handleClosePullRequest(pullRequest);
+                                openClosePullRequestModal(pullRequest);
                               }}
-                              disabled={pendingActionKey === closeActionKey}
+                              disabled={closePending}
                             >
-                              <CloseIcon className="ghsync-prs-icon" />
+                              <LoadingIconButtonContent
+                                busy={closePending}
+                                busyLabel={`Closing PR #${pullRequest.number}`}
+                                icon={<CloseIcon className="ghsync-prs-icon" />}
+                              />
                             </button>
                           </div>
                         </td>
@@ -6934,123 +7846,163 @@ export function GitHubSyncProjectPullRequestsPage(): React.JSX.Element {
                   })}
                 </tbody>
               </table>
+              </div>
+              {tableRefreshing ? (
+                <div className="ghsync-prs-page__table-overlay" aria-live="polite">
+                  <div className="ghsync-prs-page__table-overlay-card">
+                    <LoadingSpinner size="md" />
+                    <span>{tableOverlayLabel}</span>
+                  </div>
+                </div>
+              ) : null}
             </div>
           )}
         </section>
 
-        <section className="ghsync__card ghsync-prs-detail-card">
-          <div className="ghsync__card-header ghsync-prs-detail__header">
-            {selectedPullRequest ? (
-              <>
-                <div>
-                  <div className="ghsync__section-tags">
-                    <span className="ghsync__scope-pill ghsync__scope-pill--global">{pageData.repositoryLabel}</span>
-                    <span className={`ghsync__badge ${getToneClass(selectedPullRequest.checksStatus === 'failed' ? 'danger' : selectedPullRequest.checksStatus === 'pending' ? 'warning' : 'success')}`}>
-                      {getPreviewPullRequestCheckLabel(selectedPullRequest.checksStatus)}
-                    </span>
-                    {selectedPullRequestIssueLabel ? (
-                      <span className={`ghsync__badge ${getToneClass('info')}`}>{selectedPullRequestIssueLabel}</span>
-                    ) : (
-                      <span className={`ghsync__badge ${getToneClass('warning')}`}>Missing Paperclip issue</span>
-                    )}
-                  </div>
-                  <h3>{selectedPullRequest.title}</h3>
-                  <p>
-                    #{selectedPullRequest.number} opened {formatRelativeTime(selectedPullRequest.createdAt)} by {selectedPullRequest.author.handle}
-                  </p>
-                </div>
-
-                <div className="ghsync-prs-detail__actions">
-                  <a
-                    className={getPluginActionClassName({ variant: 'secondary', size: 'sm' })}
-                    href={selectedPullRequest.githubUrl}
-                    target="_blank"
-                    rel="noreferrer"
-                  >
-                    <ExternalLinkIcon className="ghsync-prs-icon" />
-                    <span>Open on GitHub</span>
-                  </a>
-                  {selectedPullRequestIssueHref && selectedPullRequestIssueLabel ? (
-                    <a
-                      className={getPluginActionClassName({ variant: 'secondary', size: 'sm' })}
-                      href={selectedPullRequestIssueHref}
-                    >
-                      {selectedPullRequestIssueLabel}
-                    </a>
+        {selectedPullRequest ? (
+          <section className="ghsync__card ghsync-prs-detail-card">
+            <div className="ghsync__card-header ghsync-prs-detail__header">
+              <div>
+                <div className="ghsync__section-tags">
+                  <span className="ghsync__scope-pill ghsync__scope-pill--global">{pageData.repositoryLabel}</span>
+                  <span className={`ghsync__badge ${getToneClass(selectedPullRequest.checksStatus === 'failed' ? 'danger' : selectedPullRequest.checksStatus === 'pending' ? 'warning' : 'success')}`}>
+                    {getPreviewPullRequestCheckLabel(selectedPullRequest.checksStatus)}
+                  </span>
+                  {selectedPullRequestIssueLabel ? (
+                    <span className={`ghsync__badge ${getToneClass('info')}`}>{selectedPullRequestIssueLabel}</span>
                   ) : (
-                    <button
-                      type="button"
-                      className={getPluginActionClassName({ variant: 'secondary', size: 'sm' })}
-                      onClick={() => openCreateIssueModal(selectedPullRequest)}
-                    >
-                      <PlusCircleIcon className="ghsync-prs-icon" />
-                      <span>Create Paperclip issue</span>
-                    </button>
+                    <span className={`ghsync__badge ${getToneClass('warning')}`}>Missing Paperclip issue</span>
                   )}
-                  {selectedPullRequest.reviewable ? (
-                    <button
-                      type="button"
-                      className={getPluginActionClassName({ variant: 'secondary', size: 'sm' })}
-                      onClick={() => {
-                        setReviewModalPullRequestId(selectedPullRequest.id);
-                        setReviewModalDraft('');
-                      }}
-                      disabled={pendingActionKey === `review:${selectedPullRequest.id}:approve`}
-                    >
-                      <ReviewIcon className="ghsync-prs-icon" />
-                      <span>Review</span>
-                    </button>
-                  ) : null}
-                  {selectedPullRequest.checksStatus === 'failed' ? (
-                    <button
-                      type="button"
-                      className={getPluginActionClassName({ variant: 'secondary', size: 'sm' })}
-                      onClick={() => setRerunCiPullRequestId(selectedPullRequest.id)}
-                      disabled={pendingActionKey === `rerun-ci:${selectedPullRequest.id}`}
-                    >
-                      <RefreshIcon className="ghsync-prs-icon" />
-                      <span>Re-run CI</span>
-                    </button>
-                  ) : null}
-                  {selectedPullRequest.mergeable ? (
-                    <button
-                      type="button"
-                      className={getPluginActionClassName({ variant: 'primary', size: 'sm' })}
-                      onClick={() => {
-                        void handleMergePullRequest(selectedPullRequest);
-                      }}
-                      disabled={pendingActionKey === `merge:${selectedPullRequest.id}`}
-                    >
-                      <MergeIcon className="ghsync-prs-icon" />
-                      <span>Merge</span>
-                    </button>
-                  ) : null}
+                </div>
+                <h3>{selectedPullRequest.title}</h3>
+                <p>
+                  #{selectedPullRequest.number} opened {formatRelativeTime(selectedPullRequest.createdAt)} by {selectedPullRequest.author.handle}
+                </p>
+              </div>
+
+              <div className="ghsync-prs-detail__actions">
+                <a
+                  className={getPluginActionClassName({ variant: 'secondary', size: 'sm' })}
+                  href={selectedPullRequest.githubUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  <ExternalLinkIcon className="ghsync-prs-icon" />
+                  <span>Open on GitHub</span>
+                </a>
+                {selectedPullRequestIssueHref && selectedPullRequestIssueLabel ? (
                   <button
                     type="button"
-                    className={getPluginActionClassName({ variant: 'danger', size: 'sm' })}
-                    onClick={() => {
-                      void handleClosePullRequest(selectedPullRequest);
-                    }}
-                    disabled={pendingActionKey === `close:${selectedPullRequest.id}`}
+                    className={getPluginActionClassName({ variant: 'secondary', size: 'sm' })}
+                    onClick={() => openPaperclipIssueDrawer({
+                      issueId: selectedPullRequest.paperclipIssueId,
+                      issueKey: selectedPullRequest.paperclipIssueKey
+                    })}
                   >
-                    <CloseIcon className="ghsync-prs-icon" />
-                    <span>Close</span>
+                    {selectedPullRequestIssueLabel}
                   </button>
-                </div>
-              </>
-            ) : (
-              <div className="ghsync-prs-detail__empty">
-                <strong>{pageStatus === 'ready' ? 'Select a pull request.' : 'Pull request details will appear here.'}</strong>
-                {pageStatus !== 'ready' ? <span>{pageData.message ?? pullRequestsPageError?.message}</span> : null}
+                ) : (
+                  <button
+                    type="button"
+                    className={getPluginActionClassName({ variant: 'secondary', size: 'sm' })}
+                    onClick={() => openCreateIssueModal(selectedPullRequest)}
+                  >
+                    <PlusCircleIcon className="ghsync-prs-icon" />
+                    <span>Create Paperclip issue</span>
+                  </button>
+                )}
+                <button
+                  type="button"
+                  className={getPluginActionClassName({ variant: 'secondary', size: 'sm' })}
+                  onClick={() => openCommentModal(selectedPullRequest.id)}
+                  disabled={selectedPullRequestCommentPending || commentModalPending}
+                >
+                  <LoadingButtonContent
+                    busy={selectedPullRequestCommentPending || commentModalPending}
+                    label="Comment"
+                    busyLabel="Commenting…"
+                    icon={<CommentIcon className="ghsync-prs-icon" />}
+                  />
+                </button>
+                {selectedPullRequest.reviewable ? (
+                  <button
+                    type="button"
+                    className={getPluginActionClassName({ variant: 'secondary', size: 'sm' })}
+                    onClick={() => {
+                      setReviewModalPullRequestId(selectedPullRequest.id);
+                      setReviewModalDraft('');
+                    }}
+                    disabled={selectedPullRequestReviewPending}
+                  >
+                    <LoadingButtonContent
+                      busy={selectedPullRequestReviewPending}
+                      label="Review"
+                      busyLabel="Submitting…"
+                      icon={<ReviewIcon className="ghsync-prs-icon" />}
+                    />
+                  </button>
+                ) : null}
+                {selectedPullRequest.checksStatus === 'failed' ? (
+                  <button
+                    type="button"
+                    className={getPluginActionClassName({ variant: 'secondary', size: 'sm' })}
+                    onClick={() => setRerunCiPullRequestId(selectedPullRequest.id)}
+                    disabled={selectedPullRequestRerunCiPending}
+                  >
+                    <LoadingButtonContent
+                      busy={selectedPullRequestRerunCiPending}
+                      label="Re-run CI"
+                      busyLabel="Requesting…"
+                      icon={<RefreshIcon className="ghsync-prs-icon" />}
+                    />
+                  </button>
+                ) : null}
+                {selectedPullRequest.mergeable ? (
+                  <button
+                    type="button"
+                    className={getPluginActionClassName({ variant: 'primary', size: 'sm' })}
+                    onClick={() => {
+                      void handleMergePullRequest(selectedPullRequest);
+                    }}
+                    disabled={selectedPullRequestMergePending}
+                  >
+                    <LoadingButtonContent
+                      busy={selectedPullRequestMergePending}
+                      label="Merge"
+                      busyLabel="Merging…"
+                      icon={<MergeIcon className="ghsync-prs-icon" />}
+                    />
+                  </button>
+                ) : null}
+                <button
+                  type="button"
+                  className={getPluginActionClassName({ variant: 'danger', size: 'sm' })}
+                  onClick={() => {
+                    openClosePullRequestModal(selectedPullRequest);
+                  }}
+                  disabled={selectedPullRequestClosePending}
+                >
+                  <LoadingButtonContent
+                    busy={selectedPullRequestClosePending}
+                    label="Close PR"
+                    busyLabel="Closing…"
+                    icon={<CloseIcon className="ghsync-prs-icon" />}
+                  />
+                </button>
               </div>
-            )}
-          </div>
+            </div>
 
-          {selectedPullRequest ? (
             <div className="ghsync-prs-detail__layout">
               <div className="ghsync-prs-timeline">
+                {selectedPullRequestDetails.loading && (selectedPullRequest.timeline?.length ?? 0) > 0 ? (
+                  <div className="ghsync__loading-inline ghsync-prs-timeline__loading-note" aria-live="polite">
+                    <LoadingSpinner size="sm" />
+                    <span>Updating conversation…</span>
+                  </div>
+                ) : null}
                 {selectedPullRequestDetails.loading && !(selectedPullRequest.timeline?.length ?? 0) ? (
-                  <div className="ghsync-prs-detail__empty">
+                  <div className="ghsync__loading-state ghsync-prs-page__panel-loading">
+                    <LoadingSpinner size="md" />
                     <strong>Loading conversation…</strong>
                   </div>
                 ) : selectedPullRequestDetails.error ? (
@@ -7103,9 +8055,13 @@ export function GitHubSyncProjectPullRequestsPage(): React.JSX.Element {
                       onClick={() => {
                         void handleAddComment();
                       }}
-                      disabled={!commentDraft.trim() || pendingActionKey === `comment:${selectedPullRequest.id}`}
+                      disabled={!commentDraft.trim() || selectedPullRequestCommentPending}
                     >
-                      Comment
+                      <LoadingButtonContent
+                        busy={selectedPullRequestCommentPending}
+                        label="Comment"
+                        busyLabel="Commenting…"
+                      />
                     </button>
                   </div>
                 </div>
@@ -7253,7 +8209,16 @@ export function GitHubSyncProjectPullRequestsPage(): React.JSX.Element {
                       <span className="ghsync-prs-meta__label">Paperclip issue</span>
                       <div className="ghsync-prs-meta__value">
                         {selectedPullRequestIssueHref && selectedPullRequestIssueLabel ? (
-                          <a href={selectedPullRequestIssueHref}>{selectedPullRequestIssueLabel}</a>
+                          <button
+                            type="button"
+                            className="ghsync-prs-page__meta-button"
+                            onClick={() => openPaperclipIssueDrawer({
+                              issueId: selectedPullRequest.paperclipIssueId,
+                              issueKey: selectedPullRequest.paperclipIssueKey
+                            })}
+                          >
+                            {selectedPullRequestIssueLabel}
+                          </button>
                         ) : (
                           <button
                             type="button"
@@ -7289,12 +8254,222 @@ export function GitHubSyncProjectPullRequestsPage(): React.JSX.Element {
                 </section>
               </aside>
             </div>
-          ) : (
-            <div className="ghsync-prs-detail__empty">
-              <strong>No open pull requests.</strong>
-            </div>
-          )}
-        </section>
+          </section>
+        ) : null}
+
+        {issueDrawer ? (
+          <div
+            className="ghsync-prs-issue-drawer-backdrop"
+            onClick={closeIssueDrawer}
+          >
+            <aside
+              className="ghsync-prs-issue-drawer"
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="ghsync-prs-issue-drawer-title"
+              onClick={(event) => event.stopPropagation()}
+            >
+              <div className="ghsync-prs-issue-drawer__header">
+                <div className="ghsync-prs-issue-drawer__title">
+                  <div className="ghsync__section-tags">
+                    <span className="ghsync__scope-pill ghsync__scope-pill--company">Paperclip</span>
+                  </div>
+                  <h3 id="ghsync-prs-issue-drawer-title">{issueDrawerIdentifier ?? 'Issue'}</h3>
+                  {issueDrawerData ? (
+                    <p className="ghsync-prs-issue-drawer__subtitle">{issueDrawerData.title}</p>
+                  ) : null}
+                </div>
+
+                <div className="ghsync-prs-issue-drawer__actions">
+                  {issueDrawerHref ? (
+                    <a
+                      className={getPluginActionClassName({ variant: 'secondary', size: 'sm' })}
+                      href={issueDrawerHref}
+                    >
+                      <ExternalLinkIcon className="ghsync-prs-icon" />
+                      <span>Open full issue</span>
+                    </a>
+                  ) : null}
+                  <button
+                    type="button"
+                    className="ghsync-prs-table__icon-button"
+                    onClick={closeIssueDrawer}
+                    aria-label="Close issue drawer"
+                  >
+                    <CloseIcon className="ghsync-prs-icon" />
+                  </button>
+                </div>
+              </div>
+
+              <div className="ghsync-prs-issue-drawer__body">
+                {issueDrawerLoading ? (
+                  <div className="ghsync-prs-issue-drawer__loading" aria-live="polite">
+                    <div className="ghsync-prs-issue-drawer__loading-card">
+                      <LoadingSpinner size="md" />
+                      <span>Opening issue…</span>
+                    </div>
+                  </div>
+                ) : issueDrawerError ? (
+                  <div className="ghsync-prs-issue-drawer__state">
+                    <strong>Could not load this issue.</strong>
+                    <span>{issueDrawerError.message}</span>
+                  </div>
+                ) : !issueDrawerData ? (
+                  <div className="ghsync-prs-issue-drawer__state">
+                    <strong>Issue unavailable.</strong>
+                    <span>Paperclip could not resolve this issue from the current project context.</span>
+                  </div>
+                ) : (
+                  <div className="ghsync-prs-issue-drawer__content">
+                    <div className="ghsync-prs-issue-drawer__main">
+                      <section className="ghsync-prs-issue-drawer__headline">
+                        <div className="ghsync__section-tags">
+                          {issueDrawerStatusMeta ? (
+                            <span className={`ghsync__badge ${getToneClass(issueDrawerStatusMeta.tone)}`}>
+                              {issueDrawerStatusMeta.label}
+                            </span>
+                          ) : null}
+                          {issueDrawerPriorityMeta ? (
+                            <span className={`ghsync__badge ${getToneClass(issueDrawerPriorityMeta.tone)}`}>
+                              {issueDrawerPriorityMeta.label}
+                            </span>
+                          ) : null}
+                          <span className="ghsync__scope-pill ghsync__scope-pill--global">{issueDrawerProjectLabel}</span>
+                        </div>
+                        <h4>{issueDrawerData.title}</h4>
+                        <p>
+                          Updated {formatRelativeTime(issueDrawerData.updatedAt)} · {pluralize(issueDrawerData.commentCount, 'comment')}
+                        </p>
+                        {issueDrawerData.labels.length > 0 ? (
+                          <div className="ghsync-prs-meta__labels">
+                            {issueDrawerData.labels.map((label) => (
+                              <span
+                                key={`${label.name}:${label.color ?? 'none'}`}
+                                className="ghsync-prs-table__label"
+                                style={label.color
+                                  ? {
+                                      color: label.color,
+                                      backgroundColor: hexToRgba(label.color, labelBackgroundAlpha),
+                                      borderColor: hexToRgba(label.color, labelBorderAlpha)
+                                    }
+                                  : undefined}
+                              >
+                                {label.name}
+                              </span>
+                            ))}
+                          </div>
+                        ) : null}
+                      </section>
+
+                      <section className="ghsync-prs-issue-drawer__timeline">
+                        <article className="ghsync-prs-timeline__entry ghsync-prs-timeline__entry--description">
+                          <div className="ghsync-prs-timeline__entry-head">
+                            <div className="ghsync-prs-issue-drawer__comment-meta">
+                              <strong>Description</strong>
+                            </div>
+                            <span className="ghsync-prs-timeline__entry-time" title={formatShortDateTime(issueDrawerData.createdAt)}>
+                              {formatRelativeTime(issueDrawerData.createdAt)}
+                            </span>
+                          </div>
+                          <div className="ghsync-prs-timeline__entry-body">
+                            {issueDrawerData.description.trim() ? (
+                              <PreviewMarkdown body={issueDrawerData.description} />
+                            ) : (
+                              <p className="ghsync-prs-issue-drawer__empty-copy">No description yet.</p>
+                            )}
+                          </div>
+                        </article>
+
+                        {issueDrawerData.comments.length > 0 ? (
+                          issueDrawerData.comments.map((comment) => (
+                            <article key={comment.id} className="ghsync-prs-timeline__entry">
+                              <div className="ghsync-prs-timeline__entry-head">
+                                <div className="ghsync-prs-issue-drawer__comment-meta">
+                                  <div className="ghsync-prs-issue-drawer__comment-author">
+                                    <strong>{comment.authorLabel}</strong>
+                                    {comment.authorTitle ? <span>{comment.authorTitle}</span> : null}
+                                  </div>
+                                  <span className={`ghsync__badge ${getToneClass(getPaperclipIssueCommentAuthorTone(comment.authorKind))}`}>
+                                    {comment.authorKind === 'agent'
+                                      ? 'Agent'
+                                      : comment.authorKind === 'user'
+                                        ? 'User'
+                                        : 'Paperclip'}
+                                  </span>
+                                </div>
+                                <span className="ghsync-prs-timeline__entry-time" title={formatShortDateTime(comment.createdAt)}>
+                                  {formatRelativeTime(comment.createdAt)}
+                                </span>
+                              </div>
+                              <div className="ghsync-prs-timeline__entry-body">
+                                <PreviewMarkdown body={comment.body} />
+                              </div>
+                            </article>
+                          ))
+                        ) : (
+                          <div className="ghsync-prs-issue-drawer__empty-copy">No comments yet.</div>
+                        )}
+                      </section>
+                    </div>
+
+                    <aside className="ghsync-prs-meta ghsync-prs-issue-drawer__sidebar">
+                      <section className="ghsync-prs-meta__section">
+                        <h4>Overview</h4>
+                        <div className="ghsync-prs-meta__rows">
+                          <div className="ghsync-prs-meta__row">
+                            <span className="ghsync-prs-meta__label">Status</span>
+                            <div className="ghsync-prs-meta__value">
+                              {issueDrawerStatusMeta?.label ?? issueDrawerData.status}
+                            </div>
+                          </div>
+
+                          <div className="ghsync-prs-meta__row">
+                            <span className="ghsync-prs-meta__label">Priority</span>
+                            <div className="ghsync-prs-meta__value">
+                              {issueDrawerPriorityMeta?.label ?? issueDrawerData.priority}
+                            </div>
+                          </div>
+
+                          <div className="ghsync-prs-meta__row">
+                            <span className="ghsync-prs-meta__label">Project</span>
+                            <div className="ghsync-prs-meta__value">{issueDrawerProjectLabel}</div>
+                          </div>
+
+                          <div className="ghsync-prs-meta__row">
+                            <span className="ghsync-prs-meta__label">Assignee</span>
+                            <div className="ghsync-prs-meta__value">
+                              {issueDrawerData.assignee?.name ?? 'Unassigned'}
+                              {issueDrawerData.assignee?.title ? ` · ${issueDrawerData.assignee.title}` : ''}
+                            </div>
+                          </div>
+
+                          <div className="ghsync-prs-meta__row">
+                            <span className="ghsync-prs-meta__label">Comments</span>
+                            <div className="ghsync-prs-meta__value">{pluralize(issueDrawerData.commentCount, 'comment')}</div>
+                          </div>
+
+                          <div className="ghsync-prs-meta__row">
+                            <span className="ghsync-prs-meta__label">Created</span>
+                            <div className="ghsync-prs-meta__value" title={formatShortDateTime(issueDrawerData.createdAt)}>
+                              {formatRelativeTime(issueDrawerData.createdAt)}
+                            </div>
+                          </div>
+
+                          <div className="ghsync-prs-meta__row">
+                            <span className="ghsync-prs-meta__label">Updated</span>
+                            <div className="ghsync-prs-meta__value" title={formatShortDateTime(issueDrawerData.updatedAt)}>
+                              {formatRelativeTime(issueDrawerData.updatedAt)}
+                            </div>
+                          </div>
+                        </div>
+                      </section>
+                    </aside>
+                  </div>
+                )}
+              </div>
+            </aside>
+          </div>
+        ) : null}
 
         {issueModalPullRequest ? (
           <div
@@ -7342,9 +8517,63 @@ export function GitHubSyncProjectPullRequestsPage(): React.JSX.Element {
                   onClick={() => {
                     void handleCreatePaperclipIssue();
                   }}
-                  disabled={!issueDraftTitle.trim() || pendingActionKey === `create-issue:${issueModalPullRequest.id}`}
+                  disabled={!issueDraftTitle.trim() || issueModalPending}
                 >
-                  Create issue
+                  <LoadingButtonContent
+                    busy={issueModalPending}
+                    label="Create issue"
+                    busyLabel="Creating…"
+                  />
+                </button>
+              </div>
+            </div>
+          </div>
+        ) : null}
+
+        {closeModalPullRequest ? (
+          <div
+            className="ghsync-prs-modal-backdrop"
+            onClick={closeModalPending ? undefined : closeClosePullRequestModal}
+          >
+            <div
+              className="ghsync-prs-modal"
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="ghsync-prs-close-modal-title"
+              onClick={(event) => event.stopPropagation()}
+            >
+              <div className="ghsync-prs-modal__header">
+                <h3 id="ghsync-prs-close-modal-title">Close PR #{closeModalPullRequest.number}?</h3>
+                <p>{closeModalPullRequest.title}</p>
+              </div>
+
+              <p className="ghsync-prs-modal__copy">
+                This closes the pull request on GitHub. You can reopen it later if needed.
+              </p>
+
+              <div className="ghsync-prs-modal__actions">
+                <button
+                  type="button"
+                  className={getPluginActionClassName({ variant: 'secondary' })}
+                  onClick={closeClosePullRequestModal}
+                  disabled={closeModalPending}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  className={getPluginActionClassName({ variant: 'danger' })}
+                  onClick={() => {
+                    void handleClosePullRequest(closeModalPullRequest);
+                  }}
+                  disabled={closeModalPending}
+                >
+                  <LoadingButtonContent
+                    busy={closeModalPending}
+                    label="Close PR"
+                    busyLabel="Closing…"
+                    icon={<CloseIcon className="ghsync-prs-icon" />}
+                  />
                 </button>
               </div>
             </div>
@@ -7392,9 +8621,13 @@ export function GitHubSyncProjectPullRequestsPage(): React.JSX.Element {
                   onClick={() => {
                     void handleAddModalComment();
                   }}
-                  disabled={!commentModalDraft.trim() || pendingActionKey === `comment-modal:${commentModalPullRequest.id}`}
+                  disabled={!commentModalDraft.trim() || commentModalPending}
                 >
-                  Comment
+                  <LoadingButtonContent
+                    busy={commentModalPending}
+                    label="Comment"
+                    busyLabel="Commenting…"
+                  />
                 </button>
               </div>
             </div>
@@ -7443,9 +8676,13 @@ export function GitHubSyncProjectPullRequestsPage(): React.JSX.Element {
                     onClick={() => {
                       void handleReviewPullRequest('request_changes');
                     }}
-                    disabled={pendingActionKey === `review:${reviewModalPullRequest.id}:request_changes`}
+                    disabled={reviewModalPending}
                   >
-                    Request changes
+                    <LoadingButtonContent
+                      busy={reviewModalRequestChangesPending}
+                      label="Request changes"
+                      busyLabel="Submitting…"
+                    />
                   </button>
                   <button
                     type="button"
@@ -7453,9 +8690,13 @@ export function GitHubSyncProjectPullRequestsPage(): React.JSX.Element {
                     onClick={() => {
                       void handleReviewPullRequest('approve');
                     }}
-                    disabled={pendingActionKey === `review:${reviewModalPullRequest.id}:approve`}
+                    disabled={reviewModalPending}
                   >
-                    Approve
+                    <LoadingButtonContent
+                      busy={reviewModalApprovePending}
+                      label="Approve"
+                      busyLabel="Approving…"
+                    />
                   </button>
                 </div>
               </div>
@@ -7494,9 +8735,13 @@ export function GitHubSyncProjectPullRequestsPage(): React.JSX.Element {
                   onClick={() => {
                     void handleRerunCi();
                   }}
-                  disabled={pendingActionKey === `rerun-ci:${rerunCiModalPullRequest.id}`}
+                  disabled={rerunCiModalPending}
                 >
-                  Re-run CI
+                  <LoadingButtonContent
+                    busy={rerunCiModalPending}
+                    label="Re-run CI"
+                    busyLabel="Requesting…"
+                  />
                 </button>
               </div>
             </div>
@@ -7619,9 +8864,7 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
 
         setExistingProjectCandidates([]);
         setExistingProjectCandidatesError(
-          error instanceof Error
-            ? error.message
-            : 'GitHub Sync could not inspect existing GitHub-linked projects in this company.'
+          getActionErrorMessage(error, 'GitHub Sync could not inspect existing GitHub-linked projects in this company.')
         );
       } finally {
         if (!cancelled) {
@@ -7732,10 +8975,10 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
 
         toast({
           title: 'Paperclip board access needs reconnection',
-          body:
-            error instanceof Error
-              ? error.message
-              : 'GitHub Sync could not finish migrating the saved Paperclip board access secret into plugin config.',
+          body: getActionErrorMessage(
+            error,
+            'GitHub Sync could not finish migrating the saved Paperclip board access secret into plugin config.'
+          ),
           tone: 'error'
         });
       }
@@ -7979,6 +9222,77 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
     }
   }, [advancedSettingsDirty]);
 
+  if (showInitialLoadingState) {
+    return (
+      <div className="ghsync ghsync-settings" style={themeVars}>
+        <style>{PAGE_STYLES}</style>
+
+        <section className="ghsync__header">
+          <div className="ghsync__header-copy">
+            <h2>GitHub Sync settings</h2>
+            {headerDescription ? <p>{headerDescription}</p> : null}
+          </div>
+          <div className="ghsync__section-head-actions">
+            <span className={`ghsync__scope-pill ${hasCompanyContext ? 'ghsync__scope-pill--company' : 'ghsync__scope-pill--mixed'}`}>
+              {hasCompanyContext ? currentCompanyName : 'No company'}
+            </span>
+            <span className="ghsync__scope-pill ghsync__scope-pill--global">Shared</span>
+            <span className="ghsync__badge ghsync__badge--neutral">
+              <LoadingSpinner size="sm" label="Loading settings" />
+              Loading
+            </span>
+          </div>
+        </section>
+
+        <div className="ghsync__layout">
+          <section className="ghsync__card">
+            <div className="ghsync__card-header">
+              <h3>Settings</h3>
+              <p>{hasCompanyContext ? currentCompanyName : 'Read-only.'}</p>
+            </div>
+
+            <div className="ghsync__loading-state" aria-live="polite">
+              <LoadingSpinner size="md" />
+              <strong>Loading saved settings…</strong>
+            </div>
+          </section>
+
+          <aside className="ghsync__card">
+            <div className="ghsync__card-header">
+              <h3>Summary</h3>
+              <p>
+                {hasCompanyContext
+                  ? currentCompanyName
+                  : 'No company selected.'}
+              </p>
+            </div>
+
+            <div className="ghsync__side-body" aria-hidden="true">
+              {Array.from({ length: 4 }, (_, index) => (
+                <div key={`settings-summary-skeleton-${index}`} className="ghsync__check">
+                  <div className="ghsync__check-top">
+                    <LoadingSkeleton style={{ width: index === 2 ? '8.5rem' : '7rem', height: '0.875rem' }} />
+                    <LoadingSkeleton style={{ width: '3.75rem', height: '1.5rem' }} />
+                  </div>
+                  <LoadingSkeleton style={{ width: index === 1 ? '64%' : '56%', height: '0.75rem' }} />
+                </div>
+              ))}
+
+              <div className="ghsync__detail-list">
+                {Array.from({ length: 3 }, (_, index) => (
+                  <div key={`settings-detail-skeleton-${index}`} className="ghsync__detail">
+                    <LoadingSkeleton style={{ width: '4.5rem', height: '0.75rem' }} />
+                    <LoadingSkeleton style={{ width: index === 1 ? '6rem' : '5rem', height: '0.875rem' }} />
+                  </div>
+                ))}
+              </div>
+            </div>
+          </aside>
+        </div>
+      </div>
+    );
+  }
+
   function updateMapping(mappingId: string, field: keyof RepositoryMapping, value: string) {
     setForm((current) => {
       const hasMapping = current.mappings.some((mapping) => mapping.id === mappingId);
@@ -8078,7 +9392,7 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
         token: trimmedToken
       }) as TokenValidationResult;
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'GitHub rejected this token.';
+      const message = getActionErrorMessage(error, 'GitHub rejected this token.');
       if (!hasSavedToken) {
         setTokenStatusOverride('invalid');
       }
@@ -8141,7 +9455,7 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
     } catch (error) {
       toast({
         title: 'GitHub token could not be saved',
-        body: error instanceof Error ? error.message : 'Paperclip could not save the validated token.',
+        body: getActionErrorMessage(error, 'Paperclip could not save the validated token.'),
         tone: 'error'
       });
     } finally {
@@ -8219,7 +9533,7 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
     } catch (error) {
       toast({
         title: 'Paperclip board access could not be connected',
-        body: error instanceof Error ? error.message : 'Unable to finish the Paperclip board access approval flow.',
+        body: getActionErrorMessage(error, 'Unable to finish the Paperclip board access approval flow.'),
         tone: 'error'
       });
     } finally {
@@ -8320,7 +9634,7 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
     } catch (error) {
       toast({
         title: 'Setup could not be saved',
-        body: error instanceof Error ? error.message : 'Unable to save GitHub sync setup.',
+        body: getActionErrorMessage(error, 'Unable to save GitHub sync setup.'),
         tone: 'error'
       });
     } finally {
@@ -8362,7 +9676,7 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
         return;
       }
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Unable to run sync.';
+      const message = getActionErrorMessage(error, 'Unable to run sync.');
       setManualSyncRequestError(message);
       toast({
         title: 'Unable to run GitHub sync',
@@ -8408,7 +9722,7 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
         return;
       }
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Unable to cancel sync.';
+      const message = getActionErrorMessage(error, 'Unable to cancel sync.');
       setManualSyncRequestError(message);
       toast({
         title: 'Unable to cancel GitHub sync',
@@ -8427,7 +9741,7 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
   }
 
   return (
-    <div className="ghsync" style={themeVars}>
+    <div className="ghsync ghsync-settings" style={themeVars}>
       <style>{PAGE_STYLES}</style>
 
       <section className="ghsync__header">
@@ -8455,7 +9769,12 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
             <p>{hasCompanyContext ? currentCompanyName : 'Read-only.'}</p>
           </div>
 
-          {showInitialLoadingState ? <p className="ghsync__loading">Loading saved settings…</p> : null}
+          {showInitialLoadingState ? (
+            <div className="ghsync__loading-inline" aria-live="polite">
+              <LoadingSpinner size="sm" />
+              <span>Loading saved settings…</span>
+            </div>
+          ) : null}
 
           <section className="ghsync__section">
             <div className="ghsync__section-head">
@@ -8525,7 +9844,11 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
                       className={getPluginActionClassName({ variant: 'primary' })}
                       disabled={!canSaveToken}
                     >
-                      {submittingToken ? 'Saving…' : 'Save token'}
+                      <LoadingButtonContent
+                        busy={submittingToken}
+                        label="Save token"
+                        busyLabel="Saving…"
+                      />
                     </button>
                   </div>
                 </div>
@@ -8600,11 +9923,11 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
                     void handleConnectBoardAccess();
                   }}
                 >
-                  {connectingBoardAccess
-                    ? 'Waiting for approval…'
-                    : boardAccessConfigured
-                      ? 'Reconnect'
-                      : 'Connect board access'}
+                  <LoadingButtonContent
+                    busy={connectingBoardAccess}
+                    label={boardAccessConfigured ? 'Reconnect' : 'Connect board access'}
+                    busyLabel="Waiting for approval…"
+                  />
                 </button>
               </div>
             ) : (
@@ -8945,9 +10268,11 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
                           key={metric.key}
                           className={`ghsync__stat${metric.emphasized ? ' ghsync__stat--emphasized' : ''}`}
                         >
-                          <strong>{metric.value}</strong>
+                          <strong>
+                            {showInitialLoadingState ? <LoadingSpinner size="sm" label={`Loading ${metric.label.toLowerCase()}`} /> : metric.value}
+                          </strong>
                           <span>{metric.label}</span>
-                          <p>{metric.description}</p>
+                          <p>{showInitialLoadingState ? 'Loading current sync data.' : metric.description}</p>
                         </div>
                       ))}
                     </div>
@@ -8966,13 +10291,11 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
                         onClick={syncPersistedRunning ? handleCancelSync : handleRunSyncNow}
                         disabled={showInitialLoadingState || syncStartPending || (syncPersistedRunning ? cancellationRequested : false)}
                       >
-                        {syncPersistedRunning
-                          ? cancellationRequested
-                            ? 'Cancelling…'
-                            : 'Cancel sync'
-                          : syncStartPending
-                            ? 'Running…'
-                          : manualSyncButtonLabel}
+                        <LoadingButtonContent
+                          busy={syncPersistedRunning ? cancellationRequested : syncStartPending}
+                          label={syncPersistedRunning ? 'Cancel sync' : manualSyncButtonLabel}
+                          busyLabel={syncPersistedRunning ? 'Cancelling…' : 'Running…'}
+                        />
                       </button>
                     </div>
                   </>
@@ -8990,7 +10313,11 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
                       className={getPluginActionClassName({ variant: 'primary' })}
                       disabled={!canSaveSetup}
                     >
-                      {submittingSetup ? 'Saving…' : 'Save settings'}
+                      <LoadingButtonContent
+                        busy={submittingSetup}
+                        label="Save settings"
+                        busyLabel="Saving…"
+                      />
                     </button>
                   </div>
                 </div>
@@ -9236,7 +10563,7 @@ export function GitHubSyncDashboardWidget(): React.JSX.Element {
 
       await settings.refresh();
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Unable to run GitHub sync.';
+      const message = getActionErrorMessage(error, 'Unable to run GitHub sync.');
       setManualSyncRequestError(message);
       toast({
         title: 'Unable to run GitHub sync',
@@ -9273,7 +10600,7 @@ export function GitHubSyncDashboardWidget(): React.JSX.Element {
       armSyncCompletionToast(nextSyncState);
       await settings.refresh();
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Unable to cancel GitHub sync.';
+      const message = getActionErrorMessage(error, 'Unable to cancel GitHub sync.');
       setManualSyncRequestError(message);
       toast({
         title: 'Unable to cancel GitHub sync',
@@ -9317,9 +10644,11 @@ export function GitHubSyncDashboardWidget(): React.JSX.Element {
               key={metric.key}
               className={`ghsync-widget__stat${metric.emphasized ? ' ghsync-widget__stat--emphasized' : ''}`}
             >
-              <strong>{metric.value}</strong>
+              <strong>
+                {showInitialLoadingState ? <LoadingSpinner size="sm" label={`Loading ${metric.label.toLowerCase()}`} /> : metric.value}
+              </strong>
               <span>{metric.label}</span>
-              <p>{metric.description}</p>
+              <p>{showInitialLoadingState ? 'Loading current sync data.' : metric.description}</p>
             </div>
           ))}
         </div>
@@ -9386,13 +10715,11 @@ export function GitHubSyncDashboardWidget(): React.JSX.Element {
                 onClick={syncPersistedRunning ? handleCancelSync : handleRunSync}
                 disabled={showInitialLoadingState || syncStartPending || (syncPersistedRunning ? cancellationRequested : false)}
               >
-                {syncPersistedRunning
-                  ? cancellationRequested
-                    ? 'Cancelling…'
-                    : 'Cancel sync'
-                  : syncStartPending
-                    ? 'Running…'
-                    : 'Run sync now'}
+                <LoadingButtonContent
+                  busy={syncPersistedRunning ? cancellationRequested : syncStartPending}
+                  label={syncPersistedRunning ? 'Cancel sync' : 'Run sync now'}
+                  busyLabel={syncPersistedRunning ? 'Cancelling…' : 'Running…'}
+                />
               </button>
             ) : null}
           </div>
@@ -9481,6 +10808,13 @@ function GitHubSyncToolbarButtonSurface(props: {
   const syncStartPending = runningSync && !syncPersistedRunning;
   const syncInFlight = syncStartPending || syncPersistedRunning;
   const cancellationRequested = syncPersistedRunning && (cancellingSync || isSyncCancellationRequested(state.syncState));
+  const toolbarButtonBusy = toolbarState.loading || (syncPersistedRunning ? cancellationRequested : syncStartPending);
+  const toolbarButtonLabel = syncPersistedRunning ? 'Cancel sync' : effectiveLabel;
+  const toolbarButtonBusyLabel = toolbarState.loading
+    ? 'Loading…'
+    : syncPersistedRunning
+      ? 'Cancelling…'
+      : 'Syncing…';
   const armSyncCompletionToast = useSyncCompletionToast(state.syncState, toast);
 
   useEffect(() => {
@@ -9599,7 +10933,7 @@ function GitHubSyncToolbarButtonSurface(props: {
     } catch (error) {
       toast({
         title: 'Unable to run GitHub sync',
-        body: error instanceof Error ? error.message : 'Unable to run GitHub sync.',
+        body: getActionErrorMessage(error, 'Unable to run GitHub sync.'),
         tone: 'error'
       });
     } finally {
@@ -9629,7 +10963,7 @@ function GitHubSyncToolbarButtonSurface(props: {
     } catch (error) {
       toast({
         title: 'Unable to cancel GitHub sync',
-        body: error instanceof Error ? error.message : 'Unable to cancel GitHub sync.',
+        body: getActionErrorMessage(error, 'Unable to cancel GitHub sync.'),
         tone: 'error'
       });
     } finally {
@@ -9654,16 +10988,12 @@ function GitHubSyncToolbarButtonSurface(props: {
         disabled={toolbarState.loading || syncStartPending || (syncPersistedRunning ? cancellationRequested : !effectiveCanRun)}
         onClick={syncPersistedRunning ? handleCancelSync : handleRunSync}
       >
-        <GitHubMarkIcon className="mr-1.5 h-3.5 w-3.5" />
-        <span>
-          {syncPersistedRunning
-            ? cancellationRequested
-              ? 'Cancelling…'
-              : 'Cancel sync'
-            : syncStartPending
-              ? 'Syncing…'
-            : effectiveLabel}
-        </span>
+        <LoadingButtonContent
+          busy={toolbarButtonBusy}
+          label={toolbarButtonLabel}
+          busyLabel={toolbarButtonBusyLabel}
+          icon={<GitHubMarkIcon className="h-3.5 w-3.5" />}
+        />
       </button>
     </div>
   );
