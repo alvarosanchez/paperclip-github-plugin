@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { useHostContext, usePluginAction, usePluginData, usePluginToast } from '@paperclipai/plugin-sdk/ui';
 import rehypeRaw from 'rehype-raw';
+import rehypeSanitize, { defaultSchema } from 'rehype-sanitize';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 
@@ -50,6 +51,24 @@ const GITHUB_MARK_PATH_D =
   'M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.5-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82a7.62 7.62 0 0 1 4 0c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z';
 const GITHUB_MARK_MASK_DATA_URI =
   'url("data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxNiAxNiI+PHBhdGggZmlsbD0iYmxhY2siIGQ9Ik04IDBDMy41OCAwIDAgMy41OCAwIDhjMCAzLjU0IDIuMjkgNi41MyA1LjQ3IDcuNTkuNC4wNy41NS0uMTcuNTUtLjM4IDAtLjE5LS4wMS0uODItLjAxLTEuNDktMi4wMS4zNy0yLjUzLS40OS0yLjY5LS45NC0uMDktLjIzLS40OC0uOTQtLjgyLTEuMTMtLjI4LS4xNS0uNjgtLjUyLS4wMS0uNTMuNjMtLjAxIDEuMDguNTggMS4yMy44Mi43MiAxLjIxIDEuODcuODcgMi4zMy42Ni4wNy0uNTIuMjgtLjg3LjUtMS4wNy0xLjc4LS4yLTMuNjQtLjg5LTMuNjQtMy45NSAwLS44Ny4zMS0xLjU5LjgyLTIuMTUtLjA4LS4yLS4zNi0xLjAyLjA4LTIuMTIgMCAwIC42Ny0uMjEgMi4yLjgyYTcuNjIgNy42MiAwIDAgMSA0IDBjMS41My0xLjA0IDIuMi0uODIgMi4yLS44Mi40NCAxLjEuMTYgMS45Mi4wOCAyLjEyLjUxLjU2LjgyIDEuMjcuODIgMi4xNSAwIDMuMDctMS44NyAzLjc1LTMuNjUgMy45NS4yOS4yNS41NC43My41NCAxLjQ4IDAgMS4wNy0uMDEgMS45My0uMDEgMi4yIDAgLjIxLjE1LjQ2LjU1LjM4QTguMDEgOC4wMSAwIDAgMCAxNiA4YzAtNC40Mi0zLjU4LTgtOC04WiIvPjwvc3ZnPg==")';
+const PREVIEW_MARKDOWN_SANITIZE_SCHEMA = {
+  ...defaultSchema,
+  tagNames: [...new Set([...(defaultSchema.tagNames ?? []), 'b', 'i', 'span', 'sub', 'sup'])],
+  attributes: {
+    ...(defaultSchema.attributes ?? {}),
+    a: [...(defaultSchema.attributes?.a ?? []), 'title', 'target'],
+    span: [...(defaultSchema.attributes?.span ?? []), 'className']
+  },
+  protocols: {
+    ...(defaultSchema.protocols ?? {}),
+    href: ['http', 'https', 'irc', 'ircs', 'mailto', 'xmpp']
+  }
+};
+const PREVIEW_MARKDOWN_SANITIZE_REHYPE_PLUGIN: [typeof rehypeSanitize, typeof PREVIEW_MARKDOWN_SANITIZE_SCHEMA] = [
+  rehypeSanitize,
+  PREVIEW_MARKDOWN_SANITIZE_SCHEMA
+];
+const PREVIEW_MARKDOWN_REHYPE_PLUGINS = [rehypeRaw, PREVIEW_MARKDOWN_SANITIZE_REHYPE_PLUGIN];
 
 type PluginActionButtonVariant = 'primary' | 'secondary' | 'danger';
 type PluginActionButtonSize = 'default' | 'sm';
@@ -6450,7 +6469,7 @@ function PreviewMarkdown(props: {
   return (
     <div className="ghsync-prs-markdown paperclip-markdown prose prose-sm max-w-none break-words overflow-hidden">
       <ReactMarkdown
-        rehypePlugins={[rehypeRaw]}
+        rehypePlugins={PREVIEW_MARKDOWN_REHYPE_PLUGINS}
         remarkPlugins={[remarkGfm]}
         components={{
           a: ({ href, children, ...anchorProps }) => (

@@ -107,7 +107,8 @@ The plugin MUST persist repository mappings, company-scoped advanced issue defau
 - The project Pull Requests page SHOULD favor repository-scoped caches for totals, KPI aggregates, and per-pull-request review or CI insights, and SHOULD expose an explicit refresh path that invalidates those caches on demand.
 - The project Pull Requests page SHOULD paginate the queue in batches of 10 rows.
 - The project Pull Requests page SHOULD deep-link row icons to the relevant GitHub resource where possible.
-- The project Pull Requests page SHOULD render markdown and supported inline HTML in pull request descriptions and comments instead of showing raw author text.
+- The project Pull Requests page SHOULD render markdown and only sanitized, allowlisted inline HTML in pull request descriptions and comments instead of showing raw author text.
+- The pull request markdown renderer MUST strip event-handler attributes, inline styles, executable or embedded elements, and unsafe URL schemes, and SHOULD limit inline HTML support to non-executable formatting and link elements such as `a`, `code`, `em`, `strong`, `b`, `i`, `br`, `span`, `sub`, and `sup`; allowed attributes SHOULD stay limited to safe link metadata such as `href`, `title`, and `target` on `a`, plus `class` on `span` where markdown-compatible formatting needs it.
 - The project Pull Requests page SHOULD include a compact inline comment composer in the bottom detail pane.
 - The project Pull Requests page SHOULD support modal quick actions for commenting, reviewing, re-running CI, and confirming close actions in addition to merge when the pull request state allows them.
 - When GitHub rejects a pull request comment or review action, the worker and UI SHOULD preserve actionable permission or validation guidance instead of collapsing it to a generic error.

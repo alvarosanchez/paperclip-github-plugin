@@ -368,34 +368,6 @@ const activeGitHubPullRequestReviewThreadSummaryCache = new Map<string, CacheEnt
 const activeGitHubPullRequestReviewThreadSummaryPromiseCache =
   new Map<string, Promise<GitHubProjectPullRequestReviewThreadSummary>>();
 
-export function __resetGitHubSyncWorkerStateForTests(): void {
-  activeSyncPromise = null;
-  activeRunningSyncState = null;
-  activePaperclipApiAuthTokensByCompanyId = null;
-  activeExternalConfigWarningKey = null;
-
-  for (const cache of [
-    activeProjectPullRequestPageCache,
-    activeProjectPullRequestCountCache,
-    activeProjectPullRequestCountPromiseCache,
-    activeProjectPullRequestMetricsCache,
-    activeProjectPullRequestMetricsPromiseCache,
-    activeProjectPullRequestSummaryCache,
-    activeProjectPullRequestSummaryPromiseCache,
-    activeProjectPullRequestSummaryRecordCache,
-    activeProjectPullRequestDetailCache,
-    activeProjectPullRequestIssueLookupCache,
-    activeGitHubPullRequestStatusSnapshotCache,
-    activeGitHubPullRequestStatusSnapshotPromiseCache,
-    activeGitHubPullRequestReviewSummaryCache,
-    activeGitHubPullRequestReviewSummaryPromiseCache,
-    activeGitHubPullRequestReviewThreadSummaryCache,
-    activeGitHubPullRequestReviewThreadSummaryPromiseCache
-  ]) {
-    cache.clear();
-  }
-}
-
 class PaperclipLabelSyncError extends Error {
   readonly name = 'PaperclipLabelSyncError';
   readonly status?: number;

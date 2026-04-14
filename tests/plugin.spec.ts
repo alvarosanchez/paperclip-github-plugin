@@ -17,10 +17,18 @@ import {
   discoverExistingProjectSyncCandidates,
   filterExistingProjectSyncCandidates
 } from '../src/ui/project-bindings.ts';
-import plugin, { __resetGitHubSyncWorkerStateForTests } from '../src/worker.ts';
 
-test.beforeEach(() => {
-  __resetGitHubSyncWorkerStateForTests();
+let plugin!: typeof import('../src/worker.ts').default;
+let workerImportSerial = 0;
+
+async function importFreshWorker(): Promise<typeof import('../src/worker.ts').default> {
+  workerImportSerial += 1;
+  const workerModuleUrl = new URL(`../src/worker.ts?worker-test=${workerImportSerial}`, import.meta.url);
+  return (await import(workerModuleUrl.href)).default;
+}
+
+test.beforeEach(async () => {
+  plugin = await importFreshWorker();
 });
 
 async function importManifestWithPluginVersion(pluginVersion?: string): Promise<typeof manifest> {
