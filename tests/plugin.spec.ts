@@ -1956,6 +1956,139 @@ test('project.pullRequests.page classifies pull request branch freshness for the
   }
 });
 
+test('project.pullRequests.page caches compare failures so unknown branch freshness does not refetch immediately', async () => {
+  const harness = await createProjectPullRequestsHarness();
+  const originalFetch = globalThis.fetch;
+  let compareNoCompareRequestCount = 0;
+
+  globalThis.fetch = async (input, init) => {
+    const requestUrl = getRequestUrl(input);
+    const requestPathname = getDecodedRequestPathname(input);
+    const method = input instanceof Request ? input.method : init?.method ?? 'GET';
+
+    if (requestUrl === 'https://api.github.com/graphql') {
+      const { query } = getGraphqlRequest(init);
+      if (query.includes('GitHubProjectPullRequests')) {
+        return graphqlResponse({
+          repository: {
+            nameWithOwner: 'paperclipai/example-repo',
+            url: 'https://github.com/paperclipai/example-repo',
+            defaultBranchRef: {
+              name: 'main'
+            },
+            pullRequests: {
+              totalCount: 1,
+              pageInfo: {
+                hasNextPage: false,
+                endCursor: null
+              },
+              nodes: [
+                {
+                  id: 'PR_unknown',
+                  number: 41,
+                  title: 'Needs compare fallback',
+                  url: 'https://github.com/paperclipai/example-repo/pull/41',
+                  state: 'OPEN',
+                  mergeable: 'UNKNOWN',
+                  mergeStateStatus: 'UNKNOWN',
+                  createdAt: '2026-04-10T08:00:00.000Z',
+                  updatedAt: '2026-04-13T09:15:00.000Z',
+                  baseRefName: 'main',
+                  headRefName: 'feature/no-compare',
+                  changedFiles: 2,
+                  commits: {
+                    totalCount: 1
+                  },
+                  author: {
+                    login: 'alvaro',
+                    url: 'https://github.com/alvaro',
+                    avatarUrl: 'https://avatars.githubusercontent.com/u/1?v=4'
+                  },
+                  labels: {
+                    nodes: []
+                  },
+                  comments: {
+                    totalCount: 0
+                  },
+                  closingIssuesReferences: {
+                    nodes: []
+                  },
+                  reviews: {
+                    pageInfo: {
+                      hasNextPage: false,
+                      endCursor: null
+                    },
+                    nodes: []
+                  },
+                  reviewThreads: {
+                    totalCount: 0,
+                    pageInfo: {
+                      hasNextPage: false,
+                      endCursor: null
+                    },
+                    nodes: []
+                  },
+                  statusCheckRollup: {
+                    contexts: {
+                      pageInfo: {
+                        hasNextPage: false,
+                        endCursor: null
+                      },
+                      nodes: []
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        });
+      }
+    }
+
+    if (requestPathname === '/repos/paperclipai/example-repo/compare/main...feature/no-compare') {
+      compareNoCompareRequestCount += 1;
+      return new Response('Not found', {
+        status: 404,
+        headers: {
+          'content-type': 'text/plain'
+        }
+      });
+    }
+
+    throw new Error(`Unexpected fetch during project.pullRequests.page compare failure cache test: ${requestUrl}`);
+  };
+
+  try {
+    const first = await harness.getData<{
+      status: string;
+      pullRequests: Array<{
+        upToDateStatus?: string;
+      }>;
+    }>('project.pullRequests.page', {
+      companyId: 'company-1',
+      projectId: 'project-1'
+    });
+
+    const second = await harness.getData<{
+      status: string;
+      pullRequests: Array<{
+        upToDateStatus?: string;
+      }>;
+    }>('project.pullRequests.page', {
+      companyId: 'company-1',
+      projectId: 'project-1'
+    });
+
+    assert.equal(first.status, 'ready');
+    assert.equal(first.pullRequests[0]?.upToDateStatus, 'unknown');
+    assert.equal(second.status, 'ready');
+    assert.equal(second.pullRequests[0]?.upToDateStatus, 'unknown');
+    assert.equal(compareNoCompareRequestCount, 1);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test('project.pullRequests.page returns token capability audit for action visibility', async () => {
   const harness = await createProjectPullRequestsHarness();
   const originalFetch = globalThis.fetch;

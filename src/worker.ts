@@ -4581,6 +4581,24 @@ function getFreshCacheValue<TValue>(
   return entry.value;
 }
 
+function getFreshCacheEntry<TValue>(
+  cache: Map<string, CacheEntry<TValue>>,
+  key: string,
+  now = Date.now()
+): CacheEntry<TValue> | null {
+  const entry = cache.get(key);
+  if (!entry) {
+    return null;
+  }
+
+  if (entry.expiresAt <= now) {
+    cache.delete(key);
+    return null;
+  }
+
+  return entry;
+}
+
 function setCacheValue<TValue>(
   cache: Map<string, CacheEntry<TValue>>,
   key: string,
@@ -9554,9 +9572,9 @@ async function getGitHubPullRequestBehindCount(
       ? headBranch
       : `${headRepositoryOwner}:${headBranch}`;
   const cacheKey = buildRepositoryPullRequestCompareCacheKey(repository, baseBranch, headBranch, headRepositoryOwner);
-  const cachedBehindCount = getFreshCacheValue(activeGitHubPullRequestBehindCountCache, cacheKey);
-  if (cachedBehindCount !== null && cachedBehindCount !== undefined) {
-    return cachedBehindCount;
+  const cachedBehindCountEntry = getFreshCacheEntry(activeGitHubPullRequestBehindCountCache, cacheKey);
+  if (cachedBehindCountEntry) {
+    return cachedBehindCountEntry.value;
   }
 
   const inFlightBehindCount = activeGitHubPullRequestBehindCountPromiseCache.get(cacheKey);

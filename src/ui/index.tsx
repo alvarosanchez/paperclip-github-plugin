@@ -5252,15 +5252,12 @@ function getPullRequestCopilotActionOptions(
   pullRequest: Pick<PreviewPullRequestRecord, 'checksStatus' | 'upToDateStatus' | 'unresolvedReviewThreads'>,
   options?: {
     canComment?: boolean;
+    canReview?: boolean;
   }
 ): PullRequestCopilotActionOption[] {
-  if (options?.canComment === false) {
-    return [];
-  }
-
   const actions: PullRequestCopilotActionOption[] = [];
 
-  if (pullRequest.checksStatus === 'failed') {
+  if (options?.canComment !== false && pullRequest.checksStatus === 'failed') {
     actions.push({
       id: 'fix_ci',
       label: getPullRequestCopilotActionLabel('fix_ci'),
@@ -5268,7 +5265,7 @@ function getPullRequestCopilotActionOptions(
     });
   }
 
-  if (pullRequest.upToDateStatus === 'conflicts') {
+  if (options?.canComment !== false && pullRequest.upToDateStatus === 'conflicts') {
     actions.push({
       id: 'rebase',
       label: getPullRequestCopilotActionLabel('rebase'),
@@ -5276,7 +5273,7 @@ function getPullRequestCopilotActionOptions(
     });
   }
 
-  if (pullRequest.unresolvedReviewThreads > 0) {
+  if (options?.canComment !== false && pullRequest.unresolvedReviewThreads > 0) {
     actions.push({
       id: 'address_review_feedback',
       label: getPullRequestCopilotActionLabel('address_review_feedback'),
@@ -5284,11 +5281,13 @@ function getPullRequestCopilotActionOptions(
     });
   }
 
-  actions.push({
-    id: 'review',
-    label: getPullRequestCopilotActionLabel('review'),
-    description: getPullRequestCopilotActionDescription('review')
-  });
+  if (options?.canReview !== false) {
+    actions.push({
+      id: 'review',
+      label: getPullRequestCopilotActionLabel('review'),
+      description: getPullRequestCopilotActionDescription('review')
+    });
+  }
 
   return actions;
 }
@@ -6971,11 +6970,7 @@ export function GitHubSyncProjectPullRequestsSidebarItem(
 
   useEffect(() => {
     const refreshPullRequestCount = () => {
-      try {
-        pullRequestCount.refresh();
-      } catch {
-        return;
-      }
+      void Promise.resolve(pullRequestCount.refresh()).catch(() => undefined);
     };
 
     if (typeof window === 'undefined' || typeof document === 'undefined') {
@@ -8346,7 +8341,8 @@ export function GitHubSyncProjectPullRequestsPage(): React.JSX.Element {
                     const targetsDefaultBranch =
                       Boolean(pageData.defaultBranchName) && targetBranchName === pageData.defaultBranchName;
                     const copilotActionOptions = getPullRequestCopilotActionOptions(pullRequest, {
-                      canComment: canCommentOnPullRequests
+                      canComment: canCommentOnPullRequests,
+                      canReview: canReviewPullRequests
                     });
                     const pullRequestIssueHref = getPaperclipIssueHref(
                       hostContext.companyPrefix,
@@ -8554,27 +8550,27 @@ export function GitHubSyncProjectPullRequestsPage(): React.JSX.Element {
                         </td>
 
                         <td className="ghsync-prs-table__cell--center">
-                          {canCommentOnPullRequests ? (
-                            <button
-                              type="button"
-                              className="ghsync-prs-table__metric-link ghsync-prs-table__metric-button"
-                              title={`Comment on #${pullRequest.number}`}
-                              onClick={() => openCommentModal(pullRequest.id)}
-                              disabled={commentModalPending}
-                            >
-                              <LoadingIconButtonContent
-                                busy={commentModalPending}
-                                busyLabel={`Commenting on #${pullRequest.number}`}
-                                icon={<CommentIcon className="ghsync-prs-icon" />}
-                              />
-                              <span>{pullRequest.commentsCount}</span>
-                            </button>
-                          ) : (
-                            <span className="ghsync-prs-table__metric-link ghsync-prs-table__metric-link--muted">
+                          <div className="ghsync-prs-table__metric-group">
+                            <a className="ghsync-prs-table__metric-link" href={pullRequest.commentsUrl} target="_blank" rel="noreferrer">
                               <CommentIcon className="ghsync-prs-icon" />
                               <span>{pullRequest.commentsCount}</span>
-                            </span>
-                          )}
+                            </a>
+                            {canCommentOnPullRequests ? (
+                              <button
+                                type="button"
+                                className="ghsync-prs-table__icon-button"
+                                title={`Comment on #${pullRequest.number}`}
+                                onClick={() => openCommentModal(pullRequest.id)}
+                                disabled={commentModalPending}
+                              >
+                                <LoadingIconButtonContent
+                                  busy={commentModalPending}
+                                  busyLabel={`Commenting on #${pullRequest.number}`}
+                                  icon={<CommentIcon className="ghsync-prs-icon" />}
+                                />
+                              </button>
+                            ) : null}
+                          </div>
                         </td>
 
                         <td className="ghsync-prs-table__cell--center">
@@ -8728,7 +8724,8 @@ export function GitHubSyncProjectPullRequestsPage(): React.JSX.Element {
                 <PullRequestCopilotActionMenu
                   pullRequestNumber={selectedPullRequest.number}
                   actions={getPullRequestCopilotActionOptions(selectedPullRequest, {
-                    canComment: canCommentOnPullRequests
+                    canComment: canCommentOnPullRequests,
+                    canReview: canReviewPullRequests
                   })}
                   busy={selectedPullRequestCopilotPending}
                   variant="button"
@@ -11820,8 +11817,26 @@ function PullRequestCopilotActionMenu(props: {
   const rootRef = useRef<HTMLDivElement | null>(null);
   const triggerRef = useRef<HTMLButtonElement | null>(null);
   const panelRef = useRef<HTMLDivElement | null>(null);
+  const optionRefs = useRef<Array<HTMLButtonElement | null>>([]);
+  const menuIdRef = useRef(`ghsync-copilot-menu-${Math.random().toString(36).slice(2, 10)}`);
   const [panelStyle, setPanelStyle] = useState<React.CSSProperties | null>(null);
   const disabled = props.busy || props.actions.length === 0;
+
+  function focusMenuOption(index: number): void {
+    const option = optionRefs.current[index];
+    option?.focus();
+  }
+
+  function closeMenu(options?: {
+    restoreFocus?: boolean;
+  }): void {
+    setOpen(false);
+    if (options?.restoreFocus !== false) {
+      window.setTimeout(() => {
+        triggerRef.current?.focus();
+      }, 0);
+    }
+  }
 
   useEffect(() => {
     if (!open) {
@@ -11856,18 +11871,22 @@ function PullRequestCopilotActionMenu(props: {
       return;
     }
 
+    window.setTimeout(() => {
+      focusMenuOption(0);
+    }, 0);
+
     const handlePointerDown = (event: PointerEvent) => {
       const target = event.target;
       if (target instanceof Node && rootRef.current?.contains(target)) {
         return;
       }
 
-      setOpen(false);
+      closeMenu();
     };
 
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
-        setOpen(false);
+        closeMenu();
       }
     };
 
@@ -11882,7 +11901,7 @@ function PullRequestCopilotActionMenu(props: {
 
   useEffect(() => {
     if (disabled && open) {
-      setOpen(false);
+      closeMenu();
     }
   }, [disabled, open]);
 
@@ -11909,9 +11928,29 @@ function PullRequestCopilotActionMenu(props: {
         }
         title={title}
         aria-label={title}
-        aria-haspopup="dialog"
+        aria-haspopup="menu"
         aria-expanded={open}
+        aria-controls={open ? menuIdRef.current : undefined}
         disabled={disabled}
+        onKeyDown={(event) => {
+          if (disabled) {
+            return;
+          }
+
+          if (event.key === 'ArrowDown') {
+            event.preventDefault();
+            setOpen(true);
+            window.setTimeout(() => {
+              focusMenuOption(0);
+            }, 0);
+          } else if (event.key === 'ArrowUp') {
+            event.preventDefault();
+            setOpen(true);
+            window.setTimeout(() => {
+              focusMenuOption(Math.max(props.actions.length - 1, 0));
+            }, 0);
+          }
+        }}
         onClick={() => {
           if (disabled) {
             return;
@@ -11943,19 +11982,60 @@ function PullRequestCopilotActionMenu(props: {
 
       {open ? (
         <div
+          id={menuIdRef.current}
           ref={panelRef}
           className="ghsync-copilot-menu__panel"
-          role="dialog"
+          role="menu"
           aria-label={`Copilot actions for pull request #${props.pullRequestNumber}`}
           style={panelStyle ?? { visibility: 'hidden' }}
+          onKeyDown={(event) => {
+            const currentIndex = optionRefs.current.findIndex((option) => option === document.activeElement);
+            if (event.key === 'Escape') {
+              event.preventDefault();
+              closeMenu();
+              return;
+            }
+
+            if (event.key === 'ArrowDown') {
+              event.preventDefault();
+              focusMenuOption((currentIndex + 1 + props.actions.length) % props.actions.length);
+              return;
+            }
+
+            if (event.key === 'ArrowUp') {
+              event.preventDefault();
+              focusMenuOption((currentIndex - 1 + props.actions.length) % props.actions.length);
+              return;
+            }
+
+            if (event.key === 'Home') {
+              event.preventDefault();
+              focusMenuOption(0);
+              return;
+            }
+
+            if (event.key === 'End') {
+              event.preventDefault();
+              focusMenuOption(Math.max(props.actions.length - 1, 0));
+              return;
+            }
+
+            if (event.key === 'Tab') {
+              closeMenu({ restoreFocus: false });
+            }
+          }}
         >
-          {props.actions.map((action) => (
+          {props.actions.map((action, index) => (
             <button
               key={action.id}
               type="button"
+              ref={(element) => {
+                optionRefs.current[index] = element;
+              }}
               className="ghsync-copilot-menu__option"
+              role="menuitem"
               onClick={() => {
-                setOpen(false);
+                closeMenu();
                 props.onSelect(action.id);
               }}
             >
