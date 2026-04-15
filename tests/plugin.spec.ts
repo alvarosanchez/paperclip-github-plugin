@@ -576,17 +576,27 @@ function createAgentFixture(params: {
 
 async function withExternalPluginConfig<T>(
   config: Record<string, unknown>,
-  run: () => Promise<T>
+  run: () => Promise<T>,
+  options: { usePaperclipHome?: boolean } = {}
 ): Promise<T> {
   const temporaryHomeDirectory = await mkdtemp(join(tmpdir(), 'paperclip-github-plugin-'));
-  const configDirectory = join(temporaryHomeDirectory, '.paperclip', 'plugins', 'github-sync');
+  const paperclipHomeDirectory = options.usePaperclipHome
+    ? join(temporaryHomeDirectory, 'paperclip-home')
+    : join(temporaryHomeDirectory, '.paperclip');
+  const configDirectory = join(paperclipHomeDirectory, 'plugins', 'github-sync');
   const configFilePath = join(configDirectory, 'config.json');
   const previousHome = process.env.HOME;
+  const previousPaperclipHome = process.env.PAPERCLIP_HOME;
 
   await mkdir(configDirectory, { recursive: true });
   await writeFile(configFilePath, `${JSON.stringify(config, null, 2)}\n`, 'utf8');
 
   process.env.HOME = temporaryHomeDirectory;
+  if (options.usePaperclipHome) {
+    process.env.PAPERCLIP_HOME = paperclipHomeDirectory;
+  } else {
+    delete process.env.PAPERCLIP_HOME;
+  }
 
   try {
     return await run();
@@ -595,6 +605,12 @@ async function withExternalPluginConfig<T>(
       delete process.env.HOME;
     } else {
       process.env.HOME = previousHome;
+    }
+
+    if (previousPaperclipHome === undefined) {
+      delete process.env.PAPERCLIP_HOME;
+    } else {
+      process.env.PAPERCLIP_HOME = previousPaperclipHome;
     }
 
     await rm(temporaryHomeDirectory, { recursive: true, force: true });
@@ -5655,6 +5671,34 @@ test('settings.registration reports a configured token from the external config 
       assert.equal(result.syncState?.status, 'idle');
       assert.equal(resolveCount, 0);
     }
+  );
+});
+
+test('settings.registration reports a configured token from the external config file inside PAPERCLIP_HOME', { concurrency: false }, async () => {
+  await withExternalPluginConfig(
+    {
+      githubToken: 'ghp_external_token'
+    },
+    async () => {
+      const harness = createTestHarness({ manifest });
+      await plugin.definition.setup(harness.ctx);
+
+      let resolveCount = 0;
+      harness.ctx.secrets.resolve = async () => {
+        resolveCount += 1;
+        throw new Error('Secret resolution should not happen for settings data.');
+      };
+
+      const result = await harness.getData<{
+        githubTokenConfigured?: boolean;
+        syncState?: { status?: string };
+      }>('settings.registration');
+
+      assert.equal(result.githubTokenConfigured, true);
+      assert.equal(result.syncState?.status, 'idle');
+      assert.equal(resolveCount, 0);
+    },
+    { usePaperclipHome: true }
   );
 });
 
@@ -11228,7 +11272,7 @@ test('settings registration clears legacy setup errors once the missing token is
         errorDetails: {
           phase: 'configuration',
           suggestedAction:
-            'Open settings and save a GitHub token secret, or create ~/.paperclip/plugins/github-sync/config.json with a "githubToken" value, and then run sync again.'
+            'Open settings and save a GitHub token secret, or create $PAPERCLIP_HOME/plugins/github-sync/config.json (or ~/.paperclip/plugins/github-sync/config.json when PAPERCLIP_HOME is unset) with a "githubToken" value, and then run sync again.'
         }
       },
       scheduleFrequencyMinutes: 15
@@ -11296,7 +11340,7 @@ test('saving setup clears stale setup errors instead of resaving them from the U
         errorDetails: {
           phase: 'configuration',
           suggestedAction:
-            'Open settings and save a GitHub token secret, or create ~/.paperclip/plugins/github-sync/config.json with a "githubToken" value, and then run sync again.'
+            'Open settings and save a GitHub token secret, or create $PAPERCLIP_HOME/plugins/github-sync/config.json (or ~/.paperclip/plugins/github-sync/config.json when PAPERCLIP_HOME is unset) with a "githubToken" value, and then run sync again.'
         }
       },
       scheduleFrequencyMinutes: 15
@@ -11321,7 +11365,7 @@ test('saving setup clears stale setup errors instead of resaving them from the U
       errorDetails: {
         phase: 'configuration',
         suggestedAction:
-          'Open settings and save a GitHub token secret, or create ~/.paperclip/plugins/github-sync/config.json with a "githubToken" value, and then run sync again.'
+          'Open settings and save a GitHub token secret, or create $PAPERCLIP_HOME/plugins/github-sync/config.json (or ~/.paperclip/plugins/github-sync/config.json when PAPERCLIP_HOME is unset) with a "githubToken" value, and then run sync again.'
       }
     }
   }) as {

@@ -150,7 +150,7 @@ The plugin is designed to avoid persisting raw credentials in plugin state.
 
 ### Optional worker-local token file
 
-If Paperclip-managed secrets are not available, the worker can read a local fallback file at `~/.paperclip/plugins/github-sync/config.json`:
+If Paperclip-managed secrets are not available, the worker can read a local fallback file at `${PAPERCLIP_HOME:-~/.paperclip}/plugins/github-sync/config.json`:
 
 ```json
 {
@@ -177,7 +177,7 @@ When an agent posts a GitHub comment or review-thread reply through the plugin, 
 
 ## Troubleshooting
 
-- If setup is reported as incomplete, confirm that a GitHub token has been saved or that `~/.paperclip/plugins/github-sync/config.json` contains `githubToken`, and make sure at least one mapping has a created Paperclip project.
+- If setup is reported as incomplete, confirm that a GitHub token has been saved or that `${PAPERCLIP_HOME:-~/.paperclip}/plugins/github-sync/config.json` contains `githubToken`, and make sure at least one mapping has a created Paperclip project.
 - If Paperclip says board access is required, open plugin settings inside the affected company and complete the Paperclip board access flow before retrying sync.
 - If the worker reaches an authenticated HTML page instead of the Paperclip API JSON responses it expects, connect Paperclip board access for that company or set `PAPERCLIP_API_URL` to a worker-accessible Paperclip API origin.
 - If a sync run finishes with partial failures, open the saved troubleshooting panel in GitHub Sync to inspect the repository, issue number, raw error, and suggested fix for each recorded failure.

@@ -63,7 +63,7 @@ const MAX_SYNC_FAILURE_LOG_ENTRIES = 25;
 const GITHUB_SECONDARY_RATE_LIMIT_FALLBACK_MS = 60_000;
 const MISSING_GITHUB_TOKEN_SYNC_MESSAGE = 'Configure a GitHub token before running sync.';
 const MISSING_GITHUB_TOKEN_SYNC_ACTION =
-  'Open settings and save a GitHub token secret, or create ~/.paperclip/plugins/github-sync/config.json with a "githubToken" value, and then run sync again.';
+  'Open settings and save a GitHub token secret, or create $PAPERCLIP_HOME/plugins/github-sync/config.json (or ~/.paperclip/plugins/github-sync/config.json when PAPERCLIP_HOME is unset) with a "githubToken" value, and then run sync again.';
 const MISSING_MAPPING_SYNC_MESSAGE = 'Save at least one mapping with a created Paperclip project before running sync.';
 const MISSING_MAPPING_SYNC_ACTION =
   'Open settings, add a repository mapping, let Paperclip create the target project, and then retry sync.';
@@ -74,7 +74,6 @@ const MISSING_BOARD_ACCESS_SYNC_ACTION =
 const ISSUE_LINK_ENTITY_TYPE = 'paperclip-github-plugin.issue-link';
 const PULL_REQUEST_LINK_ENTITY_TYPE = 'paperclip-github-plugin.pull-request-link';
 const COMMENT_ANNOTATION_ENTITY_TYPE = 'paperclip-github-plugin.comment-annotation';
-const EXTERNAL_CONFIG_FILE_PATH_SEGMENTS = ['.paperclip', 'plugins', 'github-sync', 'config.json'] as const;
 const AI_AUTHORED_COMMENT_FOOTER_PREFIX = 'Created by a Paperclip AI agent using ';
 
 type PluginSetupContext = Parameters<Parameters<typeof definePlugin>[0]['setup']>[0];
@@ -3876,15 +3875,20 @@ function normalizeGitHubToken(value: unknown): string | undefined {
 }
 
 function getExternalConfigFilePath(): string | undefined {
-  const homeDirectory = getHomeDirectory();
-  return homeDirectory ? join(homeDirectory, ...EXTERNAL_CONFIG_FILE_PATH_SEGMENTS) : undefined;
+  const paperclipHomeDirectory = getPaperclipHomeDirectory();
+  return paperclipHomeDirectory ? join(paperclipHomeDirectory, 'plugins', 'github-sync', 'config.json') : undefined;
 }
 
-function getHomeDirectory(): string | undefined {
+function getPaperclipHomeDirectory(): string | undefined {
+  const configuredPaperclipHome = process.env.PAPERCLIP_HOME?.trim();
+  if (configuredPaperclipHome) {
+    return resolve(configuredPaperclipHome);
+  }
+
   try {
     const resolvedHomeDirectory = homedir();
     return typeof resolvedHomeDirectory === 'string' && resolvedHomeDirectory.trim()
-      ? resolvedHomeDirectory
+      ? join(resolvedHomeDirectory, '.paperclip')
       : undefined;
   } catch {
     return undefined;
