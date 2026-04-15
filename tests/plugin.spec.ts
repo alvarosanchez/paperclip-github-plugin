@@ -1,7 +1,8 @@
 import { strict as assert } from 'node:assert';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import test from 'node:test';
 
 import type { Agent, Project } from '@paperclipai/plugin-sdk';
@@ -21,10 +22,14 @@ import {
 let plugin!: typeof import('../src/worker.ts').default;
 let workerImportSerial = 0;
 
-async function importFreshWorker(): Promise<typeof import('../src/worker.ts').default> {
+async function importFreshWorkerModule() {
   workerImportSerial += 1;
   const workerModuleUrl = new URL(`../src/worker.ts?worker-test=${workerImportSerial}`, import.meta.url);
-  return (await import(workerModuleUrl.href)).default;
+  return await import(workerModuleUrl.href);
+}
+
+async function importFreshWorker(): Promise<typeof import('../src/worker.ts').default> {
+  return (await importFreshWorkerModule()).default;
 }
 
 test.beforeEach(async () => {
@@ -220,6 +225,44 @@ test(
     assert.equal(resolvedManifest.version, '9.9.9-test');
   }
 );
+
+test('shouldStartWorkerHost matches symlinked entrypoints to the real worker file', async () => {
+  const workerModule = await importFreshWorkerModule();
+  const tempDir = await mkdtemp(join(tmpdir(), 'paperclip-github-plugin-worker-path-'));
+  const realWorkerPath = join(tempDir, 'worker.js');
+  const symlinkWorkerPath = join(tempDir, 'worker-symlink.js');
+
+  try {
+    await writeFile(realWorkerPath, '// test worker entrypoint\n');
+    await symlink(realWorkerPath, symlinkWorkerPath);
+
+    assert.equal(
+      workerModule.shouldStartWorkerHost(pathToFileURL(realWorkerPath).href, symlinkWorkerPath),
+      true
+    );
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});
+
+test('shouldStartWorkerHost rejects unrelated entrypoints', async () => {
+  const workerModule = await importFreshWorkerModule();
+  const tempDir = await mkdtemp(join(tmpdir(), 'paperclip-github-plugin-worker-path-'));
+  const realWorkerPath = join(tempDir, 'worker.js');
+  const otherWorkerPath = join(tempDir, 'different-worker.js');
+
+  try {
+    await writeFile(realWorkerPath, '// test worker entrypoint\n');
+    await writeFile(otherWorkerPath, '// different worker entrypoint\n');
+
+    assert.equal(
+      workerModule.shouldStartWorkerHost(pathToFileURL(realWorkerPath).href, otherWorkerPath),
+      false
+    );
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});
 
 async function createGitHubAgentToolHarness() {
   const harness = createTestHarness({

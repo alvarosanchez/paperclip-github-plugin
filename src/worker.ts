@@ -1,10 +1,12 @@
+import { realpathSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { Octokit } from '@octokit/rest';
 import {
   definePlugin,
-  runWorker,
+  startWorkerRpcHost,
   type Agent,
   type Issue,
   type IssueComment,
@@ -13739,6 +13741,20 @@ function registerGitHubAgentTools(ctx: PluginSetupContext): void {
   );
 }
 
+export function shouldStartWorkerHost(moduleUrl: string, entry = process.argv[1]): boolean {
+  if (typeof entry !== 'string' || !entry.trim()) {
+    return false;
+  }
+
+  const modulePath = fileURLToPath(moduleUrl);
+
+  try {
+    return realpathSync(entry) === realpathSync(modulePath);
+  } catch {
+    return resolve(entry) === resolve(modulePath);
+  }
+}
+
 const plugin = definePlugin({
   async setup(ctx) {
     ctx.data.register('settings.registration', async (input) => {
@@ -14098,4 +14114,7 @@ const plugin = definePlugin({
 });
 
 export default plugin;
-runWorker(plugin, import.meta.url);
+
+if (shouldStartWorkerHost(import.meta.url)) {
+  startWorkerRpcHost({ plugin });
+}
