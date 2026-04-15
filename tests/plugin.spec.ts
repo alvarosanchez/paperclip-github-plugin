@@ -11055,7 +11055,7 @@ test('worker stores repository and issue diagnostics when a sync fails mid-run',
   }
 });
 
-test('worker reports sync error when configuration is incomplete', async () => {
+test('worker reports sync error when configuration is incomplete', { concurrency: false }, async () => {
   await withExternalPluginConfig({}, async () => {
     const harness = createTestHarness({ manifest });
     await plugin.definition.setup(harness.ctx);
