@@ -13,6 +13,8 @@ const stateRoot = await mkdtemp(join(tmpdir(), 'paperclip-github-plugin-e2e-'));
 const paperclipHome = join(stateRoot, 'paperclip-home');
 const dataDir = join(stateRoot, 'paperclip-data');
 const instanceId = 'paperclip-github-plugin-e2e';
+const seededProjectName = 'Paperclip Github Plugin';
+const seededRepositoryUrl = 'https://github.com/alvarosanchez/paperclip-github-plugin';
 const requestedPort = process.env.PAPERCLIP_E2E_PORT ? Number(process.env.PAPERCLIP_E2E_PORT) : 3100;
 const requestedDbPort = process.env.PAPERCLIP_E2E_DB_PORT ? Number(process.env.PAPERCLIP_E2E_DB_PORT) : 54329;
 const defaultTimeoutMs = 30000;
@@ -255,6 +257,67 @@ async function ensureCompanySeeded() {
   return postCreateCompanies[0];
 }
 
+async function ensureSeedProjectMapped(company) {
+  const companyId = typeof company?.id === 'string' ? company.id : '';
+  if (!companyId) {
+    throw new Error('A seeded company id is required before creating the smoke-test project.');
+  }
+
+  const companyProjectsUrl = new URL(`/api/companies/${companyId}/projects`, baseUrl).toString();
+  const projects = await fetchJson(companyProjectsUrl);
+  const existingProject =
+    Array.isArray(projects)
+      ? projects.find((entry) =>
+          entry
+          && typeof entry === 'object'
+          && typeof entry.id === 'string'
+          && typeof entry.name === 'string'
+          && entry.name.trim().toLowerCase() === seededProjectName.toLowerCase()
+        )
+      : null;
+
+  const project = existingProject ?? await fetchJson(companyProjectsUrl, {
+    method: 'POST',
+    body: JSON.stringify({
+      name: seededProjectName,
+      status: 'planned'
+    })
+  });
+  const projectId = typeof project?.id === 'string' ? project.id : '';
+  const projectUrlKey = typeof project?.urlKey === 'string' ? project.urlKey.trim() : '';
+  if (!projectId || !projectUrlKey) {
+    throw new Error('Paperclip did not return a usable project record for the smoke-test seed project.');
+  }
+
+  const projectWorkspacesUrl = new URL(`/api/projects/${projectId}/workspaces`, baseUrl).toString();
+  const workspaces = await fetchJson(projectWorkspacesUrl);
+  const normalizedSeededRepositoryUrl = seededRepositoryUrl.replace(/\.git$/i, '');
+  const alreadyMapped =
+    Array.isArray(workspaces)
+      && workspaces.some((entry) =>
+        entry
+        && typeof entry === 'object'
+        && typeof entry.repoUrl === 'string'
+        && entry.repoUrl.trim().replace(/\.git$/i, '') === normalizedSeededRepositoryUrl
+      );
+  if (!alreadyMapped) {
+    await fetchJson(projectWorkspacesUrl, {
+      method: 'POST',
+      body: JSON.stringify({
+        repoUrl: seededRepositoryUrl,
+        sourceType: 'git_repo',
+        isPrimary: true
+      })
+    });
+  }
+
+  log(`Seeded project ${seededProjectName} mapped to ${seededRepositoryUrl}.`);
+  return {
+    id: projectId,
+    urlKey: projectUrlKey
+  };
+}
+
 async function waitForServerExit(timeoutMs) {
   if (!serverProcess) {
     return;
@@ -346,6 +409,7 @@ async function main() {
   log(`Paperclip server is ready at ${baseUrl}.`);
 
   const company = await ensureCompanySeeded();
+  const seededProject = await ensureSeedProjectMapped(company);
 
   await runCommand(
     'npx',
@@ -379,14 +443,32 @@ async function main() {
     await page.getByRole('heading', { name: 'Paperclip board access', exact: true }).waitFor({ timeout: 120000 });
     await page.getByRole('heading', { name: 'Repositories', exact: true }).waitFor({ timeout: 120000 });
     await page.getByRole('heading', { name: 'Sync', exact: true }).waitFor({ timeout: 120000 });
-    await page.getByLabel('GitHub token').waitFor({ timeout: 120000 });
 
     const dashboardUrl = company?.prefix ? new URL(`/${company.prefix}`, baseUrl).toString() : baseUrl;
     await gotoWithTimeout(page, dashboardUrl);
     log(`Opened Paperclip dashboard page: ${dashboardUrl}`);
 
-    await page.getByText('Finish setup to start syncing', { exact: true }).waitFor({ timeout: 120000 });
     await page.getByRole('link', { name: 'Open settings' }).first().waitFor({ timeout: 120000 });
+    const activeDashboardUrl = new URL(page.url());
+    const activeCompanyPrefix = activeDashboardUrl.pathname.split('/').filter(Boolean)[0] ?? '';
+    if (!activeCompanyPrefix) {
+      throw new Error(`Could not resolve the active company prefix from ${activeDashboardUrl.toString()}.`);
+    }
+
+    const pullRequestsSidebarLink = page.getByRole('link', { name: 'Pull requests' }).first();
+    await pullRequestsSidebarLink.waitFor({ timeout: 120000 });
+
+    const pullRequestsHref = await pullRequestsSidebarLink.getAttribute('href');
+    const expectedProjectPullRequestsPath = `/${activeCompanyPrefix}/github-pull-requests?projectId=${seededProject.id}`;
+    if (pullRequestsHref !== expectedProjectPullRequestsPath) {
+      throw new Error(
+        `Expected project Pull requests link to target ${expectedProjectPullRequestsPath}, received ${pullRequestsHref ?? 'null'}.`
+      );
+    }
+
+    await pullRequestsSidebarLink.click();
+    await page.getByRole('heading', { name: 'Open pull requests' }).waitFor({ timeout: 120000 });
+    await page.getByText('alvarosanchez/paperclip-github-plugin', { exact: true }).waitFor({ timeout: 120000 });
 
     await page.screenshot({ path: join(pluginRoot, 'tests/e2e/results/last-run.png'), fullPage: true });
     const bodyText = await page.locator('body').textContent();
@@ -397,6 +479,7 @@ async function main() {
           baseUrl,
           settingsUrl,
           dashboardUrl,
+          pullRequestsUrl: page.url(),
           bodyText
         },
         null,

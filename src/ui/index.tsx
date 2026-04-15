@@ -1,5 +1,11 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { useHostContext, usePluginAction, usePluginData, usePluginToast } from '@paperclipai/plugin-sdk/ui';
+import {
+  useHostContext,
+  usePluginAction,
+  usePluginData,
+  usePluginToast,
+  type PluginProjectSidebarItemProps
+} from '@paperclipai/plugin-sdk/ui';
 import rehypeRaw from 'rehype-raw';
 import rehypeSanitize, { defaultSchema } from 'rehype-sanitize';
 import ReactMarkdown from 'react-markdown';
@@ -320,7 +326,9 @@ const PROJECT_PULL_REQUESTS_PAGE_ROUTE_PATH = 'github-pull-requests';
 
 type PreviewPullRequestStatus = 'open' | 'merged' | 'closed';
 type PreviewPullRequestCheckStatus = 'pending' | 'failed' | 'passed';
+type PreviewPullRequestUpToDateStatus = 'up_to_date' | 'can_update' | 'conflicts' | 'unknown';
 type PreviewPullRequestFilter = 'all' | 'mergeable' | 'reviewable' | 'failing';
+type PullRequestCopilotActionId = 'fix_ci' | 'rebase' | 'address_review_feedback' | 'review';
 
 interface PreviewPullRequestLabel {
   name: string;
@@ -342,6 +350,31 @@ interface PreviewPullRequestTimelineEntry {
   body: string;
 }
 
+interface GitHubTokenPermissionAuditRepository {
+  repositoryUrl: string;
+  repositoryLabel: string;
+  checkedAt: string;
+  status: 'verified' | 'missing_permissions' | 'unverifiable';
+  samplePullRequestNumber?: number;
+  canComment: boolean;
+  canReview: boolean;
+  canClose: boolean;
+  canUpdateBranch: boolean;
+  canMerge: boolean;
+  canRerunCi: boolean;
+  missingPermissions: string[];
+  warnings: string[];
+}
+
+interface GitHubTokenPermissionAuditSummary {
+  status: 'ready' | 'missing_token' | 'error';
+  allRequiredPermissionsGranted: boolean;
+  repositories: GitHubTokenPermissionAuditRepository[];
+  missingPermissions: string[];
+  warnings: string[];
+  message?: string;
+}
+
 interface PreviewPullRequestRecord {
   id: string;
   number: number;
@@ -350,6 +383,7 @@ interface PreviewPullRequestRecord {
   author: PreviewPullRequestPerson;
   assignees: PreviewPullRequestPerson[];
   checksStatus: PreviewPullRequestCheckStatus;
+  upToDateStatus: PreviewPullRequestUpToDateStatus;
   githubMergeable?: boolean;
   reviewable?: boolean;
   reviewApprovals: number;
@@ -383,6 +417,7 @@ interface PreviewPullRequestProjectData {
   repositoryLabel: string;
   repositoryUrl: string;
   repositoryDescription: string;
+  defaultBranchName?: string;
   filter?: PreviewPullRequestFilter;
   pageIndex?: number;
   pageSize?: number;
@@ -392,6 +427,7 @@ interface PreviewPullRequestProjectData {
   totalFilteredPullRequests?: number;
   totalOpenPullRequests?: number;
   message?: string;
+  tokenPermissionAudit?: GitHubTokenPermissionAuditRepository;
   pullRequests: PreviewPullRequestRecord[];
 }
 
@@ -424,10 +460,30 @@ interface PreviewPullRequestPageQueryState {
   cursor: string | null;
 }
 
+interface PullRequestCopilotActionOption {
+  id: PullRequestCopilotActionId;
+  label: string;
+  description: string;
+}
+
 interface ProjectPullRequestIssueActionResult {
   paperclipIssueId: string;
   paperclipIssueKey?: string;
   alreadyLinked?: boolean;
+}
+
+interface ProjectPullRequestUpdateBranchActionResult {
+  status: 'already_up_to_date' | 'update_requested';
+  githubUrl?: string;
+}
+
+interface ProjectPullRequestCopilotActionResult {
+  action: PullRequestCopilotActionId;
+  actionLabel?: string;
+  commentId?: number;
+  commentUrl?: string;
+  requestedReviewer?: string;
+  githubUrl?: string;
 }
 
 interface ProjectPullRequestReviewActionResult {
@@ -1948,6 +2004,50 @@ const PAGE_STYLES = `
   gap: 8px;
 }
 
+.ghsync__permission-audit {
+  display: grid;
+  gap: 10px;
+  padding: 14px;
+  border-radius: 10px;
+  border: 1px solid var(--ghsync-border-soft);
+  background: var(--ghsync-surfaceAlt);
+}
+
+.ghsync__permission-audit--warning {
+  border-color: var(--ghsync-warning-border);
+  background: var(--ghsync-warning-bg);
+}
+
+.ghsync__permission-audit-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.ghsync__permission-audit-header strong,
+.ghsync__permission-audit-item strong {
+  color: var(--ghsync-title);
+  font-size: 13px;
+}
+
+.ghsync__permission-audit-list {
+  display: grid;
+  gap: 10px;
+}
+
+.ghsync__permission-audit-item {
+  display: grid;
+  gap: 4px;
+}
+
+.ghsync__permission-audit-item span {
+  color: var(--ghsync-muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
 .ghsync__sync-summary--success {
   border-color: var(--ghsync-success-border);
   background: var(--ghsync-success-bg);
@@ -2762,8 +2862,28 @@ const PROJECT_PULL_REQUESTS_PAGE_STYLES = `
   color: var(--ghsync-info-text);
 }
 
+.ghsync-prs-table__metric-button {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+}
+
+.ghsync-prs-table__metric-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.42;
+}
+
 .ghsync-prs-table__metric-link--muted {
   color: var(--ghsync-muted);
+}
+
+.ghsync-prs-table__metric-group {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  flex-wrap: wrap;
 }
 
 .ghsync-prs-table__issue-link {
@@ -2981,8 +3101,102 @@ const PROJECT_PULL_REQUESTS_PAGE_STYLES = `
   flex-wrap: nowrap;
 }
 
+.ghsync-copilot-menu {
+  position: relative;
+  display: inline-flex;
+}
+
+.ghsync-copilot-menu--button {
+  display: block;
+}
+
+.ghsync-copilot-menu__trigger--button {
+  width: 100%;
+  justify-content: space-between;
+}
+
+.ghsync-copilot-menu__trigger-button-content {
+  width: 100%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.ghsync-copilot-menu__trigger-chevron {
+  width: 12px;
+  height: 12px;
+  color: var(--ghsync-muted);
+}
+
+.ghsync-copilot-menu__trigger-chevron svg {
+  width: 100%;
+  height: 100%;
+}
+
+.ghsync-copilot-menu__panel {
+  position: fixed;
+  top: 24px;
+  left: 24px;
+  z-index: 24;
+  box-sizing: border-box;
+  width: min(320px, calc(100vw - 48px));
+  max-height: calc(100vh - 48px);
+  display: grid;
+  gap: 6px;
+  padding: 8px;
+  border-radius: 14px;
+  border: 1px solid var(--ghsync-border);
+  background: var(--ghsync-surface);
+  box-shadow: var(--ghsync-shadow);
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.ghsync-copilot-menu__option {
+  width: 100%;
+  box-sizing: border-box;
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  align-items: start;
+  gap: 4px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid transparent;
+  background: transparent;
+  text-align: left;
+  white-space: normal;
+  cursor: pointer;
+  transition: border-color 140ms ease, background-color 140ms ease;
+}
+
+.ghsync-copilot-menu__option:hover {
+  border-color: var(--ghsync-border);
+  background: var(--ghsync-surfaceAlt);
+}
+
+.ghsync-copilot-menu__option-label {
+  display: block;
+  color: var(--ghsync-title);
+  font-size: 13px;
+  font-weight: 700;
+  white-space: normal;
+}
+
+.ghsync-copilot-menu__option-description {
+  display: block;
+  min-width: 0;
+  color: var(--ghsync-muted);
+  font-size: 12px;
+  line-height: 1.45;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
 .ghsync-prs-table__cell--actions {
-  min-width: 174px;
+  min-width: 112px;
 }
 
 .ghsync-prs-table__time {
@@ -3451,6 +3665,10 @@ const PROJECT_PULL_REQUESTS_PAGE_STYLES = `
   .ghsync-prs-page__banner-actions .ghsync__button,
   .ghsync-prs-detail__actions .ghsync__button,
   .ghsync-prs-modal__split-actions .ghsync__button {
+    width: 100%;
+  }
+
+  .ghsync-prs-detail__actions .ghsync-copilot-menu--button {
     width: 100%;
   }
 
@@ -4973,6 +5191,107 @@ function getPreviewPullRequestCheckToneClass(status: PreviewPullRequestCheckStat
   }
 }
 
+function getPreviewPullRequestUpToDateMeta(
+  status: PreviewPullRequestUpToDateStatus
+): { label: string; tone: Tone; description: string } {
+  switch (status) {
+    case 'up_to_date':
+      return {
+        label: 'Up to date',
+        tone: 'success',
+        description: 'Branch is current with the base branch.'
+      };
+    case 'can_update':
+      return {
+        label: 'Behind base',
+        tone: 'warning',
+        description: 'Branch is behind the base branch but can be updated cleanly.'
+      };
+    case 'conflicts':
+      return {
+        label: 'Conflicts',
+        tone: 'danger',
+        description: 'Branch needs conflict resolution before it can be brought up to date.'
+      };
+    default:
+      return {
+        label: 'Unknown',
+        tone: 'neutral',
+        description: 'GitHub did not return a reliable branch freshness state yet.'
+      };
+  }
+}
+
+function getPullRequestCopilotActionLabel(action: PullRequestCopilotActionId): string {
+  switch (action) {
+    case 'fix_ci':
+      return 'Fix CI';
+    case 'rebase':
+      return 'Rebase';
+    case 'address_review_feedback':
+      return 'Address review feedback';
+    case 'review':
+      return 'Review';
+  }
+}
+
+function getPullRequestCopilotActionDescription(action: PullRequestCopilotActionId): string {
+  switch (action) {
+    case 'fix_ci':
+      return 'Ask Copilot to investigate the failing checks and push the smallest fix.';
+    case 'rebase':
+      return 'Ask Copilot to resolve update conflicts and bring the branch up to date.';
+    case 'address_review_feedback':
+      return 'Ask Copilot to address unresolved review feedback and push updates.';
+    case 'review':
+      return 'Ask Copilot to review the pull request and leave GitHub feedback.';
+  }
+}
+
+function getPullRequestCopilotActionOptions(
+  pullRequest: Pick<PreviewPullRequestRecord, 'checksStatus' | 'upToDateStatus' | 'unresolvedReviewThreads'>,
+  options?: {
+    canComment?: boolean;
+    canReview?: boolean;
+  }
+): PullRequestCopilotActionOption[] {
+  const actions: PullRequestCopilotActionOption[] = [];
+
+  if (options?.canComment !== false && pullRequest.checksStatus === 'failed') {
+    actions.push({
+      id: 'fix_ci',
+      label: getPullRequestCopilotActionLabel('fix_ci'),
+      description: getPullRequestCopilotActionDescription('fix_ci')
+    });
+  }
+
+  if (options?.canComment !== false && pullRequest.upToDateStatus === 'conflicts') {
+    actions.push({
+      id: 'rebase',
+      label: getPullRequestCopilotActionLabel('rebase'),
+      description: getPullRequestCopilotActionDescription('rebase')
+    });
+  }
+
+  if (options?.canComment !== false && pullRequest.unresolvedReviewThreads > 0) {
+    actions.push({
+      id: 'address_review_feedback',
+      label: getPullRequestCopilotActionLabel('address_review_feedback'),
+      description: getPullRequestCopilotActionDescription('address_review_feedback')
+    });
+  }
+
+  if (options?.canReview !== false) {
+    actions.push({
+      id: 'review',
+      label: getPullRequestCopilotActionLabel('review'),
+      description: getPullRequestCopilotActionDescription('review')
+    });
+  }
+
+  return actions;
+}
+
 function getPreviewPullRequestFilterLabel(filter: PreviewPullRequestFilter): string {
   switch (filter) {
     case 'mergeable':
@@ -4983,6 +5302,115 @@ function getPreviewPullRequestFilterLabel(filter: PreviewPullRequestFilter): str
       return 'Failing';
     default:
       return 'Total PRs';
+  }
+}
+
+function getGitHubTokenPermissionAuditMeta(
+  audit: GitHubTokenPermissionAuditSummary | GitHubTokenPermissionAuditRepository | null | undefined
+): {
+  tone: Tone;
+  label: string;
+} {
+  if (!audit) {
+    return {
+      tone: 'neutral',
+      label: 'Unknown'
+    };
+  }
+
+  if (audit.status === 'missing_token') {
+    return {
+      tone: 'warning',
+      label: 'Token required'
+    };
+  }
+
+  if (audit.status === 'error') {
+    return {
+      tone: 'danger',
+      label: 'Check failed'
+    };
+  }
+
+  if ('allRequiredPermissionsGranted' in audit) {
+    if (audit.repositories.length === 0) {
+      return {
+        tone: 'neutral',
+        label: 'Not checked'
+      };
+    }
+
+    return audit.allRequiredPermissionsGranted
+      ? {
+          tone: 'success',
+          label: 'Verified'
+        }
+      : {
+          tone: audit.repositories.length > 0 ? 'warning' : 'neutral',
+          label: audit.repositories.length > 0 ? 'Needs attention' : 'Not checked'
+        };
+  }
+
+  return audit.status === 'verified'
+    ? {
+        tone: 'success',
+        label: 'Verified'
+      }
+    : audit.status === 'missing_permissions'
+      ? {
+          tone: 'warning',
+          label: 'Missing permissions'
+        }
+      : {
+          tone: 'neutral',
+          label: 'Partially verified'
+        };
+}
+
+function sortPreviewPullRequestRecordsByUpdatedAt(records: PreviewPullRequestRecord[]): PreviewPullRequestRecord[] {
+  return [...records].sort((left, right) => {
+    const leftTimestamp = Date.parse(left.updatedAt);
+    const rightTimestamp = Date.parse(right.updatedAt);
+    const leftValue = Number.isFinite(leftTimestamp) ? leftTimestamp : 0;
+    const rightValue = Number.isFinite(rightTimestamp) ? rightTimestamp : 0;
+    return rightValue - leftValue;
+  });
+}
+
+function resolvePreviewPullRequestReviewable(
+  record: Pick<PreviewPullRequestRecord, 'checksStatus' | 'copilotUnresolvedReviewThreads' | 'unresolvedReviewThreads' | 'githubMergeable'>
+): boolean {
+  const unresolvedCopilotThreads =
+    typeof record.copilotUnresolvedReviewThreads === 'number'
+      ? record.copilotUnresolvedReviewThreads
+      : record.unresolvedReviewThreads;
+  return record.githubMergeable === true &&
+    record.checksStatus === 'passed' &&
+    unresolvedCopilotThreads === 0;
+}
+
+function resolvePreviewPullRequestMergeable(
+  record: Pick<PreviewPullRequestRecord, 'checksStatus' | 'reviewApprovals' | 'unresolvedReviewThreads' | 'githubMergeable'>
+): boolean {
+  return record.githubMergeable === true &&
+    record.checksStatus === 'passed' &&
+    record.reviewApprovals > 0 &&
+    record.unresolvedReviewThreads === 0;
+}
+
+function matchesPreviewPullRequestFilter(
+  record: Pick<PreviewPullRequestRecord, 'checksStatus' | 'reviewable' | 'mergeable'>,
+  filter: PreviewPullRequestFilter
+): boolean {
+  switch (filter) {
+    case 'mergeable':
+      return record.mergeable === true;
+    case 'reviewable':
+      return record.reviewable === true;
+    case 'failing':
+      return record.checksStatus === 'failed';
+    default:
+      return true;
   }
 }
 
@@ -5191,6 +5619,32 @@ function RefreshIcon({ className }: PreviewIconProps): React.JSX.Element {
       <path d="M12.75 4.25V2H10.5" />
       <path d="M12.75 2 9.9 4.85" />
       <path d="M12 8A4 4 0 1 1 8 4c.85 0 1.63.26 2.28.7" />
+    </PreviewIconBase>
+  );
+}
+
+function BranchUpdateIcon({ className }: PreviewIconProps): React.JSX.Element {
+  return (
+    <PreviewIconBase className={className}>
+      <circle cx="4" cy="3" r="1.5" />
+      <circle cx="4" cy="13" r="1.5" />
+      <circle cx="12" cy="8" r="1.5" />
+      <path d="M5.5 3.2v9.6" />
+      <path d="M5.5 8h4.8" />
+      <path d="m8.85 5.55 2.65 2.45-2.65 2.45" />
+    </PreviewIconBase>
+  );
+}
+
+function CopilotIcon({ className }: PreviewIconProps): React.JSX.Element {
+  return (
+    <PreviewIconBase className={className}>
+      <path d="M5.1 5.2a2.9 2.9 0 1 1 5.8 0" />
+      <path d="M4.2 6.2c-.85 0-1.54.69-1.54 1.54v2.95c0 1.44 1.17 2.61 2.61 2.61h5.42c1.44 0 2.61-1.17 2.61-2.61V7.74c0-.85-.69-1.54-1.54-1.54Z" />
+      <circle cx="6.15" cy="8.6" r="0.7" />
+      <circle cx="9.85" cy="8.6" r="0.7" />
+      <path d="M6.2 10.95c.42.38 1.01.58 1.8.58.79 0 1.38-.2 1.8-.58" />
+      <path d="M8 2.4v1.15" />
     </PreviewIconBase>
   );
 }
@@ -5607,6 +6061,7 @@ function getToneClass(tone: Tone): string {
 const SETTINGS_INDEX_HREF = '/instance/settings/plugins';
 const GITHUB_SYNC_SETTINGS_UPDATED_EVENT = 'paperclip-github-plugin:settings-updated';
 const GITHUB_SYNC_LOCATION_CHANGED_EVENT = 'paperclip-github-plugin:location-changed';
+const GITHUB_SYNC_PULL_REQUESTS_UPDATED_EVENT = 'paperclip-github-plugin:pull-requests-updated';
 let gitHubSyncLocationObserverInstalled = false;
 
 function getStringValue(record: Record<string, unknown>, key: string): string | null {
@@ -5742,6 +6197,14 @@ function notifyGitHubSyncSettingsChanged(): void {
   }
 
   window.dispatchEvent(new CustomEvent(GITHUB_SYNC_SETTINGS_UPDATED_EVENT));
+}
+
+function notifyGitHubSyncPullRequestsChanged(): void {
+  if (typeof window === 'undefined') {
+    return;
+  }
+
+  window.dispatchEvent(new CustomEvent(GITHUB_SYNC_PULL_REQUESTS_UPDATED_EVENT));
 }
 
 function getIssueIdentifierFromLocation(pathname: string): string | null {
@@ -6485,8 +6948,10 @@ function PreviewMarkdown(props: {
   );
 }
 
-export function GitHubSyncProjectPullRequestsSidebarItem(): React.JSX.Element | null {
-  const hostContext = useHostContext();
+export function GitHubSyncProjectPullRequestsSidebarItem(
+  props: PluginProjectSidebarItemProps
+): React.JSX.Element | null {
+  const hostContext = props.context;
   const location = useCurrentLocationSnapshot();
   const themeMode = useResolvedThemeMode();
   const theme = themeMode === 'light' ? LIGHT_PALETTE : DARK_PALETTE;
@@ -6501,12 +6966,51 @@ export function GitHubSyncProjectPullRequestsSidebarItem(): React.JSX.Element | 
       : {}
   );
 
+  const hiddenContribution = <span aria-hidden="true" style={{ display: 'none' }} />;
+
+  useEffect(() => {
+    const refreshPullRequestCount = () => {
+      void Promise.resolve(pullRequestCount.refresh()).catch(() => undefined);
+    };
+
+    if (typeof window === 'undefined' || typeof document === 'undefined') {
+      return;
+    }
+
+    const handlePullRequestsUpdated = () => {
+      refreshPullRequestCount();
+    };
+    const handleSettingsUpdated = () => {
+      refreshPullRequestCount();
+    };
+    const handleWindowFocus = () => {
+      refreshPullRequestCount();
+    };
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        refreshPullRequestCount();
+      }
+    };
+
+    window.addEventListener(GITHUB_SYNC_PULL_REQUESTS_UPDATED_EVENT, handlePullRequestsUpdated);
+    window.addEventListener(GITHUB_SYNC_SETTINGS_UPDATED_EVENT, handleSettingsUpdated);
+    window.addEventListener('focus', handleWindowFocus);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+
+    return () => {
+      window.removeEventListener(GITHUB_SYNC_PULL_REQUESTS_UPDATED_EVENT, handlePullRequestsUpdated);
+      window.removeEventListener(GITHUB_SYNC_SETTINGS_UPDATED_EVENT, handleSettingsUpdated);
+      window.removeEventListener('focus', handleWindowFocus);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
+  }, [pullRequestCount.refresh]);
+
   if (hostContext.entityType !== 'project' || !hostContext.entityId) {
-    return null;
+    return hiddenContribution;
   }
 
   if ((pullRequestCount.loading && !pullRequestCount.data) || pullRequestCount.data?.status === 'unmapped') {
-    return null;
+    return hiddenContribution;
   }
 
   const href = buildProjectPullRequestsPageHref(hostContext.companyPrefix, hostContext.entityId);
@@ -6575,6 +7079,8 @@ export function GitHubSyncProjectPullRequestsPage(): React.JSX.Element {
   );
   const createPaperclipIssue = usePluginAction('project.pullRequests.createIssue');
   const refreshPullRequestsAction = usePluginAction('project.pullRequests.refresh');
+  const updatePullRequestBranch = usePluginAction('project.pullRequests.updateBranch');
+  const requestCopilotAction = usePluginAction('project.pullRequests.requestCopilotAction');
   const mergePullRequest = usePluginAction('project.pullRequests.merge');
   const closePullRequest = usePluginAction('project.pullRequests.close');
   const addPullRequestComment = usePluginAction('project.pullRequests.addComment');
@@ -6631,6 +7137,13 @@ export function GitHubSyncProjectPullRequestsPage(): React.JSX.Element {
   };
   const showInitialLoadingState = hasPullRequestsPageContext && !pullRequestsPageData && !pullRequestsPageError;
   const pageStatus = pageData.status ?? (pullRequestsPageError ? 'error' : 'ready');
+  const pageTokenPermissionAudit = pageData.tokenPermissionAudit ?? null;
+  const canCommentOnPullRequests = Boolean(pageTokenPermissionAudit?.canComment);
+  const canReviewPullRequests = Boolean(pageTokenPermissionAudit?.canReview);
+  const canClosePullRequests = Boolean(pageTokenPermissionAudit?.canClose);
+  const canUpdatePullRequestBranches = Boolean(pageTokenPermissionAudit?.canUpdateBranch);
+  const canMergePullRequests = Boolean(pageTokenPermissionAudit?.canMerge);
+  const canRerunPullRequestCi = Boolean(pageTokenPermissionAudit?.canRerunCi);
   const displayedPullRequests = pageData.pullRequests
     .filter((pullRequest) => pullRequest.status === 'open')
     .map((pullRequest) => {
@@ -6846,11 +7359,17 @@ export function GitHubSyncProjectPullRequestsPage(): React.JSX.Element {
   const selectedPullRequestCommentPending = selectedPullRequest
     ? pendingActionKey === `comment:${selectedPullRequest.id}`
     : false;
+  const selectedPullRequestCopilotPending = selectedPullRequest
+    ? Boolean(pendingActionKey?.startsWith(`copilot:${selectedPullRequest.id}:`))
+    : false;
   const selectedPullRequestReviewPending = selectedPullRequest
     ? Boolean(pendingActionKey?.startsWith(`review:${selectedPullRequest.id}:`))
     : false;
   const selectedPullRequestRerunCiPending = selectedPullRequest
     ? pendingActionKey === `rerun-ci:${selectedPullRequest.id}`
+    : false;
+  const selectedPullRequestUpdateBranchPending = selectedPullRequest
+    ? pendingActionKey === `update-branch:${selectedPullRequest.id}`
     : false;
   const selectedPullRequestMergePending = selectedPullRequest
     ? pendingActionKey === `merge:${selectedPullRequest.id}`
@@ -6891,6 +7410,62 @@ export function GitHubSyncProjectPullRequestsPage(): React.JSX.Element {
     void Promise.resolve(pullRequestMetrics.refresh()).catch(() => undefined);
   }
 
+  function refreshSelectedPullRequestDetails(pullRequestId: string): void {
+    if (selectedPullRequestId !== pullRequestId) {
+      return;
+    }
+
+    void Promise.resolve(selectedPullRequestDetails.refresh()).catch(() => undefined);
+  }
+
+  function refreshPullRequestMetricsPanel(): void {
+    void Promise.resolve(pullRequestMetrics.refresh()).catch(() => undefined);
+  }
+
+  function patchPullRequestRow(
+    pullRequestId: string,
+    updater: (pullRequest: PreviewPullRequestRecord) => PreviewPullRequestRecord
+  ): void {
+    setPullRequestsPageData((current) => {
+      if (!current || current.status !== 'ready') {
+        return current;
+      }
+
+      let didChange = false;
+      const nextPullRequests = current.pullRequests.map((pullRequest) => {
+        if (pullRequest.id !== pullRequestId) {
+          return pullRequest;
+        }
+
+        didChange = true;
+        return updater(pullRequest);
+      });
+
+      if (!didChange) {
+        return current;
+      }
+
+      const activePageFilter =
+        current.filter === 'mergeable' || current.filter === 'reviewable' || current.filter === 'failing'
+          ? current.filter
+          : 'all';
+      const filteredPullRequests = nextPullRequests.filter((pullRequest) => matchesPreviewPullRequestFilter(pullRequest, activePageFilter));
+      const removedFromActiveFilter = filteredPullRequests.length !== nextPullRequests.length;
+      const nextTotalFilteredPullRequests =
+        removedFromActiveFilter && typeof current.totalFilteredPullRequests === 'number' && current.totalFilteredPullRequests > 0
+          ? Math.max(current.totalFilteredPullRequests - 1, 0)
+          : current.totalFilteredPullRequests;
+
+      return {
+        ...current,
+        pullRequests: sortPreviewPullRequestRecordsByUpdatedAt(filteredPullRequests),
+        ...(typeof nextTotalFilteredPullRequests === 'number'
+          ? { totalFilteredPullRequests: nextTotalFilteredPullRequests }
+          : {})
+      };
+    });
+  }
+
   async function handleRefreshPullRequests(): Promise<void> {
     if (!hostContext.companyId || !projectId) {
       reloadPullRequestsView();
@@ -6912,6 +7487,7 @@ export function GitHubSyncProjectPullRequestsPage(): React.JSX.Element {
       });
     } finally {
       reloadPullRequestsView();
+      notifyGitHubSyncPullRequestsChanged();
       setRefreshPending(false);
     }
   }
@@ -7124,10 +7700,109 @@ export function GitHubSyncProjectPullRequestsPage(): React.JSX.Element {
         tone: 'success'
       });
       refreshAfterMutation();
+      notifyGitHubSyncPullRequestsChanged();
     } catch (error) {
       toast({
         title: `Could not merge #${pullRequest.number}`,
         body: getActionErrorMessage(error, 'GitHub rejected the merge.'),
+        tone: 'error'
+      });
+    } finally {
+      setPendingActionKey((current) => current === actionKey ? null : current);
+    }
+  }
+
+  async function handleUpdatePullRequestBranch(pullRequest: PreviewPullRequestRecord): Promise<void> {
+    if (!hostContext.companyId || !projectId) {
+      return;
+    }
+
+    const actionKey = `update-branch:${pullRequest.id}`;
+    setPendingActionKey(actionKey);
+
+    try {
+      const result = await updatePullRequestBranch({
+        companyId: hostContext.companyId,
+        projectId,
+        repositoryUrl: pageData.repositoryUrl,
+        pullRequestNumber: pullRequest.number
+      }) as ProjectPullRequestUpdateBranchActionResult;
+      patchPullRequestRow(pullRequest.id, (current) => ({
+        ...current,
+        upToDateStatus: 'up_to_date',
+        updatedAt: new Date().toISOString()
+      }));
+      refreshSelectedPullRequestDetails(pullRequest.id);
+      notifyGitHubSyncPullRequestsChanged();
+      toast({
+        title: result.status === 'already_up_to_date'
+          ? `#${pullRequest.number} is already up to date`
+          : `Requested branch update for #${pullRequest.number}`,
+        body: result.status === 'already_up_to_date'
+          ? 'The pull request already includes the latest base-branch commits.'
+          : pullRequest.baseBranch.trim()
+            ? `GitHub is updating this pull request with ${pullRequest.baseBranch.trim()}. Refresh again in a moment if it still shows behind.`
+            : 'GitHub is updating this pull request with the latest base-branch commits.',
+        tone: result.status === 'already_up_to_date' ? 'info' : 'success'
+      });
+    } catch (error) {
+      toast({
+        title: `Could not update #${pullRequest.number}`,
+        body: getActionErrorMessage(error, 'GitHub rejected the branch update.'),
+        tone: 'error'
+      });
+    } finally {
+      setPendingActionKey((current) => current === actionKey ? null : current);
+    }
+  }
+
+  async function handleRequestCopilotAction(
+    pullRequest: PreviewPullRequestRecord,
+    action: PullRequestCopilotActionId
+  ): Promise<void> {
+    if (!hostContext.companyId || !projectId) {
+      return;
+    }
+
+    const actionKey = `copilot:${pullRequest.id}:${action}`;
+    const actionLabel = getPullRequestCopilotActionLabel(action);
+    setPendingActionKey(actionKey);
+    toast({
+      title: `Asking Copilot about #${pullRequest.number}`,
+      body: `Posting the "${actionLabel}" request to GitHub.`,
+      tone: 'info'
+    });
+
+    try {
+      const result = await requestCopilotAction({
+        companyId: hostContext.companyId,
+        projectId,
+        repositoryUrl: pageData.repositoryUrl,
+        pullRequestNumber: pullRequest.number,
+        action
+      }) as ProjectPullRequestCopilotActionResult;
+      if (action === 'review') {
+        notifyGitHubSyncPullRequestsChanged();
+      } else {
+        patchPullRequestRow(pullRequest.id, (current) => ({
+          ...current,
+          commentsCount: current.commentsCount + 1,
+          updatedAt: new Date().toISOString()
+        }));
+        refreshSelectedPullRequestDetails(pullRequest.id);
+        notifyGitHubSyncPullRequestsChanged();
+      }
+      toast({
+        title: `Copilot request posted for #${pullRequest.number}`,
+        body: action === 'review'
+          ? `Requested ${result.requestedReviewer ?? 'Copilot'} as a reviewer on GitHub.`
+          : `Posted an @copilot comment for "${result.actionLabel ?? actionLabel}". Copilot will continue on GitHub.`,
+        tone: 'success'
+      });
+    } catch (error) {
+      toast({
+        title: `Could not ask Copilot about #${pullRequest.number}`,
+        body: getActionErrorMessage(error, 'GitHub rejected the Copilot request.'),
         tone: 'error'
       });
     } finally {
@@ -7157,6 +7832,7 @@ export function GitHubSyncProjectPullRequestsPage(): React.JSX.Element {
       });
       setCloseModalPullRequest((current) => current?.id === pullRequest.id ? null : current);
       refreshAfterMutation();
+      notifyGitHubSyncPullRequestsChanged();
     } catch (error) {
       toast({
         title: `Could not close #${pullRequest.number}`,
@@ -7190,7 +7866,13 @@ export function GitHubSyncProjectPullRequestsPage(): React.JSX.Element {
         body: nextComment
       });
       setCommentDraft('');
-      refreshAfterMutation();
+      patchPullRequestRow(selectedPullRequest.id, (current) => ({
+        ...current,
+        commentsCount: current.commentsCount + 1,
+        updatedAt: new Date().toISOString()
+      }));
+      refreshSelectedPullRequestDetails(selectedPullRequest.id);
+      notifyGitHubSyncPullRequestsChanged();
       toast({
         title: 'Comment added',
         body: `Posted a GitHub comment on #${selectedPullRequest.number}.`,
@@ -7229,7 +7911,13 @@ export function GitHubSyncProjectPullRequestsPage(): React.JSX.Element {
         body: nextComment
       });
       closeCommentModal();
-      refreshAfterMutation();
+      patchPullRequestRow(commentModalPullRequest.id, (current) => ({
+        ...current,
+        commentsCount: current.commentsCount + 1,
+        updatedAt: new Date().toISOString()
+      }));
+      refreshSelectedPullRequestDetails(commentModalPullRequest.id);
+      notifyGitHubSyncPullRequestsChanged();
       toast({
         title: 'Comment added',
         body: `Posted a GitHub comment on #${commentModalPullRequest.number}.`,
@@ -7263,8 +7951,26 @@ export function GitHubSyncProjectPullRequestsPage(): React.JSX.Element {
         review,
         body: reviewModalDraft.trim()
       }) as ProjectPullRequestReviewActionResult;
+      const updatedAt = new Date().toISOString();
+      patchPullRequestRow(reviewModalPullRequest.id, (current) => {
+        const nextReviewApprovals = current.reviewApprovals + (result.review === 'approved' ? 1 : 0);
+        const nextReviewChangesRequested = current.reviewChangesRequested + (result.review === 'changes_requested' ? 1 : 0);
+        const nextRecord: PreviewPullRequestRecord = {
+          ...current,
+          reviewApprovals: nextReviewApprovals,
+          reviewChangesRequested: nextReviewChangesRequested,
+          updatedAt
+        };
+        return {
+          ...nextRecord,
+          reviewable: resolvePreviewPullRequestReviewable(nextRecord),
+          mergeable: resolvePreviewPullRequestMergeable(nextRecord)
+        };
+      });
       closeReviewModal();
-      refreshAfterMutation();
+      refreshSelectedPullRequestDetails(reviewModalPullRequest.id);
+      refreshPullRequestMetricsPanel();
+      notifyGitHubSyncPullRequestsChanged();
       toast({
         title: result.review === 'approved' ? `Approved #${reviewModalPullRequest.number}` : `Requested changes on #${reviewModalPullRequest.number}`,
         body: result.review === 'approved' ? 'GitHub review submitted.' : 'GitHub change request submitted.',
@@ -7296,8 +8002,23 @@ export function GitHubSyncProjectPullRequestsPage(): React.JSX.Element {
         repositoryUrl: pageData.repositoryUrl,
         pullRequestNumber: rerunCiModalPullRequest.number
       }) as ProjectPullRequestRerunCiActionResult;
+      const updatedAt = new Date().toISOString();
+      patchPullRequestRow(rerunCiModalPullRequest.id, (current) => {
+        const nextRecord: PreviewPullRequestRecord = {
+          ...current,
+          checksStatus: 'pending',
+          updatedAt
+        };
+        return {
+          ...nextRecord,
+          reviewable: resolvePreviewPullRequestReviewable(nextRecord),
+          mergeable: resolvePreviewPullRequestMergeable(nextRecord)
+        };
+      });
       closeRerunCiModal();
-      refreshAfterMutation();
+      refreshSelectedPullRequestDetails(rerunCiModalPullRequest.id);
+      refreshPullRequestMetricsPanel();
+      notifyGitHubSyncPullRequestsChanged();
       toast({
         title: `Re-ran CI for #${rerunCiModalPullRequest.number}`,
         body: result.rerunCheckSuiteCount && result.rerunCheckSuiteCount > 1
@@ -7332,13 +8053,14 @@ export function GitHubSyncProjectPullRequestsPage(): React.JSX.Element {
         <th scope="col">Title</th>
         <th scope="col">Author</th>
         <th scope="col" className="ghsync-prs-table__cell--center">Checks</th>
+        <th scope="col" className="ghsync-prs-table__cell--center">Up to date</th>
+        <th scope="col" className="ghsync-prs-table__cell--center">Target branch</th>
         <th scope="col" className="ghsync-prs-table__cell--center">Reviews</th>
         <th scope="col" className="ghsync-prs-table__cell--center">Review threads</th>
         <th scope="col" className="ghsync-prs-table__cell--center">Comments</th>
-        <th scope="col" className="ghsync-prs-table__cell--center">Age</th>
         <th scope="col" className="ghsync-prs-table__cell--center">Last updated</th>
         <th scope="col" className="ghsync-prs-table__cell--center">Paperclip issue</th>
-        <th scope="col" className="ghsync-prs-table__cell--center ghsync-prs-table__cell--actions">Quick actions</th>
+        <th scope="col" className="ghsync-prs-table__cell--center ghsync-prs-table__cell--actions">Actions</th>
       </tr>
     </thead>
   );
@@ -7547,6 +8269,12 @@ export function GitHubSyncProjectPullRequestsPage(): React.JSX.Element {
                           <LoadingSkeleton style={{ width: 20, height: 20 }} />
                         </td>
                         <td className="ghsync-prs-table__cell--center">
+                          <LoadingSkeleton style={{ width: 74, height: 20, borderRadius: 999, marginInline: 'auto' }} />
+                        </td>
+                        <td className="ghsync-prs-table__cell--center">
+                          <LoadingSkeleton style={{ width: 84, height: 20, borderRadius: 999, marginInline: 'auto' }} />
+                        </td>
+                        <td className="ghsync-prs-table__cell--center">
                           <LoadingSkeleton style={{ width: 42, height: 11, borderRadius: 6, marginInline: 'auto' }} />
                         </td>
                         <td className="ghsync-prs-table__cell--center">
@@ -7554,9 +8282,6 @@ export function GitHubSyncProjectPullRequestsPage(): React.JSX.Element {
                         </td>
                         <td className="ghsync-prs-table__cell--center">
                           <LoadingSkeleton style={{ width: 26, height: 11, borderRadius: 6, marginInline: 'auto' }} />
-                        </td>
-                        <td className="ghsync-prs-table__cell--center">
-                          <LoadingSkeleton style={{ width: 58, height: 11, borderRadius: 6, marginInline: 'auto' }} />
                         </td>
                         <td className="ghsync-prs-table__cell--center">
                           <LoadingSkeleton style={{ width: 58, height: 11, borderRadius: 6, marginInline: 'auto' }} />
@@ -7611,19 +8336,31 @@ export function GitHubSyncProjectPullRequestsPage(): React.JSX.Element {
                     const hasResolvedReviewThreads =
                       pullRequest.unresolvedReviewThreads === 0 &&
                       (hasReviewSummary || (pullRequest.copilotUnresolvedReviewThreads ?? 0) === 0);
+                    const upToDateMeta = getPreviewPullRequestUpToDateMeta(pullRequest.upToDateStatus);
+                    const targetBranchName = pullRequest.baseBranch.trim() || 'Unknown';
+                    const targetsDefaultBranch =
+                      Boolean(pageData.defaultBranchName) && targetBranchName === pageData.defaultBranchName;
+                    const copilotActionOptions = getPullRequestCopilotActionOptions(pullRequest, {
+                      canComment: canCommentOnPullRequests,
+                      canReview: canReviewPullRequests
+                    });
                     const pullRequestIssueHref = getPaperclipIssueHref(
                       hostContext.companyPrefix,
                       pullRequest.paperclipIssueKey ?? pullRequest.paperclipIssueId ?? null
                     );
                     const pullRequestIssueLabel = pullRequest.paperclipIssueKey ?? (pullRequest.paperclipIssueId ? 'Open issue' : null);
+                    const copilotActionPrefix = `copilot:${pullRequest.id}:`;
                     const mergeActionKey = `merge:${pullRequest.id}`;
                     const commentModalActionKey = `comment-modal:${pullRequest.id}`;
                     const reviewActionPrefix = `review:${pullRequest.id}:`;
                     const rerunCiActionKey = `rerun-ci:${pullRequest.id}`;
+                    const updateBranchActionKey = `update-branch:${pullRequest.id}`;
                     const closeActionKey = `close:${pullRequest.id}`;
+                    const copilotPending = Boolean(pendingActionKey?.startsWith(copilotActionPrefix));
                     const commentModalPending = pendingActionKey === commentModalActionKey;
                     const reviewPending = Boolean(pendingActionKey?.startsWith(reviewActionPrefix));
                     const rerunCiPending = pendingActionKey === rerunCiActionKey;
+                    const updateBranchPending = pendingActionKey === updateBranchActionKey;
                     const mergePending = pendingActionKey === mergeActionKey;
                     const closePending = pendingActionKey === closeActionKey;
 
@@ -7689,34 +8426,114 @@ export function GitHubSyncProjectPullRequestsPage(): React.JSX.Element {
                         </td>
 
                         <td className="ghsync-prs-table__cell--center">
-                          <a
-                            className={`ghsync-prs-table__icon-link ${getPreviewPullRequestCheckToneClass(pullRequest.checksStatus)}`}
-                            href={pullRequest.checksUrl}
-                            target="_blank"
-                            rel="noreferrer"
-                            title={`${getPreviewPullRequestCheckLabel(pullRequest.checksStatus)} on GitHub`}
-                          >
-                            <StatusIcon status={pullRequest.checksStatus} className="ghsync-prs-icon" />
-                          </a>
+                          <div className="ghsync-prs-table__metric-group">
+                            <a
+                              className={`ghsync-prs-table__icon-link ${getPreviewPullRequestCheckToneClass(pullRequest.checksStatus)}`}
+                              href={pullRequest.checksUrl}
+                              target="_blank"
+                              rel="noreferrer"
+                              title={`${getPreviewPullRequestCheckLabel(pullRequest.checksStatus)} on GitHub`}
+                            >
+                              <StatusIcon status={pullRequest.checksStatus} className="ghsync-prs-icon" />
+                            </a>
+                            {pullRequest.checksStatus === 'failed' && canRerunPullRequestCi ? (
+                              <button
+                                type="button"
+                                className="ghsync-prs-table__icon-button"
+                                title={`Re-run CI for #${pullRequest.number}`}
+                                onClick={() => setRerunCiPullRequestId(pullRequest.id)}
+                                disabled={rerunCiPending}
+                              >
+                                <LoadingIconButtonContent
+                                  busy={rerunCiPending}
+                                  busyLabel={`Re-running CI for #${pullRequest.number}`}
+                                  icon={<RefreshIcon className="ghsync-prs-icon" />}
+                                />
+                              </button>
+                            ) : null}
+                          </div>
                         </td>
 
                         <td className="ghsync-prs-table__cell--center">
-                          {hasReviewSummary ? (
-                            <a className="ghsync-prs-table__metric-link" href={pullRequest.reviewsUrl} target="_blank" rel="noreferrer">
-                              {pullRequest.reviewApprovals > 0 ? (
-                                <>
-                                  <CheckPassedIcon className="ghsync-prs-icon" />
-                                  <span>{pullRequest.reviewApprovals}</span>
-                                </>
-                              ) : null}
-                              {pullRequest.reviewChangesRequested > 0 ? (
-                                <>
-                                  <CheckFailedIcon className="ghsync-prs-icon" />
-                                  <span>{pullRequest.reviewChangesRequested}</span>
-                                </>
-                              ) : null}
-                            </a>
-                          ) : null}
+                          <div className="ghsync-prs-table__metric-group">
+                            <span
+                              className={`ghsync__badge ${getToneClass(upToDateMeta.tone)}`}
+                              title={upToDateMeta.description}
+                            >
+                              {upToDateMeta.label}
+                            </span>
+                            {pullRequest.upToDateStatus === 'can_update' && canUpdatePullRequestBranches ? (
+                              <button
+                                type="button"
+                                className="ghsync-prs-table__icon-button"
+                                title={`Update branch for #${pullRequest.number}`}
+                                onClick={() => {
+                                  void handleUpdatePullRequestBranch(pullRequest);
+                                }}
+                                disabled={updateBranchPending}
+                              >
+                                <LoadingIconButtonContent
+                                  busy={updateBranchPending}
+                                  busyLabel={`Updating branch for #${pullRequest.number}`}
+                                  icon={<BranchUpdateIcon className="ghsync-prs-icon" />}
+                                />
+                              </button>
+                            ) : null}
+                          </div>
+                        </td>
+
+                        <td className="ghsync-prs-table__cell--center">
+                          <span
+                            className={`ghsync__badge ${getToneClass(targetsDefaultBranch ? 'success' : 'neutral')}`}
+                            title={
+                              targetsDefaultBranch
+                                ? `${targetBranchName} is the default branch for this repository.`
+                                : pageData.defaultBranchName
+                                  ? `${targetBranchName} is not the default branch (${pageData.defaultBranchName}).`
+                                  : `${targetBranchName} is the target branch.`
+                            }
+                          >
+                            {targetBranchName}
+                          </span>
+                        </td>
+
+                        <td className="ghsync-prs-table__cell--center">
+                          <div className="ghsync-prs-table__metric-group">
+                            {hasReviewSummary ? (
+                              <a className="ghsync-prs-table__metric-link" href={pullRequest.reviewsUrl} target="_blank" rel="noreferrer">
+                                {pullRequest.reviewApprovals > 0 ? (
+                                  <>
+                                    <CheckPassedIcon className="ghsync-prs-icon" />
+                                    <span>{pullRequest.reviewApprovals}</span>
+                                  </>
+                                ) : null}
+                                {pullRequest.reviewChangesRequested > 0 ? (
+                                  <>
+                                    <CheckFailedIcon className="ghsync-prs-icon" />
+                                    <span>{pullRequest.reviewChangesRequested}</span>
+                                  </>
+                                ) : null}
+                              </a>
+                            ) : null}
+                            {pullRequest.reviewable && canReviewPullRequests ? (
+                              <button
+                                type="button"
+                                className="ghsync-prs-table__icon-button"
+                                title={`Review #${pullRequest.number}`}
+                                onClick={() => {
+                                  setReviewModalPullRequestId(pullRequest.id);
+                                  setReviewModalDraft('');
+                                }}
+                                disabled={reviewPending}
+                              >
+                                <LoadingIconButtonContent
+                                  busy={reviewPending}
+                                  busyLabel={`Reviewing #${pullRequest.number}`}
+                                  icon={<ReviewIcon className="ghsync-prs-icon" />}
+                                />
+                              </button>
+                            ) : null}
+                          </div>
                         </td>
 
                         <td className="ghsync-prs-table__cell--center">
@@ -7733,18 +8550,27 @@ export function GitHubSyncProjectPullRequestsPage(): React.JSX.Element {
                         </td>
 
                         <td className="ghsync-prs-table__cell--center">
-                          {pullRequest.commentsCount > 0 ? (
+                          <div className="ghsync-prs-table__metric-group">
                             <a className="ghsync-prs-table__metric-link" href={pullRequest.commentsUrl} target="_blank" rel="noreferrer">
                               <CommentIcon className="ghsync-prs-icon" />
                               <span>{pullRequest.commentsCount}</span>
                             </a>
-                          ) : null}
-                        </td>
-
-                        <td className="ghsync-prs-table__cell--center">
-                          <span className="ghsync-prs-table__time" title={formatShortDateTime(pullRequest.createdAt)}>
-                            {formatRelativeTime(pullRequest.createdAt)}
-                          </span>
+                            {canCommentOnPullRequests ? (
+                              <button
+                                type="button"
+                                className="ghsync-prs-table__icon-button"
+                                title={`Comment on #${pullRequest.number}`}
+                                onClick={() => openCommentModal(pullRequest.id)}
+                                disabled={commentModalPending}
+                              >
+                                <LoadingIconButtonContent
+                                  busy={commentModalPending}
+                                  busyLabel={`Commenting on #${pullRequest.number}`}
+                                  icon={<CommentIcon className="ghsync-prs-icon" />}
+                                />
+                              </button>
+                            ) : null}
+                          </div>
                         </td>
 
                         <td className="ghsync-prs-table__cell--center">
@@ -7779,53 +8605,16 @@ export function GitHubSyncProjectPullRequestsPage(): React.JSX.Element {
 
                         <td className="ghsync-prs-table__cell--center ghsync-prs-table__cell--actions">
                           <div className="ghsync-prs-table__quick-actions">
-                            <button
-                              type="button"
-                              className="ghsync-prs-table__icon-button"
-                              title={`Comment on #${pullRequest.number}`}
-                              onClick={() => openCommentModal(pullRequest.id)}
-                              disabled={commentModalPending}
-                            >
-                              <LoadingIconButtonContent
-                                busy={commentModalPending}
-                                busyLabel={`Commenting on #${pullRequest.number}`}
-                                icon={<CommentIcon className="ghsync-prs-icon" />}
-                              />
-                            </button>
-                            {pullRequest.reviewable ? (
-                              <button
-                                type="button"
-                                className="ghsync-prs-table__icon-button"
-                                title={`Review #${pullRequest.number}`}
-                                onClick={() => {
-                                  setReviewModalPullRequestId(pullRequest.id);
-                                  setReviewModalDraft('');
-                                }}
-                                disabled={reviewPending}
-                              >
-                                <LoadingIconButtonContent
-                                  busy={reviewPending}
-                                  busyLabel={`Reviewing #${pullRequest.number}`}
-                                  icon={<ReviewIcon className="ghsync-prs-icon" />}
-                                />
-                              </button>
-                            ) : null}
-                            {pullRequest.checksStatus === 'failed' ? (
-                              <button
-                                type="button"
-                                className="ghsync-prs-table__icon-button"
-                                title={`Re-run CI for #${pullRequest.number}`}
-                                onClick={() => setRerunCiPullRequestId(pullRequest.id)}
-                                disabled={rerunCiPending}
-                              >
-                                <LoadingIconButtonContent
-                                  busy={rerunCiPending}
-                                  busyLabel={`Re-running CI for #${pullRequest.number}`}
-                                  icon={<RefreshIcon className="ghsync-prs-icon" />}
-                                />
-                              </button>
-                            ) : null}
-                            {pullRequest.mergeable ? (
+                            <PullRequestCopilotActionMenu
+                              pullRequestNumber={pullRequest.number}
+                              actions={copilotActionOptions}
+                              busy={copilotPending}
+                              variant="icon"
+                              onSelect={(action) => {
+                                void handleRequestCopilotAction(pullRequest, action);
+                              }}
+                            />
+                            {pullRequest.mergeable && canMergePullRequests ? (
                               <button
                                 type="button"
                                 className="ghsync-prs-table__icon-button"
@@ -7842,22 +8631,24 @@ export function GitHubSyncProjectPullRequestsPage(): React.JSX.Element {
                                 />
                               </button>
                             ) : null}
-                            <button
-                              type="button"
-                              className="ghsync-prs-table__icon-button"
-                              title={`Close PR #${pullRequest.number}`}
-                              aria-label={`Close PR #${pullRequest.number}`}
-                              onClick={() => {
-                                openClosePullRequestModal(pullRequest);
-                              }}
-                              disabled={closePending}
-                            >
-                              <LoadingIconButtonContent
-                                busy={closePending}
-                                busyLabel={`Closing PR #${pullRequest.number}`}
-                                icon={<CloseIcon className="ghsync-prs-icon" />}
-                              />
-                            </button>
+                            {canClosePullRequests ? (
+                              <button
+                                type="button"
+                                className="ghsync-prs-table__icon-button"
+                                title={`Close PR #${pullRequest.number}`}
+                                aria-label={`Close PR #${pullRequest.number}`}
+                                onClick={() => {
+                                  openClosePullRequestModal(pullRequest);
+                                }}
+                                disabled={closePending}
+                              >
+                                <LoadingIconButtonContent
+                                  busy={closePending}
+                                  busyLabel={`Closing PR #${pullRequest.number}`}
+                                  icon={<CloseIcon className="ghsync-prs-icon" />}
+                                />
+                              </button>
+                            ) : null}
                           </div>
                         </td>
                       </tr>
@@ -7930,20 +8721,35 @@ export function GitHubSyncProjectPullRequestsPage(): React.JSX.Element {
                     <span>Create Paperclip issue</span>
                   </button>
                 )}
-                <button
-                  type="button"
-                  className={getPluginActionClassName({ variant: 'secondary', size: 'sm' })}
-                  onClick={() => openCommentModal(selectedPullRequest.id)}
-                  disabled={selectedPullRequestCommentPending || commentModalPending}
-                >
-                  <LoadingButtonContent
-                    busy={selectedPullRequestCommentPending || commentModalPending}
-                    label="Comment"
-                    busyLabel="Commenting…"
-                    icon={<CommentIcon className="ghsync-prs-icon" />}
-                  />
-                </button>
-                {selectedPullRequest.reviewable ? (
+                <PullRequestCopilotActionMenu
+                  pullRequestNumber={selectedPullRequest.number}
+                  actions={getPullRequestCopilotActionOptions(selectedPullRequest, {
+                    canComment: canCommentOnPullRequests,
+                    canReview: canReviewPullRequests
+                  })}
+                  busy={selectedPullRequestCopilotPending}
+                  variant="button"
+                  label="Copilot"
+                  onSelect={(action) => {
+                    void handleRequestCopilotAction(selectedPullRequest, action);
+                  }}
+                />
+                {canCommentOnPullRequests ? (
+                  <button
+                    type="button"
+                    className={getPluginActionClassName({ variant: 'secondary', size: 'sm' })}
+                    onClick={() => openCommentModal(selectedPullRequest.id)}
+                    disabled={selectedPullRequestCommentPending || commentModalPending}
+                  >
+                    <LoadingButtonContent
+                      busy={selectedPullRequestCommentPending || commentModalPending}
+                      label="Comment"
+                      busyLabel="Commenting…"
+                      icon={<CommentIcon className="ghsync-prs-icon" />}
+                    />
+                  </button>
+                ) : null}
+                {selectedPullRequest.reviewable && canReviewPullRequests ? (
                   <button
                     type="button"
                     className={getPluginActionClassName({ variant: 'secondary', size: 'sm' })}
@@ -7961,7 +8767,7 @@ export function GitHubSyncProjectPullRequestsPage(): React.JSX.Element {
                     />
                   </button>
                 ) : null}
-                {selectedPullRequest.checksStatus === 'failed' ? (
+                {selectedPullRequest.checksStatus === 'failed' && canRerunPullRequestCi ? (
                   <button
                     type="button"
                     className={getPluginActionClassName({ variant: 'secondary', size: 'sm' })}
@@ -7976,7 +8782,24 @@ export function GitHubSyncProjectPullRequestsPage(): React.JSX.Element {
                     />
                   </button>
                 ) : null}
-                {selectedPullRequest.mergeable ? (
+                {selectedPullRequest.upToDateStatus === 'can_update' && canUpdatePullRequestBranches ? (
+                  <button
+                    type="button"
+                    className={getPluginActionClassName({ variant: 'secondary', size: 'sm' })}
+                    onClick={() => {
+                      void handleUpdatePullRequestBranch(selectedPullRequest);
+                    }}
+                    disabled={selectedPullRequestUpdateBranchPending}
+                  >
+                    <LoadingButtonContent
+                      busy={selectedPullRequestUpdateBranchPending}
+                      label="Update branch"
+                      busyLabel="Requesting…"
+                      icon={<BranchUpdateIcon className="ghsync-prs-icon" />}
+                    />
+                  </button>
+                ) : null}
+                {selectedPullRequest.mergeable && canMergePullRequests ? (
                   <button
                     type="button"
                     className={getPluginActionClassName({ variant: 'primary', size: 'sm' })}
@@ -7993,21 +8816,23 @@ export function GitHubSyncProjectPullRequestsPage(): React.JSX.Element {
                     />
                   </button>
                 ) : null}
-                <button
-                  type="button"
-                  className={getPluginActionClassName({ variant: 'danger', size: 'sm' })}
-                  onClick={() => {
-                    openClosePullRequestModal(selectedPullRequest);
-                  }}
-                  disabled={selectedPullRequestClosePending}
-                >
-                  <LoadingButtonContent
-                    busy={selectedPullRequestClosePending}
-                    label="Close PR"
-                    busyLabel="Closing…"
-                    icon={<CloseIcon className="ghsync-prs-icon" />}
-                  />
-                </button>
+                {canClosePullRequests ? (
+                  <button
+                    type="button"
+                    className={getPluginActionClassName({ variant: 'danger', size: 'sm' })}
+                    onClick={() => {
+                      openClosePullRequestModal(selectedPullRequest);
+                    }}
+                    disabled={selectedPullRequestClosePending}
+                  >
+                    <LoadingButtonContent
+                      busy={selectedPullRequestClosePending}
+                      label="Close PR"
+                      busyLabel="Closing…"
+                      icon={<CloseIcon className="ghsync-prs-icon" />}
+                    />
+                  </button>
+                ) : null}
               </div>
             </div>
 
@@ -8779,6 +9604,10 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
     'settings.registration',
     hostContext.companyId ? { companyId: hostContext.companyId, includeAssignees: true } : {}
   );
+  const tokenPermissionAudit = usePluginData<GitHubTokenPermissionAuditSummary>(
+    'settings.tokenPermissionAudit',
+    hostContext.companyId ? { companyId: hostContext.companyId } : {}
+  );
   const saveRegistration = usePluginAction('settings.saveRegistration');
   const updateBoardAccess = usePluginAction('settings.updateBoardAccess');
   const validateToken = usePluginAction('settings.validateToken');
@@ -9109,6 +9938,25 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
           ? 'Add a token.'
           : 'Shared token.';
   const tokenDescription = tokenStatusDescription;
+  const tokenPermissionAuditData = tokenPermissionAudit.data;
+  const tokenPermissionAuditMeta = getGitHubTokenPermissionAuditMeta(tokenPermissionAuditData);
+  const tokenPermissionRepositories = tokenPermissionAuditData?.repositories ?? [];
+  const tokenPermissionWarnings =
+    tokenPermissionAuditData?.status === 'ready'
+      ? tokenPermissionRepositories.filter((repository) => repository.status !== 'verified')
+      : [];
+  const tokenPermissionAuditErrorVisible =
+    hasCompanyContext
+    && tokenStatus === 'valid'
+    && tokenPermissionAuditData?.status === 'error';
+  const tokenPermissionWarningVisible = hasCompanyContext && tokenStatus === 'valid' && tokenPermissionWarnings.length > 0;
+  const tokenPermissionUnknownVisible =
+    hasCompanyContext
+    && tokenStatus === 'valid'
+    && !tokenPermissionAuditErrorVisible
+    && !tokenPermissionWarningVisible
+    && tokenPermissionAuditData?.status === 'ready'
+    && tokenPermissionRepositories.length === 0;
   const boardAccessTone: Tone =
     connectingBoardAccess
       ? 'info'
@@ -9930,6 +10778,64 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
                 </button>
               </div>
             )}
+
+            {tokenPermissionWarningVisible ? (
+              <div className="ghsync__permission-audit ghsync__permission-audit--warning">
+                <div className="ghsync__permission-audit-header">
+                  <strong>Token permissions need attention</strong>
+                  <span className={`ghsync__badge ${getToneClass(tokenPermissionAuditMeta.tone)}`}>
+                    {tokenPermissionAuditMeta.label}
+                  </span>
+                </div>
+                <div className="ghsync__permission-audit-list">
+                  {tokenPermissionWarnings.map((repository) => (
+                    <div key={repository.repositoryUrl} className="ghsync__permission-audit-item">
+                      <strong>{repository.repositoryLabel}</strong>
+                      <span>
+                        {repository.missingPermissions.length > 0
+                          ? `Missing: ${repository.missingPermissions.join(', ')}.`
+                          : repository.warnings[0] ?? 'GitHub Sync could not verify all required permissions yet.'}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ) : null}
+
+            {tokenPermissionAuditErrorVisible ? (
+              <div className="ghsync__permission-audit ghsync__permission-audit--warning">
+                <div className="ghsync__permission-audit-header">
+                  <strong>Token permissions could not be checked</strong>
+                  <span className={`ghsync__badge ${getToneClass(tokenPermissionAuditMeta.tone)}`}>
+                    {tokenPermissionAuditMeta.label}
+                  </span>
+                </div>
+                <div className="ghsync__permission-audit-list">
+                  <div className="ghsync__permission-audit-item">
+                    <span>
+                      {tokenPermissionAuditData?.message
+                        ?? 'GitHub Sync could not confirm the required repository permissions for this company.'}
+                    </span>
+                  </div>
+                </div>
+              </div>
+            ) : null}
+
+            {tokenPermissionUnknownVisible ? (
+              <div className="ghsync__permission-audit">
+                <div className="ghsync__permission-audit-header">
+                  <strong>Token permission audit pending</strong>
+                </div>
+                <div className="ghsync__permission-audit-list">
+                  <div className="ghsync__permission-audit-item">
+                    <span>
+                      {tokenPermissionAuditData?.warnings[0]
+                        ?? 'Add a mapped repository in this company so GitHub Sync can verify the token permissions it needs.'}
+                    </span>
+                  </div>
+                </div>
+              </div>
+            ) : null}
           </section>
 
           <section className="ghsync__section">
@@ -10410,6 +11316,32 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
               </span>
             </div>
 
+            {tokenStatus === 'valid' ? (
+              <div className="ghsync__check">
+                <div className="ghsync__check-top">
+                  <strong>Token permissions</strong>
+                <span className={`ghsync__badge ${getToneClass(tokenPermissionAuditMeta.tone)}`}>
+                  {tokenPermissionAuditMeta.label}
+                </span>
+              </div>
+              <span>
+                {!hasCompanyContext
+                  ? 'Select a company to audit mapped repositories.'
+                  : tokenPermissionWarningVisible
+                    ? tokenPermissionAuditData?.missingPermissions.length
+                      ? `Missing: ${tokenPermissionAuditData.missingPermissions.join(', ')}.`
+                      : tokenPermissionAuditData?.warnings[0] ?? 'GitHub Sync could not verify all required permissions yet.'
+                    : tokenPermissionAuditErrorVisible
+                      ? tokenPermissionAuditData?.message ?? 'GitHub Sync could not audit token permissions.'
+                      : tokenPermissionUnknownVisible
+                        ? tokenPermissionAuditData?.warnings[0] ?? 'Add a mapped repository to verify token permissions.'
+                        : tokenPermissionAuditData?.status === 'ready' && tokenPermissionRepositories.length > 0
+                          ? 'Required permissions verified for the mapped repositories in this company.'
+                          : tokenPermissionAuditData?.warnings[0] ?? 'Select a company to audit mapped repositories.'}
+              </span>
+            </div>
+          ) : null}
+
             <div className="ghsync__check">
               <div className="ghsync__check-top">
                 <strong>Repositories</strong>
@@ -10839,6 +11771,281 @@ function GitHubMarkIcon(props: {
         d={GITHUB_MARK_PATH_D}
       />
     </svg>
+  );
+}
+
+const COPILOT_MENU_PANEL_MAX_WIDTH_PX = 320;
+const COPILOT_MENU_VIEWPORT_MARGIN_PX = 24;
+const COPILOT_MENU_TRIGGER_GAP_PX = 8;
+
+function buildCopilotMenuPanelStyle(params: {
+  triggerRect: DOMRect;
+  panelHeight: number;
+}): React.CSSProperties {
+  const availableWidth = Math.max(0, window.innerWidth - COPILOT_MENU_VIEWPORT_MARGIN_PX * 2);
+  const width = Math.min(COPILOT_MENU_PANEL_MAX_WIDTH_PX, availableWidth);
+  const left = Math.min(
+    window.innerWidth - COPILOT_MENU_VIEWPORT_MARGIN_PX - width,
+    Math.max(COPILOT_MENU_VIEWPORT_MARGIN_PX, params.triggerRect.right - width)
+  );
+  const belowTop = params.triggerRect.bottom + COPILOT_MENU_TRIGGER_GAP_PX;
+  const availableBelow = Math.max(0, window.innerHeight - COPILOT_MENU_VIEWPORT_MARGIN_PX - belowTop);
+  const availableAbove = Math.max(0, params.triggerRect.top - COPILOT_MENU_TRIGGER_GAP_PX - COPILOT_MENU_VIEWPORT_MARGIN_PX);
+  const renderAbove = params.panelHeight > availableBelow && availableAbove > availableBelow;
+  const top = renderAbove
+    ? Math.max(COPILOT_MENU_VIEWPORT_MARGIN_PX, params.triggerRect.top - COPILOT_MENU_TRIGGER_GAP_PX - params.panelHeight)
+    : Math.max(COPILOT_MENU_VIEWPORT_MARGIN_PX, belowTop);
+  const maxHeight = renderAbove ? availableAbove : availableBelow;
+
+  return {
+    top,
+    left,
+    width,
+    maxHeight
+  };
+}
+
+function PullRequestCopilotActionMenu(props: {
+  pullRequestNumber: number;
+  actions: PullRequestCopilotActionOption[];
+  busy: boolean;
+  variant: 'icon' | 'button';
+  onSelect: (action: PullRequestCopilotActionId) => void;
+  label?: string;
+}): React.JSX.Element | null {
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const triggerRef = useRef<HTMLButtonElement | null>(null);
+  const panelRef = useRef<HTMLDivElement | null>(null);
+  const optionRefs = useRef<Array<HTMLButtonElement | null>>([]);
+  const menuIdRef = useRef(`ghsync-copilot-menu-${Math.random().toString(36).slice(2, 10)}`);
+  const [panelStyle, setPanelStyle] = useState<React.CSSProperties | null>(null);
+  const disabled = props.busy || props.actions.length === 0;
+
+  function focusMenuOption(index: number): void {
+    const option = optionRefs.current[index];
+    option?.focus();
+  }
+
+  function closeMenu(options?: {
+    restoreFocus?: boolean;
+  }): void {
+    setOpen(false);
+    if (options?.restoreFocus !== false) {
+      window.setTimeout(() => {
+        triggerRef.current?.focus();
+      }, 0);
+    }
+  }
+
+  useEffect(() => {
+    if (!open) {
+      setPanelStyle(null);
+      return;
+    }
+
+    const updatePanelStyle = () => {
+      const trigger = triggerRef.current;
+      if (!trigger) {
+        return;
+      }
+
+      setPanelStyle(buildCopilotMenuPanelStyle({
+        triggerRect: trigger.getBoundingClientRect(),
+        panelHeight: panelRef.current?.offsetHeight ?? 0
+      }));
+    };
+
+    updatePanelStyle();
+    window.addEventListener('resize', updatePanelStyle);
+    window.addEventListener('scroll', updatePanelStyle, true);
+
+    return () => {
+      window.removeEventListener('resize', updatePanelStyle);
+      window.removeEventListener('scroll', updatePanelStyle, true);
+    };
+  }, [open, props.actions.length, props.variant]);
+
+  useEffect(() => {
+    if (!open) {
+      return;
+    }
+
+    window.setTimeout(() => {
+      focusMenuOption(0);
+    }, 0);
+
+    const handlePointerDown = (event: PointerEvent) => {
+      const target = event.target;
+      if (target instanceof Node && rootRef.current?.contains(target)) {
+        return;
+      }
+
+      closeMenu();
+    };
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        closeMenu();
+      }
+    };
+
+    document.addEventListener('pointerdown', handlePointerDown);
+    document.addEventListener('keydown', handleKeyDown);
+
+    return () => {
+      document.removeEventListener('pointerdown', handlePointerDown);
+      document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [open]);
+
+  useEffect(() => {
+    if (disabled && open) {
+      closeMenu();
+    }
+  }, [disabled, open]);
+
+  if (props.actions.length === 0) {
+    return null;
+  }
+
+  const buttonLabel = props.label ?? 'Copilot';
+  const busyLabel = `Posting Copilot request for #${props.pullRequestNumber}`;
+  const title = `${buttonLabel} actions for #${props.pullRequestNumber}`;
+
+  return (
+    <div
+      className={`ghsync-copilot-menu${props.variant === 'button' ? ' ghsync-copilot-menu--button' : ''}`}
+      ref={rootRef}
+    >
+      <button
+        type="button"
+        ref={triggerRef}
+        className={
+          props.variant === 'button'
+            ? `${getPluginActionClassName({ variant: 'secondary', size: 'sm' })} ghsync-copilot-menu__trigger ghsync-copilot-menu__trigger--button`
+            : 'ghsync-prs-table__icon-button ghsync-copilot-menu__trigger ghsync-copilot-menu__trigger--icon'
+        }
+        title={title}
+        aria-label={title}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        aria-controls={open ? menuIdRef.current : undefined}
+        disabled={disabled}
+        onKeyDown={(event) => {
+          if (disabled) {
+            return;
+          }
+
+          if (event.key === 'ArrowDown') {
+            event.preventDefault();
+            setOpen(true);
+            window.setTimeout(() => {
+              focusMenuOption(0);
+            }, 0);
+          } else if (event.key === 'ArrowUp') {
+            event.preventDefault();
+            setOpen(true);
+            window.setTimeout(() => {
+              focusMenuOption(Math.max(props.actions.length - 1, 0));
+            }, 0);
+          }
+        }}
+        onClick={() => {
+          if (disabled) {
+            return;
+          }
+
+          setOpen((current) => !current);
+        }}
+      >
+        {props.variant === 'button' ? (
+          <span className="ghsync-copilot-menu__trigger-button-content">
+            {props.busy ? (
+              <LoadingSpinner size="sm" className="ghsync__button-spinner" label={busyLabel} />
+            ) : (
+              <CopilotIcon className="ghsync-prs-icon" />
+            )}
+            <span>{props.busy ? 'Requesting…' : buttonLabel}</span>
+            <span className="ghsync-copilot-menu__trigger-chevron" aria-hidden="true">
+              <PickerChevronIcon />
+            </span>
+          </span>
+        ) : (
+          <LoadingIconButtonContent
+            busy={props.busy}
+            busyLabel={busyLabel}
+            icon={<CopilotIcon className="ghsync-prs-icon" />}
+          />
+        )}
+      </button>
+
+      {open ? (
+        <div
+          id={menuIdRef.current}
+          ref={panelRef}
+          className="ghsync-copilot-menu__panel"
+          role="menu"
+          aria-label={`Copilot actions for pull request #${props.pullRequestNumber}`}
+          style={panelStyle ?? { visibility: 'hidden' }}
+          onKeyDown={(event) => {
+            const currentIndex = optionRefs.current.findIndex((option) => option === document.activeElement);
+            if (event.key === 'Escape') {
+              event.preventDefault();
+              closeMenu();
+              return;
+            }
+
+            if (event.key === 'ArrowDown') {
+              event.preventDefault();
+              focusMenuOption((currentIndex + 1 + props.actions.length) % props.actions.length);
+              return;
+            }
+
+            if (event.key === 'ArrowUp') {
+              event.preventDefault();
+              focusMenuOption((currentIndex - 1 + props.actions.length) % props.actions.length);
+              return;
+            }
+
+            if (event.key === 'Home') {
+              event.preventDefault();
+              focusMenuOption(0);
+              return;
+            }
+
+            if (event.key === 'End') {
+              event.preventDefault();
+              focusMenuOption(Math.max(props.actions.length - 1, 0));
+              return;
+            }
+
+            if (event.key === 'Tab') {
+              closeMenu({ restoreFocus: false });
+            }
+          }}
+        >
+          {props.actions.map((action, index) => (
+            <button
+              key={action.id}
+              type="button"
+              ref={(element) => {
+                optionRefs.current[index] = element;
+              }}
+              className="ghsync-copilot-menu__option"
+              role="menuitem"
+              onClick={() => {
+                closeMenu();
+                props.onSelect(action.id);
+              }}
+            >
+              <span className="ghsync-copilot-menu__option-label">{action.label}</span>
+              <span className="ghsync-copilot-menu__option-description">{action.description}</span>
+            </button>
+          ))}
+        </div>
+      ) : null}
+    </div>
   );
 }
 
