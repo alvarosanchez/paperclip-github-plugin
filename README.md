@@ -216,6 +216,7 @@ If you want the seeded `CEO` agent used in manual verification to opt into Codex
 - The published version is derived from the GitHub release tag rather than the committed `package.json` version.
 - Tags may be either `1.2.3` or `v1.2.3`; the workflow normalizes both to `1.2.3`.
 - During release, the package version is stamped from the tag before build and publish, and the built plugin manifest uses that same resolved version.
+- After a successful publish, the workflow also commits that resolved version back into the checked-in `package.json` on the release target branch so the repository metadata stays in sync with npm.
 - The workflow is intended for npm trusted publishing through GitHub Actions OIDC, so no long-lived `NPM_TOKEN` secret is required when trusted publishing is configured correctly.
 
 ## License

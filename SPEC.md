@@ -133,4 +133,5 @@ The plugin MUST persist repository mappings, company-scoped advanced issue defau
 - Local development SHOULD provide a watch-mode build and a local UI dev server for hosted-UI iteration.
 - The build pipeline MUST stamp the plugin manifest version from build-time package metadata rather than keeping a separately hardcoded manifest version.
 - The release workflow MUST derive the published version from the GitHub release tag and stamp that version into publishable package metadata before build and publish.
+- After a successful publish, the release workflow MUST sync that resolved release version back into the checked-in `package.json` on the release target branch so repository metadata reflects the latest published release.
 - The release workflow MUST run on a Node.js version that already satisfies npm trusted publishing requirements instead of relying on an in-job npm self-upgrade step.
