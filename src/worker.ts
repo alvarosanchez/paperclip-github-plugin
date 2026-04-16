@@ -75,6 +75,8 @@ const ISSUE_LINK_ENTITY_TYPE = 'paperclip-github-plugin.issue-link';
 const PULL_REQUEST_LINK_ENTITY_TYPE = 'paperclip-github-plugin.pull-request-link';
 const COMMENT_ANNOTATION_ENTITY_TYPE = 'paperclip-github-plugin.comment-annotation';
 const AI_AUTHORED_COMMENT_FOOTER_PREFIX = 'Created by a Paperclip AI agent using ';
+const HIDDEN_GITHUB_IMPORT_MARKER_PREFIX = '<!-- paperclip-github-plugin-imported-from: ';
+const HIDDEN_GITHUB_IMPORT_MARKER_SUFFIX = ' -->';
 
 type PluginSetupContext = Parameters<Parameters<typeof definePlugin>[0]['setup']>[0];
 type PaperclipIssueStatus = Issue['status'];
@@ -275,6 +277,12 @@ interface GitHubIssueLinkRecord {
   data: GitHubIssueLinkEntityData;
 }
 
+interface GitHubIssueLinkTarget {
+  companyId?: string;
+  paperclipProjectId?: string;
+  repositoryUrl: string;
+}
+
 interface ResolvedPaperclipIssueGitHubLink {
   source: 'entity' | 'import_registry' | 'description';
   companyId?: string;
@@ -284,6 +292,7 @@ interface ResolvedPaperclipIssueGitHubLink {
   githubIssueNumber: number;
   githubIssueUrl: string;
   linkedPullRequestNumbers: number[];
+  entityRecord?: GitHubIssueLinkRecord;
 }
 
 interface StoredStatusTransitionCommentAnnotation {
@@ -2923,9 +2932,13 @@ function doesImportedIssueMatchTarget(
 async function resolvePaperclipIssueGitHubLink(
   ctx: PluginSetupContext,
   issueId: string,
-  companyId: string
+  companyId: string,
+  options: {
+    linkRecords?: GitHubIssueLinkRecord[];
+    paperclipIssue?: Issue | null;
+  } = {}
 ): Promise<ResolvedPaperclipIssueGitHubLink | null> {
-  const linkRecords = await listGitHubIssueLinkRecords(ctx, {
+  const linkRecords = options.linkRecords ?? await listGitHubIssueLinkRecords(ctx, {
     paperclipIssueId: issueId
   });
   const entityMatch = linkRecords.find((record) => !record.data.companyId || record.data.companyId === companyId);
@@ -2938,7 +2951,8 @@ async function resolvePaperclipIssueGitHubLink(
       githubIssueId: entityMatch.data.githubIssueId,
       githubIssueNumber: entityMatch.data.githubIssueNumber,
       githubIssueUrl: entityMatch.data.githubIssueUrl,
-      linkedPullRequestNumbers: entityMatch.data.linkedPullRequestNumbers
+      linkedPullRequestNumbers: entityMatch.data.linkedPullRequestNumbers,
+      entityRecord: entityMatch
     };
   }
 
@@ -2955,7 +2969,7 @@ async function resolvePaperclipIssueGitHubLink(
       registryMatch.githubIssueNumber
     );
     if (githubIssueUrl) {
-      return {
+      const fallbackLink = {
         source: 'import_registry',
         companyId: registryMatch.companyId,
         paperclipProjectId: registryMatch.paperclipProjectId,
@@ -2964,18 +2978,20 @@ async function resolvePaperclipIssueGitHubLink(
         githubIssueNumber: registryMatch.githubIssueNumber,
         githubIssueUrl,
         linkedPullRequestNumbers: []
-      };
+      } satisfies ResolvedPaperclipIssueGitHubLink;
+
+      return await hydrateRecoveredPaperclipIssueGitHubLink(ctx, issueId, fallbackLink) ?? fallbackLink;
     }
   }
 
-  const issue = await ctx.issues.get(issueId, companyId);
+  const issue = options.paperclipIssue ?? await ctx.issues.get(issueId, companyId);
   const githubIssueUrl = extractImportedGitHubIssueUrlFromDescription(issue?.description);
   const githubIssueReference = githubIssueUrl ? parseGitHubIssueHtmlUrl(githubIssueUrl) : null;
   if (!githubIssueReference) {
     return null;
   }
 
-  return {
+  const fallbackLink = {
     source: 'description',
     companyId,
     paperclipProjectId: issue?.projectId ?? undefined,
@@ -2983,7 +2999,84 @@ async function resolvePaperclipIssueGitHubLink(
     githubIssueNumber: githubIssueReference.issueNumber,
     githubIssueUrl: githubIssueReference.issueUrl,
     linkedPullRequestNumbers: []
-  };
+  } satisfies ResolvedPaperclipIssueGitHubLink;
+
+  return await hydrateRecoveredPaperclipIssueGitHubLink(ctx, issueId, fallbackLink) ?? fallbackLink;
+}
+
+async function hydrateRecoveredPaperclipIssueGitHubLink(
+  ctx: PluginSetupContext,
+  issueId: string,
+  fallbackLink: ResolvedPaperclipIssueGitHubLink
+): Promise<ResolvedPaperclipIssueGitHubLink | null> {
+  const repository = parseRepositoryReference(fallbackLink.repositoryUrl);
+  if (!repository) {
+    return null;
+  }
+
+  let octokit: Octokit;
+  try {
+    octokit = await createGitHubToolOctokit(ctx);
+  } catch {
+    return null;
+  }
+
+  try {
+    const response = await octokit.rest.issues.get({
+      owner: repository.owner,
+      repo: repository.repo,
+      issue_number: fallbackLink.githubIssueNumber,
+      headers: {
+        'X-GitHub-Api-Version': GITHUB_API_VERSION
+      }
+    });
+    const githubIssue = normalizeGitHubIssueRecord(response.data as GitHubApiIssueRecord);
+    const linkedPullRequests = await listLinkedPullRequestsForIssue(octokit, repository, githubIssue.number);
+    const linkedPullRequestNumbers = linkedPullRequests.map((pullRequest) => pullRequest.number);
+
+    const entityRecord = buildGitHubIssueLinkRecord(
+      {
+        companyId: fallbackLink.companyId,
+        paperclipProjectId: fallbackLink.paperclipProjectId,
+        repositoryUrl: fallbackLink.repositoryUrl
+      },
+      issueId,
+      githubIssue,
+      linkedPullRequestNumbers
+    );
+    await upsertGitHubIssueLinkRecord(
+      ctx,
+      {
+        companyId: fallbackLink.companyId,
+        paperclipProjectId: fallbackLink.paperclipProjectId,
+        repositoryUrl: fallbackLink.repositoryUrl
+      },
+      issueId,
+      githubIssue,
+      linkedPullRequestNumbers
+    );
+
+    return {
+      source: 'entity',
+      companyId: fallbackLink.companyId,
+      paperclipProjectId: fallbackLink.paperclipProjectId,
+      repositoryUrl: fallbackLink.repositoryUrl,
+      githubIssueId: githubIssue.id,
+      githubIssueNumber: githubIssue.number,
+      githubIssueUrl: normalizeGitHubIssueHtmlUrl(githubIssue.htmlUrl) ?? githubIssue.htmlUrl,
+      linkedPullRequestNumbers,
+      entityRecord
+    };
+  } catch (error) {
+    ctx.logger.warn('Unable to hydrate recovered GitHub issue metadata for a Paperclip issue fallback link.', {
+      issueId,
+      companyId: fallbackLink.companyId,
+      repositoryUrl: fallbackLink.repositoryUrl,
+      githubIssueNumber: fallbackLink.githubIssueNumber,
+      error: getErrorMessage(error)
+    });
+    return null;
+  }
 }
 
 async function resolveManualSyncTarget(
@@ -3244,7 +3337,14 @@ async function buildIssueGitHubDetails(
   const linkRecords = await listGitHubIssueLinkRecords(ctx, {
     paperclipIssueId: issueId
   });
-  const entityMatch = linkRecords.find((record) => !record.data.companyId || record.data.companyId === companyId);
+  const link = await resolvePaperclipIssueGitHubLink(ctx, issueId, companyId, {
+    linkRecords
+  });
+  if (!link) {
+    return null;
+  }
+
+  const entityMatch = link.entityRecord;
   if (entityMatch) {
     return {
       paperclipIssueId: issueId,
@@ -3261,18 +3361,13 @@ async function buildIssueGitHubDetails(
     };
   }
 
-  const fallbackLink = await resolvePaperclipIssueGitHubLink(ctx, issueId, companyId);
-  if (!fallbackLink) {
-    return null;
-  }
-
   return {
     paperclipIssueId: issueId,
-    source: fallbackLink.source,
-    githubIssueNumber: fallbackLink.githubIssueNumber,
-    githubIssueUrl: fallbackLink.githubIssueUrl,
-    repositoryUrl: fallbackLink.repositoryUrl,
-    linkedPullRequestNumbers: fallbackLink.linkedPullRequestNumbers
+    source: link.source,
+    githubIssueNumber: link.githubIssueNumber,
+    githubIssueUrl: link.githubIssueUrl,
+    repositoryUrl: link.repositoryUrl,
+    linkedPullRequestNumbers: link.linkedPullRequestNumbers
   };
 }
 
@@ -5896,6 +5991,17 @@ function normalizeGitHubIssueHtmlUrl(value: string): string | undefined {
   return parseGitHubIssueHtmlUrl(value)?.issueUrl;
 }
 
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function getHiddenGitHubImportMarkerPattern(): RegExp {
+  return new RegExp(
+    `${escapeRegExp(HIDDEN_GITHUB_IMPORT_MARKER_PREFIX)}(\\S+?)${escapeRegExp(HIDDEN_GITHUB_IMPORT_MARKER_SUFFIX)}`,
+    'i'
+  );
+}
+
 function buildGitHubIssueMarkdownLink(issueReference: ParsedGitHubIssueReference): string {
   return `[#${issueReference.issueNumber}](${issueReference.issueUrl})`;
 }
@@ -5950,6 +6056,11 @@ function normalizeLinkedPullRequestNumbers(values: number[]): number[] {
 function extractImportedGitHubIssueUrlFromDescription(description: string | null | undefined): string | undefined {
   if (typeof description !== 'string') {
     return undefined;
+  }
+
+  const hiddenMarkerMatch = description.match(getHiddenGitHubImportMarkerPattern());
+  if (hiddenMarkerMatch) {
+    return normalizeGitHubIssueHtmlUrl(hiddenMarkerMatch[1]);
   }
 
   const markdownMetadataMatch = description.match(/^\*\s+GitHub issue:\s+\[[^\]]+\]\(([^)]+)\)/m);
@@ -6145,8 +6256,30 @@ function normalizeGitHubIssueBodyForPaperclip(body: string | null | undefined): 
 
 function buildPaperclipIssueDescription(issue: GitHubIssueRecord, linkedPullRequestNumbers: number[] = []): string {
   const normalizedBody = normalizeGitHubIssueBodyForPaperclip(issue.body);
+  const hiddenImportMarker = buildHiddenGitHubImportMarker(issue.htmlUrl);
   void linkedPullRequestNumbers;
-  return normalizedBody ?? '';
+  if (!hiddenImportMarker) {
+    return normalizedBody ?? '';
+  }
+
+  if (!normalizedBody) {
+    return hiddenImportMarker;
+  }
+
+  return `${normalizedBody}\n\n${hiddenImportMarker}`;
+}
+
+function buildHiddenGitHubImportMarker(githubIssueUrl: string | null | undefined): string | undefined {
+  if (typeof githubIssueUrl !== 'string') {
+    return undefined;
+  }
+
+  const normalizedIssueUrl = normalizeGitHubIssueHtmlUrl(githubIssueUrl);
+  if (!normalizedIssueUrl) {
+    return undefined;
+  }
+
+  return `${HIDDEN_GITHUB_IMPORT_MARKER_PREFIX}${normalizedIssueUrl}${HIDDEN_GITHUB_IMPORT_MARKER_SUFFIX}`;
 }
 
 function normalizeIssueDescriptionValue(value: string | null | undefined): string {
@@ -6505,26 +6638,23 @@ async function findStoredStatusTransitionCommentAnnotation(
   return null;
 }
 
-async function upsertGitHubIssueLinkRecord(
-  ctx: PluginSetupContext,
-  mapping: RepositoryMapping,
+function buildGitHubIssueLinkRecord(
+  target: GitHubIssueLinkTarget,
   issueId: string,
   githubIssue: GitHubIssueRecord,
   linkedPullRequestNumbers: number[]
-): Promise<void> {
+): GitHubIssueLinkRecord {
   const githubIssueUrl = normalizeGitHubIssueHtmlUrl(githubIssue.htmlUrl) ?? githubIssue.htmlUrl;
+  const repositoryUrl = parseRepositoryReference(target.repositoryUrl)?.url ?? target.repositoryUrl.trim();
 
-  await ctx.entities.upsert({
-    entityType: ISSUE_LINK_ENTITY_TYPE,
-    scopeKind: 'issue',
-    scopeId: issueId,
-    externalId: githubIssueUrl,
+  return {
+    paperclipIssueId: issueId,
     title: `GitHub issue #${githubIssue.number}`,
     status: githubIssue.state,
     data: {
-      ...(mapping.companyId ? { companyId: mapping.companyId } : {}),
-      ...(mapping.paperclipProjectId ? { paperclipProjectId: mapping.paperclipProjectId } : {}),
-      repositoryUrl: getNormalizedMappingRepositoryUrl(mapping),
+      ...(target.companyId ? { companyId: target.companyId } : {}),
+      ...(target.paperclipProjectId ? { paperclipProjectId: target.paperclipProjectId } : {}),
+      repositoryUrl,
       githubIssueId: githubIssue.id,
       githubIssueNumber: githubIssue.number,
       githubIssueUrl,
@@ -6535,6 +6665,26 @@ async function upsertGitHubIssueLinkRecord(
       labels: githubIssue.labels,
       syncedAt: new Date().toISOString()
     }
+  };
+}
+
+async function upsertGitHubIssueLinkRecord(
+  ctx: PluginSetupContext,
+  target: GitHubIssueLinkTarget,
+  issueId: string,
+  githubIssue: GitHubIssueRecord,
+  linkedPullRequestNumbers: number[]
+): Promise<void> {
+  const record = buildGitHubIssueLinkRecord(target, issueId, githubIssue, linkedPullRequestNumbers);
+
+  await ctx.entities.upsert({
+    entityType: ISSUE_LINK_ENTITY_TYPE,
+    scopeKind: 'issue',
+    scopeId: issueId,
+    externalId: record.data.githubIssueUrl,
+    ...(record.title ? { title: record.title } : {}),
+    ...(record.status ? { status: record.status } : {}),
+    data: record.data as unknown as Record<string, unknown>
   });
 }
 

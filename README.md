@@ -118,6 +118,8 @@ When a token is saved, the settings page audits the mapped repositories for the 
 
 Imported issues keep the original GitHub title and use the normalized GitHub body as the Paperclip description. The worker also normalizes GitHub HTML that Paperclip descriptions do not render cleanly, including elements such as `<br>`, `<hr>`, `<details>`, `<summary>`, and inline images.
 
+To keep imported issues recognizable without cluttering the visible description, the plugin appends a hidden HTML comment footer with the source GitHub issue URL. Agents and repair flows use that marker when the plugin-owned link entity or import registry is missing.
+
 Repeated syncs keep existing imports current instead of creating duplicates again. If the plugin's import registry is stale, the worker can repair deduplication by reusing existing Paperclip issues when durable GitHub link metadata is already present.
 
 When the local Paperclip API is available, the plugin also syncs labels by name, prefers exact color matches when multiple Paperclip labels share the same name, and creates missing Paperclip labels when needed.
