@@ -10795,6 +10795,146 @@ test('worker falls back to the SDK bridge when the local Paperclip status PATCH 
   }
 });
 
+test('worker moves reopened imported issues with no linked pull requests from done back to todo', async () => {
+  const harness = createTestHarness({
+    manifest,
+    config: {
+      githubTokenRef: 'github-secret-ref'
+    }
+  });
+  await plugin.definition.setup(harness.ctx);
+  harness.ctx.secrets.resolve = async () => 'github-token';
+
+  await harness.performAction('settings.saveRegistration', {
+    mappings: [
+      {
+        id: 'mapping-a',
+        repositoryUrl: 'paperclipai/example-repo',
+        paperclipProjectName: 'Engineering',
+        paperclipProjectId: 'project-1',
+        companyId: 'company-1'
+      }
+    ],
+    syncState: {
+      status: 'idle'
+    }
+  });
+
+  const originalUpdate = harness.ctx.issues.update;
+  const originalCreateComment = harness.ctx.issues.createComment;
+
+  const importedIssue = await harness.ctx.issues.create({
+    companyId: 'company-1',
+    projectId: 'project-1',
+    title: 'Reopened issue should re-enter the queue',
+    description: '* GitHub issue: [#45](https://github.com/paperclipai/example-repo/issues/45)\n\n---\n\nBody'
+  });
+  await originalUpdate(importedIssue.id, { status: 'done' }, 'company-1');
+
+  await harness.ctx.state.set(
+    {
+      scopeKind: 'instance',
+      stateKey: 'paperclip-github-plugin-import-registry'
+    },
+    [
+      {
+        mappingId: 'mapping-a',
+        githubIssueId: 4501,
+        githubIssueNumber: 45,
+        paperclipIssueId: importedIssue.id,
+        importedAt: '2026-04-09T09:00:00.000Z',
+        lastSeenCommentCount: 0,
+        repositoryUrl: 'https://github.com/paperclipai/example-repo',
+        paperclipProjectId: 'project-1',
+        companyId: 'company-1'
+      }
+    ]
+  );
+
+  const transitionComments: Array<{ issueId: string; body: string }> = [];
+  harness.ctx.issues.createComment = async (issueId, body, companyId) => {
+    transitionComments.push({ issueId, body });
+    return originalCreateComment(issueId, body, companyId);
+  };
+
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input, init) => {
+    const rawUrl = getRequestUrl(input);
+    const url = new URL(rawUrl);
+
+    if (url.pathname === '/repos/paperclipai/example-repo/issues' && ['all', 'open'].includes(url.searchParams.get('state') ?? '')) {
+      return jsonResponse([
+        {
+          id: 4501,
+          number: 45,
+          title: 'Reopened issue should re-enter the queue',
+          body: 'Body',
+          html_url: 'https://github.com/paperclipai/example-repo/issues/45',
+          state: 'open',
+          comments: 0
+        }
+      ]);
+    }
+
+    if (url.pathname === '/graphql') {
+      const { query, variables } = getGraphqlRequest(init);
+      const issueNumber = typeof variables.issueNumber === 'number' ? variables.issueNumber : undefined;
+
+      if (query.includes('query GitHubIssueParentRelationships')) {
+        return graphqlIssueParentRelationshipsResponse([
+          {
+            issueNumber: 45
+          }
+        ]);
+      }
+
+      if (query.includes('query GitHubIssueStatusSnapshot') && issueNumber === 45) {
+        return graphqlResponse({
+          repository: {
+            issue: {
+              number: 45,
+              state: 'OPEN',
+              stateReason: null,
+              comments: {
+                totalCount: 0
+              },
+              closedByPullRequestsReferences: {
+                pageInfo: {
+                  hasNextPage: false,
+                  endCursor: null
+                },
+                nodes: []
+              }
+            }
+          }
+        });
+      }
+    }
+
+    throw new Error(`Unexpected GitHub request: ${url.toString()}`);
+  };
+
+  try {
+    const sync = await harness.performAction('sync.runNow', {
+      waitForCompletion: true
+    }) as {
+      syncState: { status: string };
+    };
+
+    assert.equal(sync.syncState.status, 'success');
+    assert.equal((await harness.ctx.issues.get(importedIssue.id, 'company-1'))?.status, 'todo');
+    assert.equal(transitionComments.length, 1);
+    assert.equal(transitionComments[0]?.issueId, importedIssue.id);
+    assert.match(transitionComments[0]?.body ?? '', /from `done` to `todo`/);
+    assert.match(
+      transitionComments[0]?.body ?? '',
+      /the GitHub issue is open with no linked pull requests/
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test('worker only resets imported issues to todo for new comments from the issue author or repository maintainers', async () => {
   const harness = createTestHarness({
     manifest,

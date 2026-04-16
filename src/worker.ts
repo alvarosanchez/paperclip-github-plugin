@@ -5243,7 +5243,7 @@ function resolvePaperclipIssueStatus(params: {
   }
 
   if (currentStatus === 'done' || currentStatus === 'cancelled') {
-    return 'backlog';
+    return 'todo';
   }
 
   return currentStatus;
