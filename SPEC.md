@@ -56,6 +56,7 @@ The plugin MUST persist repository mappings, company-scoped advanced issue defau
 - When the mapping company has a configured default assignee, the sync flow MUST assign newly created imported Paperclip issues to that Paperclip agent.
 - Imported Paperclip issues MUST keep the original GitHub issue title without adding a `[GitHub]` prefix.
 - Imported issue descriptions SHOULD contain the normalized GitHub body when present and MUST normalize the GitHub raw HTML constructs that Paperclip cannot render in multiline descriptions.
+- Imported issue descriptions MUST also retain a machine-readable hidden marker for the source GitHub issue URL so agents and repair paths can still recognize imported issues when plugin-owned entity or registry state is missing.
 - GitHub repository, issue, PR, label, and sync metadata SHOULD move into a dedicated issue detail surface instead of being prepended into the issue description.
 - Repeated sync runs MUST continue reconciling imported Paperclip issue descriptions against the latest GitHub issue body.
 - Saving setup MUST persist the current Paperclip host origin so scheduled sync runs can call the local Paperclip label API later.

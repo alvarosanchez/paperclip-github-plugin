@@ -719,17 +719,25 @@ async function waitFor(condition: () => boolean, timeoutMs = 2_000, intervalMs =
   throw new Error(`Timed out after ${timeoutMs}ms waiting for a background sync result.`);
 }
 
+function stripHiddenGitHubImportMarker(description: string): string {
+  return description
+    .replace(/\n*\s*<!--\s*paperclip-github-plugin-imported-from:\s*\S+?\s*-->\s*$/i, '')
+    .trimEnd();
+}
+
 function assertNormalizedPublicGitHubIssueDescription(description: string): void {
-  assert.doesNotMatch(description, /^\*\s+GitHub issue:/m);
-  assert.match(description, /This issue lists Renovate updates and detected dependencies\./);
-  assert.match(description, /## PR Edited \(Blocked\)/);
-  assert.match(description, /## Detected Dependencies/);
-  assert.match(description, /\n\n---\n\n/);
-  assert.doesNotMatch(description, /<!--/);
-  assert.doesNotMatch(description, /<br\s*\/?>/i);
-  assert.doesNotMatch(description, /<\/?details\b/i);
-  assert.doesNotMatch(description, /<\/?summary\b/i);
-  assert.doesNotMatch(description, /<img\b/i);
+  const visibleDescription = stripHiddenGitHubImportMarker(description);
+  assert.doesNotMatch(visibleDescription, /^\*\s+GitHub issue:/m);
+  assert.match(visibleDescription, /This issue lists Renovate updates and detected dependencies\./);
+  assert.match(visibleDescription, /## PR Edited \(Blocked\)/);
+  assert.match(visibleDescription, /## Detected Dependencies/);
+  assert.match(visibleDescription, /\n\n---\n\n/);
+  assert.doesNotMatch(visibleDescription, /<!--/);
+  assert.doesNotMatch(visibleDescription, /<br\s*\/?>/i);
+  assert.doesNotMatch(visibleDescription, /<\/?details\b/i);
+  assert.doesNotMatch(visibleDescription, /<\/?summary\b/i);
+  assert.doesNotMatch(visibleDescription, /<img\b/i);
+  assert.match(description, /<!-- paperclip-github-plugin-imported-from: https:\/\/github\.com\//);
 }
 
 test('resolveCliAuthPollUrl prefixes the Paperclip API base path for challenge polling', () => {
@@ -6726,7 +6734,10 @@ test('worker strips NUL bytes from GitHub issue text before creating imported Pa
     const importedIssue = importedIssues.find((issue) => issue.title === 'Import survives  NUL bytes');
 
     assert.ok(importedIssue);
-    assert.equal(importedIssue?.description, 'First line\n\nSecond line after the hidden byte.');
+    assert.equal(
+      stripHiddenGitHubImportMarker(importedIssue?.description ?? ''),
+      'First line\n\nSecond line after the hidden byte.'
+    );
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -7740,6 +7751,209 @@ test('worker resyncs imported issue descriptions when the GitHub body changes la
   }
 });
 
+test('get_issue resolves imported Paperclip issues from the hidden description marker when registry and entities are missing', async () => {
+  const harness = await createGitHubAgentToolHarness();
+  const originalFetch = globalThis.fetch;
+  const originalEntityList = harness.ctx.entities.list.bind(harness.ctx.entities);
+
+  const importedIssue = await harness.ctx.issues.create({
+    companyId: 'company-1',
+    projectId: 'project-1',
+    title: 'Fallback marker import',
+    description: 'Body imported from GitHub.\n\n<!-- paperclip-github-plugin-imported-from: https://github.com/paperclipai/example-repo/issues/31 -->'
+  });
+
+  globalThis.fetch = async (input, init) => {
+    const url = new URL(getRequestUrl(input));
+
+    if (url.pathname === '/repos/paperclipai/example-repo/issues/31') {
+      return jsonResponse({
+        id: 3101,
+        number: 31,
+        title: 'Fallback marker import',
+        body: 'Body imported from GitHub.',
+        html_url: 'https://github.com/paperclipai/example-repo/issues/31',
+        state: 'open',
+        comments: 0,
+        user: {
+          login: 'octocat'
+        },
+        assignees: [],
+        labels: [],
+        milestone: null
+      });
+    }
+
+    if (url.pathname === '/repos/paperclipai/example-repo/pulls/311') {
+      return jsonResponse({
+        number: 311,
+        title: 'Linked PR from fallback issue metadata',
+        body: 'Fixes the imported issue.',
+        html_url: 'https://github.com/paperclipai/example-repo/pull/311',
+        state: 'open',
+        draft: false,
+        merged: false,
+        mergeable: true,
+        mergeable_state: 'clean',
+        head: {
+          ref: 'feature/fallback-link',
+          sha: 'abc123'
+        },
+        base: {
+          ref: 'main'
+        },
+        user: {
+          login: 'octocat'
+        },
+        requested_reviewers: [],
+        requested_teams: []
+      });
+    }
+
+    if (url.pathname === '/graphql') {
+      const { query, variables } = getGraphqlRequest(init);
+      const issueNumber = typeof variables.issueNumber === 'number' ? variables.issueNumber : undefined;
+      const pullRequestNumber = typeof variables.pullRequestNumber === 'number' ? variables.pullRequestNumber : undefined;
+
+      if (query.includes('query GitHubIssueStatusSnapshot') && issueNumber === 31) {
+        return graphqlResponse({
+          repository: {
+            issue: {
+              number: 31,
+              state: 'OPEN',
+              stateReason: null,
+              comments: {
+                totalCount: 0
+              },
+              closedByPullRequestsReferences: {
+                pageInfo: {
+                  hasNextPage: false,
+                  endCursor: null
+                },
+                nodes: [
+                  {
+                    number: 311,
+                    state: 'OPEN',
+                    repository: {
+                      owner: {
+                        login: 'paperclipai'
+                      },
+                      name: 'example-repo'
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        });
+      }
+
+      if (query.includes('query GitHubPullRequestReviewThreads') && pullRequestNumber === 311) {
+        return graphqlResponse({
+          repository: {
+            pullRequest: {
+              reviewThreads: {
+                pageInfo: {
+                  hasNextPage: false,
+                  endCursor: null
+                },
+                nodes: []
+              }
+            }
+          }
+        });
+      }
+
+      if (query.includes('query GitHubPullRequestCiContexts') && pullRequestNumber === 311) {
+        return graphqlResponse({
+          repository: {
+            pullRequest: {
+              statusCheckRollup: {
+                contexts: {
+                  pageInfo: {
+                    hasNextPage: false,
+                    endCursor: null
+                  },
+                  nodes: []
+                }
+              }
+            }
+          }
+        });
+      }
+    }
+
+    throw new Error(`Unexpected GitHub request: ${url.toString()}`);
+  };
+
+  try {
+    await harness.ctx.state.set(
+      {
+        scopeKind: 'instance',
+        stateKey: 'paperclip-github-plugin-import-registry'
+      },
+      []
+    );
+
+    harness.ctx.entities.list = async (input) => {
+      if (
+        input &&
+        typeof input === 'object' &&
+        'entityType' in input &&
+        (input as { entityType?: unknown }).entityType === 'paperclip-github-plugin.issue-link'
+      ) {
+        return [];
+      }
+
+      return originalEntityList(input);
+    };
+
+    const result = await harness.executeTool('get_issue', {
+      paperclipIssueId: importedIssue.id
+    }, {
+      companyId: 'company-1',
+      projectId: 'project-1'
+    });
+
+    assert.ok(!result.error);
+    assert.equal((result.data as { repository: string }).repository, 'https://github.com/paperclipai/example-repo');
+    assert.equal((result.data as { issue: { number: number } }).issue.number, 31);
+    assert.equal(
+      (result.data as { issue: { url: string } }).issue.url,
+      'https://github.com/paperclipai/example-repo/issues/31'
+    );
+
+    const details = await harness.getData<{
+      source: string;
+      linkedPullRequestNumbers: number[];
+      githubIssueNumber: number;
+    } | null>('issue.githubDetails', {
+      companyId: 'company-1',
+      issueId: importedIssue.id
+    });
+
+    assert.equal(details?.source, 'entity');
+    assert.equal(details?.githubIssueNumber, 31);
+    assert.deepEqual(details?.linkedPullRequestNumbers, [311]);
+
+    const inferredPullRequest = await harness.executeTool('get_pull_request', {
+      paperclipIssueId: importedIssue.id
+    }, {
+      companyId: 'company-1',
+      projectId: 'project-1'
+    });
+
+    assert.ok(!inferredPullRequest.error);
+    assert.equal(
+      (inferredPullRequest.data as { pullRequest: { number: number } }).pullRequest.number,
+      311
+    );
+  } finally {
+    harness.ctx.entities.list = originalEntityList;
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test('worker repairs missing descriptions for newly created issues through the local Paperclip issue PATCH API', async () => {
   const harness = createTestHarness({
     manifest,
@@ -7894,14 +8108,17 @@ test('worker repairs missing descriptions for newly created issues through the l
     const descriptionPatchRequests = patchRequests.filter((request) => typeof request.body?.description === 'string');
     assert.equal(descriptionPatchRequests.length, 1);
     assert.equal(directDescriptionUpdateCalls.length, 0);
-    assert.equal(String(descriptionPatchRequests[0]?.body?.description ?? ''), 'Imported body');
+    assert.equal(
+      stripHiddenGitHubImportMarker(String(descriptionPatchRequests[0]?.body?.description ?? '')),
+      'Imported body'
+    );
 
     const importedIssue = (await harness.ctx.issues.list({
       companyId: 'company-1'
     })).find((issue) => issue.title === 'Description repaired after create');
 
     assert.ok(importedIssue);
-    assert.equal(importedIssue?.description ?? '', 'Imported body');
+    assert.equal(stripHiddenGitHubImportMarker(importedIssue?.description ?? ''), 'Imported body');
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -8555,15 +8772,17 @@ test('worker normalizes GitHub raw HTML that Paperclip issue descriptions cannot
     assert.ok(importedIssue);
 
     const description = importedIssue?.description ?? '';
-    assert.doesNotMatch(description, /^\*\s+GitHub issue:/m);
-    assert.match(description, /First line\nSecond line/);
-    assert.match(description, /\n\n### Preview\n\nInside details/);
-    assert.match(description, /!\[Diagram\]\(https:\/\/example\.com\/diagram\.png\)/);
-    assert.doesNotMatch(description, /<!--/);
-    assert.doesNotMatch(description, /<br\s*\/?>/i);
-    assert.doesNotMatch(description, /<\/?details\b/i);
-    assert.doesNotMatch(description, /<\/?summary\b/i);
-    assert.doesNotMatch(description, /<img\b/i);
+    const visibleDescription = stripHiddenGitHubImportMarker(description);
+    assert.doesNotMatch(visibleDescription, /^\*\s+GitHub issue:/m);
+    assert.match(visibleDescription, /First line\nSecond line/);
+    assert.match(visibleDescription, /\n\n### Preview\n\nInside details/);
+    assert.match(visibleDescription, /!\[Diagram\]\(https:\/\/example\.com\/diagram\.png\)/);
+    assert.doesNotMatch(visibleDescription, /<!--/);
+    assert.doesNotMatch(visibleDescription, /<br\s*\/?>/i);
+    assert.doesNotMatch(visibleDescription, /<\/?details\b/i);
+    assert.doesNotMatch(visibleDescription, /<\/?summary\b/i);
+    assert.doesNotMatch(visibleDescription, /<img\b/i);
+    assert.match(description, /<!-- paperclip-github-plugin-imported-from: https:\/\/github\.com\/paperclipai\/example-repo\/issues\/10 -->/);
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -10561,7 +10780,10 @@ test('worker uses the local Paperclip issue PATCH API for status transitions whe
     assert.equal(statusPatchRequests[0]?.issueId, importedIssue.id);
     assert.equal(statusPatchRequests[0]?.body?.status, 'todo');
     assert.equal(statusPatchRequests[0]?.body?.comment, undefined);
-    assert.equal(String(descriptionPatchRequests[0]?.body?.description ?? ''), 'Body');
+    assert.equal(
+      stripHiddenGitHubImportMarker(String(descriptionPatchRequests[0]?.body?.description ?? '')),
+      'Body'
+    );
     assert.equal(directStatusUpdateCalls.length, 0);
     assert.equal(directCommentCalls.length, 1);
     assert.equal(apiTransitionComments.length, 0);

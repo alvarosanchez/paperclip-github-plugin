@@ -75,6 +75,8 @@ const ISSUE_LINK_ENTITY_TYPE = 'paperclip-github-plugin.issue-link';
 const PULL_REQUEST_LINK_ENTITY_TYPE = 'paperclip-github-plugin.pull-request-link';
 const COMMENT_ANNOTATION_ENTITY_TYPE = 'paperclip-github-plugin.comment-annotation';
 const AI_AUTHORED_COMMENT_FOOTER_PREFIX = 'Created by a Paperclip AI agent using ';
+const HIDDEN_GITHUB_IMPORT_MARKER_PREFIX = '<!-- paperclip-github-plugin-imported-from: ';
+const HIDDEN_GITHUB_IMPORT_MARKER_SUFFIX = ' -->';
 
 type PluginSetupContext = Parameters<Parameters<typeof definePlugin>[0]['setup']>[0];
 type PaperclipIssueStatus = Issue['status'];
@@ -2955,7 +2957,7 @@ async function resolvePaperclipIssueGitHubLink(
       registryMatch.githubIssueNumber
     );
     if (githubIssueUrl) {
-      return {
+      const fallbackLink = {
         source: 'import_registry',
         companyId: registryMatch.companyId,
         paperclipProjectId: registryMatch.paperclipProjectId,
@@ -2964,7 +2966,9 @@ async function resolvePaperclipIssueGitHubLink(
         githubIssueNumber: registryMatch.githubIssueNumber,
         githubIssueUrl,
         linkedPullRequestNumbers: []
-      };
+      } satisfies ResolvedPaperclipIssueGitHubLink;
+
+      return await hydrateRecoveredPaperclipIssueGitHubLink(ctx, issueId, fallbackLink) ?? fallbackLink;
     }
   }
 
@@ -2975,7 +2979,7 @@ async function resolvePaperclipIssueGitHubLink(
     return null;
   }
 
-  return {
+  const fallbackLink = {
     source: 'description',
     companyId,
     paperclipProjectId: issue?.projectId ?? undefined,
@@ -2983,7 +2987,75 @@ async function resolvePaperclipIssueGitHubLink(
     githubIssueNumber: githubIssueReference.issueNumber,
     githubIssueUrl: githubIssueReference.issueUrl,
     linkedPullRequestNumbers: []
-  };
+  } satisfies ResolvedPaperclipIssueGitHubLink;
+
+  return await hydrateRecoveredPaperclipIssueGitHubLink(ctx, issueId, fallbackLink) ?? fallbackLink;
+}
+
+async function hydrateRecoveredPaperclipIssueGitHubLink(
+  ctx: PluginSetupContext,
+  issueId: string,
+  fallbackLink: ResolvedPaperclipIssueGitHubLink
+): Promise<ResolvedPaperclipIssueGitHubLink | null> {
+  const repository = parseRepositoryReference(fallbackLink.repositoryUrl);
+  if (!repository) {
+    return null;
+  }
+
+  let octokit: Octokit;
+  try {
+    octokit = await createGitHubToolOctokit(ctx);
+  } catch {
+    return null;
+  }
+
+  try {
+    const response = await octokit.rest.issues.get({
+      owner: repository.owner,
+      repo: repository.repo,
+      issue_number: fallbackLink.githubIssueNumber,
+      headers: {
+        'X-GitHub-Api-Version': GITHUB_API_VERSION
+      }
+    });
+    const githubIssue = normalizeGitHubIssueRecord(response.data as GitHubApiIssueRecord);
+    const linkedPullRequests = await listLinkedPullRequestsForIssue(octokit, repository, githubIssue.number);
+    const linkedPullRequestNumbers = linkedPullRequests.map((pullRequest) => pullRequest.number);
+
+    await upsertGitHubIssueLinkRecord(
+      ctx,
+      {
+        id: `recovered:${issueId}`,
+        repositoryUrl: fallbackLink.repositoryUrl,
+        paperclipProjectName: '',
+        paperclipProjectId: fallbackLink.paperclipProjectId,
+        companyId: fallbackLink.companyId
+      },
+      issueId,
+      githubIssue,
+      linkedPullRequestNumbers
+    );
+
+    return {
+      source: 'entity',
+      companyId: fallbackLink.companyId,
+      paperclipProjectId: fallbackLink.paperclipProjectId,
+      repositoryUrl: fallbackLink.repositoryUrl,
+      githubIssueId: githubIssue.id,
+      githubIssueNumber: githubIssue.number,
+      githubIssueUrl: normalizeGitHubIssueHtmlUrl(githubIssue.htmlUrl) ?? githubIssue.htmlUrl,
+      linkedPullRequestNumbers
+    };
+  } catch (error) {
+    ctx.logger.warn('Unable to hydrate recovered GitHub issue metadata for a Paperclip issue fallback link.', {
+      issueId,
+      companyId: fallbackLink.companyId,
+      repositoryUrl: fallbackLink.repositoryUrl,
+      githubIssueNumber: fallbackLink.githubIssueNumber,
+      error: getErrorMessage(error)
+    });
+    return null;
+  }
 }
 
 async function resolveManualSyncTarget(
@@ -3264,6 +3336,26 @@ async function buildIssueGitHubDetails(
   const fallbackLink = await resolvePaperclipIssueGitHubLink(ctx, issueId, companyId);
   if (!fallbackLink) {
     return null;
+  }
+
+  const hydratedLinkRecords = await listGitHubIssueLinkRecords(ctx, {
+    paperclipIssueId: issueId
+  });
+  const hydratedEntityMatch = hydratedLinkRecords.find((record) => !record.data.companyId || record.data.companyId === companyId);
+  if (hydratedEntityMatch) {
+    return {
+      paperclipIssueId: issueId,
+      source: 'entity',
+      githubIssueNumber: hydratedEntityMatch.data.githubIssueNumber,
+      githubIssueUrl: hydratedEntityMatch.data.githubIssueUrl,
+      repositoryUrl: hydratedEntityMatch.data.repositoryUrl,
+      githubIssueState: hydratedEntityMatch.data.githubIssueState,
+      githubIssueStateReason: hydratedEntityMatch.data.githubIssueStateReason,
+      commentsCount: hydratedEntityMatch.data.commentsCount,
+      linkedPullRequestNumbers: hydratedEntityMatch.data.linkedPullRequestNumbers,
+      labels: hydratedEntityMatch.data.labels,
+      syncedAt: hydratedEntityMatch.data.syncedAt
+    };
   }
 
   return {
@@ -5952,6 +6044,11 @@ function extractImportedGitHubIssueUrlFromDescription(description: string | null
     return undefined;
   }
 
+  const hiddenMarkerMatch = description.match(/<!--\s*paperclip-github-plugin-imported-from:\s*(\S+?)\s*-->/i);
+  if (hiddenMarkerMatch) {
+    return normalizeGitHubIssueHtmlUrl(hiddenMarkerMatch[1]);
+  }
+
   const markdownMetadataMatch = description.match(/^\*\s+GitHub issue:\s+\[[^\]]+\]\(([^)]+)\)/m);
   if (markdownMetadataMatch) {
     return normalizeGitHubIssueHtmlUrl(markdownMetadataMatch[1]);
@@ -6145,8 +6242,30 @@ function normalizeGitHubIssueBodyForPaperclip(body: string | null | undefined): 
 
 function buildPaperclipIssueDescription(issue: GitHubIssueRecord, linkedPullRequestNumbers: number[] = []): string {
   const normalizedBody = normalizeGitHubIssueBodyForPaperclip(issue.body);
+  const hiddenImportMarker = buildHiddenGitHubImportMarker(issue.htmlUrl);
   void linkedPullRequestNumbers;
-  return normalizedBody ?? '';
+  if (!hiddenImportMarker) {
+    return normalizedBody ?? '';
+  }
+
+  if (!normalizedBody) {
+    return hiddenImportMarker;
+  }
+
+  return `${normalizedBody}\n\n${hiddenImportMarker}`;
+}
+
+function buildHiddenGitHubImportMarker(githubIssueUrl: string | null | undefined): string | undefined {
+  if (typeof githubIssueUrl !== 'string') {
+    return undefined;
+  }
+
+  const normalizedIssueUrl = normalizeGitHubIssueHtmlUrl(githubIssueUrl);
+  if (!normalizedIssueUrl) {
+    return undefined;
+  }
+
+  return `${HIDDEN_GITHUB_IMPORT_MARKER_PREFIX}${normalizedIssueUrl}${HIDDEN_GITHUB_IMPORT_MARKER_SUFFIX}`;
 }
 
 function normalizeIssueDescriptionValue(value: string | null | undefined): string {
