@@ -1635,6 +1635,10 @@ function normalizeOptionalString(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim() ? value.trim() : undefined;
 }
 
+function stripNullBytes(value: string): string {
+  return value.replace(/\u0000/g, '');
+}
+
 function getErrorStatus(error: unknown): number | undefined {
   if (!error || typeof error !== 'object' || !('status' in error)) {
     return undefined;
@@ -2061,7 +2065,12 @@ function normalizeSecretRef(value: unknown): string | undefined {
 }
 
 function normalizeGitHubUserLogin(value: unknown): string | undefined {
-  return typeof value === 'string' && value.trim() ? value.trim().toLowerCase() : undefined;
+  if (typeof value !== 'string') {
+    return undefined;
+  }
+
+  const trimmed = stripNullBytes(value).trim();
+  return trimmed ? trimmed.toLowerCase() : undefined;
 }
 
 function normalizeGitHubTokenRef(value: unknown): string | undefined {
@@ -4050,7 +4059,7 @@ function normalizeGitHubUsername(value: unknown): string | undefined {
     return undefined;
   }
 
-  const trimmed = value.trim().replace(/^@+/, '');
+  const trimmed = stripNullBytes(value).trim().replace(/^@+/, '');
   return trimmed ? trimmed.toLowerCase() : undefined;
 }
 
@@ -4474,9 +4483,9 @@ function normalizeGitHubIssueLabels(value: GitHubApiIssueRecord['labels']): GitH
   for (const entry of value) {
     const name =
       typeof entry === 'string'
-        ? entry.trim()
+        ? stripNullBytes(entry).trim()
         : entry && typeof entry === 'object' && typeof entry.name === 'string'
-          ? entry.name.trim()
+          ? stripNullBytes(entry.name).trim()
           : '';
 
     if (!name) {
@@ -4503,8 +4512,8 @@ function normalizeGitHubIssueRecord(issue: GitHubApiIssueRecord): GitHubIssueRec
   return {
     id: issue.id,
     number: issue.number,
-    title: issue.title,
-    body: issue.body ?? null,
+    title: stripNullBytes(issue.title),
+    body: typeof issue.body === 'string' ? stripNullBytes(issue.body) : null,
     htmlUrl: issue.html_url,
     ...(normalizeGitHubUsername(issue.user?.login) ? { authorLogin: normalizeGitHubUsername(issue.user?.login) } : {}),
     labels: normalizeGitHubIssueLabels(issue.labels),
@@ -5778,7 +5787,7 @@ async function listNewGitHubIssueCommentsSinceCount(
     for (const comment of response.data.slice(remainingOffset)) {
       comments.push({
         id: comment.id,
-        body: comment.body ?? '',
+        body: typeof comment.body === 'string' ? stripNullBytes(comment.body) : '',
         url: comment.html_url ?? undefined,
         authorLogin: normalizeGitHubUserLogin(comment.user?.login),
         createdAt: comment.created_at ?? undefined,
@@ -6105,7 +6114,7 @@ function normalizeGitHubIssueBodyForPaperclip(body: string | null | undefined): 
     return undefined;
   }
 
-  const trimmed = body.trim();
+  const trimmed = stripNullBytes(body).trim();
   if (!trimmed) {
     return undefined;
   }
@@ -9197,7 +9206,7 @@ async function listAllGitHubIssueComments(
     for (const comment of response.data) {
       comments.push({
         id: comment.id,
-        body: comment.body ?? '',
+        body: typeof comment.body === 'string' ? stripNullBytes(comment.body) : '',
         url: comment.html_url ?? undefined,
         authorLogin: normalizeGitHubUserLogin(comment.user?.login),
         authorUrl: comment.user?.html_url ?? undefined,

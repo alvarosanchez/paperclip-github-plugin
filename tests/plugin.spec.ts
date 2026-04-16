@@ -6615,6 +6615,123 @@ test('worker maps GitHub labels onto existing Paperclip labels, creates missing 
   }
 });
 
+test('worker strips NUL bytes from GitHub issue text before creating imported Paperclip issues', async () => {
+  const harness = createTestHarness({
+    manifest,
+    config: {
+      githubTokenRef: 'github-secret-ref'
+    }
+  });
+  await plugin.definition.setup(harness.ctx);
+  harness.ctx.secrets.resolve = async () => 'github-token';
+
+  await harness.performAction('settings.saveRegistration', {
+    mappings: [
+      {
+        id: 'mapping-a',
+        repositoryUrl: 'paperclipai/example-repo',
+        paperclipProjectName: 'Engineering',
+        paperclipProjectId: 'project-1',
+        companyId: 'company-1'
+      }
+    ],
+    syncState: {
+      status: 'idle'
+    }
+  });
+
+  const originalCreate = harness.ctx.issues.create;
+  let createdIssueInput: Parameters<typeof originalCreate>[0] | undefined;
+  harness.ctx.issues.create = async (input) => {
+    createdIssueInput = input;
+
+    if (input.title.includes('\u0000') || input.description?.includes('\u0000')) {
+      throw new Error('invalid byte sequence for encoding "UTF8": 0x00');
+    }
+
+    return originalCreate(input);
+  };
+
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input, init) => {
+    const rawUrl = getRequestUrl(input);
+    const url = new URL(rawUrl);
+
+    if (url.pathname === '/repos/paperclipai/example-repo/issues' && ['all', 'open'].includes(url.searchParams.get('state') ?? '')) {
+      return jsonResponse([
+        {
+          id: 2718,
+          number: 718,
+          title: 'Import survives \u0000 NUL bytes',
+          body: 'First line\u0000\n\nSecond line after the hidden byte.',
+          html_url: 'https://github.com/paperclipai/example-repo/issues/718',
+          state: 'open',
+          labels: []
+        }
+      ]);
+    }
+
+    if (url.pathname === '/graphql') {
+      const { query, variables } = getGraphqlRequest(init);
+      const issueNumber = typeof variables.issueNumber === 'number' ? variables.issueNumber : undefined;
+
+      if (query.includes('query GitHubIssueParentRelationships')) {
+        return graphqlIssueParentRelationshipsResponse([
+          {
+            issueNumber: 718
+          }
+        ]);
+      }
+
+      if (query.includes('query GitHubIssueStatusSnapshot') && issueNumber === 718) {
+        return graphqlResponse({
+          repository: {
+            issue: {
+              number: 718,
+              state: 'OPEN',
+              stateReason: null,
+              comments: {
+                totalCount: 0
+              },
+              closedByPullRequestsReferences: {
+                pageInfo: {
+                  hasNextPage: false,
+                  endCursor: null
+                },
+                nodes: []
+              }
+            }
+          }
+        });
+      }
+    }
+
+    throw new Error(`Unexpected GitHub request: ${url.toString()}`);
+  };
+
+  try {
+    const sync = await harness.performAction('sync.runNow', {}) as {
+      syncState: { status: string; createdIssuesCount?: number };
+    };
+
+    assert.equal(sync.syncState.status, 'success');
+    assert.equal(sync.syncState.createdIssuesCount, 1);
+    assert.ok(createdIssueInput);
+    assert.doesNotMatch(createdIssueInput?.title ?? '', /\u0000/);
+    assert.doesNotMatch(createdIssueInput?.description ?? '', /\u0000/);
+
+    const importedIssues = await harness.ctx.issues.list({
+      companyId: 'company-1'
+    });
+    const importedIssue = importedIssues.find((issue) => issue.title === 'Import survives  NUL bytes');
+
+    assert.ok(importedIssue);
+    assert.equal(importedIssue?.description, 'First line\n\nSecond line after the hidden byte.');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test('worker authenticates direct Paperclip REST label and issue sync calls with the configured board token', async () => {
   const harness = createTestHarness({
     manifest,
