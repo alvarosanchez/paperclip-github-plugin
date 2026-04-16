@@ -364,6 +364,7 @@ function createProjectFixture(params: {
     leadAgentId: null,
     targetDate: null,
     color: null,
+    env: null,
     pauseReason: null,
     pausedAt: null,
     executionWorkspacePolicy: null,
