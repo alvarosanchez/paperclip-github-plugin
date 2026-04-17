@@ -7089,10 +7089,6 @@ function getPaperclipLabelsEndpoint(baseUrl: string, companyId: string): string 
   return new URL(`/api/companies/${companyId}/labels`, baseUrl).toString();
 }
 
-function getPaperclipIssuesEndpoint(baseUrl: string, companyId: string): string {
-  return new URL(`/api/companies/${companyId}/issues`, baseUrl).toString();
-}
-
 function getPaperclipIssueEndpoint(baseUrl: string, issueId: string): string {
   return new URL(`/api/issues/${issueId}`, baseUrl).toString();
 }
@@ -7163,20 +7159,6 @@ async function detectPaperclipBoardAccessRequirement(paperclipApiBaseUrl?: strin
   } catch {
     return false;
   }
-}
-
-function parsePaperclipIssueId(value: unknown): string | null {
-  if (!value || typeof value !== 'object') {
-    return null;
-  }
-
-  const id = (value as { id?: unknown }).id;
-  if (typeof id !== 'string') {
-    return null;
-  }
-
-  const trimmedId = id.trim();
-  return trimmedId || null;
 }
 
 function parsePaperclipIssueDescription(value: unknown): string | null | undefined {
@@ -8331,31 +8313,6 @@ function shouldIgnoreGitHubIssue(
   );
 }
 
-async function applyDefaultAssigneeToPaperclipIssue(
-  ctx: PluginSetupContext,
-  params: {
-    companyId: string;
-    issueId: string;
-    defaultAssigneeAgentId?: string;
-  }
-): Promise<void> {
-  const { companyId, issueId, defaultAssigneeAgentId } = params;
-  if (!defaultAssigneeAgentId) {
-    return;
-  }
-
-  try {
-    await ctx.issues.update(issueId, { assigneeAgentId: defaultAssigneeAgentId }, companyId);
-  } catch (error) {
-    ctx.logger.warn('Unable to apply the default assignee to an imported GitHub issue.', {
-      companyId,
-      issueId,
-      assigneeAgentId: defaultAssigneeAgentId,
-      error: getErrorMessage(error)
-    });
-  }
-}
-
 async function createPaperclipIssue(
   ctx: PluginSetupContext,
   mapping: RepositoryMapping,
@@ -8368,77 +8325,24 @@ async function createPaperclipIssue(
   if (!mapping.companyId || !mapping.paperclipProjectId) {
     throw new Error(`Mapping ${mapping.id} is missing resolved Paperclip project identifiers.`);
   }
+  if (!ctx.issues || typeof ctx.issues.create !== 'function') {
+    throw new Error('This Paperclip runtime does not expose plugin issue creation yet.');
+  }
 
   const title = issue.title;
   const description = buildPaperclipIssueDescription(issue);
-  let createdIssueId: string | null = null;
-  let createdIssueDescription: string | null | undefined;
-  let createPath: IssueDescriptionUpdatePath = 'sdk';
-
-  if (paperclipApiBaseUrl) {
-    try {
-      const response = await fetchPaperclipApi(
-        getPaperclipIssuesEndpoint(paperclipApiBaseUrl, mapping.companyId),
-        {
-          method: 'POST',
-          headers: {
-            accept: 'application/json',
-            'content-type': 'application/json'
-          },
-          body: JSON.stringify({
-            projectId: mapping.paperclipProjectId,
-            title,
-            ...(description ? { description } : {})
-          })
-        },
-        {
-          companyId: mapping.companyId
-        }
-      );
-
-      const payloadResult = await readPaperclipApiJsonResponse<unknown>(response, {
-        operationLabel: 'issue create'
-      });
-
-      if (!payloadResult.failure) {
-        const createdIssue = payloadResult.data;
-        createdIssueId = parsePaperclipIssueId(createdIssue);
-        createdIssueDescription = parsePaperclipIssueDescription(createdIssue);
-        createPath = 'local_api';
-      }
-    } catch {
-      // Fall back to the SDK bridge when the local REST API is unavailable.
-    }
-  }
-
-  if (!createdIssueId) {
-    const createdIssue = await ctx.issues.create({
-      companyId: mapping.companyId,
-      projectId: mapping.paperclipProjectId,
-      title,
-      ...(description ? { description } : {}),
-      ...(advancedSettings.defaultAssigneeAgentId
-        ? { assigneeAgentId: advancedSettings.defaultAssigneeAgentId }
-        : {})
-    });
-    createdIssueId = createdIssue.id;
-    createdIssueDescription = createdIssue.description;
-    createPath = 'sdk';
-  }
-
-  const ensuredCreatedIssueId = createdIssueId;
-  if (!ensuredCreatedIssueId) {
-    throw new Error('GitHub sync could not resolve the created Paperclip issue id.');
-  }
-  const normalizedCreatedIssueDescription = createdIssueDescription ?? undefined;
-
-  if (createPath !== 'sdk') {
-    await applyDefaultAssigneeToPaperclipIssue(ctx, {
-      companyId: mapping.companyId,
-      issueId: ensuredCreatedIssueId,
-      defaultAssigneeAgentId: advancedSettings.defaultAssigneeAgentId
-    });
-  }
+  const createdIssue = await ctx.issues.create({
+    companyId: mapping.companyId,
+    projectId: mapping.paperclipProjectId,
+    title,
+    ...(description ? { description } : {}),
+    ...(advancedSettings.defaultAssigneeAgentId
+      ? { assigneeAgentId: advancedSettings.defaultAssigneeAgentId }
+      : {})
+  });
+  const ensuredCreatedIssueId = createdIssue.id;
+  const normalizedCreatedIssueDescription = createdIssue.description ?? undefined;
+  const createPath: IssueDescriptionUpdatePath = 'sdk';
 
   if (normalizeIssueDescriptionValue(normalizedCreatedIssueDescription) !== description) {
     logIssueDescriptionDiagnostic(

@@ -53,6 +53,7 @@ The plugin MUST persist repository mappings, company-scoped advanced issue defau
 - The sync flow MUST fetch open GitHub issues from every configured repository.
 - The sync flow MUST ignore GitHub issues whose author username matches a configured ignored username for that mapping company.
 - The sync flow MUST create one top-level Paperclip issue per imported GitHub issue when the target mapping has a resolved Paperclip project identifier.
+- When the Paperclip runtime exposes plugin issue creation, the sync flow SHOULD prefer `ctx.issues.create(...)` for imported issue creation and reserve direct Paperclip REST issue calls for repair or update paths so imported issues are not attributed to the connected board user.
 - When the mapping company has a configured default assignee, the sync flow MUST assign newly created imported Paperclip issues to that Paperclip agent.
 - Imported Paperclip issues MUST keep the original GitHub issue title without adding a `[GitHub]` prefix.
 - Imported issue descriptions SHOULD contain the normalized GitHub body when present and MUST normalize the GitHub raw HTML constructs that Paperclip cannot render in multiline descriptions.

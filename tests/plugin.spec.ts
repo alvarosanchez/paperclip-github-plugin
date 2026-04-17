@@ -7288,7 +7288,7 @@ test('worker strips NUL bytes from GitHub issue text before creating imported Pa
   }
 });
 
-test('worker authenticates direct Paperclip REST label and issue sync calls with the configured board token', async () => {
+test('worker authenticates direct Paperclip REST label and issue update sync calls with the configured board token', async () => {
   const harness = createTestHarness({
     manifest,
     config: {
@@ -7460,7 +7460,7 @@ test('worker authenticates direct Paperclip REST label and issue sync calls with
 
     assert.equal(sync.syncState.status, 'success');
     assert.ok(paperclipApiAuthHeaders.some((entry) => entry.path === '/api/companies/company-1/labels'));
-    assert.ok(paperclipApiAuthHeaders.some((entry) => entry.path === '/api/companies/company-1/issues'));
+    assert.ok(!paperclipApiAuthHeaders.some((entry) => entry.path === '/api/companies/company-1/issues'));
     assert.ok(paperclipApiAuthHeaders.some((entry) => entry.path.startsWith('/api/issues/')));
     assert.ok(
       paperclipApiAuthHeaders.every((entry) => entry.authorization === 'Bearer paperclip-board-token'),
@@ -8850,7 +8850,7 @@ test('worker repairs missing descriptions for the reported public issue case', a
   }
 });
 
-test('worker prefers local Paperclip issue creation for the reported public issue case when it is available', async () => {
+test('worker prefers SDK Paperclip issue creation for the reported public issue case when the local API is available', async () => {
   const harness = createTestHarness({
     manifest,
     config: {
@@ -9003,10 +9003,27 @@ test('worker prefers local Paperclip issue creation for the reported public issu
     };
 
     assert.equal(sync.syncState.status, 'success');
-    assert.equal(directSdkCreateCalls, 0);
-    assert.equal(issueCreateRequests.length, 1);
-    assert.equal(descriptionPatchRequests.length, 0);
-    assertNormalizedPublicGitHubIssueDescription(String(issueCreateRequests[0]?.description ?? ''));
+    assert.equal(directSdkCreateCalls, 1);
+    assert.equal(issueCreateRequests.length, 0);
+    assert.equal(descriptionPatchRequests.length, 1);
+    assert.ok(
+      harness.logs.find((entry) =>
+        entry.level === 'warn'
+        && entry.message === 'GitHub sync detected a missing or mismatched Paperclip issue description immediately after issue creation.'
+        && entry.meta?.createPath === 'sdk'
+        && entry.meta?.githubIssueNumber === 3
+      )
+    );
+    assert.ok(
+      harness.logs.find((entry) =>
+        entry.level === 'info'
+        && entry.message === 'GitHub sync repaired a Paperclip issue description through the local Paperclip API.'
+        && entry.meta?.updatePath === 'local_api'
+        && entry.meta?.reason === 'create_response_mismatch'
+        && entry.meta?.githubIssueNumber === 3
+      )
+    );
+    assertNormalizedPublicGitHubIssueDescription(String(descriptionPatchRequests[0]?.body?.description ?? ''));
 
     const importedIssue = (await harness.ctx.issues.list({
       companyId: 'company-1'
@@ -9019,7 +9036,7 @@ test('worker prefers local Paperclip issue creation for the reported public issu
   }
 });
 
-test('worker immediately repairs empty descriptions when the local Paperclip create response stores the reported public issue without one', async () => {
+test('worker immediately repairs empty descriptions from SDK issue creation even when the local Paperclip create API is available', async () => {
   const harness = createTestHarness({
     manifest,
     config: {
@@ -9064,7 +9081,9 @@ test('worker immediately repairs empty descriptions when the local Paperclip cre
   let directSdkCreateCalls = 0;
   harness.ctx.issues.create = async (input) => {
     directSdkCreateCalls += 1;
-    return originalCreate(input);
+    const payload = input as Parameters<typeof originalCreate>[0] & { description?: string };
+    const { description: _description, ...rest } = payload;
+    return originalCreate(rest as Parameters<typeof originalCreate>[0]);
   };
 
   const issueCreateRequests: Array<Record<string, unknown> | null> = [];
@@ -9169,14 +9188,14 @@ test('worker immediately repairs empty descriptions when the local Paperclip cre
     };
 
     assert.equal(sync.syncState.status, 'success');
-    assert.equal(directSdkCreateCalls, 0);
-    assert.equal(issueCreateRequests.length, 1);
+    assert.equal(directSdkCreateCalls, 1);
+    assert.equal(issueCreateRequests.length, 0);
     assert.equal(descriptionPatchRequests.length, 1);
     assert.ok(
       harness.logs.find((entry) =>
         entry.level === 'warn'
         && entry.message === 'GitHub sync detected a missing or mismatched Paperclip issue description immediately after issue creation.'
-        && entry.meta?.createPath === 'local_api'
+        && entry.meta?.createPath === 'sdk'
         && entry.meta?.githubIssueNumber === 3
       )
     );
@@ -9377,10 +9396,20 @@ test('worker falls back to the SDK bridge when the local Paperclip description P
     return originalUpdate(issueId, patch, companyId);
   };
 
+  let directSdkCreateCalls = 0;
   let createdIssueId: string | null = null;
   const issueCreateRequests: Array<Record<string, unknown> | null> = [];
   const descriptionPatchRequests: Array<{ issueId: string; body: Record<string, unknown> | null }> = [];
   const originalFetch = globalThis.fetch;
+
+  harness.ctx.issues.create = async (input) => {
+    directSdkCreateCalls += 1;
+    const payload = input as Parameters<typeof originalCreate>[0] & { description?: string };
+    const { description: _description, ...rest } = payload;
+    const created = await originalCreate(rest as Parameters<typeof originalCreate>[0]);
+    createdIssueId = created.id;
+    return created;
+  };
 
   globalThis.fetch = async (input, init) => {
     const rawUrl = getRequestUrl(input);
@@ -9479,7 +9508,8 @@ test('worker falls back to the SDK bridge when the local Paperclip description P
     };
 
     assert.equal(sync.syncState.status, 'success');
-    assert.equal(issueCreateRequests.length, 1);
+    assert.equal(directSdkCreateCalls, 1);
+    assert.equal(issueCreateRequests.length, 0);
     assert.equal(descriptionPatchRequests.length >= 1, true);
     assert.equal(directDescriptionUpdateCalls.length >= 1, true);
     assert.ok(
@@ -9561,9 +9591,19 @@ test('worker falls back to the SDK bridge when the local Paperclip description P
     return originalUpdate(issueId, patch, companyId);
   };
 
+  let directSdkCreateCalls = 0;
   let createdIssueId: string | null = null;
   const loginPage = '<!doctype html><html><body><h1>Sign in</h1></body></html>';
   const originalFetch = globalThis.fetch;
+
+  harness.ctx.issues.create = async (input) => {
+    directSdkCreateCalls += 1;
+    const payload = input as Parameters<typeof originalCreate>[0] & { description?: string };
+    const { description: _description, ...rest } = payload;
+    const created = await originalCreate(rest as Parameters<typeof originalCreate>[0]);
+    createdIssueId = created.id;
+    return created;
+  };
 
   globalThis.fetch = async (input, init) => {
     const rawUrl = getRequestUrl(input);
@@ -9645,6 +9685,7 @@ test('worker falls back to the SDK bridge when the local Paperclip description P
     };
 
     assert.equal(sync.syncState.status, 'success');
+    assert.equal(directSdkCreateCalls, 1);
     assert.equal(directDescriptionUpdateCalls.length >= 1, true);
     assert.ok(
       directDescriptionUpdateCalls.some((call) =>
@@ -9730,9 +9771,7 @@ test('worker uses the live Paperclip API URL passed to sync.runNow instead of a 
 
   harness.ctx.issues.create = async (input) => {
     directSdkCreateCalls += 1;
-    const payload = input as Parameters<typeof originalCreate>[0] & { description?: string };
-    const { description: _description, ...rest } = payload;
-    return originalCreate(rest as Parameters<typeof originalCreate>[0]);
+    return originalCreate(input);
   };
 
   globalThis.fetch = async (input, init) => {
@@ -9851,7 +9890,7 @@ test('worker uses the live Paperclip API URL passed to sync.runNow instead of a 
     };
 
     assert.equal(sync.syncState.status, 'success');
-    assert.equal(directSdkCreateCalls, 0);
+    assert.equal(directSdkCreateCalls, 1);
     assert.equal(sync.paperclipApiBaseUrl, 'http://127.0.0.1:63675');
 
     const persistedSettings = harness.getState({
