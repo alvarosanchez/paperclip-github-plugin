@@ -1076,6 +1076,7 @@ const FAILED_CHECK_RUN_CONCLUSIONS = new Set([
 const SUCCESSFUL_STATUS_CONTEXT_STATES = new Set(['SUCCESS']);
 const FAILED_STATUS_CONTEXT_STATES = new Set(['ERROR', 'FAILURE']);
 const PENDING_STATUS_CONTEXT_STATES = new Set(['EXPECTED', 'PENDING']);
+const GITHUB_REPOSITORY_MAINTAINER_WARMUP_CONCURRENCY = 4;
 const GITHUB_REPOSITORY_MAINTAINER_ROLE_NAMES = new Set(['admin', 'maintain']);
 
 const GITHUB_ISSUE_STATUS_SNAPSHOT_QUERY = `
@@ -5996,6 +5997,42 @@ async function isMaintainerAuthoredGitHubIssue(params: {
     authorLogin,
     params.maintainerCache
   );
+}
+
+async function warmGitHubRepositoryMaintainerCache(params: {
+  octokit: Octokit;
+  repository: ParsedRepositoryReference;
+  githubIssues: GitHubIssueRecord[];
+  maintainerCache: Map<string, boolean>;
+}): Promise<void> {
+  const uniqueAuthorLogins = [...new Set(
+    params.githubIssues
+      .map((issue) => normalizeGitHubUserLogin(issue.authorLogin))
+      .filter((authorLogin): authorLogin is string => Boolean(authorLogin))
+  )].filter((authorLogin) => !params.maintainerCache.has(buildGitHubRepositoryActorCacheKey(params.repository, authorLogin)));
+
+  if (uniqueAuthorLogins.length === 0) {
+    return;
+  }
+
+  await mapWithConcurrency(uniqueAuthorLogins, GITHUB_REPOSITORY_MAINTAINER_WARMUP_CONCURRENCY, async (authorLogin) => {
+    try {
+      await isGitHubUserRepositoryMaintainer(
+        params.octokit,
+        params.repository,
+        authorLogin,
+        params.maintainerCache
+      );
+    } catch (error) {
+      if (isGitHubRateLimitError(error)) {
+        throw error;
+      }
+
+      // Keep non-rate-limit failures recoverable by letting the later
+      // per-issue path retry and attach any resulting failure to the
+      // affected issue instead of failing the whole warmup step.
+    }
+  });
 }
 
 function parseGitHubIssueHtmlUrl(value: string): ParsedGitHubIssueReference | undefined {
@@ -12930,6 +12967,32 @@ async function performSync(
           allIssuesById.has(importedIssue.githubIssueId) &&
           doesImportedIssueMatchTarget(importedIssue, options.target)
         );
+        const newlyImportedIssuesForMaintainerWarmup: GitHubIssueRecord[] =
+          advancedSettings.defaultStatus === 'todo'
+            ? []
+            : importedIssuesForSynchronization
+                .filter((importedIssue) => createdIssueIds.has(importedIssue.githubIssueId))
+                .map((importedIssue) => allIssuesById.get(importedIssue.githubIssueId))
+                .filter(
+                  (githubIssue): githubIssue is GitHubIssueRecord =>
+                    githubIssue !== undefined && githubIssue.state === 'open'
+                )
+                .filter(
+                  (githubIssue) => !(linkedPullRequestsByIssueNumber.get(githubIssue.number) ?? []).some(
+                    (pullRequest) => pullRequest.state === 'OPEN'
+                  )
+                );
+
+        if (newlyImportedIssuesForMaintainerWarmup.length > 0) {
+          await warmGitHubRepositoryMaintainerCache({
+            octokit,
+            repository,
+            githubIssues: newlyImportedIssuesForMaintainerWarmup,
+            maintainerCache: repositoryMaintainerCache
+          });
+          await throwIfSyncCancelled();
+        }
+
         currentProgress = {
           phase: 'syncing',
           totalRepositoryCount: mappings.length,
