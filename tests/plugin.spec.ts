@@ -6329,6 +6329,159 @@ test('worker keeps deduplicating imported issues when the mapping id changes', a
   }
 });
 
+test('worker imports maintainer-authored open issues without linked pull requests as todo', async () => {
+  const harness = createTestHarness({
+    manifest,
+    config: {
+      githubTokenRef: 'github-secret-ref'
+    }
+  });
+  await plugin.definition.setup(harness.ctx);
+
+  await harness.performAction('settings.saveRegistration', {
+    mappings: [
+      {
+        id: 'mapping-a',
+        repositoryUrl: 'paperclipai/example-repo',
+        paperclipProjectName: 'Engineering',
+        paperclipProjectId: 'project-1',
+        companyId: 'company-1'
+      }
+    ],
+    syncState: {
+      status: 'idle'
+    }
+  });
+
+  const statusTransitionComments: Array<{ issueId: string; body: string }> = [];
+  const originalCreateComment = harness.ctx.issues.createComment;
+  harness.ctx.issues.createComment = async (issueId, body, companyId) => {
+    statusTransitionComments.push({ issueId, body });
+    return originalCreateComment(issueId, body, companyId);
+  };
+
+  const originalFetch = globalThis.fetch;
+
+  globalThis.fetch = async (input, init) => {
+    const rawUrl = getRequestUrl(input);
+    const url = new URL(rawUrl);
+
+    if (url.pathname === '/repos/paperclipai/example-repo/issues' && ['all', 'open'].includes(url.searchParams.get('state') ?? '')) {
+      return jsonResponse([
+        {
+          id: 2601,
+          number: 26,
+          title: 'Maintainer-authored issue',
+          body: 'Ship this next',
+          html_url: 'https://github.com/paperclipai/example-repo/issues/26',
+          user: {
+            login: 'repo-maintainer'
+          },
+          state: 'open',
+          comments: 0
+        },
+        {
+          id: 2602,
+          number: 27,
+          title: 'Reporter-authored issue',
+          body: 'Please look into this',
+          html_url: 'https://github.com/paperclipai/example-repo/issues/27',
+          user: {
+            login: 'external-reporter'
+          },
+          state: 'open',
+          comments: 0
+        }
+      ]);
+    }
+
+    if (url.pathname === '/repos/paperclipai/example-repo/collaborators/repo-maintainer/permission') {
+      return jsonResponse({
+        permission: 'admin',
+        role_name: 'maintain',
+        user: {
+          login: 'repo-maintainer'
+        }
+      });
+    }
+
+    if (url.pathname === '/repos/paperclipai/example-repo/collaborators/external-reporter/permission') {
+      return jsonResponse(
+        {
+          message: 'Not Found'
+        },
+        404
+      );
+    }
+
+    if (url.pathname === '/graphql') {
+      const { query, variables } = getGraphqlRequest(init);
+      const issueNumber = typeof variables.issueNumber === 'number' ? variables.issueNumber : undefined;
+
+      if (query.includes('query GitHubIssueParentRelationships')) {
+        return graphqlIssueParentRelationshipsResponse([
+          {
+            issueNumber: 26
+          },
+          {
+            issueNumber: 27
+          }
+        ]);
+      }
+
+      if (query.includes('query GitHubIssueStatusSnapshot') && (issueNumber === 26 || issueNumber === 27)) {
+        return graphqlResponse({
+          repository: {
+            issue: {
+              number: issueNumber,
+              state: 'OPEN',
+              stateReason: null,
+              comments: {
+                totalCount: 0
+              },
+              closedByPullRequestsReferences: {
+                pageInfo: {
+                  hasNextPage: false,
+                  endCursor: null
+                },
+                nodes: []
+              }
+            }
+          }
+        });
+      }
+    }
+
+    throw new Error(`Unexpected GitHub request: ${url.toString()}`);
+  };
+
+  try {
+    const sync = await harness.performAction('sync.runNow', {}) as {
+      syncState: { status: string; createdIssuesCount?: number; skippedIssuesCount?: number; syncedIssuesCount?: number };
+    };
+
+    assert.equal(sync.syncState.status, 'success');
+    assert.equal(sync.syncState.createdIssuesCount, 2);
+    assert.equal(sync.syncState.skippedIssuesCount, 0);
+    assert.equal(sync.syncState.syncedIssuesCount, 2);
+
+    const importedIssues = await harness.ctx.issues.list({
+      companyId: 'company-1'
+    });
+
+    assert.equal(importedIssues.find((issue) => issue.title === 'Maintainer-authored issue')?.status, 'todo');
+    assert.equal(importedIssues.find((issue) => issue.title === 'Reporter-authored issue')?.status, 'backlog');
+    assert.equal(statusTransitionComments.length, 1);
+    assert.match(statusTransitionComments[0]?.body ?? '', /from `todo` to `backlog`/);
+    assert.match(
+      statusTransitionComments[0]?.body ?? '',
+      /the GitHub issue is open with no linked pull requests/
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test('worker repairs missing import registry entries by reusing existing imported Paperclip issues', async () => {
   const harness = createTestHarness({
     manifest,
@@ -10818,6 +10971,48 @@ test('worker uses the local Paperclip issue PATCH API for status transitions whe
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+test('comment.annotation falls back to GitHub links found in plain issue comments', async () => {
+  const harness = createTestHarness({
+    manifest
+  });
+  await plugin.definition.setup(harness.ctx);
+
+  const issue = await harness.ctx.issues.create({
+    companyId: 'company-1',
+    projectId: 'project-1',
+    title: 'Comment annotation fallback issue',
+    description: 'Body'
+  });
+  const comment = await harness.ctx.issues.createComment(
+    issue.id,
+    'See https://github.com/paperclipai/example-repo/issues/999 and https://github.com/paperclipai/example-repo/pull/1000',
+    'company-1'
+  );
+
+  const annotation = await harness.getData<{
+    source: string;
+    links: Array<{ type: string; label: string; href: string }>;
+  } | null>('comment.annotation', {
+    companyId: 'company-1',
+    parentIssueId: issue.id,
+    commentId: comment.id
+  });
+
+  assert.equal(annotation?.source, 'comment_body');
+  assert.deepEqual(annotation?.links, [
+    {
+      type: 'issue',
+      label: 'Issue #999',
+      href: 'https://github.com/paperclipai/example-repo/issues/999'
+    },
+    {
+      type: 'pull_request',
+      label: 'PR #1000',
+      href: 'https://github.com/paperclipai/example-repo/pull/1000'
+    }
+  ]);
 });
 
 test('worker falls back to the SDK bridge when the local Paperclip status PATCH returns an HTML sign-in page', async () => {

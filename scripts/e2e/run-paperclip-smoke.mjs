@@ -15,6 +15,10 @@ const dataDir = join(stateRoot, 'paperclip-data');
 const instanceId = 'paperclip-github-plugin-e2e';
 const seededProjectName = 'Paperclip Github Plugin';
 const seededRepositoryUrl = 'https://github.com/alvarosanchez/paperclip-github-plugin';
+const seededIssueTitle = 'GitHub Sync Smoke Issue';
+const seededGitHubIssueUrl = 'https://github.com/paperclipai/example-repo/issues/999';
+const seededGitHubPullRequestUrl = 'https://github.com/paperclipai/example-repo/pull/1000';
+const issueDetailTabQuery = 'plugin:paperclip-github-plugin:paperclip-github-plugin-issue-detail-tab';
 const requestedPort = process.env.PAPERCLIP_E2E_PORT ? Number(process.env.PAPERCLIP_E2E_PORT) : 3100;
 const requestedDbPort = process.env.PAPERCLIP_E2E_DB_PORT ? Number(process.env.PAPERCLIP_E2E_DB_PORT) : 54329;
 const defaultTimeoutMs = 30000;
@@ -124,12 +128,16 @@ async function readConfiguredBaseUrl(configPath) {
 }
 
 async function fetchJson(url, init = {}) {
+  const headers = new Headers(init.headers);
+  headers.set('accept', 'application/json');
+
+  if (typeof init.body === 'string' && !headers.has('content-type')) {
+    headers.set('content-type', 'application/json');
+  }
+
   const response = await fetch(url, {
-    headers: {
-      'content-type': 'application/json',
-      ...(init.headers ?? {})
-    },
-    ...init
+    ...init,
+    headers
   });
 
   const text = await response.text();
@@ -318,6 +326,91 @@ async function ensureSeedProjectMapped(company) {
   };
 }
 
+function buildSeedIssueDescription() {
+  return [
+    'Smoke coverage for GitHub issue detail fallback rendering.',
+    '',
+    `<!-- paperclip-github-plugin-imported-from: ${seededGitHubIssueUrl} -->`
+  ].join('\n');
+}
+
+function buildSeedIssueCommentBody() {
+  return `See ${seededGitHubIssueUrl} and ${seededGitHubPullRequestUrl}`;
+}
+
+function resolveCompanyIssuePrefix(company, issueIdentifier) {
+  const companyIssuePrefix =
+    company
+    && typeof company === 'object'
+    && typeof company.issuePrefix === 'string'
+    && company.issuePrefix.trim()
+      ? company.issuePrefix.trim()
+      : '';
+
+  if (companyIssuePrefix) {
+    return companyIssuePrefix;
+  }
+
+  if (typeof issueIdentifier === 'string' && issueIdentifier.includes('-')) {
+    return issueIdentifier.split('-', 1)[0];
+  }
+
+  throw new Error('Could not resolve the issue route prefix for the smoke-test issue.');
+}
+
+async function ensureSeedIssueWithGitHubMetadata(company, project) {
+  const companyId = typeof company?.id === 'string' ? company.id : '';
+  if (!companyId) {
+    throw new Error('A seeded company id is required before creating the smoke-test issue.');
+  }
+
+  const projectId = typeof project?.id === 'string' ? project.id : '';
+  if (!projectId) {
+    throw new Error('A seeded project id is required before creating the smoke-test issue.');
+  }
+
+  const createdIssue = await fetchJson(new URL(`/api/companies/${companyId}/issues`, baseUrl).toString(), {
+    method: 'POST',
+    body: JSON.stringify({
+      projectId,
+      title: seededIssueTitle,
+      description: buildSeedIssueDescription()
+    })
+  });
+  const issueId = typeof createdIssue?.id === 'string' ? createdIssue.id : '';
+  const issueIdentifier = typeof createdIssue?.identifier === 'string' ? createdIssue.identifier : '';
+
+  if (!issueId || !issueIdentifier) {
+    throw new Error('Paperclip did not return a usable smoke-test issue record.');
+  }
+
+  const createdComment = await fetchJson(new URL(`/api/issues/${issueId}/comments`, baseUrl).toString(), {
+    method: 'POST',
+    body: JSON.stringify({
+      body: buildSeedIssueCommentBody()
+    })
+  });
+  const commentId = typeof createdComment?.id === 'string' ? createdComment.id : '';
+
+  if (!commentId) {
+    throw new Error('Paperclip did not return a usable smoke-test issue comment.');
+  }
+
+  const companyIssuePrefix = resolveCompanyIssuePrefix(company, issueIdentifier);
+  const issueUrl = new URL(
+    `/${companyIssuePrefix}/issues/${encodeURIComponent(issueIdentifier)}?tab=${encodeURIComponent(issueDetailTabQuery)}`,
+    baseUrl
+  ).toString();
+
+  log(`Seeded issue ${issueIdentifier} with GitHub fallback metadata and comment links.`);
+  return {
+    id: issueId,
+    identifier: issueIdentifier,
+    commentId,
+    url: issueUrl
+  };
+}
+
 async function waitForServerExit(timeoutMs) {
   if (!serverProcess) {
     return;
@@ -417,6 +510,8 @@ async function main() {
   );
   log('Installed local paperclip-github-plugin plugin.');
 
+  const seededIssue = await ensureSeedIssueWithGitHubMetadata(company, seededProject);
+
   const { chromium } = await import('playwright');
   const browser = await chromium.launch({ headless: true });
   const page = await browser.newPage();
@@ -436,6 +531,11 @@ async function main() {
     const settingsUrl = new URL(href, baseUrl).toString();
     await gotoWithTimeout(page, settingsUrl);
     log(`Opened plugin settings detail page: ${settingsUrl}`);
+
+    const installedPluginId = new URL(settingsUrl).pathname.split('/').filter(Boolean).at(-1) ?? '';
+    if (!installedPluginId) {
+      throw new Error(`Could not resolve the installed plugin id from ${settingsUrl}.`);
+    }
 
     await page.getByRole('heading', { name: 'GitHub Sync' }).waitFor({ timeout: 120000 });
     await page.getByText('GitHub Sync settings', { exact: true }).waitFor({ timeout: 120000 });
@@ -469,6 +569,29 @@ async function main() {
     await pullRequestsSidebarLink.click();
     await page.getByRole('heading', { name: 'Open pull requests' }).waitFor({ timeout: 120000 });
     await page.getByText('alvarosanchez/paperclip-github-plugin', { exact: true }).waitFor({ timeout: 120000 });
+    const pullRequestsUrl = page.url();
+
+    await gotoWithTimeout(page, seededIssue.url);
+    log(`Opened smoke-test issue detail page: ${seededIssue.url}`);
+
+    await page.getByRole('heading', { name: seededIssueTitle, exact: true }).waitFor({ timeout: 120000 });
+    const githubDetailTab = page.getByRole('tab', { name: 'GitHub', exact: true });
+    await githubDetailTab.click();
+
+    const issueDetailSurface = page.locator('.ghsync-issue-detail');
+    await issueDetailSurface.getByText('Issue #999', { exact: true }).waitFor({ timeout: 120000 });
+    await issueDetailSurface.getByText('paperclipai/example-repo', { exact: true }).waitFor({ timeout: 120000 });
+    const openOnGitHubLink = issueDetailSurface.getByRole('link', { name: 'Open on GitHub', exact: true });
+    await openOnGitHubLink.waitFor({ timeout: 120000 });
+    const openOnGitHubHref = await openOnGitHubLink.getAttribute('href');
+    if (openOnGitHubHref !== seededGitHubIssueUrl) {
+      throw new Error(`Expected issue detail GitHub link to target ${seededGitHubIssueUrl}, received ${openOnGitHubHref ?? 'null'}.`);
+    }
+
+    await page.getByRole('tab', { name: 'Chat', exact: true }).click();
+    await page.getByText(`See ${seededGitHubIssueUrl} and ${seededGitHubPullRequestUrl}`, { exact: true }).waitFor({
+      timeout: 120000
+    });
 
     await page.screenshot({ path: join(pluginRoot, 'tests/e2e/results/last-run.png'), fullPage: true });
     const bodyText = await page.locator('body').textContent();
@@ -479,7 +602,11 @@ async function main() {
           baseUrl,
           settingsUrl,
           dashboardUrl,
-          pullRequestsUrl: page.url(),
+          pullRequestsUrl,
+          issueUrl: seededIssue.url,
+          installedPluginId,
+          seededIssueIdentifier: seededIssue.identifier,
+          seededIssueCommentId: seededIssue.commentId,
           bodyText
         },
         null,
