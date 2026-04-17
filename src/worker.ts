@@ -8325,9 +8325,6 @@ async function createPaperclipIssue(
   if (!mapping.companyId || !mapping.paperclipProjectId) {
     throw new Error(`Mapping ${mapping.id} is missing resolved Paperclip project identifiers.`);
   }
-  if (!ctx.issues || typeof ctx.issues.create !== 'function') {
-    throw new Error('This Paperclip runtime does not expose plugin issue creation yet.');
-  }
 
   const title = issue.title;
   const description = buildPaperclipIssueDescription(issue);
