@@ -21,6 +21,7 @@ import {
 
 let plugin!: typeof import('../src/worker.ts').default;
 let workerImportSerial = 0;
+let uiImportSerial = 0;
 
 async function importFreshWorkerModule() {
   workerImportSerial += 1;
@@ -30,6 +31,12 @@ async function importFreshWorkerModule() {
 
 async function importFreshWorker(): Promise<typeof import('../src/worker.ts').default> {
   return (await importFreshWorkerModule()).default;
+}
+
+async function importFreshUiModule() {
+  uiImportSerial += 1;
+  const uiModuleUrl = new URL(`../src/ui/index.tsx?ui-test=${uiImportSerial}`, import.meta.url);
+  return await import(uiModuleUrl.href);
 }
 
 test.beforeEach(async () => {
@@ -482,6 +489,60 @@ test('filterExistingProjectSyncCandidates hides projects already enabled in plug
       sourceType: 'git_repo'
     }
   ]);
+});
+
+test('resolveOrCreateProject enables isolated issue checkouts for new company projects', async () => {
+  const uiModule = await importFreshUiModule() as {
+    resolveOrCreateProject?: unknown;
+  };
+
+  assert.equal(typeof uiModule.resolveOrCreateProject, 'function');
+
+  const resolveOrCreateProject = uiModule.resolveOrCreateProject as (
+    companyId: string,
+    projectName: string
+  ) => Promise<{ id: string; name: string }>;
+  const originalFetch = globalThis.fetch;
+  const requestBodies: Record<string, unknown>[] = [];
+
+  globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+    const url = getRequestUrl(input);
+    const method = (init?.method ?? 'GET').toUpperCase();
+
+    if (url === '/api/companies/company-1/projects' && method === 'GET') {
+      return jsonResponse([]);
+    }
+
+    if (url === '/api/companies/company-1/projects' && method === 'POST') {
+      requestBodies.push(getJsonRequestBody(init) ?? {});
+      return jsonResponse({
+        id: 'project-1',
+        name: 'Engineering'
+      });
+    }
+
+    throw new Error(`Unexpected fetch request: ${method} ${url}`);
+  };
+
+  try {
+    const project = await resolveOrCreateProject('company-1', ' Engineering ');
+
+    assert.deepEqual(project, {
+      id: 'project-1',
+      name: 'Engineering'
+    });
+    assert.deepEqual(requestBodies, [
+      {
+        name: 'Engineering',
+        status: 'planned',
+        executionWorkspacePolicy: {
+          enabled: true
+        }
+      }
+    ]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test('resolveInstalledGitHubSyncPluginId finds the GitHub Sync installation id from plugin listings', () => {
