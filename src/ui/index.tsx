@@ -5745,7 +5745,7 @@ function useResolvedThemeMode(): ThemeMode {
   return themeMode;
 }
 
-async function resolveOrCreateProject(companyId: string, projectName: string): Promise<{ id: string; name: string }> {
+export async function resolveOrCreateProject(companyId: string, projectName: string): Promise<{ id: string; name: string }> {
   const projects = await listCompanyProjects(companyId);
   const existing = projects.find((project) => project.name.trim().toLowerCase() === projectName.trim().toLowerCase());
   if (existing) {
@@ -5756,7 +5756,10 @@ async function resolveOrCreateProject(companyId: string, projectName: string): P
     method: 'POST',
     body: JSON.stringify({
       name: projectName.trim(),
-      status: 'planned'
+      status: 'planned',
+      executionWorkspacePolicy: {
+        enabled: true
+      }
     })
   });
 }
