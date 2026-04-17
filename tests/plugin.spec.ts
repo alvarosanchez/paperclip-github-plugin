@@ -859,7 +859,9 @@ test('manifest declares the GitHub agent tools and capability', () => {
       'reply_to_review_thread',
       'resolve_review_thread',
       'unresolve_review_thread',
-      'request_pull_request_reviewers'
+      'request_pull_request_reviewers',
+      'list_organization_projects',
+      'add_pull_request_to_project'
     ]
   );
   assert.match(
@@ -1415,6 +1417,334 @@ test('request_pull_request_reviewers sends user and team reviewers to GitHub', a
       team_reviewers: ['platform']
     });
     assert.equal((result.data as { requestedReviewers: string[] }).requestedReviewers[0], 'octocat');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('list_organization_projects returns visible GitHub organization projects', async () => {
+  const harness = await createGitHubAgentToolHarness();
+  const originalFetch = globalThis.fetch;
+
+  globalThis.fetch = async (input, init) => {
+    const requestUrl = getRequestUrl(input);
+    if (requestUrl === 'https://api.github.com/graphql') {
+      const { query, variables } = getGraphqlRequest(init);
+      if (query.includes('query GitHubOrganizationProjects')) {
+        assert.equal(variables.organization, 'paperclipai');
+        assert.equal(variables.first, 5);
+
+        return graphqlResponse({
+          organization: {
+            projectsV2: {
+              pageInfo: {
+                hasNextPage: false,
+                endCursor: null
+              },
+              nodes: [
+                {
+                  id: 'PVT_kwDOB_project_1',
+                  number: 12,
+                  title: 'Q2 roadmap',
+                  shortDescription: 'Track platform delivery',
+                  url: 'https://github.com/orgs/paperclipai/projects/12',
+                  closed: false,
+                  updatedAt: '2026-04-17T10:15:00Z'
+                },
+                {
+                  id: 'PVT_kwDOB_project_2',
+                  number: 15,
+                  title: 'Bug backlog',
+                  shortDescription: null,
+                  url: 'https://github.com/orgs/paperclipai/projects/15',
+                  closed: false,
+                  updatedAt: '2026-04-16T08:00:00Z'
+                }
+              ]
+            }
+          }
+        });
+      }
+    }
+
+    throw new Error(`Unexpected GitHub request: ${requestUrl}`);
+  };
+
+  try {
+    const result = await harness.executeTool('list_organization_projects', {
+      organization: 'paperclipai',
+      limit: 5
+    }, {
+      companyId: 'company-1',
+      projectId: 'project-1'
+    });
+
+    assert.ok(!result.error);
+    assert.equal((result.data as { organization: string }).organization, 'paperclipai');
+    assert.deepEqual(
+      (result.data as {
+        projects: Array<{ number: number; title: string; shortDescription?: string; url: string }>;
+      }).projects,
+      [
+        {
+          id: 'PVT_kwDOB_project_1',
+          number: 12,
+          title: 'Q2 roadmap',
+          shortDescription: 'Track platform delivery',
+          url: 'https://github.com/orgs/paperclipai/projects/12',
+          closed: false,
+          updatedAt: '2026-04-17T10:15:00Z'
+        },
+        {
+          id: 'PVT_kwDOB_project_2',
+          number: 15,
+          title: 'Bug backlog',
+          url: 'https://github.com/orgs/paperclipai/projects/15',
+          closed: false,
+          updatedAt: '2026-04-16T08:00:00Z'
+        }
+      ]
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('add_pull_request_to_project associates a pull request with a GitHub organization project', async () => {
+  const harness = await createGitHubAgentToolHarness();
+  const originalFetch = globalThis.fetch;
+  let mutationVariables: Record<string, unknown> | null = null;
+
+  globalThis.fetch = async (input, init) => {
+    const requestUrl = getRequestUrl(input);
+    if (requestUrl === 'https://api.github.com/graphql') {
+      const { query, variables } = getGraphqlRequest(init);
+
+      if (query.includes('query GitHubOrganizationProjectByNumber')) {
+        assert.equal(variables.organization, 'paperclipai');
+        assert.equal(variables.projectNumber, 12);
+
+        return graphqlResponse({
+          organization: {
+            projectV2: {
+              id: 'PVT_kwDOB_project_12',
+              number: 12,
+              title: 'Q2 roadmap',
+              url: 'https://github.com/orgs/paperclipai/projects/12',
+              closed: false,
+              owner: {
+                __typename: 'Organization',
+                login: 'paperclipai'
+              }
+            }
+          }
+        });
+      }
+
+      if (query.includes('query GitHubPullRequestProjectItems')) {
+        assert.equal(variables.owner, 'paperclipai');
+        assert.equal(variables.repo, 'example-repo');
+        assert.equal(variables.pullRequestNumber, 7);
+
+        return graphqlResponse({
+          repository: {
+            pullRequest: {
+              id: 'PR_kwDOB_example_7',
+              number: 7,
+              title: 'Fix the importer',
+              url: 'https://github.com/paperclipai/example-repo/pull/7',
+              projectItems: {
+                pageInfo: {
+                  hasNextPage: false,
+                  endCursor: null
+                },
+                nodes: []
+              }
+            }
+          }
+        });
+      }
+
+      if (query.includes('mutation GitHubAddPullRequestToProject')) {
+        mutationVariables = variables;
+
+        return graphqlResponse({
+          addProjectV2ItemById: {
+            item: {
+              id: 'PVTIT_kwDOB_item_1',
+              project: {
+                id: 'PVT_kwDOB_project_12',
+                number: 12,
+                title: 'Q2 roadmap',
+                url: 'https://github.com/orgs/paperclipai/projects/12',
+                closed: false,
+                owner: {
+                  __typename: 'Organization',
+                  login: 'paperclipai'
+                }
+              }
+            }
+          }
+        });
+      }
+    }
+
+    throw new Error(`Unexpected GitHub request: ${requestUrl}`);
+  };
+
+  try {
+    const result = await harness.executeTool('add_pull_request_to_project', {
+      pullRequestNumber: 7,
+      organization: 'paperclipai',
+      projectNumber: 12
+    }, {
+      companyId: 'company-1',
+      projectId: 'project-1'
+    });
+
+    assert.ok(!result.error);
+    assert.deepEqual(mutationVariables, {
+      projectId: 'PVT_kwDOB_project_12',
+      contentId: 'PR_kwDOB_example_7'
+    });
+    assert.equal((result.data as { alreadyAssociated: boolean }).alreadyAssociated, false);
+    assert.deepEqual(
+      result.data,
+      {
+        repository: 'https://github.com/paperclipai/example-repo',
+        pullRequest: {
+          number: 7,
+          title: 'Fix the importer',
+          url: 'https://github.com/paperclipai/example-repo/pull/7'
+        },
+        project: {
+          id: 'PVT_kwDOB_project_12',
+          number: 12,
+          title: 'Q2 roadmap',
+          url: 'https://github.com/orgs/paperclipai/projects/12',
+          closed: false,
+          ownerLogin: 'paperclipai'
+        },
+        projectItem: {
+          id: 'PVTIT_kwDOB_item_1'
+        },
+        alreadyAssociated: false
+      }
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('add_pull_request_to_project returns the existing project item when the pull request is already associated', async () => {
+  const harness = await createGitHubAgentToolHarness();
+  const originalFetch = globalThis.fetch;
+  let addMutationCalls = 0;
+
+  globalThis.fetch = async (input, init) => {
+    const requestUrl = getRequestUrl(input);
+    if (requestUrl === 'https://api.github.com/graphql') {
+      const { query, variables } = getGraphqlRequest(init);
+
+      if (query.includes('query GitHubOrganizationProjectByNumber')) {
+        return graphqlResponse({
+          organization: {
+            projectV2: {
+              id: 'PVT_kwDOB_project_12',
+              number: 12,
+              title: 'Q2 roadmap',
+              url: 'https://github.com/orgs/paperclipai/projects/12',
+              closed: false,
+              owner: {
+                __typename: 'Organization',
+                login: 'paperclipai'
+              }
+            }
+          }
+        });
+      }
+
+      if (query.includes('query GitHubPullRequestProjectItems')) {
+        assert.equal(variables.pullRequestNumber, 7);
+
+        return graphqlResponse({
+          repository: {
+            pullRequest: {
+              id: 'PR_kwDOB_example_7',
+              number: 7,
+              title: 'Fix the importer',
+              url: 'https://github.com/paperclipai/example-repo/pull/7',
+              projectItems: {
+                pageInfo: {
+                  hasNextPage: false,
+                  endCursor: null
+                },
+                nodes: [
+                  {
+                    id: 'PVTIT_kwDOB_existing_1',
+                    project: {
+                      id: 'PVT_kwDOB_project_12',
+                      number: 12,
+                      title: 'Q2 roadmap',
+                      url: 'https://github.com/orgs/paperclipai/projects/12',
+                      closed: false,
+                      owner: {
+                        __typename: 'Organization',
+                        login: 'paperclipai'
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        });
+      }
+
+      if (query.includes('mutation GitHubAddPullRequestToProject')) {
+        addMutationCalls += 1;
+      }
+    }
+
+    throw new Error(`Unexpected GitHub request: ${requestUrl}`);
+  };
+
+  try {
+    const result = await harness.executeTool('add_pull_request_to_project', {
+      pullRequestNumber: 7,
+      organization: 'paperclipai',
+      projectNumber: 12
+    }, {
+      companyId: 'company-1',
+      projectId: 'project-1'
+    });
+
+    assert.ok(!result.error);
+    assert.equal(addMutationCalls, 0);
+    assert.equal((result.data as { alreadyAssociated: boolean }).alreadyAssociated, true);
+    assert.deepEqual(
+      result.data,
+      {
+        repository: 'https://github.com/paperclipai/example-repo',
+        pullRequest: {
+          number: 7,
+          title: 'Fix the importer',
+          url: 'https://github.com/paperclipai/example-repo/pull/7'
+        },
+        project: {
+          id: 'PVT_kwDOB_project_12',
+          number: 12,
+          title: 'Q2 roadmap',
+          url: 'https://github.com/orgs/paperclipai/projects/12',
+          closed: false,
+          ownerLogin: 'paperclipai'
+        },
+        projectItem: {
+          id: 'PVTIT_kwDOB_existing_1'
+        },
+        alreadyAssociated: true
+      }
+    );
   } finally {
     globalThis.fetch = originalFetch;
   }

@@ -21,7 +21,7 @@ With this plugin, you can:
 - configure mappings and import defaults per Paperclip company
 - run sync manually or on a schedule
 - triage open pull requests from mapped Paperclip projects in a hosted queue
-- give Paperclip agents native GitHub tools for issues, pull requests, CI, and review threads
+- give Paperclip agents native GitHub tools for issues, pull requests, CI, review threads, and org-level projects
 
 ## What you get in Paperclip
 
@@ -67,7 +67,7 @@ Paperclip issue linkage on the queue prefers the GitHub issue that the pull requ
 
 ### Agent workflows built in
 
-Paperclip agents can search GitHub for duplicates, read and update issues, post comments, create pull requests, inspect changed files and CI, reply to review threads, resolve or unresolve threads, and request reviewers without leaving the Paperclip plugin surface.
+Paperclip agents can search GitHub for duplicates, read and update issues, post comments, create pull requests, inspect changed files and CI, reply to review threads, resolve or unresolve threads, request reviewers, list org-level GitHub Projects, and associate pull requests with those projects without leaving the Paperclip plugin surface.
 
 ## Requirements
 
@@ -177,6 +177,7 @@ The plugin exposes GitHub workflow tools to Paperclip agents, including:
 - issue reads, comment reads, comment writes, and metadata updates
 - pull request creation, reads, updates, changed-file inspection, and CI-check inspection
 - review-thread reads, replies, resolve and unresolve actions, and reviewer requests
+- organization-level GitHub Project listing and pull-request-to-project association
 
 When an agent posts a GitHub comment or review-thread reply through the plugin, the message includes a footer disclosing that it was created by a Paperclip AI agent and which model was used.
 

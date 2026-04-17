@@ -5,6 +5,11 @@ const repositoryProperty = {
   description: 'GitHub repository as owner/repo or https://github.com/owner/repo. Omit when the current Paperclip project has exactly one mapped repository.'
 } as const;
 
+const organizationProperty = {
+  type: 'string',
+  description: 'GitHub organization login that owns the Projects.'
+} as const;
+
 const paperclipIssueIdProperty = {
   type: 'string',
   description: 'Paperclip issue id used to infer the linked GitHub issue and repository when available.'
@@ -20,6 +25,17 @@ const pullRequestNumberProperty = {
   type: 'integer',
   minimum: 1,
   description: 'GitHub pull request number.'
+} as const;
+
+const projectIdProperty = {
+  type: 'string',
+  description: 'GitHub ProjectV2 node id. You can use the id returned by list_organization_projects.'
+} as const;
+
+const projectNumberProperty = {
+  type: 'integer',
+  minimum: 1,
+  description: 'GitHub organization project number. Requires organization when projectId is not provided.'
 } as const;
 
 const llmModelProperty = {
@@ -45,6 +61,17 @@ const pullRequestTargetSchema = {
     },
     {
       required: ['pullRequestNumber']
+    }
+  ]
+} as const;
+
+const organizationProjectTargetSchema = {
+  anyOf: [
+    {
+      required: ['projectId']
+    },
+    {
+      required: ['organization', 'projectNumber']
     }
   ]
 } as const;
@@ -431,6 +458,51 @@ export const GITHUB_AGENT_TOOLS: PluginToolDeclaration[] = [
           required: ['pullRequestNumber', 'teamReviewers']
         }
       ]
+    }
+  },
+  {
+    name: 'list_organization_projects',
+    displayName: 'List Organization Projects',
+    description: 'List GitHub organization-level Projects so an agent can choose where to associate pull requests.',
+    parametersSchema: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['organization'],
+      properties: {
+        organization: organizationProperty,
+        includeClosed: {
+          type: 'boolean',
+          description: 'Include closed Projects in the results. Defaults to false.'
+        },
+        query: {
+          type: 'string',
+          description: 'Optional free-text filter matched against project titles and descriptions after loading the organization projects.'
+        },
+        limit: {
+          type: 'integer',
+          minimum: 1,
+          maximum: 100,
+          description: 'Maximum number of projects to return.'
+        }
+      }
+    }
+  },
+  {
+    name: 'add_pull_request_to_project',
+    displayName: 'Add Pull Request To Project',
+    description: 'Associate a GitHub pull request with an organization-level GitHub Project.',
+    parametersSchema: {
+      type: 'object',
+      additionalProperties: false,
+      allOf: [pullRequestTargetSchema, organizationProjectTargetSchema],
+      properties: {
+        repository: repositoryProperty,
+        pullRequestNumber: pullRequestNumberProperty,
+        paperclipIssueId: paperclipIssueIdProperty,
+        projectId: projectIdProperty,
+        organization: organizationProperty,
+        projectNumber: projectNumberProperty
+      }
     }
   }
 ];

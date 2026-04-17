@@ -831,6 +831,64 @@ interface GitHubReviewThreadRecord {
   totalCommentCount?: number;
 }
 
+interface GitHubProjectV2OwnerRecord {
+  __typename?: string | null;
+  login?: string | null;
+}
+
+interface GitHubProjectV2Node {
+  id?: string | null;
+  number?: number | null;
+  title?: string | null;
+  shortDescription?: string | null;
+  url?: string | null;
+  closed?: boolean | null;
+  updatedAt?: string | null;
+  owner?: GitHubProjectV2OwnerRecord | null;
+}
+
+interface GitHubOrganizationProjectsQueryResult {
+  organization?: {
+    projectsV2?: {
+      pageInfo?: GitHubPageInfo | null;
+      nodes?: Array<GitHubProjectV2Node | null> | null;
+    } | null;
+  } | null;
+}
+
+interface GitHubOrganizationProjectByNumberQueryResult {
+  organization?: {
+    projectV2?: GitHubProjectV2Node | null;
+  } | null;
+}
+
+interface GitHubPullRequestProjectItemsQueryResult {
+  repository?: {
+    pullRequest?: {
+      id?: string | null;
+      number?: number | null;
+      title?: string | null;
+      url?: string | null;
+      projectItems?: {
+        pageInfo?: GitHubPageInfo | null;
+        nodes?: Array<{
+          id?: string | null;
+          project?: GitHubProjectV2Node | null;
+        } | null> | null;
+      } | null;
+    } | null;
+  } | null;
+}
+
+interface GitHubAddPullRequestToProjectMutationResult {
+  addProjectV2ItemById?: {
+    item?: {
+      id?: string | null;
+      project?: GitHubProjectV2Node | null;
+    } | null;
+  } | null;
+}
+
 interface GitHubPullRequestLinkEntityData {
   companyId?: string;
   paperclipProjectId?: string;
@@ -1062,6 +1120,22 @@ interface SyncProcessingFailure {
   error: unknown;
   context: SyncFailureContext;
   occurredAt: string;
+}
+
+interface GitHubProjectRecord {
+  id: string;
+  number: number;
+  title: string;
+  url: string;
+  closed: boolean;
+  shortDescription?: string;
+  updatedAt?: string;
+  ownerLogin?: string;
+}
+
+interface GitHubPullRequestProjectItemRecord {
+  id: string;
+  project: GitHubProjectRecord;
 }
 
 const SUCCESSFUL_CHECK_RUN_CONCLUSIONS = new Set(['SUCCESS', 'NEUTRAL', 'SKIPPED']);
@@ -1506,6 +1580,118 @@ const GITHUB_PULL_REQUEST_REVIEW_THREADS_DETAILED_QUERY = `
                   id
                 }
               }
+            }
+          }
+        }
+      }
+    }
+  }
+`;
+
+const GITHUB_ORGANIZATION_PROJECTS_QUERY = `
+  query GitHubOrganizationProjects($organization: String!, $after: String, $first: Int!) {
+    organization(login: $organization) {
+      projectsV2(first: $first, after: $after, orderBy: { field: UPDATED_AT, direction: DESC }) {
+        pageInfo {
+          hasNextPage
+          endCursor
+        }
+        nodes {
+          id
+          number
+          title
+          shortDescription
+          url
+          closed
+          updatedAt
+        }
+      }
+    }
+  }
+`;
+
+const GITHUB_ORGANIZATION_PROJECT_BY_NUMBER_QUERY = `
+  query GitHubOrganizationProjectByNumber($organization: String!, $projectNumber: Int!) {
+    organization(login: $organization) {
+      projectV2(number: $projectNumber) {
+        id
+        number
+        title
+        url
+        closed
+        owner {
+          __typename
+          ... on Organization {
+            login
+          }
+          ... on User {
+            login
+          }
+        }
+      }
+    }
+  }
+`;
+
+const GITHUB_PULL_REQUEST_PROJECT_ITEMS_QUERY = `
+  query GitHubPullRequestProjectItems($owner: String!, $repo: String!, $pullRequestNumber: Int!, $after: String) {
+    repository(owner: $owner, name: $repo) {
+      pullRequest(number: $pullRequestNumber) {
+        id
+        number
+        title
+        url
+        projectItems(first: 100, after: $after) {
+          pageInfo {
+            hasNextPage
+            endCursor
+          }
+          nodes {
+            id
+            project {
+              id
+              number
+              title
+              url
+              closed
+              owner {
+                __typename
+                ... on Organization {
+                  login
+                }
+                ... on User {
+                  login
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+`;
+
+const GITHUB_ADD_PULL_REQUEST_TO_PROJECT_MUTATION = `
+  mutation GitHubAddPullRequestToProject($projectId: ID!, $contentId: ID!) {
+    addProjectV2ItemById(input: {
+      projectId: $projectId
+      contentId: $contentId
+    }) {
+      item {
+        id
+        project {
+          id
+          number
+          title
+          url
+          closed
+          owner {
+            __typename
+            ... on Organization {
+              login
+            }
+            ... on User {
+              login
             }
           }
         }
@@ -9390,6 +9576,240 @@ async function resolveGitHubPullRequestToolTarget(
   };
 }
 
+function normalizeGitHubProjectRecord(
+  project: GitHubProjectV2Node | null | undefined,
+  fallbackOwnerLogin?: string
+): GitHubProjectRecord | null {
+  const id = normalizeOptionalString(project?.id);
+  const title = normalizeOptionalString(project?.title);
+  const url = normalizeOptionalString(project?.url);
+  const number =
+    typeof project?.number === 'number' && Number.isInteger(project.number) && project.number > 0
+      ? Math.floor(project.number)
+      : null;
+
+  if (!id || !title || !url || number === null) {
+    return null;
+  }
+
+  const shortDescription = normalizeOptionalString(project?.shortDescription);
+  const updatedAt = normalizeOptionalString(project?.updatedAt);
+  const ownerLogin = normalizeOptionalString(project?.owner?.login) ?? fallbackOwnerLogin;
+
+  return {
+    id,
+    number,
+    title,
+    url,
+    closed: project?.closed === true,
+    ...(shortDescription ? { shortDescription } : {}),
+    ...(updatedAt ? { updatedAt } : {}),
+    ...(ownerLogin ? { ownerLogin } : {})
+  };
+}
+
+function buildGitHubProjectToolData(
+  project: GitHubProjectRecord,
+  options?: {
+    includeOwnerLogin?: boolean;
+  }
+): Record<string, unknown> {
+  return {
+    id: project.id,
+    number: project.number,
+    title: project.title,
+    ...(project.shortDescription ? { shortDescription: project.shortDescription } : {}),
+    url: project.url,
+    closed: project.closed,
+    ...(project.updatedAt ? { updatedAt: project.updatedAt } : {}),
+    ...(options?.includeOwnerLogin && project.ownerLogin ? { ownerLogin: project.ownerLogin } : {})
+  };
+}
+
+function matchesGitHubProjectFilter(project: GitHubProjectRecord, query?: string): boolean {
+  const normalizedQuery = normalizeOptionalString(query)?.toLowerCase();
+  if (!normalizedQuery) {
+    return true;
+  }
+
+  return [project.title, project.shortDescription]
+    .filter((value): value is string => Boolean(value))
+    .some((value) => value.toLowerCase().includes(normalizedQuery));
+}
+
+async function listGitHubOrganizationProjects(
+  octokit: Octokit,
+  organization: string,
+  options?: {
+    includeClosed?: boolean;
+    query?: string;
+    limit?: number;
+  }
+): Promise<GitHubProjectRecord[]> {
+  const normalizedOrganization = normalizeOptionalString(organization);
+  if (!normalizedOrganization) {
+    throw new Error('organization is required.');
+  }
+
+  const includeClosed = options?.includeClosed === true;
+  const limit = Math.min(normalizeToolPositiveInteger(options?.limit) ?? 20, 100);
+  const projects: GitHubProjectRecord[] = [];
+  let after: string | undefined;
+
+  do {
+    const response = await octokit.graphql<GitHubOrganizationProjectsQueryResult>(
+      GITHUB_ORGANIZATION_PROJECTS_QUERY,
+      {
+        organization: normalizedOrganization,
+        first: Math.min(50, Math.max(1, limit)),
+        after
+      }
+    );
+
+    if (!response.organization) {
+      throw new Error(`GitHub organization ${normalizedOrganization} was not found or is not visible to the configured token.`);
+    }
+
+    const connection = response.organization.projectsV2;
+    for (const node of connection?.nodes ?? []) {
+      const project = normalizeGitHubProjectRecord(node, normalizedOrganization);
+      if (!project) {
+        continue;
+      }
+
+      if (!includeClosed && project.closed) {
+        continue;
+      }
+
+      if (!matchesGitHubProjectFilter(project, options?.query)) {
+        continue;
+      }
+
+      projects.push(project);
+      if (projects.length >= limit) {
+        return projects;
+      }
+    }
+
+    after = getPageCursor(connection?.pageInfo);
+  } while (after);
+
+  return projects;
+}
+
+async function resolveGitHubProjectToolTarget(
+  octokit: Octokit,
+  input: Record<string, unknown>
+): Promise<{
+  projectId: string;
+  project?: GitHubProjectRecord;
+}> {
+  const explicitProjectId = normalizeOptionalString(input.projectId);
+  if (explicitProjectId) {
+    return {
+      projectId: explicitProjectId
+    };
+  }
+
+  const organization = normalizeOptionalToolString(input.organization);
+  const projectNumber = normalizeToolPositiveInteger(input.projectNumber);
+  if (!organization || projectNumber === undefined) {
+    throw new Error('Provide either projectId or both organization and projectNumber.');
+  }
+
+  const response = await octokit.graphql<GitHubOrganizationProjectByNumberQueryResult>(
+    GITHUB_ORGANIZATION_PROJECT_BY_NUMBER_QUERY,
+    {
+      organization,
+      projectNumber
+    }
+  );
+  const project = normalizeGitHubProjectRecord(response.organization?.projectV2, organization);
+  if (!project) {
+    throw new Error(`GitHub organization project #${projectNumber} was not found in ${organization}.`);
+  }
+
+  return {
+    projectId: project.id,
+    project
+  };
+}
+
+async function getGitHubPullRequestProjectItems(
+  octokit: Octokit,
+  repository: ParsedRepositoryReference,
+  pullRequestNumber: number
+): Promise<{
+  pullRequestId: string;
+  pullRequest: {
+    number: number;
+    title: string;
+    url: string;
+  };
+  projectItems: GitHubPullRequestProjectItemRecord[];
+}> {
+  const projectItems: GitHubPullRequestProjectItemRecord[] = [];
+  let after: string | undefined;
+  let pullRequestId: string | undefined;
+  let pullRequestTitle: string | undefined;
+  let pullRequestUrl: string | undefined;
+
+  do {
+    const response = await octokit.graphql<GitHubPullRequestProjectItemsQueryResult>(
+      GITHUB_PULL_REQUEST_PROJECT_ITEMS_QUERY,
+      {
+        owner: repository.owner,
+        repo: repository.repo,
+        pullRequestNumber,
+        after
+      }
+    );
+
+    const pullRequest = response.repository?.pullRequest;
+    const currentPullRequestId = normalizeOptionalString(pullRequest?.id);
+    const currentPullRequestTitle = normalizeOptionalString(pullRequest?.title);
+    const currentPullRequestUrl = normalizeOptionalString(pullRequest?.url);
+
+    if (!currentPullRequestId || !currentPullRequestTitle || !currentPullRequestUrl) {
+      throw new Error(`GitHub pull request #${pullRequestNumber} was not found in ${formatRepositoryLabel(repository)}.`);
+    }
+
+    pullRequestId ??= currentPullRequestId;
+    pullRequestTitle ??= currentPullRequestTitle;
+    pullRequestUrl ??= currentPullRequestUrl;
+
+    const connection = response.repository?.pullRequest?.projectItems;
+    for (const node of connection?.nodes ?? []) {
+      const itemId = normalizeOptionalString(node?.id);
+      const project = normalizeGitHubProjectRecord(node?.project);
+      if (!itemId || !project) {
+        continue;
+      }
+
+      projectItems.push({
+        id: itemId,
+        project
+      });
+    }
+
+    after = getPageCursor(connection?.pageInfo);
+  } while (after);
+
+  if (!pullRequestId || !pullRequestTitle || !pullRequestUrl) {
+    throw new Error(`GitHub pull request #${pullRequestNumber} was not found in ${formatRepositoryLabel(repository)}.`);
+  }
+
+  return {
+    pullRequestId,
+    pullRequest: {
+      number: pullRequestNumber,
+      title: pullRequestTitle,
+      url: pullRequestUrl
+    },
+    projectItems
+  };
+}
+
 function formatAiAuthorshipFooter(llmModel: string): string {
   return `\n\n---\n${AI_AUTHORED_COMMENT_FOOTER_PREFIX}${llmModel.trim()}.`;
 }
@@ -14012,6 +14432,100 @@ function registerGitHubAgentTools(ctx: PluginSetupContext): void {
           pullRequestNumber: target.pullRequestNumber,
           requestedReviewers: (response.data.requested_reviewers ?? []).map((reviewer) => reviewer?.login ?? '').filter(Boolean),
           requestedTeams: (response.data.requested_teams ?? []).map((team) => team?.slug ?? '').filter(Boolean)
+        }
+      );
+    })
+  );
+
+  ctx.tools.register(
+    'list_organization_projects',
+    getGitHubAgentToolDeclaration('list_organization_projects'),
+    async (params) => executeGitHubTool(async () => {
+      const input = getToolInputRecord(params);
+      const organization = normalizeOptionalToolString(input.organization);
+      if (!organization) {
+        throw new Error('organization is required.');
+      }
+
+      const octokit = await createGitHubToolOctokit(ctx);
+      const projects = await listGitHubOrganizationProjects(octokit, organization, {
+        includeClosed: input.includeClosed === true,
+        query: normalizeOptionalToolString(input.query),
+        limit: normalizeToolPositiveInteger(input.limit)
+      });
+
+      return buildToolSuccessResult(
+        `Loaded ${projects.length} GitHub organization ${projects.length === 1 ? 'project' : 'projects'} from ${organization}.`,
+        {
+          organization,
+          projects: projects.map((project) => buildGitHubProjectToolData(project))
+        }
+      );
+    })
+  );
+
+  ctx.tools.register(
+    'add_pull_request_to_project',
+    getGitHubAgentToolDeclaration('add_pull_request_to_project'),
+    async (params, runCtx) => executeGitHubTool(async () => {
+      const input = getToolInputRecord(params);
+      const target = await resolveGitHubPullRequestToolTarget(ctx, runCtx, input);
+      const octokit = await createGitHubToolOctokit(ctx);
+      const projectTarget = await resolveGitHubProjectToolTarget(octokit, input);
+      const pullRequest = await getGitHubPullRequestProjectItems(
+        octokit,
+        target.repository,
+        target.pullRequestNumber
+      );
+      const existingProjectItem = pullRequest.projectItems.find((item) => item.project.id === projectTarget.projectId);
+
+      if (existingProjectItem) {
+        return buildToolSuccessResult(
+          `Pull request #${target.pullRequestNumber} is already associated with GitHub project #${existingProjectItem.project.number}.`,
+          {
+            repository: target.repository.url,
+            pullRequest: pullRequest.pullRequest,
+            project: buildGitHubProjectToolData(existingProjectItem.project, {
+              includeOwnerLogin: true
+            }),
+            projectItem: {
+              id: existingProjectItem.id
+            },
+            alreadyAssociated: true
+          }
+        );
+      }
+
+      const response = await octokit.graphql<GitHubAddPullRequestToProjectMutationResult>(
+        GITHUB_ADD_PULL_REQUEST_TO_PROJECT_MUTATION,
+        {
+          projectId: projectTarget.projectId,
+          contentId: pullRequest.pullRequestId
+        }
+      );
+      const projectItemId = normalizeOptionalString(response.addProjectV2ItemById?.item?.id);
+      const project =
+        normalizeGitHubProjectRecord(
+          response.addProjectV2ItemById?.item?.project,
+          projectTarget.project?.ownerLogin
+        ) ?? projectTarget.project;
+
+      if (!projectItemId || !project) {
+        throw new Error('GitHub did not return the created project item.');
+      }
+
+      return buildToolSuccessResult(
+        `Added pull request #${target.pullRequestNumber} to GitHub project #${project.number}.`,
+        {
+          repository: target.repository.url,
+          pullRequest: pullRequest.pullRequest,
+          project: buildGitHubProjectToolData(project, {
+            includeOwnerLogin: true
+          }),
+          projectItem: {
+            id: projectItemId
+          },
+          alreadyAssociated: false
         }
       );
     })
