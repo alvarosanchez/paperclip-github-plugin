@@ -12347,6 +12347,87 @@ test('worker blocks sync when the Paperclip deployment is authenticated and boar
   }
 });
 
+test('sync.runNow returns a configuration error when plugin issue creation is unavailable', async () => {
+  const harness = createTestHarness({
+    manifest,
+    config: {
+      githubTokenRef: 'github-secret-ref'
+    }
+  });
+  await plugin.definition.setup(harness.ctx);
+
+  await harness.performAction('settings.saveRegistration', {
+    mappings: [
+      {
+        id: 'mapping-a',
+        repositoryUrl: 'paperclipai/example-repo',
+        paperclipProjectName: 'Engineering',
+        paperclipProjectId: 'project-1',
+        companyId: 'company-1'
+      }
+    ],
+    syncState: {
+      status: 'idle'
+    }
+  });
+
+  harness.ctx.secrets.resolve = async (secretRef) => {
+    assert.equal(secretRef, 'github-secret-ref');
+    return 'github-token';
+  };
+  (harness.ctx.issues as { create?: unknown }).create = undefined;
+
+  const result = await harness.performAction('sync.runNow', {
+    waitForCompletion: true
+  }) as {
+    syncState: {
+      status: string;
+      message?: string;
+      lastRunTrigger?: string;
+      errorDetails?: {
+        phase?: string;
+        suggestedAction?: string;
+      };
+      recentFailures?: Array<{
+        message?: string;
+        phase?: string;
+      }>;
+    };
+  };
+
+  assert.equal(result.syncState.status, 'error');
+  assert.equal(result.syncState.message, 'This Paperclip runtime does not expose plugin issue creation yet.');
+  assert.equal(result.syncState.lastRunTrigger, 'manual');
+  assert.equal(result.syncState.errorDetails?.phase, 'configuration');
+  assert.match(result.syncState.errorDetails?.suggestedAction ?? '', /supports plugin issue creation/i);
+  assert.equal(result.syncState.recentFailures?.length, 1);
+  assert.equal(result.syncState.recentFailures?.[0]?.message, 'This Paperclip runtime does not expose plugin issue creation yet.');
+  assert.equal(result.syncState.recentFailures?.[0]?.phase, 'configuration');
+
+  const savedState = harness.getState({
+    scopeKind: 'instance',
+    stateKey: 'paperclip-github-plugin-settings'
+  }) as {
+    syncState: {
+      status: string;
+      message?: string;
+      errorDetails?: {
+        phase?: string;
+        suggestedAction?: string;
+      };
+      recentFailures?: Array<{
+        message?: string;
+      }>;
+    };
+  };
+
+  assert.equal(savedState.syncState.status, 'error');
+  assert.equal(savedState.syncState.message, 'This Paperclip runtime does not expose plugin issue creation yet.');
+  assert.equal(savedState.syncState.errorDetails?.phase, 'configuration');
+  assert.match(savedState.syncState.errorDetails?.suggestedAction ?? '', /supports plugin issue creation/i);
+  assert.equal(savedState.syncState.recentFailures?.[0]?.message, 'This Paperclip runtime does not expose plugin issue creation yet.');
+});
+
 test('settings registration clears legacy setup errors once the missing token is saved', async () => {
   const harness = createTestHarness({
     manifest,
