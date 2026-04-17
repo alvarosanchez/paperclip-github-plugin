@@ -5201,8 +5201,9 @@ function describeGitHubStatusTransitionReason(params: {
   snapshot: GitHubIssueStatusSnapshot;
   previousCommentCount?: number;
   hasTrustedNewComment?: boolean;
+  maintainerAuthoredImportedIssue?: boolean;
 }): string {
-  const { snapshot, previousCommentCount, hasTrustedNewComment } = params;
+  const { snapshot, previousCommentCount, hasTrustedNewComment, maintainerAuthoredImportedIssue } = params;
 
   if (snapshot.state === 'closed') {
     switch (snapshot.stateReason) {
@@ -5221,6 +5222,10 @@ function describeGitHubStatusTransitionReason(params: {
   }
 
   if (snapshot.linkedPullRequests.length === 0) {
+    if (maintainerAuthoredImportedIssue) {
+      return 'the GitHub issue is open with no linked pull requests and was created by a repository maintainer';
+    }
+
     return 'the GitHub issue is open with no linked pull requests';
   }
 
@@ -5274,15 +5279,25 @@ function buildPaperclipIssueStatusTransitionComment(params: {
   snapshot: GitHubIssueStatusSnapshot;
   previousCommentCount?: number;
   hasTrustedNewComment?: boolean;
+  maintainerAuthoredImportedIssue?: boolean;
 }): {
   body: string;
   annotation: StoredStatusTransitionCommentAnnotation;
 } {
-  const { previousStatus, nextStatus, repository, snapshot, previousCommentCount, hasTrustedNewComment } = params;
+  const {
+    previousStatus,
+    nextStatus,
+    repository,
+    snapshot,
+    previousCommentCount,
+    hasTrustedNewComment,
+    maintainerAuthoredImportedIssue
+  } = params;
   const reason = describeGitHubStatusTransitionReason({
     snapshot,
     previousCommentCount,
-    hasTrustedNewComment
+    hasTrustedNewComment,
+    maintainerAuthoredImportedIssue
   });
 
   return {
@@ -5304,6 +5319,7 @@ function resolvePaperclipIssueStatus(params: {
   hasTrustedNewComment?: boolean;
   wasImportedThisRun: boolean;
   defaultImportedStatus: PaperclipIssueStatus;
+  maintainerAuthoredImportedIssue?: boolean;
 }): PaperclipIssueStatus {
   const {
     currentStatus,
@@ -5311,7 +5327,8 @@ function resolvePaperclipIssueStatus(params: {
     previousCommentCount,
     hasTrustedNewComment,
     wasImportedThisRun,
-    defaultImportedStatus
+    defaultImportedStatus,
+    maintainerAuthoredImportedIssue
   } = params;
 
   if (snapshot.state === 'closed') {
@@ -5334,7 +5351,7 @@ function resolvePaperclipIssueStatus(params: {
   }
 
   if (wasImportedThisRun) {
-    return defaultImportedStatus;
+    return maintainerAuthoredImportedIssue ? 'todo' : defaultImportedStatus;
   }
 
   if (currentStatus === 'done' || currentStatus === 'cancelled') {
@@ -5960,6 +5977,25 @@ async function hasTrustedNewGitHubIssueComment(params: {
   }
 
   return false;
+}
+
+async function isMaintainerAuthoredGitHubIssue(params: {
+  octokit: Octokit;
+  repository: ParsedRepositoryReference;
+  githubIssue: GitHubIssueRecord;
+  maintainerCache: Map<string, boolean>;
+}): Promise<boolean> {
+  const authorLogin = normalizeGitHubUserLogin(params.githubIssue.authorLogin);
+  if (!authorLogin) {
+    return false;
+  }
+
+  return isGitHubUserRepositoryMaintainer(
+    params.octokit,
+    params.repository,
+    authorLogin,
+    params.maintainerCache
+  );
 }
 
 function parseGitHubIssueHtmlUrl(value: string): ParsedGitHubIssueReference | undefined {
@@ -8516,13 +8552,27 @@ async function synchronizePaperclipIssueStatuses(
               currentCommentCount: snapshot.commentCount,
               maintainerCache: repositoryMaintainerCache
             });
+      const wasImportedThisRun = createdIssueIds.has(importedIssue.githubIssueId);
+      const maintainerAuthoredImportedIssue =
+        wasImportedThisRun &&
+        advancedSettings.defaultStatus !== 'todo' &&
+        snapshot.state === 'open' &&
+        snapshot.linkedPullRequests.length === 0
+          ? await isMaintainerAuthoredGitHubIssue({
+              octokit,
+              repository,
+              githubIssue,
+              maintainerCache: repositoryMaintainerCache
+            })
+          : false;
       const nextStatus = resolvePaperclipIssueStatus({
         currentStatus: paperclipIssue.status,
         snapshot,
         previousCommentCount,
         hasTrustedNewComment,
-        wasImportedThisRun: createdIssueIds.has(importedIssue.githubIssueId),
-        defaultImportedStatus: advancedSettings.defaultStatus
+        wasImportedThisRun,
+        defaultImportedStatus: advancedSettings.defaultStatus,
+        maintainerAuthoredImportedIssue
       });
 
       importedIssue.githubIssueNumber = githubIssue.number;
@@ -8538,7 +8588,8 @@ async function synchronizePaperclipIssueStatuses(
         repository,
         snapshot,
         previousCommentCount,
-        hasTrustedNewComment
+        hasTrustedNewComment,
+        maintainerAuthoredImportedIssue
       });
 
       updateSyncFailureContext(syncFailureContext, {

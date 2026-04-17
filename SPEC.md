@@ -73,7 +73,8 @@ The plugin MUST persist repository mappings, company-scoped advanced issue defau
 - Repeated sync runs MUST continue reconciling imported Paperclip issue statuses against the latest GitHub state.
 - When the local Paperclip host API is available, sync-driven Paperclip status transitions SHOULD go through the same issue-update path Paperclip UI uses so timeline activity is recorded for agents and humans.
 - Repeated sync runs MUST continue reconciling imported Paperclip issue labels against the latest mapped GitHub labels, including removing labels that were removed on GitHub.
-- An open GitHub issue without a linked PR MUST map to the configured default Paperclip status when it is first imported, and that default MUST be `backlog` when the company has not chosen another status.
+- An open GitHub issue without a linked PR that was created by a repository maintainer/admin MUST map to Paperclip `todo` when it is first imported.
+- An open GitHub issue without a linked PR MUST otherwise map to the configured default Paperclip status when it is first imported, and that default MUST be `backlog` when the company has not chosen another status.
 - If an imported Paperclip issue is currently `backlog` and its linked GitHub issue is still open, the sync flow MUST preserve `backlog`; only a manual Paperclip transition may move it out of `backlog`.
 - If a Paperclip issue that came from an open GitHub issue without a linked PR is later moved out of `backlog`, the sync flow SHOULD preserve that Paperclip status until another open-issue GitHub rule applies.
 - If that Paperclip issue is currently `done` or `cancelled` while the linked GitHub issue is open with no linked PR, the sync flow MUST move it to `todo` instead of `backlog` so it re-enters the active queue.

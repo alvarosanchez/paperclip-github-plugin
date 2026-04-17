@@ -3,8 +3,6 @@ import { mkdir, readFile, rm } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { build, context } from 'esbuild';
-
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const packageRoot = resolve(__dirname, '..');
 const outdir = resolve(packageRoot, 'dist');
@@ -14,6 +12,36 @@ const pluginVersion =
   process.env.PLUGIN_VERSION?.trim()
   || (typeof packageJson.version === 'string' && packageJson.version.trim())
   || '0.0.0-dev';
+
+function isMissingDependencyError(error, packageName) {
+  return (
+    error
+    && typeof error === 'object'
+    && 'code' in error
+    && error.code === 'ERR_MODULE_NOT_FOUND'
+    && 'message' in error
+    && typeof error.message === 'string'
+    && error.message.includes(`'${packageName}'`)
+  );
+}
+
+async function loadEsbuild() {
+  try {
+    return await import('esbuild');
+  } catch (error) {
+    if (isMissingDependencyError(error, 'esbuild')) {
+      console.error(
+        '[paperclip-github-plugin] Missing build dependency "esbuild". '
+        + 'Run `pnpm install` in this checkout before running `pnpm build`, `pnpm test:e2e`, or `pnpm verify:manual`.'
+      );
+      process.exit(1);
+    }
+
+    throw error;
+  }
+}
+
+const { build, context } = await loadEsbuild();
 
 await rm(outdir, { recursive: true, force: true });
 await mkdir(resolve(outdir, 'ui'), { recursive: true });

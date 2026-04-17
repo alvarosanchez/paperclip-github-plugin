@@ -128,6 +128,7 @@ When the local Paperclip API is available, the plugin also syncs labels by name,
 
 | GitHub condition | Paperclip status |
 | --- | --- |
+| Open issue with no linked pull request, created by a repository maintainer | `todo` on first import |
 | Open issue with no linked pull request | Configured default status, which defaults to `backlog` |
 | Open issue with a linked pull request and unfinished CI | `in_progress` |
 | Open issue with failing CI or unresolved review threads | `todo` |
@@ -137,6 +138,7 @@ When the local Paperclip API is available, the plugin also syncs labels by name,
 
 Additional behavior:
 
+- Open issues with no linked pull request that are created by a verified repository maintainer/admin bypass the default imported status and start in `todo`.
 - Open imported issues that are already in `backlog` stay in `backlog` until someone changes them in Paperclip.
 - If an imported issue is `done` or `cancelled` and GitHub shows it open again with no linked pull request, sync moves it to `todo` so agents can pick it up again.
 - Trusted new GitHub comments from the original issue author or a verified maintainer/admin can move an open imported issue back to `todo`.
