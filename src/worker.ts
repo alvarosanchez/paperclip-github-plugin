@@ -2269,6 +2269,15 @@ function normalizeGitHubUserLogin(value: unknown): string | undefined {
   return trimmed ? trimmed.toLowerCase() : undefined;
 }
 
+function normalizeGitHubRepositoryPermissionLevel(value: unknown): string | undefined {
+  if (typeof value !== 'string') {
+    return undefined;
+  }
+
+  const trimmed = stripNullBytes(value).trim();
+  return trimmed ? trimmed.toLowerCase() : undefined;
+}
+
 function normalizeGitHubTokenRef(value: unknown): string | undefined {
   return normalizeSecretRef(value);
 }
@@ -6030,11 +6039,17 @@ async function isGitHubUserRepositoryMaintainer(
         'X-GitHub-Api-Version': GITHUB_API_VERSION
       }
     });
+    const permission =
+      response.data && typeof response.data === 'object' && 'permission' in response.data
+        ? normalizeGitHubRepositoryPermissionLevel((response.data as { permission?: unknown }).permission)
+        : undefined;
     const roleName =
       response.data && typeof response.data === 'object' && 'role_name' in response.data
-        ? normalizeGitHubUserLogin((response.data as { role_name?: unknown }).role_name)
+        ? normalizeGitHubRepositoryPermissionLevel((response.data as { role_name?: unknown }).role_name)
         : undefined;
-    const isMaintainer = roleName ? GITHUB_REPOSITORY_MAINTAINER_ROLE_NAMES.has(roleName) : false;
+    const isMaintainer =
+      (permission ? GITHUB_REPOSITORY_MAINTAINER_ROLE_NAMES.has(permission) : false)
+      || (roleName ? GITHUB_REPOSITORY_MAINTAINER_ROLE_NAMES.has(roleName) : false);
     cache.set(cacheKey, isMaintainer);
     return isMaintainer;
   } catch (error) {
