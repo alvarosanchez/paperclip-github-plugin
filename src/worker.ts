@@ -88,6 +88,7 @@ type PaperclipIssueUpdatePatchWithLabels = Parameters<PluginSetupContext['issues
 };
 type PaperclipLabelDirectory = Map<string, PaperclipIssueLabel[]>;
 type PaperclipBoardApiTokenRefs = Record<string, string>;
+type PaperclipBoardAccessIdentityByCompanyId = Record<string, string>;
 type CompanyAdvancedSettingsByCompanyId = Record<string, GitHubSyncAdvancedSettings>;
 type ProjectPullRequestFilter = 'all' | 'mergeable' | 'reviewable' | 'failing';
 type ProjectPullRequestUpToDateStatus = 'up_to_date' | 'can_update' | 'conflicts' | 'unknown';
@@ -148,6 +149,7 @@ interface GitHubSyncAdvancedSettings {
   defaultAssigneeAgentId?: string;
   defaultStatus: PaperclipIssueStatus;
   ignoredIssueAuthorUsernames: string[];
+  githubTokenPropagationAgentIds?: string[];
 }
 
 interface GitHubSyncAssigneeOption {
@@ -334,7 +336,9 @@ interface GitHubSyncSettings {
   scheduleFrequencyMinutes: number;
   paperclipApiBaseUrl?: string;
   githubTokenRef?: string;
+  githubTokenLogin?: string;
   paperclipBoardApiTokenRefs?: PaperclipBoardApiTokenRefs;
+  paperclipBoardAccessIdentityByCompanyId?: PaperclipBoardAccessIdentityByCompanyId;
   companyAdvancedSettingsByCompanyId?: CompanyAdvancedSettingsByCompanyId;
   totalSyncedIssuesCount?: number;
   updatedAt?: string;
@@ -3720,28 +3724,50 @@ function sanitizeSettingsForCurrentSetup(
 
 function getPublicSettings(
   settings: GitHubSyncSettings
-): Omit<GitHubSyncSettings, 'githubTokenRef' | 'paperclipBoardApiTokenRefs' | 'companyAdvancedSettingsByCompanyId'> {
+): Omit<
+  GitHubSyncSettings,
+  'githubTokenRef' | 'paperclipBoardApiTokenRefs' | 'paperclipBoardAccessIdentityByCompanyId' | 'companyAdvancedSettingsByCompanyId'
+> {
   const {
     githubTokenRef: _githubTokenRef,
     paperclipBoardApiTokenRefs: _paperclipBoardApiTokenRefs,
+    paperclipBoardAccessIdentityByCompanyId: _paperclipBoardAccessIdentityByCompanyId,
     companyAdvancedSettingsByCompanyId: _companyAdvancedSettingsByCompanyId,
     ...publicSettings
   } = settings;
   return publicSettings;
 }
 
+function getPaperclipBoardAccessIdentity(
+  settings: Pick<GitHubSyncSettings, 'paperclipBoardAccessIdentityByCompanyId'>,
+  companyId?: string
+): string | undefined {
+  const normalizedCompanyId = normalizeCompanyId(companyId);
+  if (!normalizedCompanyId) {
+    return undefined;
+  }
+
+  return normalizeOptionalString(settings.paperclipBoardAccessIdentityByCompanyId?.[normalizedCompanyId]);
+}
+
 function getPublicSettingsForScope(
   settings: GitHubSyncSettings,
   companyId?: string
-): Omit<GitHubSyncSettings, 'githubTokenRef' | 'paperclipBoardApiTokenRefs' | 'companyAdvancedSettingsByCompanyId'> & {
+): Omit<
+  GitHubSyncSettings,
+  'githubTokenRef' | 'paperclipBoardApiTokenRefs' | 'paperclipBoardAccessIdentityByCompanyId' | 'companyAdvancedSettingsByCompanyId'
+> & {
   advancedSettings: GitHubSyncAdvancedSettings;
+  paperclipBoardAccessIdentity?: string;
 } {
   const publicSettings = getPublicSettings(settings);
+  const paperclipBoardAccessIdentity = getPaperclipBoardAccessIdentity(settings, companyId);
 
   return {
     ...publicSettings,
     mappings: filterMappingsByCompany(publicSettings.mappings, companyId),
-    advancedSettings: getCompanyAdvancedSettings(settings, companyId)
+    advancedSettings: getCompanyAdvancedSettings(settings, companyId),
+    ...(paperclipBoardAccessIdentity ? { paperclipBoardAccessIdentity } : {})
   };
 }
 
@@ -4267,6 +4293,30 @@ function normalizePaperclipBoardApiTokenRefs(value: unknown): PaperclipBoardApiT
   return Object.fromEntries(entries);
 }
 
+function normalizePaperclipBoardAccessIdentityByCompanyId(
+  value: unknown
+): PaperclipBoardAccessIdentityByCompanyId | undefined {
+  if (!value || typeof value !== 'object') {
+    return undefined;
+  }
+
+  const entries = Object.entries(value as Record<string, unknown>)
+    .map(([companyId, identityLabel]) => {
+      const normalizedCompanyId = normalizeCompanyId(companyId);
+      const normalizedIdentityLabel = normalizeOptionalString(identityLabel);
+      return normalizedCompanyId && normalizedIdentityLabel
+        ? [normalizedCompanyId, normalizedIdentityLabel] as const
+        : null;
+    })
+    .filter((entry): entry is readonly [string, string] => entry !== null);
+
+  if (entries.length === 0) {
+    return undefined;
+  }
+
+  return Object.fromEntries(entries);
+}
+
 function normalizeSyncCancellationRequest(value: unknown): SyncCancellationRequest | null {
   if (!value || typeof value !== 'object') {
     return null;
@@ -4383,6 +4433,16 @@ function normalizeIgnoredIssueAuthorUsernames(value: unknown): string[] {
   return [...new Set(entries)];
 }
 
+function normalizeAgentIds(value: unknown): string[] {
+  const entries = Array.isArray(value)
+    ? value
+      .map((entry) => normalizeOptionalString(entry))
+      .filter((entry): entry is string => Boolean(entry))
+    : [];
+
+  return [...new Set(entries)].sort((left, right) => left.localeCompare(right));
+}
+
 function normalizeAdvancedSettings(value: unknown): GitHubSyncAdvancedSettings {
   if (!value || typeof value !== 'object') {
     return DEFAULT_ADVANCED_SETTINGS;
@@ -4398,11 +4458,16 @@ function normalizeAdvancedSettings(value: unknown): GitHubSyncAdvancedSettings {
     'ignoredIssueAuthorUsernames' in record
       ? normalizeIgnoredIssueAuthorUsernames(record.ignoredIssueAuthorUsernames)
       : DEFAULT_ADVANCED_SETTINGS.ignoredIssueAuthorUsernames;
+  const githubTokenPropagationAgentIds =
+    'githubTokenPropagationAgentIds' in record
+      ? normalizeAgentIds(record.githubTokenPropagationAgentIds)
+      : [];
 
   return {
     ...(defaultAssigneeAgentId ? { defaultAssigneeAgentId } : {}),
     defaultStatus,
-    ignoredIssueAuthorUsernames
+    ignoredIssueAuthorUsernames,
+    ...(githubTokenPropagationAgentIds.length > 0 ? { githubTokenPropagationAgentIds } : {})
   };
 }
 
@@ -4551,7 +4616,11 @@ function normalizeSettings(value: unknown): GitHubSyncSettings {
   const record = value as Record<string, unknown>;
   const paperclipApiBaseUrl = resolvePaperclipApiBaseUrl(record.paperclipApiBaseUrl);
   const githubTokenRef = normalizeGitHubTokenRef(record.githubTokenRef);
+  const githubTokenLogin = normalizeOptionalString(record.githubTokenLogin);
   const paperclipBoardApiTokenRefs = normalizePaperclipBoardApiTokenRefs(record.paperclipBoardApiTokenRefs);
+  const paperclipBoardAccessIdentityByCompanyId = normalizePaperclipBoardAccessIdentityByCompanyId(
+    record.paperclipBoardAccessIdentityByCompanyId
+  );
   const companyAdvancedSettingsByCompanyId = normalizeCompanyAdvancedSettingsByCompanyId(record.companyAdvancedSettingsByCompanyId);
 
   return {
@@ -4560,7 +4629,9 @@ function normalizeSettings(value: unknown): GitHubSyncSettings {
     scheduleFrequencyMinutes: normalizeScheduleFrequencyMinutes(record.scheduleFrequencyMinutes),
     ...(paperclipApiBaseUrl ? { paperclipApiBaseUrl } : {}),
     ...(githubTokenRef ? { githubTokenRef } : {}),
+    ...(githubTokenLogin ? { githubTokenLogin } : {}),
     ...(paperclipBoardApiTokenRefs ? { paperclipBoardApiTokenRefs } : {}),
+    ...(paperclipBoardAccessIdentityByCompanyId ? { paperclipBoardAccessIdentityByCompanyId } : {}),
     ...(companyAdvancedSettingsByCompanyId ? { companyAdvancedSettingsByCompanyId } : {}),
     updatedAt: typeof record.updatedAt === 'string' ? record.updatedAt : undefined
   };
@@ -14657,6 +14728,10 @@ const plugin = definePlugin({
         'githubTokenRef' in record
           ? normalizeGitHubTokenRef(record.githubTokenRef)
           : normalizeGitHubTokenRef(previous.githubTokenRef) ?? normalizeGitHubTokenRef(config.githubTokenRef);
+      const githubTokenLogin =
+        'githubTokenLogin' in record
+          ? normalizeOptionalString(record.githubTokenLogin)
+          : previous.githubTokenLogin;
       const inputMappings = hasMappingsPatch ? normalizeMappings(record.mappings) : previous.mappings;
       const nextCompanyAdvancedSettingsByCompanyId = {
         ...(previous.companyAdvancedSettingsByCompanyId ?? {})
@@ -14684,7 +14759,9 @@ const plugin = definePlugin({
           'paperclipApiBaseUrl' in record
             ? resolveTrustedPaperclipApiBaseUrlInput(record.paperclipApiBaseUrl, previous, config)
             : getConfiguredPaperclipApiBaseUrl(previous, config),
+        ...(githubTokenLogin ? { githubTokenLogin } : {}),
         paperclipBoardApiTokenRefs: previous.paperclipBoardApiTokenRefs,
+        paperclipBoardAccessIdentityByCompanyId: previous.paperclipBoardAccessIdentityByCompanyId,
         ...(Object.keys(nextCompanyAdvancedSettingsByCompanyId).length > 0
           ? { companyAdvancedSettingsByCompanyId: nextCompanyAdvancedSettingsByCompanyId }
           : {}),
@@ -14702,7 +14779,11 @@ const plugin = definePlugin({
         syncState: previous.syncState,
         scheduleFrequencyMinutes: current.scheduleFrequencyMinutes,
         ...(current.paperclipApiBaseUrl ? { paperclipApiBaseUrl: current.paperclipApiBaseUrl } : {}),
+        ...(current.githubTokenLogin ? { githubTokenLogin: current.githubTokenLogin } : {}),
         ...(current.paperclipBoardApiTokenRefs ? { paperclipBoardApiTokenRefs: current.paperclipBoardApiTokenRefs } : {}),
+        ...(current.paperclipBoardAccessIdentityByCompanyId
+          ? { paperclipBoardAccessIdentityByCompanyId: current.paperclipBoardAccessIdentityByCompanyId }
+          : {}),
         ...(current.companyAdvancedSettingsByCompanyId
           ? { companyAdvancedSettingsByCompanyId: current.companyAdvancedSettingsByCompanyId }
           : {}),
@@ -14737,21 +14818,38 @@ const plugin = definePlugin({
       const nextPaperclipBoardApiTokenRefs = {
         ...(previous.paperclipBoardApiTokenRefs ?? {})
       };
+      const nextPaperclipBoardAccessIdentityByCompanyId = {
+        ...(previous.paperclipBoardAccessIdentityByCompanyId ?? {})
+      };
 
       if (nextSecretRef) {
         nextPaperclipBoardApiTokenRefs[companyId] = nextSecretRef;
       } else {
         delete nextPaperclipBoardApiTokenRefs[companyId];
+        delete nextPaperclipBoardAccessIdentityByCompanyId[companyId];
+      }
+
+      if ('paperclipBoardAccessIdentity' in record) {
+        const nextIdentityLabel = normalizeOptionalString(record.paperclipBoardAccessIdentity);
+        if (nextIdentityLabel) {
+          nextPaperclipBoardAccessIdentityByCompanyId[companyId] = nextIdentityLabel;
+        } else {
+          delete nextPaperclipBoardAccessIdentityByCompanyId[companyId];
+        }
       }
 
       const {
         paperclipBoardApiTokenRefs: _previousPaperclipBoardApiTokenRefs,
+        paperclipBoardAccessIdentityByCompanyId: _previousPaperclipBoardAccessIdentityByCompanyId,
         ...previousWithoutBoardAccess
       } = previous;
       const next = sanitizeSettingsForCurrentSetup({
         ...previousWithoutBoardAccess,
         ...(Object.keys(nextPaperclipBoardApiTokenRefs).length > 0
           ? { paperclipBoardApiTokenRefs: nextPaperclipBoardApiTokenRefs }
+          : {}),
+        ...(Object.keys(nextPaperclipBoardAccessIdentityByCompanyId).length > 0
+          ? { paperclipBoardAccessIdentityByCompanyId: nextPaperclipBoardAccessIdentityByCompanyId }
           : {}),
         updatedAt: new Date().toISOString()
       }, {

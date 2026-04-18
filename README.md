@@ -19,6 +19,7 @@ With this plugin, you can:
 - import open GitHub issues into Paperclip without adding title prefixes or duplicate issues
 - keep descriptions, labels, and status aligned with GitHub over time
 - configure mappings and import defaults per Paperclip company
+- on authenticated Paperclip deployments, choose exactly which company agents should receive the saved GitHub token as `GITHUB_TOKEN`
 - run sync manually or on a schedule
 - triage open pull requests from mapped Paperclip projects in a hosted queue
 - give Paperclip agents native GitHub tools for issues, pull requests, CI, review threads, and org-level projects
@@ -28,6 +29,7 @@ With this plugin, you can:
 The plugin adds a full in-host workflow instead of a one-off import script:
 
 - a hosted settings page for GitHub auth, repository mappings, company defaults, and sync controls
+- authenticated-only setup controls for Paperclip board access and company-scoped agent token propagation
 - a dashboard widget that shows readiness, sync status, and last-run results
 - saved sync diagnostics that let operators inspect the latest per-issue failures, raw errors, and suggested next steps
 - a project sidebar item that opens a live project-scoped Pull Requests page for the mapped repository and can show the open PR count through a lightweight badge read
@@ -103,13 +105,14 @@ npx paperclipai plugin install --local "$PWD"
 
 1. Open the plugin settings for **GitHub Sync** from inside the Paperclip company you want to configure.
 2. Paste a GitHub token, validate it, and save it.
-3. If the deployment requires authenticated Paperclip board access, connect it from the same settings page and complete the approval flow.
-4. Add one or more repository mappings for the current company.
-5. For each mapping, either choose an existing GitHub-linked Paperclip project or enter the project name that should receive synced issues.
-6. Optionally configure company-wide defaults for imported issues, including the default assignee, the default Paperclip status, and ignored GitHub usernames. Bot aliases such as `renovate[bot]` are matched when you save `renovate`.
-7. Choose the automatic sync interval in minutes.
-8. Save the settings and run the first manual sync.
-9. Repeat inside other companies if they need their own mappings, defaults, or board access.
+3. If the deployment is authenticated, connect Paperclip board access from the same settings page and complete the approval flow.
+4. If the deployment is authenticated, choose which agents in the current company should receive the saved GitHub token as `GITHUB_TOKEN`.
+5. Add one or more repository mappings for the current company.
+6. For each mapping, either choose an existing GitHub-linked Paperclip project or enter the project name that should receive synced issues.
+7. Optionally configure company-wide defaults for imported issues, including the default assignee, the default Paperclip status, and ignored GitHub usernames. Bot aliases such as `renovate[bot]` are matched when you save `renovate`.
+8. Choose the automatic sync interval in minutes.
+9. Save the settings and run the first manual sync.
+10. Repeat inside other companies if they need their own mappings, defaults, board access, or agent token propagation.
 
 Repository input accepts either `owner/repo` or `https://github.com/owner/repo`.
 When a token is saved, the settings page audits the mapped repositories for the permissions needed by pull request actions and warns when permissions are missing or GitHub cannot verify them yet.
@@ -150,6 +153,8 @@ The plugin is designed to avoid persisting raw credentials in plugin state.
 
 - GitHub tokens saved through the UI are stored as Paperclip secret references.
 - Paperclip board access tokens are also stored as per-company secret references.
+- The settings UI also keeps lightweight non-secret identity labels for those saved connections, so later visits can still show who the shared GitHub token and company board access are connected as.
+- On authenticated deployments, any selected propagation agents receive `GITHUB_TOKEN` as an agent env secret-ref binding that points at the same saved GitHub token secret instead of a copied raw token.
 - The worker resolves those secret references at runtime instead of storing raw tokens in plugin state.
 - On authenticated Paperclip deployments, sync is blocked until the relevant company has connected Paperclip board access.
 
@@ -181,10 +186,13 @@ The plugin exposes GitHub workflow tools to Paperclip agents, including:
 
 When an agent posts a GitHub comment or review-thread reply through the plugin, the message includes a footer disclosing that it was created by a Paperclip AI agent and which model was used.
 
+Current host caveat: on authenticated Paperclip deployments, the Paperclip host currently guards `GET /api/plugins/tools` and `POST /api/plugins/tools/execute` with board authentication before dispatching to any plugin worker. If an agent run does not have board access for the target company, GitHub Sync tool discovery and execution fail with `403 {"error":"Board access required"}` before this plugin's worker code runs.
+
 ## Troubleshooting
 
 - If setup is reported as incomplete, confirm that a GitHub token has been saved or that `${PAPERCLIP_HOME:-~/.paperclip}/plugins/github-sync/config.json` contains `githubToken`, and make sure at least one mapping has a created Paperclip project.
 - If Paperclip says board access is required, open plugin settings inside the affected company and complete the Paperclip board access flow before retrying sync.
+- If GitHub Sync agent tools fail with `403 {"error":"Board access required"}` on `/api/plugins/tools` or `/api/plugins/tools/execute`, the current Paperclip host rejected the request before the plugin worker ran. Re-run from a board-authenticated session or agent run that has board access to the target company.
 - If the worker reaches an authenticated HTML page instead of the Paperclip API JSON responses it expects, connect Paperclip board access for that company or set `PAPERCLIP_API_URL` to a worker-accessible Paperclip API origin.
 - If a sync run finishes with partial failures, open the saved troubleshooting panel in GitHub Sync to inspect the repository, issue number, raw error, and suggested fix for each recorded failure.
 - If sync says the Paperclip API URL is not trusted, reopen the plugin from the current Paperclip host so the settings UI can refresh the saved origin, or set `PAPERCLIP_API_URL` for the worker.
