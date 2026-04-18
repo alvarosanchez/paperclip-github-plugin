@@ -29,7 +29,7 @@ With this plugin, you can:
 The plugin adds a full in-host workflow instead of a one-off import script:
 
 - a hosted settings page for GitHub auth, repository mappings, company defaults, and sync controls
-- authenticated-only setup controls for Paperclip board access and company-scoped agent token propagation
+- setup controls for Paperclip board access and company-scoped agent token propagation on authenticated and `local_trusted` deployments
 - a dashboard widget that shows readiness, sync status, and last-run results
 - saved sync diagnostics that let operators inspect the latest per-issue failures, raw errors, and suggested next steps
 - a project sidebar item that opens a live project-scoped Pull Requests page for the mapped repository and can show the open PR count through a lightweight badge read
@@ -39,7 +39,7 @@ The plugin adds a full in-host workflow instead of a one-off import script:
 
 ## How it works
 
-1. Save a GitHub token in the plugin settings.
+1. Save a GitHub token in the plugin settings for the current company.
 2. Connect one or more GitHub repositories to Paperclip projects.
 3. Run a sync manually or let the scheduled job keep things up to date.
 
@@ -53,7 +53,7 @@ Long-running syncs continue in the background, so quick actions do not have to w
 
 ### Company-aware configuration
 
-GitHub tokens and sync cadence are shared at the plugin instance level, while repository mappings, advanced import defaults, and Paperclip board access are managed per company. When you open settings inside a specific company, you only edit that company's mappings and defaults.
+GitHub tokens, repository mappings, advanced import defaults, and Paperclip board access are all managed per company, while sync cadence remains shared at the plugin instance level. When you open settings inside a specific company, you only edit that company's setup and defaults.
 
 ### Project binding that respects existing work
 
@@ -107,14 +107,15 @@ npx paperclipai plugin install --local "$PWD"
 
 1. Open the plugin settings for **GitHub Sync** from inside the Paperclip company you want to configure.
 2. Paste a GitHub token, validate it, and save it.
-3. If the deployment is authenticated, connect Paperclip board access from the same settings page and complete the approval flow.
-4. If the deployment is authenticated, choose which agents in the current company should receive the saved GitHub token as `GITHUB_TOKEN`.
-5. Add one or more repository mappings for the current company.
-6. For each mapping, either choose an existing GitHub-linked Paperclip project or enter the project name that should receive synced issues.
-7. Optionally configure company-wide defaults for imported issues, including the default assignee, the default Paperclip status, and ignored GitHub usernames. Bot aliases such as `renovate[bot]` are matched when you save `renovate`.
-8. Choose the automatic sync interval in minutes.
-9. Save the settings and run the first manual sync.
-10. Repeat inside other companies if they need their own mappings, defaults, board access, or agent token propagation.
+3. If the deployment is authenticated or `local_trusted`, the settings page shows Paperclip board access and GitHub token propagation controls so you can configure and test them locally.
+4. If the deployment is authenticated, connect Paperclip board access from the same settings page and complete the approval flow before running sync.
+5. If the deployment is authenticated or `local_trusted`, choose which agents in the current company should receive the saved GitHub token as `GITHUB_TOKEN`.
+6. Add one or more repository mappings for the current company.
+7. For each mapping, either choose an existing GitHub-linked Paperclip project or enter the project name that should receive synced issues.
+8. Optionally configure company-wide defaults for imported issues, including the default assignee, the default Paperclip status, and ignored GitHub usernames. Bot aliases such as `renovate[bot]` are matched when you save `renovate`.
+9. Choose the automatic sync interval in minutes.
+10. Save the settings and run the first manual sync.
+11. Repeat inside other companies if they need their own mappings, defaults, board access, or agent token propagation.
 
 Repository input accepts either `owner/repo` or `https://github.com/owner/repo`.
 When a token is saved, the settings page audits the mapped repositories for the permissions needed by pull request actions and warns when permissions are missing or GitHub cannot verify them yet.
@@ -153,10 +154,11 @@ Additional behavior:
 
 The plugin is designed to avoid persisting raw credentials in plugin state.
 
-- GitHub tokens saved through the UI are stored as Paperclip secret references.
+- GitHub tokens saved through the UI are stored as per-company Paperclip secret references.
 - Paperclip board access tokens are also stored as per-company secret references.
-- The settings UI also keeps lightweight non-secret identity labels for those saved connections, so later visits can still show who the shared GitHub token and company board access are connected as.
-- On authenticated deployments, any selected propagation agents receive `GITHUB_TOKEN` as an agent env secret-ref binding that points at the same saved GitHub token secret instead of a copied raw token.
+- The settings UI also keeps lightweight non-secret identity labels for those saved connections, so later visits can still show who that company’s GitHub token and board access are connected as.
+- On authenticated and `local_trusted` deployments, any selected propagation agents receive `GITHUB_TOKEN` as an agent env secret-ref binding that points at the same saved GitHub token secret instead of a copied raw token.
+- If an older save left the company token secret only in plugin state, the settings UI repairs the config mirror and retries selected-agent propagation from that same company secret.
 - The worker resolves those secret references at runtime instead of storing raw tokens in plugin state.
 - On authenticated Paperclip deployments, sync is blocked until the relevant company has connected Paperclip board access.
 

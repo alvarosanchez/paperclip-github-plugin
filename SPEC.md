@@ -6,10 +6,10 @@ GitHub Sync is a Paperclip plugin for registering one or more GitHub repositorie
 
 The plugin MUST provide a settings page inside Paperclip where an operator can configure:
 
-- a GitHub token stored as a Paperclip secret reference
+- a company-scoped GitHub token stored as a Paperclip secret reference
 - an optional external config file at `${PAPERCLIP_HOME:-~/.paperclip}/plugins/github-sync/config.json` for worker-only global values such as a raw `githubToken`
 - Paperclip board access, which is optional on unauthenticated deployments and required when the Paperclip deployment reports `deploymentMode: "authenticated"`
-- on authenticated deployments, a company-scoped multi-select of agents that should receive `GITHUB_TOKEN` propagation from the saved GitHub token secret
+- on authenticated and `local_trusted` deployments, a company-scoped multi-select of agents that should receive `GITHUB_TOKEN` propagation from the saved GitHub token secret, while authenticated deployments remain the only mode where board access is required for sync
 - one or more GitHub repository mappings
 - company-scoped advanced defaults for imported issues: default assignee, default Paperclip status, and ignored GitHub issue authors, where a saved username such as `renovate` also matches GitHub bot logins such as `renovate[bot]`
 - the frequency for automatic scheduled sync runs
@@ -21,7 +21,7 @@ The settings page MUST allow saving mappings and triggering a manual sync.
 - The settings page SHOULD clearly label company-scoped setup versus plugin-instance-wide setup when both are shown together.
 - When a company context is present, the settings page SHOULD show the active company name prominently using a human-friendly label instead of a raw identifier.
 - When a company already has Paperclip projects bound to GitHub repository workspaces, the settings page SHOULD surface those projects so an operator can enable sync without recreating the project.
-- The settings page MUST only render the Paperclip board-access connect controls and the agent token-propagation selector when the current Paperclip deployment reports `deploymentMode: "authenticated"`.
+- The settings page MUST render the Paperclip board-access connect controls and the agent token-propagation selector when the current Paperclip deployment reports `deploymentMode: "authenticated"` or `deploymentMode: "local_trusted"`.
 - When the settings page successfully validates a saved GitHub token, it SHOULD persist the validated GitHub login as non-secret display metadata so later visits can continue showing `Authenticated as ...` instead of falling back to a generic ready state.
 - When the settings page successfully connects Paperclip board access for a company, it SHOULD persist a company-scoped non-secret identity label so later visits can continue showing `Connected as ...` instead of falling back to a generic connected state.
 - The plugin SHOULD also expose manual sync entry points from Paperclip toolbar surfaces when the SDK supports them.
@@ -33,11 +33,12 @@ The settings page MUST allow saving mappings and triggering a manual sync.
 
 - The raw GitHub token MUST NOT be persisted in plugin state.
 - Saving a token from the settings UI MUST create or reuse a company secret through the Paperclip host API.
-- The plugin MUST persist only the resulting secret UUID in plugin instance config.
-- The worker MUST resolve that secret UUID at runtime via `ctx.secrets.resolve(...)`.
-- The plugin MAY persist lightweight non-secret display metadata such as the validated GitHub login alongside the saved GitHub token secret ref so hosted UI can keep connected-state copy consistent across refreshes without resolving the secret.
-- When authenticated deployment settings select agents for GitHub token propagation, the hosted settings UI MUST patch those agents through the host API so `adapterConfig.env.GITHUB_TOKEN` points at that same secret UUID instead of copying the raw token value.
-- When an authenticated deployment settings save removes an agent from that propagation allowlist, the hosted settings UI SHOULD remove `adapterConfig.env.GITHUB_TOKEN` only when that binding still points at the plugin-managed secret UUID, so unrelated manual agent env settings are not clobbered.
+- The plugin MUST persist only the resulting secret UUID, keyed by company, in plugin instance config.
+- The worker MUST resolve the saved GitHub token secret for the active company at runtime via `ctx.secrets.resolve(...)`.
+- The plugin MAY persist lightweight company-scoped non-secret display metadata such as the validated GitHub login alongside the saved GitHub token secret ref so hosted UI can keep connected-state copy consistent across refreshes without resolving the secret.
+- When authenticated or `local_trusted` deployment settings select agents for GitHub token propagation, the hosted settings UI MUST patch those agents through the host API so `adapterConfig.env.GITHUB_TOKEN` points at that same secret UUID instead of copying the raw token value.
+- When an authenticated or `local_trusted` deployment settings save removes an agent from that propagation allowlist, the hosted settings UI SHOULD remove `adapterConfig.env.GITHUB_TOKEN` only when that binding still points at the plugin-managed secret UUID, so unrelated manual agent env settings are not clobbered.
+- When the worker or hosted UI detects that a saved company-scoped GitHub token secret has not been mirrored into plugin config yet, it SHOULD repair that config sync and retry selected-agent `GITHUB_TOKEN` propagation from the saved company secret ref.
 - If `${PAPERCLIP_HOME:-~/.paperclip}/plugins/github-sync/config.json` exists and contains a string `githubToken`, the worker MUST treat it as a worker-only fallback source for the GitHub token without persisting or returning that raw token.
 - The raw Paperclip board API token MUST NOT be persisted in plugin state.
 - Connecting Paperclip board access from the settings UI MUST create or reuse a company secret through the Paperclip host API and MUST persist only the resulting secret UUID, keyed by company in plugin state and mirrored into plugin instance config so the worker can resolve it.

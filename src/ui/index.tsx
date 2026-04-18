@@ -12,7 +12,7 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 
 import { parseRepositoryReference, type ParsedRepositoryReference } from '../github-repo.ts';
-import { requiresPaperclipBoardAccess } from '../paperclip-health.ts';
+import { requiresPaperclipBoardAccess, shouldShowPaperclipBoardAccessSettings } from '../paperclip-health.ts';
 import { normalizeCompanyAssigneeOptionsResponse, type GitHubSyncAssigneeOption } from './assignees.ts';
 import { buildPaperclipUrl, fetchJson, fetchPaperclipHealth, resolveCliAuthPollUrl } from './http.ts';
 import { resolveInstalledGitHubSyncPluginId, resolvePluginSettingsHref } from './plugin-installation.ts';
@@ -235,6 +235,8 @@ interface GitHubSyncSettings {
   paperclipApiBaseUrl?: string;
   githubTokenConfigured?: boolean;
   githubTokenLogin?: string;
+  githubTokenNeedsConfigSync?: boolean;
+  githubTokenConfigSyncRef?: string;
   paperclipBoardAccessConfigured?: boolean;
   paperclipBoardAccessIdentity?: string;
   paperclipBoardAccessNeedsConfigSync?: boolean;
@@ -801,8 +803,10 @@ function getSyncSetupMessage(
 function usePaperclipBoardAccessRequirement(): {
   status: BoardAccessRequirementStatus;
   required: boolean;
+  visible: boolean;
 } {
   const [status, setStatus] = useState<BoardAccessRequirementStatus>('loading');
+  const [visible, setVisible] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -815,9 +819,11 @@ function usePaperclipBoardAccessRequirement(): {
 
       if (!health) {
         setStatus('unknown');
+        setVisible(false);
         return;
       }
 
+      setVisible(shouldShowPaperclipBoardAccessSettings(health));
       setStatus(requiresPaperclipBoardAccess(health) ? 'required' : 'not_required');
     })();
 
@@ -828,7 +834,8 @@ function usePaperclipBoardAccessRequirement(): {
 
   return {
     status,
-    required: status === 'required'
+    required: status === 'required',
+    visible
   };
 }
 
@@ -10046,6 +10053,7 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
   const themeMode = useResolvedThemeMode();
   const boardAccessRequirement = usePaperclipBoardAccessRequirement();
   const armSyncCompletionToast = useSyncCompletionToast(form.syncState, toast);
+  const githubTokenConfigSyncAttemptRef = useRef<string | null>(null);
   const boardAccessConfigSyncAttemptRef = useRef<string | null>(null);
   const assigneeFallbackAttemptRef = useRef<string | null>(null);
 
@@ -10182,6 +10190,91 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
       cancelled = true;
     };
   }, [currentSettings?.availableAssignees?.length, currentSettings?.updatedAt, hostContext.companyId]);
+
+  useEffect(() => {
+    const companyId = hostContext.companyId;
+    const secretRef =
+      settings.data?.githubTokenNeedsConfigSync
+        ? settings.data.githubTokenConfigSyncRef
+        : undefined;
+
+    if (!companyId || !secretRef) {
+      return;
+    }
+
+    const attemptKey = `${companyId}:${secretRef}`;
+    if (githubTokenConfigSyncAttemptRef.current === attemptKey) {
+      return;
+    }
+    githubTokenConfigSyncAttemptRef.current = attemptKey;
+
+    let cancelled = false;
+
+    void (async () => {
+      try {
+        const pluginId = await resolveCurrentPluginId(pluginIdFromLocation);
+        if (!pluginId) {
+          throw new Error('Plugin id is required to finish syncing the GitHub token secret into plugin config.');
+        }
+
+        await patchPluginConfig(pluginId, {
+          githubTokenRefs: {
+            [companyId]: secretRef
+          }
+        });
+
+        if (cancelled) {
+          return;
+        }
+
+        const selectedAgentIds = normalizeAgentIds(settings.data?.advancedSettings?.githubTokenPropagationAgentIds);
+        if (selectedAgentIds.length > 0) {
+          try {
+            await propagateGitHubTokenToSelectedAgents({
+              selectedAgentIds,
+              previousAgentIds: selectedAgentIds,
+              githubTokenSecretRef: secretRef
+            });
+          } catch {
+            // Let the later refresh keep the saved token visible even if propagation needs manual attention.
+          }
+        }
+
+        notifyGitHubSyncSettingsChanged();
+
+        try {
+          await settings.refresh();
+        } catch {
+          return;
+        }
+      } catch (error) {
+        if (cancelled) {
+          return;
+        }
+
+        toast({
+          title: 'GitHub token needs reconnection',
+          body: getActionErrorMessage(
+            error,
+            'GitHub Sync could not finish migrating the saved GitHub token secret into plugin config.'
+          ),
+          tone: 'error'
+        });
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    hostContext.companyId,
+    pluginIdFromLocation,
+    settings.data?.advancedSettings?.githubTokenPropagationAgentIds,
+    settings.data?.githubTokenConfigSyncRef,
+    settings.data?.githubTokenNeedsConfigSync,
+    settings.refresh,
+    toast
+  ]);
 
   useEffect(() => {
     const companyId = hostContext.companyId;
@@ -10336,6 +10429,7 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
   const hasSavedToken = Boolean(form.githubTokenConfigured || showSavedTokenHint);
   const boardAccessConfigured = Boolean(form.paperclipBoardAccessConfigured);
   const boardAccessRequired = boardAccessRequirement.required;
+  const boardAccessVisible = boardAccessRequirement.visible;
   const boardAccessReady = !boardAccessRequired || (hasCompanyContext && boardAccessConfigured);
   const tokenStatus = tokenStatusOverride ?? (hasSavedToken ? 'valid' : 'required');
   const tokenTone: Tone = tokenStatus === 'valid' ? 'success' : tokenStatus === 'invalid' ? 'danger' : 'warning';
@@ -10524,7 +10618,7 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
   const manualSyncScopePillLabel = hasCompanyContext ? 'This company' : 'All companies';
   const manualSyncButtonLabel = hasCompanyContext ? 'Run sync for this company' : 'Run sync across all companies';
   const advancedSettingsSummary = formatAdvancedSettingsSummary(form.advancedSettings, availableAssignees, {
-    includePropagation: boardAccessRequired
+    includePropagation: boardAccessVisible
   });
   const assigneeSelectOptions: SettingsSelectOption[] = [
     { value: '', label: 'Unassigned' },
@@ -10709,7 +10803,7 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
     previousAgentIds?: string[];
     githubTokenSecretRef?: string;
   }): Promise<void> {
-    if (!boardAccessRequired) {
+    if (!boardAccessVisible) {
       return;
     }
 
@@ -10725,13 +10819,18 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
         : undefined;
 
     if (!githubTokenSecretRef) {
+      const companyId = hostContext.companyId;
+      if (!companyId) {
+        throw new Error('Company context is required to propagate the GitHub token to selected agents.');
+      }
+
       const pluginId = await resolveCurrentPluginId(pluginIdFromLocation);
       if (!pluginId) {
         throw new Error('Plugin id is required to propagate the GitHub token to selected agents.');
       }
 
       const currentConfigResponse = await fetchJson<PluginConfigResponse | null>(`/api/plugins/${pluginId}/config`);
-      githubTokenSecretRef = normalizePluginConfig(currentConfigResponse?.configJson).githubTokenRef;
+      githubTokenSecretRef = normalizePluginConfig(currentConfigResponse?.configJson).githubTokenRefs?.[companyId];
     }
 
     if (!githubTokenSecretRef) {
@@ -10793,7 +10892,9 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
       const secret = await resolveOrCreateCompanySecret(companyId, secretName, trimmedToken);
 
       await patchPluginConfig(pluginId, {
-        githubTokenRef: secret.id
+        githubTokenRefs: {
+          [companyId]: secret.id
+        }
       });
       await saveRegistration({
         companyId,
@@ -11348,7 +11449,7 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
             ) : null}
           </section>
 
-          {boardAccessRequired ? (
+          {boardAccessVisible ? (
             <section className="ghsync__section">
               <div className="ghsync__section-head">
                 <div className="ghsync__section-copy">
@@ -11386,7 +11487,7 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
                           ? 'Required in authenticated deployments.'
                           : boardAccessRequirement.status === 'loading'
                             ? 'Checking whether it is required.'
-                            : 'Only needed when Paperclip API calls require sign-in.'}
+                            : 'Available here for local testing and only required when Paperclip API calls need sign-in.'}
                     </span>
                   </div>
                   <button
@@ -11670,7 +11771,7 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
                   <p className="ghsync__hint">Comma or newline separated.</p>
                 </div>
 
-                {boardAccessRequired ? (
+                {boardAccessVisible ? (
                   <div className="ghsync__field">
                     <label htmlFor="advanced-token-propagation">Propagate GitHub token to agents</label>
                     <SettingsAgentMultiPicker
@@ -11902,7 +12003,7 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
               </span>
             </div>
 
-            {boardAccessRequired ? (
+            {boardAccessVisible ? (
               <div className="ghsync__check">
                 <div className="ghsync__check-top">
                   <strong>Paperclip board access</strong>
