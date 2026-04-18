@@ -553,6 +553,50 @@ test('settings UI no longer exports a local authenticated-controls preview overr
   assert.equal(uiModule.shouldShowAuthenticatedControlsPreview, undefined);
 });
 
+test('resolveSavedTokenUiState clears stale valid token state when no saved token remains', async () => {
+  const uiModule = await importFreshUiModule() as {
+    resolveSavedTokenUiState?: unknown;
+  };
+
+  assert.equal(typeof uiModule.resolveSavedTokenUiState, 'function');
+
+  const resolveSavedTokenUiState = uiModule.resolveSavedTokenUiState as (params: {
+    githubTokenConfigured?: boolean;
+    githubTokenLogin?: string | null;
+  }) => {
+    showSavedTokenHint: boolean;
+    showTokenEditor: boolean;
+    tokenStatusOverride: 'valid' | 'invalid' | 'required' | null;
+    validatedLogin: string | null;
+  };
+
+  assert.deepEqual(
+    resolveSavedTokenUiState({
+      githubTokenConfigured: true,
+      githubTokenLogin: '  octocat  '
+    }),
+    {
+      showSavedTokenHint: true,
+      showTokenEditor: false,
+      tokenStatusOverride: 'valid',
+      validatedLogin: 'octocat'
+    }
+  );
+
+  assert.deepEqual(
+    resolveSavedTokenUiState({
+      githubTokenConfigured: false,
+      githubTokenLogin: 'octocat'
+    }),
+    {
+      showSavedTokenHint: false,
+      showTokenEditor: true,
+      tokenStatusOverride: null,
+      validatedLogin: null
+    }
+  );
+});
+
 test('syncGitHubTokenPropagationForAgents adds and removes agent GITHUB_TOKEN secret refs without clobbering unrelated env config', async () => {
   const uiModule = await importFreshUiModule() as {
     syncGitHubTokenPropagationForAgents?: unknown;
@@ -642,7 +686,9 @@ test('syncGitHubTokenPropagationForAgents adds and removes agent GITHUB_TOKEN se
       previousAgentIds: ['agent-1', 'agent-2', 'agent-3']
     });
 
-    assert.deepEqual(patchBodies, [
+    assert.deepEqual(
+      [...patchBodies].sort((left, right) => left.agentId.localeCompare(right.agentId)),
+      [
       {
         agentId: 'agent-1',
         body: {
@@ -675,7 +721,101 @@ test('syncGitHubTokenPropagationForAgents adds and removes agent GITHUB_TOKEN se
           }
         }
       }
-    ]);
+      ]
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('syncGitHubTokenPropagationForAgents batches propagation updates with a small concurrency limit', async () => {
+  const uiModule = await importFreshUiModule() as {
+    syncGitHubTokenPropagationForAgents?: unknown;
+  };
+
+  assert.equal(typeof uiModule.syncGitHubTokenPropagationForAgents, 'function');
+
+  const syncGitHubTokenPropagationForAgents = uiModule.syncGitHubTokenPropagationForAgents as (params: {
+    githubTokenSecretRef: string;
+    selectedAgentIds: string[];
+    previousAgentIds?: string[];
+  }) => Promise<void>;
+  const originalFetch = globalThis.fetch;
+  const patchBodies: Array<{ agentId: string; body: Record<string, unknown> }> = [];
+  let inFlight = 0;
+  let maxInFlight = 0;
+
+  globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+    const url = getRequestUrl(input);
+    const method = (init?.method ?? 'GET').toUpperCase();
+
+    if (!url.startsWith('/api/agents/')) {
+      throw new Error(`Unexpected fetch request: ${method} ${url}`);
+    }
+
+    const agentId = url.slice('/api/agents/'.length);
+    inFlight += 1;
+    maxInFlight = Math.max(maxInFlight, inFlight);
+
+    await delay(20);
+
+    try {
+      if (method === 'GET') {
+        return jsonResponse({
+          id: agentId,
+          companyId: 'company-1',
+          adapterConfig: {
+            cwd: `/tmp/${agentId}`
+          }
+        });
+      }
+
+      if (method === 'PATCH') {
+        patchBodies.push({
+          agentId,
+          body: getJsonRequestBody(init) ?? {}
+        });
+        return jsonResponse({ ok: true });
+      }
+
+      throw new Error(`Unexpected fetch request: ${method} ${url}`);
+    } finally {
+      inFlight -= 1;
+    }
+  };
+
+  try {
+    await syncGitHubTokenPropagationForAgents({
+      githubTokenSecretRef: 'github-secret-ref',
+      selectedAgentIds: ['agent-1', 'agent-2', 'agent-3', 'agent-4', 'agent-5', 'agent-6']
+    });
+
+    assert.ok(maxInFlight > 1);
+    assert.ok(maxInFlight <= 4);
+    assert.deepEqual(
+      [...patchBodies].sort((left, right) => left.agentId.localeCompare(right.agentId)),
+      [
+        'agent-1',
+        'agent-2',
+        'agent-3',
+        'agent-4',
+        'agent-5',
+        'agent-6'
+      ].map((agentId) => ({
+        agentId,
+        body: {
+          adapterConfig: {
+            cwd: `/tmp/${agentId}`,
+            env: {
+              GITHUB_TOKEN: {
+                type: 'secret_ref',
+                secretId: 'github-secret-ref'
+              }
+            }
+          }
+        }
+      }))
+    );
   } finally {
     globalThis.fetch = originalFetch;
   }

@@ -4390,6 +4390,10 @@ function normalizeGitHubUsername(value: string): string | null {
   return trimmed ? trimmed : null;
 }
 
+function normalizeOptionalText(value: unknown): string | null {
+  return typeof value === 'string' && value.trim() ? value.trim() : null;
+}
+
 function normalizeIgnoredIssueAuthorUsernames(value: unknown): string[] {
   const rawEntries = Array.isArray(value)
     ? value
@@ -4535,6 +4539,32 @@ function formatAdvancedSettingsSummary(
   }
 
   return `Assignee: ${assigneeLabel} · Status: ${statusLabel} · Ignore: ${ignoredAuthorsLabel}`;
+}
+
+export function resolveSavedTokenUiState(params: {
+  githubTokenConfigured?: boolean;
+  githubTokenLogin?: string | null;
+}): {
+  showSavedTokenHint: boolean;
+  showTokenEditor: boolean;
+  tokenStatusOverride: TokenStatus | null;
+  validatedLogin: string | null;
+} {
+  if (params.githubTokenConfigured) {
+    return {
+      showSavedTokenHint: true,
+      showTokenEditor: false,
+      tokenStatusOverride: 'valid',
+      validatedLogin: normalizeOptionalText(params.githubTokenLogin)
+    };
+  }
+
+  return {
+    showSavedTokenHint: false,
+    showTokenEditor: true,
+    tokenStatusOverride: null,
+    validatedLogin: null
+  };
 }
 
 function formatAgentMultiSelectionLabel(values: string[], options: SettingsSelectOption[]): string {
@@ -6121,6 +6151,8 @@ async function patchPluginConfig(pluginId: string, patch: Record<string, unknown
   });
 }
 
+const GITHUB_TOKEN_PROPAGATION_CONCURRENCY_LIMIT = 4;
+
 function normalizeAgentAdapterConfig(value: unknown): Record<string, unknown> {
   return value && typeof value === 'object' && !Array.isArray(value)
     ? { ...(value as Record<string, unknown>) }
@@ -6189,71 +6221,88 @@ function getAgentPropagationPatch(params: {
   return nextAdapterConfig;
 }
 
+async function runWithConcurrencyLimit<T>(
+  items: T[],
+  concurrencyLimit: number,
+  worker: (item: T) => Promise<void>
+): Promise<void> {
+  if (items.length === 0) {
+    return;
+  }
+
+  let nextIndex = 0;
+  const runnerCount = Math.min(concurrencyLimit, items.length);
+
+  await Promise.all(
+    Array.from({ length: runnerCount }, async () => {
+      while (nextIndex < items.length) {
+        const currentIndex = nextIndex;
+        nextIndex += 1;
+        await worker(items[currentIndex]);
+      }
+    })
+  );
+}
+
+async function applyGitHubTokenPropagationUpdate(params: {
+  agentId: string;
+  githubTokenSecretRef: string;
+  mode: 'ensure' | 'remove';
+}): Promise<void> {
+  const agent = await fetchJson<{ adapterConfig?: unknown }>(`/api/agents/${params.agentId}`);
+  const nextAdapterConfig = getAgentPropagationPatch({
+    adapterConfig: agent?.adapterConfig,
+    githubTokenSecretRef: params.githubTokenSecretRef,
+    mode: params.mode
+  });
+
+  if (!nextAdapterConfig) {
+    return;
+  }
+
+  await fetchJson(`/api/agents/${params.agentId}`, {
+    method: 'PATCH',
+    body: JSON.stringify({
+      adapterConfig: nextAdapterConfig
+    })
+  });
+}
+
 export async function syncGitHubTokenPropagationForAgents(params: {
   githubTokenSecretRef: string;
   selectedAgentIds: string[];
   previousAgentIds?: string[];
 }): Promise<void> {
   const selectedAgentIds = normalizeAgentIds(params.selectedAgentIds);
+  const selectedAgentIdSet = new Set(selectedAgentIds);
   const previousAgentIds = normalizeAgentIds(params.previousAgentIds);
-  const previousSelectedAgentIds = new Set(previousAgentIds);
-  const failures: string[] = [];
+  const failures = new Set<string>();
+  const operations = [
+    ...selectedAgentIds.map((agentId) => ({ agentId, mode: 'ensure' as const })),
+    ...previousAgentIds
+      .filter((agentId) => !selectedAgentIdSet.has(agentId))
+      .map((agentId) => ({ agentId, mode: 'remove' as const }))
+  ];
 
-  for (const agentId of selectedAgentIds) {
-    try {
-      const agent = await fetchJson<{ adapterConfig?: unknown }>(`/api/agents/${agentId}`);
-      const nextAdapterConfig = getAgentPropagationPatch({
-        adapterConfig: agent?.adapterConfig,
-        githubTokenSecretRef: params.githubTokenSecretRef,
-        mode: 'ensure'
-      });
-
-      if (!nextAdapterConfig) {
-        continue;
+  await runWithConcurrencyLimit(
+    operations,
+    GITHUB_TOKEN_PROPAGATION_CONCURRENCY_LIMIT,
+    async (operation) => {
+      try {
+        await applyGitHubTokenPropagationUpdate({
+          agentId: operation.agentId,
+          githubTokenSecretRef: params.githubTokenSecretRef,
+          mode: operation.mode
+        });
+      } catch {
+        failures.add(operation.agentId);
       }
-
-      await fetchJson(`/api/agents/${agentId}`, {
-        method: 'PATCH',
-        body: JSON.stringify({
-          adapterConfig: nextAdapterConfig
-        })
-      });
-    } catch {
-      failures.push(agentId);
     }
-  }
+  );
 
-  for (const agentId of previousAgentIds) {
-    if (!previousSelectedAgentIds.has(agentId) || selectedAgentIds.includes(agentId)) {
-      continue;
-    }
-
-    try {
-      const agent = await fetchJson<{ adapterConfig?: unknown }>(`/api/agents/${agentId}`);
-      const nextAdapterConfig = getAgentPropagationPatch({
-        adapterConfig: agent?.adapterConfig,
-        githubTokenSecretRef: params.githubTokenSecretRef,
-        mode: 'remove'
-      });
-
-      if (!nextAdapterConfig) {
-        continue;
-      }
-
-      await fetchJson(`/api/agents/${agentId}`, {
-        method: 'PATCH',
-        body: JSON.stringify({
-          adapterConfig: nextAdapterConfig
-        })
-      });
-    } catch {
-      failures.push(agentId);
-    }
-  }
-
-  if (failures.length > 0) {
+  if (failures.size > 0) {
     throw new Error(
-      `GitHub token propagation could not update these agents: ${[...new Set(failures)].join(', ')}.`
+      `GitHub token propagation could not update these agents: ${[...failures].join(', ')}.`
     );
   }
 }
@@ -10014,10 +10063,10 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
       return;
     }
 
-    const savedValidatedLogin =
-      typeof settings.data.githubTokenLogin === 'string' && settings.data.githubTokenLogin.trim()
-        ? settings.data.githubTokenLogin.trim()
-        : null;
+    const tokenUiState = resolveSavedTokenUiState({
+      githubTokenConfigured: settings.data.githubTokenConfigured,
+      githubTokenLogin: settings.data.githubTokenLogin
+    });
     const savedBoardAccessIdentity =
       typeof settings.data.paperclipBoardAccessIdentity === 'string' && settings.data.paperclipBoardAccessIdentity.trim()
         ? settings.data.paperclipBoardAccessIdentity.trim()
@@ -10038,18 +10087,11 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
     setScheduleFrequencyDraft(String(nextScheduleFrequencyMinutes));
     setIgnoredAuthorsDraft(normalizeAdvancedSettings(settings.data.advancedSettings).ignoredIssueAuthorUsernames.join(', '));
     setTokenDraft('');
-    setValidatedLogin(savedValidatedLogin);
+    setValidatedLogin(tokenUiState.validatedLogin);
     setBoardAccessIdentity(settings.data.paperclipBoardAccessConfigured ? savedBoardAccessIdentity : null);
-
-    if (settings.data.githubTokenConfigured) {
-      setShowSavedTokenHint(true);
-      setShowTokenEditor(false);
-      setTokenStatusOverride('valid');
-    } else {
-      setShowSavedTokenHint(false);
-      setShowTokenEditor(true);
-      setValidatedLogin(null);
-    }
+    setShowSavedTokenHint(tokenUiState.showSavedTokenHint);
+    setShowTokenEditor(tokenUiState.showTokenEditor);
+    setTokenStatusOverride(tokenUiState.tokenStatusOverride);
   }, [settings.data]);
 
   useEffect(() => {
