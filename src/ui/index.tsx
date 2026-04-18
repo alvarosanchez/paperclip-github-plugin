@@ -223,6 +223,7 @@ interface GitHubSyncAdvancedSettings {
   defaultAssigneeAgentId?: string;
   defaultStatus: PaperclipIssueStatus;
   ignoredIssueAuthorUsernames: string[];
+  githubTokenPropagationAgentIds?: string[];
 }
 
 interface GitHubSyncSettings {
@@ -233,7 +234,9 @@ interface GitHubSyncSettings {
   availableAssignees?: GitHubSyncAssigneeOption[];
   paperclipApiBaseUrl?: string;
   githubTokenConfigured?: boolean;
+  githubTokenLogin?: string;
   paperclipBoardAccessConfigured?: boolean;
+  paperclipBoardAccessIdentity?: string;
   paperclipBoardAccessNeedsConfigSync?: boolean;
   paperclipBoardAccessConfigSyncRef?: string;
   totalSyncedIssuesCount?: number;
@@ -4387,10 +4390,14 @@ function normalizeGitHubUsername(value: string): string | null {
   return trimmed ? trimmed : null;
 }
 
+function normalizeOptionalText(value: unknown): string | null {
+  return typeof value === 'string' && value.trim() ? value.trim() : null;
+}
+
 function normalizeIgnoredIssueAuthorUsernames(value: unknown): string[] {
   const rawEntries = Array.isArray(value)
     ? value
-    : typeof value === 'string'
+      : typeof value === 'string'
       ? value.split(/[\s,]+/g)
       : [];
 
@@ -4399,6 +4406,16 @@ function normalizeIgnoredIssueAuthorUsernames(value: unknown): string[] {
       .map((entry) => typeof entry === 'string' ? normalizeGitHubUsername(entry) : null)
       .filter((entry): entry is string => Boolean(entry))
   )];
+}
+
+function normalizeAgentIds(value: unknown): string[] {
+  const rawEntries = Array.isArray(value) ? value : [];
+
+  return [...new Set(
+    rawEntries
+      .map((entry) => typeof entry === 'string' && entry.trim() ? entry.trim() : null)
+      .filter((entry): entry is string => Boolean(entry))
+  )].sort((left, right) => left.localeCompare(right));
 }
 
 function normalizeAdvancedSettings(value: unknown): GitHubSyncAdvancedSettings {
@@ -4418,7 +4435,10 @@ function normalizeAdvancedSettings(value: unknown): GitHubSyncAdvancedSettings {
     ignoredIssueAuthorUsernames:
       'ignoredIssueAuthorUsernames' in record
         ? normalizeIgnoredIssueAuthorUsernames(record.ignoredIssueAuthorUsernames)
-        : DEFAULT_ADVANCED_SETTINGS.ignoredIssueAuthorUsernames
+        : DEFAULT_ADVANCED_SETTINGS.ignoredIssueAuthorUsernames,
+    ...(normalizeAgentIds(record.githubTokenPropagationAgentIds).length > 0
+      ? { githubTokenPropagationAgentIds: normalizeAgentIds(record.githubTokenPropagationAgentIds) }
+      : {})
   };
 }
 
@@ -4440,7 +4460,10 @@ function getComparableAdvancedSettings(value: GitHubSyncAdvancedSettings | null 
   return {
     ...(settings.defaultAssigneeAgentId ? { defaultAssigneeAgentId: settings.defaultAssigneeAgentId } : {}),
     defaultStatus: settings.defaultStatus,
-    ignoredIssueAuthorUsernames: [...settings.ignoredIssueAuthorUsernames].sort((left, right) => left.localeCompare(right))
+    ignoredIssueAuthorUsernames: [...settings.ignoredIssueAuthorUsernames].sort((left, right) => left.localeCompare(right)),
+    ...(settings.githubTokenPropagationAgentIds?.length
+      ? { githubTokenPropagationAgentIds: [...settings.githubTokenPropagationAgentIds].sort((left, right) => left.localeCompare(right)) }
+      : {})
   };
 }
 
@@ -4466,9 +4489,29 @@ function getAvailableAssigneeOptions(
   return normalizedOptions;
 }
 
+function getAvailablePropagationAgentOptions(
+  options: GitHubSyncAssigneeOption[] | null | undefined,
+  selectedAgentIds: string[] | null | undefined
+): GitHubSyncAssigneeOption[] {
+  const normalizedOptions = [...(options ?? [])];
+  const selectedIds = normalizeAgentIds(selectedAgentIds);
+
+  for (const selectedAgentId of selectedIds) {
+    if (!normalizedOptions.some((option) => option.id === selectedAgentId)) {
+      normalizedOptions.push({
+        id: selectedAgentId,
+        name: 'Unavailable agent'
+      });
+    }
+  }
+
+  return normalizedOptions.sort((left, right) => left.name.localeCompare(right.name));
+}
+
 function formatAdvancedSettingsSummary(
   advancedSettings: GitHubSyncAdvancedSettings,
-  availableAssignees: GitHubSyncAssigneeOption[]
+  availableAssignees: GitHubSyncAssigneeOption[],
+  options?: { includePropagation?: boolean }
 ): string {
   const assigneeLabel = advancedSettings.defaultAssigneeAgentId
     ? formatAssigneeOptionLabel(
@@ -4486,8 +4529,62 @@ function formatAdvancedSettingsSummary(
     advancedSettings.ignoredIssueAuthorUsernames.length > 0
       ? advancedSettings.ignoredIssueAuthorUsernames.join(', ')
       : 'none';
+  if (options?.includePropagation) {
+    const propagatedAgentsLabel =
+      advancedSettings.githubTokenPropagationAgentIds?.length
+        ? `${advancedSettings.githubTokenPropagationAgentIds.length} selected`
+        : 'none';
+
+    return `Assignee: ${assigneeLabel} · Status: ${statusLabel} · Ignore: ${ignoredAuthorsLabel} · Propagate: ${propagatedAgentsLabel}`;
+  }
 
   return `Assignee: ${assigneeLabel} · Status: ${statusLabel} · Ignore: ${ignoredAuthorsLabel}`;
+}
+
+export function resolveSavedTokenUiState(params: {
+  githubTokenConfigured?: boolean;
+  githubTokenLogin?: string | null;
+}): {
+  showSavedTokenHint: boolean;
+  showTokenEditor: boolean;
+  tokenStatusOverride: TokenStatus | null;
+  validatedLogin: string | null;
+} {
+  if (params.githubTokenConfigured) {
+    return {
+      showSavedTokenHint: true,
+      showTokenEditor: false,
+      tokenStatusOverride: 'valid',
+      validatedLogin: normalizeOptionalText(params.githubTokenLogin)
+    };
+  }
+
+  return {
+    showSavedTokenHint: false,
+    showTokenEditor: true,
+    tokenStatusOverride: null,
+    validatedLogin: null
+  };
+}
+
+function formatAgentMultiSelectionLabel(values: string[], options: SettingsSelectOption[]): string {
+  if (values.length === 0) {
+    return 'No agents selected';
+  }
+
+  const labels = values
+    .map((value) => options.find((option) => option.value === value)?.label ?? 'Unavailable agent')
+    .filter((label) => label.trim().length > 0);
+
+  if (labels.length === 0) {
+    return 'No agents selected';
+  }
+
+  if (labels.length <= 2) {
+    return labels.join(', ');
+  }
+
+  return `${labels.length} agents selected`;
 }
 
 interface SettingsSelectOption {
@@ -4684,6 +4781,159 @@ function SettingsAssigneePicker(props: {
               })
             ) : (
               <div className="ghsync__picker-empty">No assignees match.</div>
+            )}
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function SettingsAgentMultiPicker(props: {
+  id: string;
+  values: string[];
+  options: SettingsSelectOption[];
+  disabled?: boolean;
+  onChange: (values: string[]) => void;
+}): React.JSX.Element {
+  const { id, values, options, disabled, onChange } = props;
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState('');
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const searchInputRef = useRef<HTMLInputElement | null>(null);
+  const selectedValues = normalizeAgentIds(values);
+  const selectedValueSet = new Set(selectedValues);
+  const normalizedQuery = query.trim().toLowerCase();
+  const filteredOptions = normalizedQuery
+    ? options.filter((option) => option.label.toLowerCase().includes(normalizedQuery))
+    : options;
+  const selectedLabel = formatAgentMultiSelectionLabel(selectedValues, options);
+
+  useEffect(() => {
+    if (!open) {
+      setQuery('');
+      return;
+    }
+
+    const handlePointerDown = (event: PointerEvent) => {
+      const target = event.target;
+      if (target instanceof Node && rootRef.current?.contains(target)) {
+        return;
+      }
+
+      setOpen(false);
+    };
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setOpen(false);
+      }
+    };
+
+    document.addEventListener('pointerdown', handlePointerDown);
+    document.addEventListener('keydown', handleKeyDown);
+
+    globalThis.setTimeout(() => {
+      searchInputRef.current?.focus();
+      searchInputRef.current?.select();
+    }, 0);
+
+    return () => {
+      document.removeEventListener('pointerdown', handlePointerDown);
+      document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [open]);
+
+  useEffect(() => {
+    if (disabled && open) {
+      setOpen(false);
+    }
+  }, [disabled, open]);
+
+  return (
+    <div className="ghsync__picker" ref={rootRef}>
+      <button
+        id={id}
+        type="button"
+        className="ghsync__picker-trigger ghsync__picker-trigger--assignee"
+        disabled={disabled}
+        aria-haspopup="dialog"
+        aria-expanded={open}
+        onClick={() => {
+          if (disabled) {
+            return;
+          }
+
+          setOpen((current) => !current);
+        }}
+      >
+        <span className="ghsync__picker-trigger-main">
+          <span className="ghsync__picker-agent-icon" aria-hidden="true">
+            <AgentIcon />
+          </span>
+          <span className="ghsync__picker-trigger-label">{selectedLabel}</span>
+        </span>
+        <span className="ghsync__picker-trigger-icon">
+          <PickerChevronIcon />
+        </span>
+      </button>
+
+      {open ? (
+        <div className="ghsync__picker-panel ghsync__picker-panel--assignee" role="dialog" aria-label="Choose agents">
+          <div className="ghsync__picker-search">
+            <input
+              ref={searchInputRef}
+              type="text"
+              className="ghsync__picker-search-input"
+              placeholder="Search agents..."
+              value={query}
+              onChange={(event) => {
+                setQuery(event.currentTarget.value);
+              }}
+              onKeyDown={(event) => {
+                if (event.key === 'Escape') {
+                  event.preventDefault();
+                  setOpen(false);
+                }
+              }}
+            />
+          </div>
+
+          <div className="ghsync__picker-list" role="listbox" aria-labelledby={id} aria-multiselectable="true">
+            {filteredOptions.length > 0 ? (
+              filteredOptions.map((option) => {
+                const selected = selectedValueSet.has(option.value);
+
+                return (
+                  <button
+                    key={option.value}
+                    type="button"
+                    role="option"
+                    aria-selected={selected}
+                    className={`ghsync__picker-option${selected ? ' ghsync__picker-option--selected' : ''}`}
+                    onClick={() => {
+                      const nextValues = selected
+                        ? selectedValues.filter((value) => value !== option.value)
+                        : normalizeAgentIds([...selectedValues, option.value]);
+                      onChange(nextValues);
+                    }}
+                  >
+                    <span className="ghsync__picker-trigger-main">
+                      {option.icon === 'agent' ? (
+                        <span className="ghsync__picker-agent-icon" aria-hidden="true">
+                          <AgentIcon />
+                        </span>
+                      ) : null}
+                      <span className="ghsync__picker-option-label">{option.label}</span>
+                    </span>
+                    <span className="ghsync__picker-option-check" aria-hidden="true">
+                      {selected ? <PickerCheckIcon /> : null}
+                    </span>
+                  </button>
+                );
+              })
+            ) : (
+              <div className="ghsync__picker-empty">No agents match.</div>
             )}
           </div>
         </div>
@@ -5899,6 +6149,162 @@ async function patchPluginConfig(pluginId: string, patch: Record<string, unknown
       configJson: nextConfig
     })
   });
+}
+
+const GITHUB_TOKEN_PROPAGATION_CONCURRENCY_LIMIT = 4;
+
+function normalizeAgentAdapterConfig(value: unknown): Record<string, unknown> {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? { ...(value as Record<string, unknown>) }
+    : {};
+}
+
+function normalizeAgentEnvBindings(value: unknown): Record<string, unknown> {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? { ...(value as Record<string, unknown>) }
+    : {};
+}
+
+function isMatchingSecretRefEnvBinding(value: unknown, secretId: string): boolean {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return false;
+  }
+
+  const record = value as Record<string, unknown>;
+  return record.type === 'secret_ref' && record.secretId === secretId;
+}
+
+function getAgentPropagationPatch(params: {
+  adapterConfig: unknown;
+  githubTokenSecretRef: string;
+  mode: 'ensure' | 'remove';
+}): Record<string, unknown> | null {
+  const adapterConfig = normalizeAgentAdapterConfig(params.adapterConfig);
+  const currentEnv = normalizeAgentEnvBindings(adapterConfig.env);
+
+  if (params.mode === 'ensure') {
+    const nextEnv = {
+      ...currentEnv,
+      GITHUB_TOKEN: {
+        type: 'secret_ref',
+        secretId: params.githubTokenSecretRef
+      }
+    };
+
+    if (JSON.stringify(nextEnv) === JSON.stringify(currentEnv)) {
+      return null;
+    }
+
+    return {
+      ...adapterConfig,
+      env: nextEnv
+    };
+  }
+
+  if (!isMatchingSecretRefEnvBinding(currentEnv.GITHUB_TOKEN, params.githubTokenSecretRef)) {
+    return null;
+  }
+
+  const nextEnv = { ...currentEnv };
+  delete nextEnv.GITHUB_TOKEN;
+
+  const nextAdapterConfig = {
+    ...adapterConfig
+  };
+
+  if (Object.keys(nextEnv).length > 0) {
+    nextAdapterConfig.env = nextEnv;
+  } else {
+    delete nextAdapterConfig.env;
+  }
+
+  return nextAdapterConfig;
+}
+
+async function runWithConcurrencyLimit<T>(
+  items: T[],
+  concurrencyLimit: number,
+  worker: (item: T) => Promise<void>
+): Promise<void> {
+  if (items.length === 0) {
+    return;
+  }
+
+  let nextIndex = 0;
+  const runnerCount = Math.min(concurrencyLimit, items.length);
+
+  await Promise.all(
+    Array.from({ length: runnerCount }, async () => {
+      while (nextIndex < items.length) {
+        const currentIndex = nextIndex;
+        nextIndex += 1;
+        await worker(items[currentIndex]);
+      }
+    })
+  );
+}
+
+async function applyGitHubTokenPropagationUpdate(params: {
+  agentId: string;
+  githubTokenSecretRef: string;
+  mode: 'ensure' | 'remove';
+}): Promise<void> {
+  const agent = await fetchJson<{ adapterConfig?: unknown }>(`/api/agents/${params.agentId}`);
+  const nextAdapterConfig = getAgentPropagationPatch({
+    adapterConfig: agent?.adapterConfig,
+    githubTokenSecretRef: params.githubTokenSecretRef,
+    mode: params.mode
+  });
+
+  if (!nextAdapterConfig) {
+    return;
+  }
+
+  await fetchJson(`/api/agents/${params.agentId}`, {
+    method: 'PATCH',
+    body: JSON.stringify({
+      adapterConfig: nextAdapterConfig
+    })
+  });
+}
+
+export async function syncGitHubTokenPropagationForAgents(params: {
+  githubTokenSecretRef: string;
+  selectedAgentIds: string[];
+  previousAgentIds?: string[];
+}): Promise<void> {
+  const selectedAgentIds = normalizeAgentIds(params.selectedAgentIds);
+  const selectedAgentIdSet = new Set(selectedAgentIds);
+  const previousAgentIds = normalizeAgentIds(params.previousAgentIds);
+  const failures = new Set<string>();
+  const operations = [
+    ...selectedAgentIds.map((agentId) => ({ agentId, mode: 'ensure' as const })),
+    ...previousAgentIds
+      .filter((agentId) => !selectedAgentIdSet.has(agentId))
+      .map((agentId) => ({ agentId, mode: 'remove' as const }))
+  ];
+
+  await runWithConcurrencyLimit(
+    operations,
+    GITHUB_TOKEN_PROPAGATION_CONCURRENCY_LIMIT,
+    async (operation) => {
+      try {
+        await applyGitHubTokenPropagationUpdate({
+          agentId: operation.agentId,
+          githubTokenSecretRef: params.githubTokenSecretRef,
+          mode: operation.mode
+        });
+      } catch {
+        failures.add(operation.agentId);
+      }
+    }
+  );
+
+  if (failures.size > 0) {
+    throw new Error(
+      `GitHub token propagation could not update these agents: ${[...failures].join(', ')}.`
+    );
+  }
 }
 
 function normalizeCliAuthPollIntervalMs(value: unknown): number {
@@ -9657,6 +10063,14 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
       return;
     }
 
+    const tokenUiState = resolveSavedTokenUiState({
+      githubTokenConfigured: settings.data.githubTokenConfigured,
+      githubTokenLogin: settings.data.githubTokenLogin
+    });
+    const savedBoardAccessIdentity =
+      typeof settings.data.paperclipBoardAccessIdentity === 'string' && settings.data.paperclipBoardAccessIdentity.trim()
+        ? settings.data.paperclipBoardAccessIdentity.trim()
+        : null;
     const nextScheduleFrequencyMinutes = normalizeScheduleFrequencyMinutes(settings.data.scheduleFrequencyMinutes);
     setForm({
       mappings: settings.data.mappings ?? [],
@@ -9673,19 +10087,12 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
     setScheduleFrequencyDraft(String(nextScheduleFrequencyMinutes));
     setIgnoredAuthorsDraft(normalizeAdvancedSettings(settings.data.advancedSettings).ignoredIssueAuthorUsernames.join(', '));
     setTokenDraft('');
-    if (!settings.data.paperclipBoardAccessConfigured) {
-      setBoardAccessIdentity(null);
-    }
-
-    if (settings.data.githubTokenConfigured) {
-      setShowSavedTokenHint(true);
-      setShowTokenEditor(false);
-      setTokenStatusOverride('valid');
-    } else if (!showSavedTokenHint) {
-      setShowTokenEditor(true);
-      setValidatedLogin(null);
-    }
-  }, [settings.data, showSavedTokenHint]);
+    setValidatedLogin(tokenUiState.validatedLogin);
+    setBoardAccessIdentity(settings.data.paperclipBoardAccessConfigured ? savedBoardAccessIdentity : null);
+    setShowSavedTokenHint(tokenUiState.showSavedTokenHint);
+    setShowTokenEditor(tokenUiState.showTokenEditor);
+    setTokenStatusOverride(tokenUiState.tokenStatusOverride);
+  }, [settings.data]);
 
   useEffect(() => {
     const companyId = hostContext.companyId;
@@ -9986,6 +10393,12 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
     ?? browserAvailableAssignees,
     form.advancedSettings.defaultAssigneeAgentId
   );
+  const propagationAgents = getAvailablePropagationAgentOptions(
+    (currentSettings?.availableAssignees?.length ? currentSettings.availableAssignees : null)
+    ?? (form.availableAssignees?.length ? form.availableAssignees : null)
+    ?? browserAvailableAssignees,
+    form.advancedSettings.githubTokenPropagationAgentIds
+  );
   const savedMappingsSource = currentSettings ? currentSettings.mappings ?? [] : form.mappings;
   const savedMappings = getComparableMappings(savedMappingsSource);
   const draftMappings = getComparableMappings(form.mappings);
@@ -10061,7 +10474,9 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
       : connectingBoardAccess
         ? 'Approval in progress.'
         : boardAccessConfigured
-          ? 'Connected.'
+          ? boardAccessIdentity
+            ? `Connected as ${boardAccessIdentity}.`
+            : 'Connected.'
           : boardAccessRequired
             ? 'Required for sync.'
             : boardAccessRequirement.status === 'loading'
@@ -10108,7 +10523,9 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
     : 'ghsync__scope-pill ghsync__scope-pill--mixed';
   const manualSyncScopePillLabel = hasCompanyContext ? 'This company' : 'All companies';
   const manualSyncButtonLabel = hasCompanyContext ? 'Run sync for this company' : 'Run sync across all companies';
-  const advancedSettingsSummary = formatAdvancedSettingsSummary(form.advancedSettings, availableAssignees);
+  const advancedSettingsSummary = formatAdvancedSettingsSummary(form.advancedSettings, availableAssignees, {
+    includePropagation: boardAccessRequired
+  });
   const assigneeSelectOptions: SettingsSelectOption[] = [
     { value: '', label: 'Unassigned' },
     ...availableAssignees.map((option) => ({
@@ -10117,6 +10534,11 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
       icon: 'agent' as const
     }))
   ];
+  const propagationAgentOptions: SettingsSelectOption[] = propagationAgents.map((option) => ({
+    value: option.id,
+    label: formatAssigneeOptionLabel(option),
+    icon: 'agent' as const
+  }));
   const statusSelectOptions: SettingsSelectOption[] = PAPERCLIP_STATUS_OPTIONS.map((option) => ({
     value: option.value,
     label: option.label,
@@ -10282,6 +10704,47 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
     });
   }
 
+  async function propagateGitHubTokenToSelectedAgents(options: {
+    selectedAgentIds: string[];
+    previousAgentIds?: string[];
+    githubTokenSecretRef?: string;
+  }): Promise<void> {
+    if (!boardAccessRequired) {
+      return;
+    }
+
+    const selectedAgentIds = normalizeAgentIds(options.selectedAgentIds);
+    const previousAgentIds = normalizeAgentIds(options.previousAgentIds);
+    if (selectedAgentIds.length === 0 && previousAgentIds.length === 0) {
+      return;
+    }
+
+    let githubTokenSecretRef =
+      typeof options.githubTokenSecretRef === 'string' && options.githubTokenSecretRef.trim()
+        ? options.githubTokenSecretRef.trim()
+        : undefined;
+
+    if (!githubTokenSecretRef) {
+      const pluginId = await resolveCurrentPluginId(pluginIdFromLocation);
+      if (!pluginId) {
+        throw new Error('Plugin id is required to propagate the GitHub token to selected agents.');
+      }
+
+      const currentConfigResponse = await fetchJson<PluginConfigResponse | null>(`/api/plugins/${pluginId}/config`);
+      githubTokenSecretRef = normalizePluginConfig(currentConfigResponse?.configJson).githubTokenRef;
+    }
+
+    if (!githubTokenSecretRef) {
+      throw new Error('GitHub token propagation requires a GitHub token saved through this settings page.');
+    }
+
+    await syncGitHubTokenPropagationForAgents({
+      githubTokenSecretRef,
+      selectedAgentIds,
+      previousAgentIds
+    });
+  }
+
   async function handleSaveToken(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setSubmittingToken(true);
@@ -10334,8 +10797,21 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
       });
       await saveRegistration({
         companyId,
-        githubTokenRef: secret.id
+        githubTokenRef: secret.id,
+        githubTokenLogin: validation.login
       });
+
+      const selectedAgentIds = normalizeAgentIds(currentSettings?.advancedSettings?.githubTokenPropagationAgentIds);
+      let propagationError: unknown = null;
+      try {
+        await propagateGitHubTokenToSelectedAgents({
+          selectedAgentIds,
+          previousAgentIds: selectedAgentIds,
+          githubTokenSecretRef: secret.id
+        });
+      } catch (error) {
+        propagationError = error;
+      }
 
       setForm((current) => ({
         ...current,
@@ -10351,6 +10827,16 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
         body: 'Token saved.',
         tone: 'success'
       });
+      if (propagationError) {
+        toast({
+          title: 'GitHub token saved, but agent propagation needs attention',
+          body: getActionErrorMessage(
+            propagationError,
+            'GitHub Sync could not update the selected agents with the saved token.'
+          ),
+          tone: 'error'
+        });
+      }
       notifyGitHubSyncSettingsChanged();
 
       try {
@@ -10416,7 +10902,8 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
       });
       await updateBoardAccess({
         companyId,
-        paperclipBoardApiTokenRef: secret.id
+        paperclipBoardApiTokenRef: secret.id,
+        paperclipBoardAccessIdentity: identity ?? ''
       });
 
       setBoardAccessIdentity(identity);
@@ -10513,6 +11000,16 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
         ...(trustedPaperclipApiBaseUrl ? { paperclipApiBaseUrl: trustedPaperclipApiBaseUrl } : {})
       }) as GitHubSyncSettings;
 
+      let propagationError: unknown = null;
+      try {
+        await propagateGitHubTokenToSelectedAgents({
+          selectedAgentIds: normalizeAgentIds(normalizeAdvancedSettings(result.advancedSettings).githubTokenPropagationAgentIds),
+          previousAgentIds: normalizeAgentIds(currentSettings?.advancedSettings?.githubTokenPropagationAgentIds)
+        });
+      } catch (error) {
+        propagationError = error;
+      }
+
       setForm((current) => ({
         ...current,
         mappings: result.mappings.length > 0 ? result.mappings : [createEmptyMapping(0)],
@@ -10530,6 +11027,16 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
         body: `Advanced defaults, mappings, and automatic sync are saved for ${currentCompanyName}.`,
         tone: 'success'
       });
+      if (propagationError) {
+        toast({
+          title: 'Settings saved, but agent propagation needs attention',
+          body: getActionErrorMessage(
+            propagationError,
+            'GitHub Sync could not apply the selected agent token propagation updates.'
+          ),
+          tone: 'error'
+        });
+      }
       notifyGitHubSyncSettingsChanged();
 
       try {
@@ -10841,71 +11348,73 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
             ) : null}
           </section>
 
-          <section className="ghsync__section">
-            <div className="ghsync__section-head">
-              <div className="ghsync__section-copy">
-                <div className="ghsync__section-title-row">
-                  <h4>Paperclip board access</h4>
-                  <div className="ghsync__section-tags">
-                    <span className="ghsync__scope-pill ghsync__scope-pill--company">Company</span>
+          {boardAccessRequired ? (
+            <section className="ghsync__section">
+              <div className="ghsync__section-head">
+                <div className="ghsync__section-copy">
+                  <div className="ghsync__section-title-row">
+                    <h4>Paperclip board access</h4>
+                    <div className="ghsync__section-tags">
+                      <span className="ghsync__scope-pill ghsync__scope-pill--company">Company</span>
+                    </div>
                   </div>
+                  {boardAccessSectionDescription ? <p>{boardAccessSectionDescription}</p> : null}
                 </div>
-                {boardAccessSectionDescription ? <p>{boardAccessSectionDescription}</p> : null}
+                <span className={`ghsync__badge ${getToneClass(boardAccessTone)}`}>
+                  {boardAccessBannerLabel}
+                </span>
               </div>
-              <span className={`ghsync__badge ${getToneClass(boardAccessTone)}`}>
-                {boardAccessBannerLabel}
-              </span>
-            </div>
 
-            {hostContext.companyId ? (
-              <div className="ghsync__connected">
-                <div>
-                  <strong>
-                    {boardAccessConfigured
-                      ? boardAccessIdentity
-                        ? `Connected as ${boardAccessIdentity}`
-                        : 'Connected'
-                      : boardAccessRequired
-                        ? 'Required'
-                        : boardAccessRequirement.status === 'loading'
-                          ? 'Checking requirement'
-                          : 'Optional'}
-                  </strong>
-                  <span>
-                    {boardAccessConfigured
-                      ? 'Used for Paperclip API calls.'
-                      : boardAccessRequired
-                        ? 'Required in authenticated deployments.'
-                        : boardAccessRequirement.status === 'loading'
-                          ? 'Checking whether it is required.'
-                          : 'Only needed when Paperclip API calls require sign-in.'}
-                  </span>
+              {hostContext.companyId ? (
+                <div className="ghsync__connected">
+                  <div>
+                    <strong>
+                      {boardAccessConfigured
+                        ? boardAccessIdentity
+                          ? `Connected as ${boardAccessIdentity}`
+                          : 'Connected'
+                        : boardAccessRequired
+                          ? 'Required'
+                          : boardAccessRequirement.status === 'loading'
+                            ? 'Checking requirement'
+                            : 'Optional'}
+                    </strong>
+                    <span>
+                      {boardAccessConfigured
+                        ? 'Used for Paperclip API calls.'
+                        : boardAccessRequired
+                          ? 'Required in authenticated deployments.'
+                          : boardAccessRequirement.status === 'loading'
+                            ? 'Checking whether it is required.'
+                            : 'Only needed when Paperclip API calls require sign-in.'}
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    className={getPluginActionClassName({ variant: boardAccessConfigured ? 'secondary' : 'primary' })}
+                    disabled={!canConnectBoardAccess}
+                    onClick={() => {
+                      void handleConnectBoardAccess();
+                    }}
+                  >
+                    <LoadingButtonContent
+                      busy={connectingBoardAccess}
+                      label={boardAccessConfigured ? 'Reconnect' : 'Connect board access'}
+                      busyLabel="Waiting for approval…"
+                    />
+                  </button>
                 </div>
-                <button
-                  type="button"
-                  className={getPluginActionClassName({ variant: boardAccessConfigured ? 'secondary' : 'primary' })}
-                  disabled={!canConnectBoardAccess}
-                  onClick={() => {
-                    void handleConnectBoardAccess();
-                  }}
-                >
-                  <LoadingButtonContent
-                    busy={connectingBoardAccess}
-                    label={boardAccessConfigured ? 'Reconnect' : 'Connect board access'}
-                    busyLabel="Waiting for approval…"
-                  />
-                </button>
-              </div>
-            ) : (
-              <div className="ghsync__locked">
-                <div>
-                  <strong>Company required</strong>
-                  <span>Open a company to connect it.</span>
+              ) : (
+                <div className="ghsync__locked">
+                  <div>
+                    <strong>Company required</strong>
+                    <span>Open a company to connect it.</span>
+                  </div>
+                  <span className="ghsync__badge ghsync__badge--neutral">Unavailable</span>
                 </div>
-                <span className="ghsync__badge ghsync__badge--neutral">Unavailable</span>
-              </div>
-            )}
-          </section>
+              )}
+            </section>
+          ) : null}
 
           <section className="ghsync__section">
             <div className="ghsync__section-head">
@@ -11160,6 +11669,34 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
                   />
                   <p className="ghsync__hint">Comma or newline separated.</p>
                 </div>
+
+                {boardAccessRequired ? (
+                  <div className="ghsync__field">
+                    <label htmlFor="advanced-token-propagation">Propagate GitHub token to agents</label>
+                    <SettingsAgentMultiPicker
+                      id="advanced-token-propagation"
+                      values={form.advancedSettings.githubTokenPropagationAgentIds ?? []}
+                      options={propagationAgentOptions}
+                      disabled={settingsMutationsLocked || tokenStatus !== 'valid'}
+                      onChange={(nextValues) => {
+                        setForm((current) => ({
+                          ...current,
+                          advancedSettings: {
+                            ...current.advancedSettings,
+                            ...(nextValues.length > 0
+                              ? { githubTokenPropagationAgentIds: nextValues }
+                              : { githubTokenPropagationAgentIds: undefined })
+                          }
+                        }));
+                      }}
+                    />
+                    <p className="ghsync__hint">
+                      {tokenStatus === 'valid'
+                        ? 'Selected agents receive `GITHUB_TOKEN` from the saved GitHub secret when you save settings.'
+                        : 'Save a valid GitHub token before choosing agents to propagate it to.'}
+                    </p>
+                  </div>
+                ) : null}
               </div>
             ) : null}
           </section>
@@ -11365,15 +11902,17 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
               </span>
             </div>
 
-            <div className="ghsync__check">
-              <div className="ghsync__check-top">
-                <strong>Paperclip board access</strong>
-                <span className={`ghsync__badge ${getToneClass(boardAccessStatusTone)}`}>
-                  {boardAccessStatusLabel}
-                </span>
+            {boardAccessRequired ? (
+              <div className="ghsync__check">
+                <div className="ghsync__check-top">
+                  <strong>Paperclip board access</strong>
+                  <span className={`ghsync__badge ${getToneClass(boardAccessStatusTone)}`}>
+                    {boardAccessStatusLabel}
+                  </span>
+                </div>
+                <span>{boardAccessSummaryText}</span>
               </div>
-              <span>{boardAccessSummaryText}</span>
-            </div>
+            ) : null}
 
             <div className="ghsync__check">
               <div className="ghsync__check-top">

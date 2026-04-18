@@ -545,6 +545,282 @@ test('resolveOrCreateProject enables isolated issue checkouts for new company pr
   }
 });
 
+test('settings UI no longer exports a local authenticated-controls preview override', async () => {
+  const uiModule = await importFreshUiModule() as {
+    shouldShowAuthenticatedControlsPreview?: unknown;
+  };
+
+  assert.equal(uiModule.shouldShowAuthenticatedControlsPreview, undefined);
+});
+
+test('resolveSavedTokenUiState clears stale valid token state when no saved token remains', async () => {
+  const uiModule = await importFreshUiModule() as {
+    resolveSavedTokenUiState?: unknown;
+  };
+
+  assert.equal(typeof uiModule.resolveSavedTokenUiState, 'function');
+
+  const resolveSavedTokenUiState = uiModule.resolveSavedTokenUiState as (params: {
+    githubTokenConfigured?: boolean;
+    githubTokenLogin?: string | null;
+  }) => {
+    showSavedTokenHint: boolean;
+    showTokenEditor: boolean;
+    tokenStatusOverride: 'valid' | 'invalid' | 'required' | null;
+    validatedLogin: string | null;
+  };
+
+  assert.deepEqual(
+    resolveSavedTokenUiState({
+      githubTokenConfigured: true,
+      githubTokenLogin: '  octocat  '
+    }),
+    {
+      showSavedTokenHint: true,
+      showTokenEditor: false,
+      tokenStatusOverride: 'valid',
+      validatedLogin: 'octocat'
+    }
+  );
+
+  assert.deepEqual(
+    resolveSavedTokenUiState({
+      githubTokenConfigured: false,
+      githubTokenLogin: 'octocat'
+    }),
+    {
+      showSavedTokenHint: false,
+      showTokenEditor: true,
+      tokenStatusOverride: null,
+      validatedLogin: null
+    }
+  );
+});
+
+test('syncGitHubTokenPropagationForAgents adds and removes agent GITHUB_TOKEN secret refs without clobbering unrelated env config', async () => {
+  const uiModule = await importFreshUiModule() as {
+    syncGitHubTokenPropagationForAgents?: unknown;
+  };
+
+  assert.equal(typeof uiModule.syncGitHubTokenPropagationForAgents, 'function');
+
+  const syncGitHubTokenPropagationForAgents = uiModule.syncGitHubTokenPropagationForAgents as (params: {
+    githubTokenSecretRef: string;
+    selectedAgentIds: string[];
+    previousAgentIds?: string[];
+  }) => Promise<void>;
+  const originalFetch = globalThis.fetch;
+  const patchBodies: Array<{ agentId: string; body: Record<string, unknown> }> = [];
+
+  globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+    const url = getRequestUrl(input);
+    const method = (init?.method ?? 'GET').toUpperCase();
+
+    if (url === '/api/agents/agent-1' && method === 'GET') {
+      return jsonResponse({
+        id: 'agent-1',
+        companyId: 'company-1',
+        adapterConfig: {
+          cwd: '/tmp/agent-1',
+          env: {
+            EXISTING: {
+              type: 'plain',
+              value: '1'
+            }
+          }
+        }
+      });
+    }
+
+    if (url === '/api/agents/agent-2' && method === 'GET') {
+      return jsonResponse({
+        id: 'agent-2',
+        companyId: 'company-1',
+        adapterConfig: {
+          model: 'gpt-5.4',
+          env: {
+            GITHUB_TOKEN: {
+              type: 'secret_ref',
+              secretId: 'github-secret-ref'
+            },
+            KEEP_ME: {
+              type: 'plain',
+              value: '2'
+            }
+          }
+        }
+      });
+    }
+
+    if (url === '/api/agents/agent-3' && method === 'GET') {
+      return jsonResponse({
+        id: 'agent-3',
+        companyId: 'company-1',
+        adapterConfig: {
+          env: {
+            GITHUB_TOKEN: {
+              type: 'secret_ref',
+              secretId: 'different-secret-ref'
+            }
+          }
+        }
+      });
+    }
+
+    if (url.startsWith('/api/agents/') && method === 'PATCH') {
+      const agentId = url.slice('/api/agents/'.length);
+      patchBodies.push({
+        agentId,
+        body: getJsonRequestBody(init) ?? {}
+      });
+      return jsonResponse({ ok: true });
+    }
+
+    throw new Error(`Unexpected fetch request: ${method} ${url}`);
+  };
+
+  try {
+    await syncGitHubTokenPropagationForAgents({
+      githubTokenSecretRef: 'github-secret-ref',
+      selectedAgentIds: ['agent-1'],
+      previousAgentIds: ['agent-1', 'agent-2', 'agent-3']
+    });
+
+    assert.deepEqual(
+      [...patchBodies].sort((left, right) => left.agentId.localeCompare(right.agentId)),
+      [
+      {
+        agentId: 'agent-1',
+        body: {
+          adapterConfig: {
+            cwd: '/tmp/agent-1',
+            env: {
+              EXISTING: {
+                type: 'plain',
+                value: '1'
+              },
+              GITHUB_TOKEN: {
+                type: 'secret_ref',
+                secretId: 'github-secret-ref'
+              }
+            }
+          }
+        }
+      },
+      {
+        agentId: 'agent-2',
+        body: {
+          adapterConfig: {
+            model: 'gpt-5.4',
+            env: {
+              KEEP_ME: {
+                type: 'plain',
+                value: '2'
+              }
+            }
+          }
+        }
+      }
+      ]
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('syncGitHubTokenPropagationForAgents batches propagation updates with a small concurrency limit', async () => {
+  const uiModule = await importFreshUiModule() as {
+    syncGitHubTokenPropagationForAgents?: unknown;
+  };
+
+  assert.equal(typeof uiModule.syncGitHubTokenPropagationForAgents, 'function');
+
+  const syncGitHubTokenPropagationForAgents = uiModule.syncGitHubTokenPropagationForAgents as (params: {
+    githubTokenSecretRef: string;
+    selectedAgentIds: string[];
+    previousAgentIds?: string[];
+  }) => Promise<void>;
+  const originalFetch = globalThis.fetch;
+  const patchBodies: Array<{ agentId: string; body: Record<string, unknown> }> = [];
+  let inFlight = 0;
+  let maxInFlight = 0;
+
+  globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+    const url = getRequestUrl(input);
+    const method = (init?.method ?? 'GET').toUpperCase();
+
+    if (!url.startsWith('/api/agents/')) {
+      throw new Error(`Unexpected fetch request: ${method} ${url}`);
+    }
+
+    const agentId = url.slice('/api/agents/'.length);
+    inFlight += 1;
+    maxInFlight = Math.max(maxInFlight, inFlight);
+
+    await delay(20);
+
+    try {
+      if (method === 'GET') {
+        return jsonResponse({
+          id: agentId,
+          companyId: 'company-1',
+          adapterConfig: {
+            cwd: `/tmp/${agentId}`
+          }
+        });
+      }
+
+      if (method === 'PATCH') {
+        patchBodies.push({
+          agentId,
+          body: getJsonRequestBody(init) ?? {}
+        });
+        return jsonResponse({ ok: true });
+      }
+
+      throw new Error(`Unexpected fetch request: ${method} ${url}`);
+    } finally {
+      inFlight -= 1;
+    }
+  };
+
+  try {
+    await syncGitHubTokenPropagationForAgents({
+      githubTokenSecretRef: 'github-secret-ref',
+      selectedAgentIds: ['agent-1', 'agent-2', 'agent-3', 'agent-4', 'agent-5', 'agent-6']
+    });
+
+    assert.ok(maxInFlight > 1);
+    assert.ok(maxInFlight <= 4);
+    assert.deepEqual(
+      [...patchBodies].sort((left, right) => left.agentId.localeCompare(right.agentId)),
+      [
+        'agent-1',
+        'agent-2',
+        'agent-3',
+        'agent-4',
+        'agent-5',
+        'agent-6'
+      ].map((agentId) => ({
+        agentId,
+        body: {
+          adapterConfig: {
+            cwd: `/tmp/${agentId}`,
+            env: {
+              GITHUB_TOKEN: {
+                type: 'secret_ref',
+                secretId: 'github-secret-ref'
+              }
+            }
+          }
+        }
+      }))
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test('resolveInstalledGitHubSyncPluginId finds the GitHub Sync installation id from plugin listings', () => {
   const records = [
     {
@@ -5883,6 +6159,89 @@ test('worker scopes mapping saves and settings reads to the requested company', 
   });
 });
 
+test('worker scopes github token propagation agent selections to the requested company', async () => {
+  const harness = createTestHarness({ manifest });
+  await plugin.definition.setup(harness.ctx);
+
+  await harness.performAction('settings.saveRegistration', {
+    companyId: 'company-1',
+    advancedSettings: {
+      defaultStatus: 'todo',
+      ignoredIssueAuthorUsernames: ['renovate'],
+      githubTokenPropagationAgentIds: ['agent-2', 'agent-1', 'agent-2']
+    },
+    syncState: {
+      status: 'idle'
+    }
+  });
+
+  await harness.performAction('settings.saveRegistration', {
+    companyId: 'company-2',
+    advancedSettings: {
+      defaultStatus: 'backlog',
+      ignoredIssueAuthorUsernames: ['dependabot'],
+      githubTokenPropagationAgentIds: ['agent-3']
+    },
+    syncState: {
+      status: 'idle'
+    }
+  });
+
+  const companyOneResult = await harness.getData<{
+    advancedSettings: {
+      defaultStatus: string;
+      ignoredIssueAuthorUsernames: string[];
+      githubTokenPropagationAgentIds?: string[];
+    };
+  }>('settings.registration', {
+    companyId: 'company-1'
+  });
+  const companyTwoResult = await harness.getData<{
+    advancedSettings: {
+      defaultStatus: string;
+      ignoredIssueAuthorUsernames: string[];
+      githubTokenPropagationAgentIds?: string[];
+    };
+  }>('settings.registration', {
+    companyId: 'company-2'
+  });
+
+  assert.deepEqual(companyOneResult.advancedSettings, {
+    defaultStatus: 'todo',
+    ignoredIssueAuthorUsernames: ['renovate'],
+    githubTokenPropagationAgentIds: ['agent-1', 'agent-2']
+  });
+  assert.deepEqual(companyTwoResult.advancedSettings, {
+    defaultStatus: 'backlog',
+    ignoredIssueAuthorUsernames: ['dependabot'],
+    githubTokenPropagationAgentIds: ['agent-3']
+  });
+
+  const savedSettings = harness.getState({
+    scopeKind: 'instance',
+    stateKey: 'paperclip-github-plugin-settings'
+  }) as {
+    companyAdvancedSettingsByCompanyId: Record<string, {
+      defaultStatus: string;
+      ignoredIssueAuthorUsernames: string[];
+      githubTokenPropagationAgentIds?: string[];
+    }>;
+  };
+
+  assert.deepEqual(savedSettings.companyAdvancedSettingsByCompanyId, {
+    'company-1': {
+      defaultStatus: 'todo',
+      ignoredIssueAuthorUsernames: ['renovate'],
+      githubTokenPropagationAgentIds: ['agent-1', 'agent-2']
+    },
+    'company-2': {
+      defaultStatus: 'backlog',
+      ignoredIssueAuthorUsernames: ['dependabot'],
+      githubTokenPropagationAgentIds: ['agent-3']
+    }
+  });
+});
+
 test('worker normalizes owner/repo slugs to canonical GitHub URLs when saving mappings', async () => {
   const harness = createTestHarness({ manifest });
   await plugin.definition.setup(harness.ctx);
@@ -6047,6 +6406,37 @@ test('settings.registration reports a configured token without resolving the sav
   assert.equal(resolveCount, 0);
 });
 
+test('settings.saveRegistration persists the saved GitHub login label for later settings reads', async () => {
+  const harness = createTestHarness({ manifest });
+  await plugin.definition.setup(harness.ctx);
+
+  const saveResult = await harness.performAction('settings.saveRegistration', {
+    githubTokenRef: 'github-secret-ref',
+    githubTokenLogin: 'octocat'
+  }) as {
+    githubTokenLogin?: string;
+  };
+
+  assert.equal(saveResult.githubTokenLogin, 'octocat');
+
+  const savedSettings = harness.getState({
+    scopeKind: 'instance',
+    stateKey: 'paperclip-github-plugin-settings'
+  }) as {
+    githubTokenLogin?: string;
+  };
+
+  assert.equal(savedSettings.githubTokenLogin, 'octocat');
+
+  const registrationResult = await harness.getData<{
+    githubTokenConfigured?: boolean;
+    githubTokenLogin?: string;
+  }>('settings.registration');
+
+  assert.equal(registrationResult.githubTokenConfigured, true);
+  assert.equal(registrationResult.githubTokenLogin, 'octocat');
+});
+
 test('settings.registration reports a configured token from the external config file without resolving secrets', { concurrency: false }, async () => {
   await withExternalPluginConfig(
     {
@@ -6137,6 +6527,52 @@ test('settings.registration reports company-specific board access without resolv
   assert.equal(companyTwoResult.paperclipBoardAccessConfigured, false);
   assert.equal(companyTwoResult.paperclipBoardAccessNeedsConfigSync, false);
   assert.equal(resolveCount, 0);
+});
+
+test('settings.updateBoardAccess persists a company-specific board access identity label', async () => {
+  const harness = createTestHarness({ manifest });
+  await plugin.definition.setup(harness.ctx);
+
+  const actionResult = await harness.performAction('settings.updateBoardAccess', {
+    companyId: 'company-1',
+    paperclipBoardApiTokenRef: 'board-secret-ref',
+    paperclipBoardAccessIdentity: 'Jane Operator'
+  }) as {
+    paperclipBoardAccessConfigured?: boolean;
+    paperclipBoardAccessIdentity?: string;
+  };
+
+  assert.equal(actionResult.paperclipBoardAccessConfigured, true);
+  assert.equal(actionResult.paperclipBoardAccessIdentity, 'Jane Operator');
+
+  const savedSettings = harness.getState({
+    scopeKind: 'instance',
+    stateKey: 'paperclip-github-plugin-settings'
+  }) as {
+    paperclipBoardAccessIdentityByCompanyId?: Record<string, string>;
+  };
+
+  assert.deepEqual(savedSettings.paperclipBoardAccessIdentityByCompanyId, {
+    'company-1': 'Jane Operator'
+  });
+
+  const companyOneResult = await harness.getData<{
+    paperclipBoardAccessConfigured?: boolean;
+    paperclipBoardAccessIdentity?: string;
+  }>('settings.registration', {
+    companyId: 'company-1'
+  });
+  const companyTwoResult = await harness.getData<{
+    paperclipBoardAccessConfigured?: boolean;
+    paperclipBoardAccessIdentity?: string;
+  }>('settings.registration', {
+    companyId: 'company-2'
+  });
+
+  assert.equal(companyOneResult.paperclipBoardAccessConfigured, true);
+  assert.equal(companyOneResult.paperclipBoardAccessIdentity, 'Jane Operator');
+  assert.equal(companyTwoResult.paperclipBoardAccessConfigured, false);
+  assert.equal(companyTwoResult.paperclipBoardAccessIdentity, undefined);
 });
 
 test('settings.registration reports company-specific board access from plugin config without resolving the saved secret', async () => {
