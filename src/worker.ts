@@ -15051,8 +15051,6 @@ const plugin = definePlugin({
       const githubTokenLogin =
         !requestedCompanyId && 'githubTokenLogin' in record
           ? requestedGitHubTokenLogin
-          : requestedCompanyId && requestedGitHubTokenLogin
-            ? requestedGitHubTokenLogin
           : previous.githubTokenLogin;
       const inputMappings = hasMappingsPatch ? normalizeMappings(record.mappings) : previous.mappings;
       const nextCompanyAdvancedSettingsByCompanyId = {

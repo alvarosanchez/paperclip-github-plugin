@@ -1,7 +1,0 @@
-1611:.ghsync__scope-pill--global {
-8530:                  <span className="ghsync__scope-pill ghsync__scope-pill--global">{pageData.repositoryLabel}</span>
-9086:                  <span className="ghsync__scope-pill ghsync__scope-pill--global">{pageData.repositoryLabel}</span>
-9590:                          <span className="ghsync__scope-pill ghsync__scope-pill--global">{issueDrawerProjectLabel}</span>
-11491:                            <span className="ghsync__scope-pill ghsync__scope-pill--global">GitHub workspace</span>
-11723:                    <span className="ghsync__scope-pill ghsync__scope-pill--global">Shared cadence</span>
-11764:                    <span className="ghsync__scope-pill ghsync__scope-pill--global">Shared</span>

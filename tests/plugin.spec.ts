@@ -6585,13 +6585,17 @@ test('settings.saveRegistration persists the saved GitHub login label for later 
     stateKey: 'paperclip-github-plugin-settings'
   }) as {
     githubTokenRefs?: Record<string, string>;
+    githubTokenLoginByCompanyId?: Record<string, string>;
     githubTokenLogin?: string;
   };
 
   assert.deepEqual(savedSettings.githubTokenRefs, {
     'company-1': 'github-secret-ref'
   });
-  assert.equal(savedSettings.githubTokenLogin, 'octocat');
+  assert.deepEqual(savedSettings.githubTokenLoginByCompanyId, {
+    'company-1': 'octocat'
+  });
+  assert.equal(savedSettings.githubTokenLogin, undefined);
 
   const registrationResult = await harness.getData<{
     githubTokenConfigured?: boolean;

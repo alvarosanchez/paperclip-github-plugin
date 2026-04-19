@@ -10349,7 +10349,7 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
             ? 'Add a token for this company.'
             : 'Select a company.'
           : hasCompanyContext
-            ? 'Company token.'
+            ? 'Token configured for the selected company context.'
             : 'Saved in one or more companies.';
   const tokenDescription = tokenStatusDescription;
   const tokenPermissionAuditData = tokenPermissionAudit.data;
@@ -10568,7 +10568,9 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
             <span className={`ghsync__scope-pill ${hasCompanyContext ? 'ghsync__scope-pill--company' : 'ghsync__scope-pill--mixed'}`}>
               {hasCompanyContext ? currentCompanyName : 'No company'}
             </span>
-            <span className="ghsync__scope-pill ghsync__scope-pill--company">Company</span>
+            {hasCompanyContext ? (
+              <span className="ghsync__scope-pill ghsync__scope-pill--company">Company</span>
+            ) : null}
             <span className="ghsync__badge ghsync__badge--neutral">
               <LoadingSpinner size="sm" label="Loading settings" />
               Loading
@@ -11284,7 +11286,7 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
               <div className="ghsync__connected">
                 <div>
                   <strong>{validatedLogin ? `Authenticated as ${validatedLogin}` : 'Company token ready'}</strong>
-                  <span>{`Used only for ${currentCompanyName}.`}</span>
+                  <span>{`Used for sync in ${currentCompanyName}.`}</span>
                 </div>
                 <button
                   type="button"
