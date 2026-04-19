@@ -103,7 +103,7 @@ The plugin MUST persist repository mappings, company-scoped advanced issue defau
 
 - Saving a mapping MUST create or reuse the target Paperclip project.
 - Saving a company-scoped mapping from the settings page MUST create or reuse the target Paperclip project in that same company.
-- When the settings page creates a new target Paperclip project, it MUST set `executionWorkspacePolicy.enabled` to `true` so the project opts into isolated issue checkouts.
+- When the settings page creates a new target Paperclip project, it MUST set `executionWorkspacePolicy.enabled` to `true` and `executionWorkspacePolicy.defaultMode` to `"isolated_workspace"` so the project opts into isolated issue checkouts and new issues default to isolated checkout.
 - Saving a mapping for a Paperclip project that is already bound to the GitHub repository MUST reuse that existing project instead of creating a duplicate workspace binding.
 - Saving a mapping MUST bind the GitHub repository URL to the Paperclip project workspace.
 - Once a project has been created and linked, its project name field SHOULD be treated as read-only in the settings UI.

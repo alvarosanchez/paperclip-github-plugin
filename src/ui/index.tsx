@@ -6015,7 +6015,8 @@ export async function resolveOrCreateProject(companyId: string, projectName: str
       name: projectName.trim(),
       status: 'planned',
       executionWorkspacePolicy: {
-        enabled: true
+        enabled: true,
+        defaultMode: 'isolated_workspace'
       }
     })
   });
