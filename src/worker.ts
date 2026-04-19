@@ -77,6 +77,7 @@ const COMMENT_ANNOTATION_ENTITY_TYPE = 'paperclip-github-plugin.comment-annotati
 const AI_AUTHORED_COMMENT_FOOTER_PREFIX = 'Created by a Paperclip AI agent using ';
 const HIDDEN_GITHUB_IMPORT_MARKER_PREFIX = '<!-- paperclip-github-plugin-imported-from: ';
 const HIDDEN_GITHUB_IMPORT_MARKER_SUFFIX = ' -->';
+const EMPTY_GITHUB_ISSUE_DESCRIPTION_PLACEHOLDER = '_No description provided on GitHub._';
 
 type PluginSetupContext = Parameters<Parameters<typeof definePlugin>[0]['setup']>[0];
 type PaperclipIssueStatus = Issue['status'];
@@ -6757,7 +6758,7 @@ function buildPaperclipIssueDescription(issue: GitHubIssueRecord, linkedPullRequ
   }
 
   if (!normalizedBody) {
-    return hiddenImportMarker;
+    return `${EMPTY_GITHUB_ISSUE_DESCRIPTION_PLACEHOLDER}\n\n${hiddenImportMarker}`;
   }
 
   return `${normalizedBody}\n\n${hiddenImportMarker}`;

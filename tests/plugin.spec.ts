@@ -10153,6 +10153,133 @@ test('worker normalizes GitHub raw HTML that Paperclip issue descriptions cannot
   }
 });
 
+test('worker stores a renderable placeholder when an imported GitHub issue has no body', async () => {
+  const harness = createTestHarness({
+    manifest,
+    config: {
+      githubTokenRef: 'github-secret-ref'
+    }
+  });
+  await plugin.definition.setup(harness.ctx);
+
+  await harness.performAction('settings.saveRegistration', {
+    mappings: [
+      {
+        id: 'mapping-a',
+        repositoryUrl: 'paperclipai/example-repo',
+        paperclipProjectName: 'Engineering',
+        paperclipProjectId: 'project-1',
+        companyId: 'company-1'
+      }
+    ],
+    syncState: {
+      status: 'idle'
+    }
+  });
+
+  const originalFetch = globalThis.fetch;
+
+  globalThis.fetch = async (input, init) => {
+    const rawUrl = getRequestUrl(input);
+    const url = new URL(rawUrl);
+
+    if (url.pathname === '/repos/paperclipai/example-repo/issues' && ['all', 'open'].includes(url.searchParams.get('state') ?? '')) {
+      return jsonResponse([
+        {
+          id: 1101,
+          number: 11,
+          title: 'Missing body issue',
+          body: null,
+          html_url: 'https://github.com/paperclipai/example-repo/issues/11',
+          state: 'open',
+          comments: 0
+        }
+      ]);
+    }
+
+    if (url.pathname === '/graphql') {
+      const { query, variables } = getGraphqlRequest(init);
+      const issueNumber = typeof variables.issueNumber === 'number' ? variables.issueNumber : undefined;
+
+      if (query.includes('query GitHubRepositoryOpenIssueLinkedPullRequests')) {
+        return graphqlResponse({
+          repository: {
+            issues: {
+              pageInfo: {
+                hasNextPage: false,
+                endCursor: null
+              },
+              nodes: [
+                {
+                  number: 11,
+                  timelineItems: {
+                    nodes: []
+                  }
+                }
+              ]
+            }
+          }
+        });
+      }
+
+      if (query.includes('query GitHubIssueParentRelationships')) {
+        return graphqlIssueParentRelationshipsResponse([
+          {
+            issueNumber: 11
+          }
+        ]);
+      }
+
+      if (query.includes('query GitHubIssueStatusSnapshot') && issueNumber === 11) {
+        return graphqlResponse({
+          repository: {
+            issue: {
+              number: 11,
+              state: 'OPEN',
+              stateReason: null,
+              comments: {
+                totalCount: 0
+              },
+              closedByPullRequestsReferences: {
+                pageInfo: {
+                  hasNextPage: false,
+                  endCursor: null
+                },
+                nodes: []
+              }
+            }
+          }
+        });
+      }
+    }
+
+    throw new Error(`Unexpected GitHub request: ${url.toString()}`);
+  };
+
+  try {
+    const sync = await harness.performAction('sync.runNow', {
+      waitForCompletion: true
+    }) as {
+      syncState: { status: string };
+    };
+
+    assert.equal(sync.syncState.status, 'success');
+
+    const importedIssue = (await harness.ctx.issues.list({
+      companyId: 'company-1'
+    })).find((issue) => issue.title === 'Missing body issue');
+
+    assert.ok(importedIssue);
+
+    const description = importedIssue?.description ?? '';
+    assert.equal(stripHiddenGitHubImportMarker(description), '_No description provided on GitHub._');
+    assert.match(description, /<!-- paperclip-github-plugin-imported-from: https:\/\/github\.com\/paperclipai\/example-repo\/issues\/11 -->/);
+    assert.doesNotMatch(description, /^\s*<!--/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test('worker falls back to the SDK bridge when the local Paperclip description PATCH responds successfully but still returns a blank description', async () => {
   const harness = createTestHarness({
     manifest,
