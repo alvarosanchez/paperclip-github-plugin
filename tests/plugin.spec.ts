@@ -536,7 +536,8 @@ test('resolveOrCreateProject enables isolated issue checkouts for new company pr
         name: 'Engineering',
         status: 'planned',
         executionWorkspacePolicy: {
-          enabled: true
+          enabled: true,
+          defaultMode: 'isolated_workspace'
         }
       }
     ]);

@@ -57,7 +57,7 @@ GitHub tokens, repository mappings, advanced import defaults, and Paperclip boar
 
 ### Project binding that respects existing work
 
-If a company already has a Paperclip project bound to a GitHub repository workspace, the settings UI can reuse that project instead of creating a duplicate. New mappings can also create and bind a Paperclip project automatically, and those newly created projects opt into isolated issue checkouts.
+If a company already has a Paperclip project bound to a GitHub repository workspace, the settings UI can reuse that project instead of creating a duplicate. New mappings can also create and bind a Paperclip project automatically, and those newly created projects opt into isolated issue checkouts with new issues defaulting to isolated checkout.
 
 ### Status sync with delivery context
 
