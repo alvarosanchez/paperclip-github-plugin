@@ -53,7 +53,7 @@ Long-running syncs continue in the background, so quick actions do not have to w
 
 ### Company-aware configuration
 
-GitHub tokens, repository mappings, advanced import defaults, and Paperclip board access are managed per company, while sync cadence remains shared at the plugin instance level. When you open settings inside a specific company, you only edit that company's setup.
+GitHub tokens, repository mappings, advanced import defaults, Paperclip board access, and sync cadence are managed per company. When you open settings inside a specific company, you only edit that company's setup.
 
 ### Project binding that respects existing work
 

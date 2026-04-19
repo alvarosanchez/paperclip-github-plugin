@@ -335,8 +335,11 @@ interface ResolvedSyncTarget {
 interface GitHubSyncSettings {
   mappings: RepositoryMapping[];
   syncState: SyncRunState;
+  syncStateByCompanyId?: SyncStateByCompanyId;
   scheduleFrequencyMinutes: number;
+  scheduleFrequencyMinutesByCompanyId?: ScheduleFrequencyMinutesByCompanyId;
   paperclipApiBaseUrl?: string;
+  paperclipApiBaseUrlByCompanyId?: PaperclipApiBaseUrlByCompanyId;
   githubTokenRefs?: GitHubTokenRefs;
   githubTokenLoginByCompanyId?: GitHubTokenLoginByCompanyId;
   githubTokenRef?: string;
@@ -355,6 +358,10 @@ interface GitHubSyncConfig {
   paperclipBoardApiTokenRefs?: PaperclipBoardApiTokenRefs;
   paperclipApiBaseUrl?: string;
 }
+
+type SyncStateByCompanyId = Record<string, SyncRunState>;
+type ScheduleFrequencyMinutesByCompanyId = Record<string, number>;
+type PaperclipApiBaseUrlByCompanyId = Record<string, string>;
 
 interface ResolvedGitHubTokenSource {
   secretRef?: string;
@@ -396,6 +403,7 @@ function normalizeCompanyId(value: unknown): string | undefined {
 
 let activeSyncPromise: Promise<GitHubSyncSettings> | null = null;
 let activeRunningSyncState: GitHubSyncSettings | null = null;
+let activeRunningSyncCompanyId: string | undefined;
 let activePaperclipApiAuthTokensByCompanyId: Map<string, string> | null = null;
 let activeExternalConfigWarningKey: string | null = null;
 const activeProjectPullRequestPageCache = new Map<string, CacheEntry<Record<string, unknown>>>();
@@ -3462,9 +3470,9 @@ async function buildToolbarSyncState(
   ctx: PluginSetupContext,
   input: Record<string, unknown>
 ): Promise<Record<string, unknown>> {
-  const settings = await getActiveOrCurrentSyncState(ctx);
-  const config = await getResolvedConfig(ctx);
   const companyId = typeof input.companyId === 'string' && input.companyId.trim() ? input.companyId.trim() : undefined;
+  const settings = await getActiveOrCurrentSyncState(ctx, companyId);
+  const config = await getResolvedConfig(ctx);
   const githubTokenConfigured = hasConfiguredGithubToken(settings, config, companyId);
   const entityId = typeof input.entityId === 'string' && input.entityId.trim() ? input.entityId.trim() : undefined;
   const entityType = typeof input.entityType === 'string' && input.entityType.trim() ? input.entityType.trim() : undefined;
@@ -3757,7 +3765,15 @@ function getPublicSettings(
   settings: GitHubSyncSettings
 ): Omit<
   GitHubSyncSettings,
-  'githubTokenRefs' | 'githubTokenLoginByCompanyId' | 'githubTokenRef' | 'paperclipBoardApiTokenRefs' | 'paperclipBoardAccessIdentityByCompanyId' | 'companyAdvancedSettingsByCompanyId'
+  'githubTokenRefs'
+  | 'githubTokenLoginByCompanyId'
+  | 'githubTokenRef'
+  | 'paperclipBoardApiTokenRefs'
+  | 'paperclipBoardAccessIdentityByCompanyId'
+  | 'companyAdvancedSettingsByCompanyId'
+  | 'syncStateByCompanyId'
+  | 'scheduleFrequencyMinutesByCompanyId'
+  | 'paperclipApiBaseUrlByCompanyId'
 > {
   const {
     githubTokenRefs: _githubTokenRefs,
@@ -3766,6 +3782,9 @@ function getPublicSettings(
     paperclipBoardApiTokenRefs: _paperclipBoardApiTokenRefs,
     paperclipBoardAccessIdentityByCompanyId: _paperclipBoardAccessIdentityByCompanyId,
     companyAdvancedSettingsByCompanyId: _companyAdvancedSettingsByCompanyId,
+    syncStateByCompanyId: _syncStateByCompanyId,
+    scheduleFrequencyMinutesByCompanyId: _scheduleFrequencyMinutesByCompanyId,
+    paperclipApiBaseUrlByCompanyId: _paperclipApiBaseUrlByCompanyId,
     ...publicSettings
   } = settings;
   return publicSettings;
@@ -3801,7 +3820,15 @@ function getPublicSettingsForScope(
   companyId?: string
 ): Omit<
   GitHubSyncSettings,
-  'githubTokenRefs' | 'githubTokenLoginByCompanyId' | 'githubTokenRef' | 'paperclipBoardApiTokenRefs' | 'paperclipBoardAccessIdentityByCompanyId' | 'companyAdvancedSettingsByCompanyId'
+  'githubTokenRefs'
+  | 'githubTokenLoginByCompanyId'
+  | 'githubTokenRef'
+  | 'paperclipBoardApiTokenRefs'
+  | 'paperclipBoardAccessIdentityByCompanyId'
+  | 'companyAdvancedSettingsByCompanyId'
+  | 'syncStateByCompanyId'
+  | 'scheduleFrequencyMinutesByCompanyId'
+  | 'paperclipApiBaseUrlByCompanyId'
 > & {
   advancedSettings: GitHubSyncAdvancedSettings;
   githubTokenLogin?: string;
@@ -4041,16 +4068,14 @@ function createSetupConfigurationErrorSyncState(
 async function saveSettingsSyncState(
   ctx: PluginSetupContext,
   settings: GitHubSyncSettings,
-  syncState: SyncRunState
+  syncState: SyncRunState,
+  companyId?: string
 ): Promise<GitHubSyncSettings> {
-  const next = {
-    ...settings,
-    syncState
-  };
+  const next = upsertScopedSyncState(normalizeSettings(settings), syncState, companyId);
 
   await ctx.state.set(SETTINGS_SCOPE, next);
-  await ctx.state.set(SYNC_STATE_SCOPE, next.syncState);
-  return next;
+  await ctx.state.set(SYNC_STATE_SCOPE, syncState);
+  return materializeScopedSettings(next, null, companyId);
 }
 
 async function setSyncCancellationRequest(
@@ -4098,9 +4123,10 @@ function buildCancelledSyncMessage(
 async function createUnexpectedSyncErrorResult(
   ctx: PluginSetupContext,
   trigger: 'manual' | 'schedule' | 'retry',
-  error: unknown
+  error: unknown,
+  companyId?: string
 ): Promise<GitHubSyncSettings> {
-  const settings = normalizeSettings(await ctx.state.get(SETTINGS_SCOPE));
+  const settings = materializeScopedSettings(normalizeSettings(await ctx.state.get(SETTINGS_SCOPE)), null, companyId);
   const errorDetails = buildSyncErrorDetails(error, {
     phase: 'configuration'
   });
@@ -4128,7 +4154,8 @@ async function createUnexpectedSyncErrorResult(
           errorDetails
         })
       )
-    })
+    }),
+    companyId
   );
 }
 
@@ -4152,18 +4179,20 @@ async function waitForSyncResultWithinGracePeriod(
   }
 }
 
-async function getActiveOrCurrentSyncState(ctx: PluginSetupContext): Promise<GitHubSyncSettings> {
-  if (activeRunningSyncState?.syncState.status === 'running') {
-    return activeRunningSyncState;
+async function getActiveOrCurrentSyncState(
+  ctx: PluginSetupContext,
+  companyId?: string
+): Promise<GitHubSyncSettings> {
+  const normalizedCompanyId = normalizeCompanyId(companyId);
+  if (
+    activeRunningSyncState?.syncState.status === 'running'
+    && activeRunningSyncCompanyId === normalizedCompanyId
+  ) {
+    return materializeScopedSettings(activeRunningSyncState, null, normalizedCompanyId);
   }
 
   const current = normalizeSettings(await ctx.state.get(SETTINGS_SCOPE));
-
-  if (current.syncState.status === 'running') {
-    return current;
-  }
-
-  return current;
+  return materializeScopedSettings(current, null, normalizedCompanyId);
 }
 
 function updateSyncFailureContext(
@@ -4419,14 +4448,16 @@ function normalizeSyncState(value: unknown): SyncRunState {
 
   return {
     status: status === 'running' || status === 'success' || status === 'error' || status === 'cancelled' ? status : 'idle',
-    message: typeof record.message === 'string' ? record.message : undefined,
-    checkedAt: typeof record.checkedAt === 'string' ? record.checkedAt : undefined,
-    syncedIssuesCount: typeof record.syncedIssuesCount === 'number' ? record.syncedIssuesCount : undefined,
-    createdIssuesCount: typeof record.createdIssuesCount === 'number' ? record.createdIssuesCount : undefined,
-    skippedIssuesCount: typeof record.skippedIssuesCount === 'number' ? record.skippedIssuesCount : undefined,
-    erroredIssuesCount: typeof record.erroredIssuesCount === 'number' ? record.erroredIssuesCount : undefined,
-    lastRunTrigger: lastRunTrigger === 'manual' || lastRunTrigger === 'schedule' || lastRunTrigger === 'retry' ? lastRunTrigger : undefined,
-    cancelRequestedAt: typeof record.cancelRequestedAt === 'string' ? record.cancelRequestedAt : undefined,
+    ...(typeof record.message === 'string' ? { message: record.message } : {}),
+    ...(typeof record.checkedAt === 'string' ? { checkedAt: record.checkedAt } : {}),
+    ...(typeof record.syncedIssuesCount === 'number' ? { syncedIssuesCount: record.syncedIssuesCount } : {}),
+    ...(typeof record.createdIssuesCount === 'number' ? { createdIssuesCount: record.createdIssuesCount } : {}),
+    ...(typeof record.skippedIssuesCount === 'number' ? { skippedIssuesCount: record.skippedIssuesCount } : {}),
+    ...(typeof record.erroredIssuesCount === 'number' ? { erroredIssuesCount: record.erroredIssuesCount } : {}),
+    ...(lastRunTrigger === 'manual' || lastRunTrigger === 'schedule' || lastRunTrigger === 'retry'
+      ? { lastRunTrigger }
+      : {}),
+    ...(typeof record.cancelRequestedAt === 'string' ? { cancelRequestedAt: record.cancelRequestedAt } : {}),
     ...(progress ? { progress } : {}),
     ...(errorDetails ? { errorDetails } : {}),
     ...(recentFailures ? { recentFailures } : {})
@@ -4598,6 +4629,40 @@ function normalizeScheduleFrequencyMinutes(value: unknown): number {
   return Math.floor(numericValue);
 }
 
+function normalizeSyncStateByCompanyId(value: unknown): SyncStateByCompanyId | undefined {
+  if (!value || typeof value !== 'object') {
+    return undefined;
+  }
+
+  const entries = Object.entries(value as Record<string, unknown>)
+    .map(([companyId, syncState]) => {
+      const normalizedCompanyId = normalizeCompanyId(companyId);
+      return normalizedCompanyId
+        ? [normalizedCompanyId, normalizeSyncState(syncState)] as const
+        : null;
+    })
+    .filter((entry): entry is readonly [string, SyncRunState] => entry !== null);
+
+  return entries.length > 0 ? Object.fromEntries(entries) : undefined;
+}
+
+function normalizeScheduleFrequencyMinutesByCompanyId(value: unknown): ScheduleFrequencyMinutesByCompanyId | undefined {
+  if (!value || typeof value !== 'object') {
+    return undefined;
+  }
+
+  const entries = Object.entries(value as Record<string, unknown>)
+    .map(([companyId, scheduleFrequencyMinutes]) => {
+      const normalizedCompanyId = normalizeCompanyId(companyId);
+      return normalizedCompanyId
+        ? [normalizedCompanyId, normalizeScheduleFrequencyMinutes(scheduleFrequencyMinutes)] as const
+        : null;
+    })
+    .filter((entry): entry is readonly [string, number] => entry !== null);
+
+  return entries.length > 0 ? Object.fromEntries(entries) : undefined;
+}
+
 function normalizePaperclipApiBaseUrl(value: unknown): string | undefined {
   if (typeof value !== 'string') {
     return undefined;
@@ -4613,6 +4678,24 @@ function normalizePaperclipApiBaseUrl(value: unknown): string | undefined {
   } catch {
     return undefined;
   }
+}
+
+function normalizePaperclipApiBaseUrlByCompanyId(value: unknown): PaperclipApiBaseUrlByCompanyId | undefined {
+  if (!value || typeof value !== 'object') {
+    return undefined;
+  }
+
+  const entries = Object.entries(value as Record<string, unknown>)
+    .map(([companyId, paperclipApiBaseUrl]) => {
+      const normalizedCompanyId = normalizeCompanyId(companyId);
+      const normalizedPaperclipApiBaseUrl = normalizePaperclipApiBaseUrl(paperclipApiBaseUrl);
+      return normalizedCompanyId && normalizedPaperclipApiBaseUrl
+        ? [normalizedCompanyId, normalizedPaperclipApiBaseUrl] as const
+        : null;
+    })
+    .filter((entry): entry is readonly [string, string] => entry !== null);
+
+  return entries.length > 0 ? Object.fromEntries(entries) : undefined;
 }
 
 function getRuntimePaperclipApiBaseUrl(): string | undefined {
@@ -4640,16 +4723,27 @@ function resolvePaperclipApiBaseUrl(...values: unknown[]): string | undefined {
 }
 
 function getConfiguredPaperclipApiBaseUrl(
-  settings: Pick<GitHubSyncSettings, 'paperclipApiBaseUrl'> | null | undefined,
+  settings: Pick<GitHubSyncSettings, 'paperclipApiBaseUrl' | 'paperclipApiBaseUrlByCompanyId'> | null | undefined,
   config: Pick<GitHubSyncConfig, 'paperclipApiBaseUrl'> | null | undefined
+  ,
+  companyId?: string
 ): string | undefined {
-  return resolvePaperclipApiBaseUrl(config?.paperclipApiBaseUrl, settings?.paperclipApiBaseUrl);
+  const normalizedCompanyId = normalizeCompanyId(companyId);
+  return normalizedCompanyId
+    ? resolvePaperclipApiBaseUrl(
+        config?.paperclipApiBaseUrl,
+        settings?.paperclipApiBaseUrlByCompanyId?.[normalizedCompanyId],
+        settings?.paperclipApiBaseUrl
+      )
+    : resolvePaperclipApiBaseUrl(config?.paperclipApiBaseUrl, settings?.paperclipApiBaseUrl);
 }
 
 function resolveTrustedPaperclipApiBaseUrlInput(
   value: unknown,
-  settings: Pick<GitHubSyncSettings, 'paperclipApiBaseUrl'> | null | undefined,
+  settings: Pick<GitHubSyncSettings, 'paperclipApiBaseUrl' | 'paperclipApiBaseUrlByCompanyId'> | null | undefined,
   config: Pick<GitHubSyncConfig, 'paperclipApiBaseUrl'> | null | undefined
+  ,
+  companyId?: string
 ): string | undefined {
   const runtimePaperclipApiBaseUrl = getRuntimePaperclipApiBaseUrl();
   if (runtimePaperclipApiBaseUrl) {
@@ -4658,10 +4752,14 @@ function resolveTrustedPaperclipApiBaseUrlInput(
 
   const requestedPaperclipApiBaseUrl = normalizePaperclipApiBaseUrl(value);
   const configuredPaperclipApiBaseUrl = normalizePaperclipApiBaseUrl(config?.paperclipApiBaseUrl);
+  const normalizedCompanyId = normalizeCompanyId(companyId);
+  const savedCompanyPaperclipApiBaseUrl = normalizedCompanyId
+    ? normalizePaperclipApiBaseUrl(settings?.paperclipApiBaseUrlByCompanyId?.[normalizedCompanyId])
+    : undefined;
   const savedPaperclipApiBaseUrl = normalizePaperclipApiBaseUrl(settings?.paperclipApiBaseUrl);
 
   if (!requestedPaperclipApiBaseUrl) {
-    return configuredPaperclipApiBaseUrl ?? savedPaperclipApiBaseUrl;
+    return configuredPaperclipApiBaseUrl ?? savedCompanyPaperclipApiBaseUrl ?? savedPaperclipApiBaseUrl;
   }
 
   if (configuredPaperclipApiBaseUrl) {
@@ -4672,6 +4770,10 @@ function resolveTrustedPaperclipApiBaseUrlInput(
     }
 
     return configuredPaperclipApiBaseUrl;
+  }
+
+  if (savedCompanyPaperclipApiBaseUrl && requestedPaperclipApiBaseUrl === savedCompanyPaperclipApiBaseUrl) {
+    return savedCompanyPaperclipApiBaseUrl;
   }
 
   if (savedPaperclipApiBaseUrl && requestedPaperclipApiBaseUrl === savedPaperclipApiBaseUrl) {
@@ -4689,7 +4791,12 @@ function normalizeSettings(value: unknown): GitHubSyncSettings {
   }
 
   const record = value as Record<string, unknown>;
+  const syncStateByCompanyId = normalizeSyncStateByCompanyId(record.syncStateByCompanyId);
+  const scheduleFrequencyMinutesByCompanyId = normalizeScheduleFrequencyMinutesByCompanyId(
+    record.scheduleFrequencyMinutesByCompanyId
+  );
   const paperclipApiBaseUrl = resolvePaperclipApiBaseUrl(record.paperclipApiBaseUrl);
+  const paperclipApiBaseUrlByCompanyId = normalizePaperclipApiBaseUrlByCompanyId(record.paperclipApiBaseUrlByCompanyId);
   const githubTokenRefs = normalizeGitHubTokenRefs(record.githubTokenRefs);
   const githubTokenLoginByCompanyId = normalizeGitHubTokenLoginByCompanyId(record.githubTokenLoginByCompanyId);
   const githubTokenRef = normalizeGitHubTokenRef(record.githubTokenRef);
@@ -4703,8 +4810,11 @@ function normalizeSettings(value: unknown): GitHubSyncSettings {
   return {
     mappings: normalizeMappings(record.mappings),
     syncState: normalizeSyncState(record.syncState),
+    ...(syncStateByCompanyId ? { syncStateByCompanyId } : {}),
     scheduleFrequencyMinutes: normalizeScheduleFrequencyMinutes(record.scheduleFrequencyMinutes),
+    ...(scheduleFrequencyMinutesByCompanyId ? { scheduleFrequencyMinutesByCompanyId } : {}),
     ...(paperclipApiBaseUrl ? { paperclipApiBaseUrl } : {}),
+    ...(paperclipApiBaseUrlByCompanyId ? { paperclipApiBaseUrlByCompanyId } : {}),
     ...(githubTokenRefs ? { githubTokenRefs } : {}),
     ...(githubTokenLoginByCompanyId ? { githubTokenLoginByCompanyId } : {}),
     ...(githubTokenRef ? { githubTokenRef } : {}),
@@ -4714,6 +4824,147 @@ function normalizeSettings(value: unknown): GitHubSyncSettings {
     ...(companyAdvancedSettingsByCompanyId ? { companyAdvancedSettingsByCompanyId } : {}),
     updatedAt: typeof record.updatedAt === 'string' ? record.updatedAt : undefined
   };
+}
+
+function getScopedSyncState(
+  settings: Pick<GitHubSyncSettings, 'syncState' | 'syncStateByCompanyId'>,
+  companyId?: string
+): SyncRunState {
+  const normalizedCompanyId = normalizeCompanyId(companyId);
+  if (!normalizedCompanyId) {
+    return normalizeSyncState(settings.syncState);
+  }
+
+  const scopedSyncState = settings.syncStateByCompanyId?.[normalizedCompanyId];
+  return scopedSyncState ? normalizeSyncState(scopedSyncState) : normalizeSyncState(settings.syncState);
+}
+
+function getScopedScheduleFrequencyMinutes(
+  settings: Pick<GitHubSyncSettings, 'scheduleFrequencyMinutes' | 'scheduleFrequencyMinutesByCompanyId'>,
+  companyId?: string
+): number {
+  const normalizedCompanyId = normalizeCompanyId(companyId);
+  if (!normalizedCompanyId) {
+    return normalizeScheduleFrequencyMinutes(settings.scheduleFrequencyMinutes);
+  }
+
+  const scopedScheduleFrequencyMinutes = settings.scheduleFrequencyMinutesByCompanyId?.[normalizedCompanyId];
+  return scopedScheduleFrequencyMinutes !== undefined
+    ? normalizeScheduleFrequencyMinutes(scopedScheduleFrequencyMinutes)
+    : normalizeScheduleFrequencyMinutes(settings.scheduleFrequencyMinutes);
+}
+
+function materializeScopedSettings(
+  settings: GitHubSyncSettings,
+  config: Pick<GitHubSyncConfig, 'paperclipApiBaseUrl'> | null | undefined,
+  companyId?: string
+): GitHubSyncSettings {
+  const syncState = getScopedSyncState(settings, companyId);
+  const scheduleFrequencyMinutes = getScopedScheduleFrequencyMinutes(settings, companyId);
+  const paperclipApiBaseUrl = getConfiguredPaperclipApiBaseUrl(settings, config, companyId);
+
+  return {
+    ...settings,
+    syncState,
+    scheduleFrequencyMinutes,
+    ...(paperclipApiBaseUrl ? { paperclipApiBaseUrl } : {})
+  };
+}
+
+function upsertScopedSyncState(
+  settings: GitHubSyncSettings,
+  syncState: SyncRunState,
+  companyId?: string
+): GitHubSyncSettings {
+  const normalizedCompanyId = normalizeCompanyId(companyId);
+  if (!normalizedCompanyId) {
+    return {
+      ...settings,
+      syncState
+    };
+  }
+
+  return {
+    ...settings,
+    syncState,
+    syncStateByCompanyId: {
+      ...(settings.syncStateByCompanyId ?? {}),
+      [normalizedCompanyId]: syncState
+    }
+  };
+}
+
+function upsertScopedScheduleFrequencyMinutes(
+  settings: GitHubSyncSettings,
+  scheduleFrequencyMinutes: number,
+  companyId?: string
+): GitHubSyncSettings {
+  const normalizedCompanyId = normalizeCompanyId(companyId);
+  if (!normalizedCompanyId) {
+    return {
+      ...settings,
+      scheduleFrequencyMinutes
+    };
+  }
+
+  return {
+    ...settings,
+    scheduleFrequencyMinutes,
+    scheduleFrequencyMinutesByCompanyId: {
+      ...(settings.scheduleFrequencyMinutesByCompanyId ?? {}),
+      [normalizedCompanyId]: scheduleFrequencyMinutes
+    }
+  };
+}
+
+function upsertScopedPaperclipApiBaseUrl(
+  settings: GitHubSyncSettings,
+  paperclipApiBaseUrl: string | undefined,
+  companyId?: string
+): GitHubSyncSettings {
+  const normalizedCompanyId = normalizeCompanyId(companyId);
+  if (!normalizedCompanyId) {
+    return {
+      ...settings,
+      ...(paperclipApiBaseUrl ? { paperclipApiBaseUrl } : {})
+    };
+  }
+
+  const nextPaperclipApiBaseUrlByCompanyId = {
+    ...(settings.paperclipApiBaseUrlByCompanyId ?? {})
+  };
+  if (paperclipApiBaseUrl) {
+    nextPaperclipApiBaseUrlByCompanyId[normalizedCompanyId] = paperclipApiBaseUrl;
+  } else {
+    delete nextPaperclipApiBaseUrlByCompanyId[normalizedCompanyId];
+  }
+
+  return {
+    ...settings,
+    ...(paperclipApiBaseUrl ? { paperclipApiBaseUrl } : {}),
+    ...(Object.keys(nextPaperclipApiBaseUrlByCompanyId).length > 0
+      ? { paperclipApiBaseUrlByCompanyId: nextPaperclipApiBaseUrlByCompanyId }
+      : {})
+  };
+}
+
+function getScopedSyncTarget(companyId: string): ResolvedSyncTarget {
+  return {
+    kind: 'company',
+    companyId,
+    displayLabel: 'this company'
+  };
+}
+
+function getSyncableMappingsForScope(mappings: RepositoryMapping[], companyId?: string): RepositoryMapping[] {
+  const normalizedCompanyId = normalizeCompanyId(companyId);
+  return normalizedCompanyId
+    ? getSyncableMappingsForTarget(mappings, getScopedSyncTarget(normalizedCompanyId))
+    : getSyncableMappings(mappings);
+}
+
+function hasAnyScopedValue<T>(valueByCompanyId: Record<string, T> | undefined): boolean {
+  return Boolean(valueByCompanyId && Object.keys(valueByCompanyId).length > 0);
 }
 
 function normalizeImportRegistry(value: unknown): ImportedIssueRecord[] {
@@ -8932,11 +9183,16 @@ function getConfiguredGithubTokenSource(
   companyId?: string
 ): ResolvedGitHubTokenSource {
   const normalizedCompanyId = normalizeCompanyId(companyId);
+  const hasScopedGitHubTokenRefs =
+    hasAnyScopedValue(settings?.githubTokenRefs)
+    || hasAnyScopedValue(config.githubTokenRefs);
   const secretRef = normalizedCompanyId
     ? normalizeSecretRef(config.githubTokenRefs?.[normalizedCompanyId])
       ?? normalizeSecretRef(settings?.githubTokenRefs?.[normalizedCompanyId])
-      ?? normalizeGitHubTokenRef(config.githubTokenRef)
-      ?? normalizeGitHubTokenRef(settings?.githubTokenRef)
+      ?? (!hasScopedGitHubTokenRefs
+        ? normalizeGitHubTokenRef(config.githubTokenRef)
+          ?? normalizeGitHubTokenRef(settings?.githubTokenRef)
+        : undefined)
     : normalizeGitHubTokenRef(config.githubTokenRef)
       ?? normalizeGitHubTokenRef(settings?.githubTokenRef)
       ?? (() => {
@@ -8953,7 +9209,9 @@ function getConfiguredGithubTokenSource(
     return { secretRef };
   }
 
-  const token = normalizeGitHubToken(config.githubToken);
+  const token = !normalizedCompanyId || !hasScopedGitHubTokenRefs
+    ? normalizeGitHubToken(config.githubToken)
+    : undefined;
   return token ? { token } : {};
 }
 
@@ -13035,6 +13293,22 @@ function shouldRunScheduledSync(settings: GitHubSyncSettings, scheduledAt?: stri
   return now - lastCheckedAt >= settings.scheduleFrequencyMinutes * 60_000;
 }
 
+function listScheduledSyncTargets(settings: GitHubSyncSettings): Array<ResolvedSyncTarget | undefined> {
+  const companyIds = [
+    ...new Set(
+      settings.mappings
+        .map((mapping) => normalizeCompanyId(mapping.companyId))
+        .filter((companyId): companyId is string => Boolean(companyId))
+    )
+  ];
+
+  if (companyIds.length === 0) {
+    return settings.mappings.length > 0 ? [undefined] : [];
+  }
+
+  return companyIds.map((companyId) => getScopedSyncTarget(companyId));
+}
+
 async function performSync(
   ctx: PluginSetupContext,
   trigger: 'manual' | 'schedule' | 'retry',
@@ -13043,13 +13317,15 @@ async function performSync(
     target?: ResolvedSyncTarget;
   } = {}
 ) {
-  const settings = normalizeSettings(await ctx.state.get(SETTINGS_SCOPE));
+  const targetCompanyId = normalizeCompanyId(options.target?.companyId);
+  const baseSettings = normalizeSettings(await ctx.state.get(SETTINGS_SCOPE));
   const config = await getResolvedConfig(ctx);
+  const settings = materializeScopedSettings(baseSettings, config, targetCompanyId);
   const importRegistry = normalizeImportRegistry(await ctx.state.get(IMPORT_REGISTRY_SCOPE));
   const token = typeof options.resolvedToken === 'string'
     ? options.resolvedToken
-    : await resolveGithubToken(ctx, { companyId: options.target?.companyId });
-  const paperclipApiBaseUrl = getConfiguredPaperclipApiBaseUrl(settings, config);
+    : await resolveGithubToken(ctx, { companyId: targetCompanyId });
+  const paperclipApiBaseUrl = getConfiguredPaperclipApiBaseUrl(baseSettings, config, targetCompanyId);
   const mappings = getSyncableMappingsForTarget(settings.mappings, options.target);
   activePaperclipApiAuthTokensByCompanyId = null;
   const failureContext: SyncFailureContext = {
@@ -13061,9 +13337,7 @@ async function performSync(
       ...settings,
       syncState: createSetupConfigurationErrorSyncState('missing_token', trigger)
     };
-    await ctx.state.set(SETTINGS_SCOPE, next);
-    await ctx.state.set(SYNC_STATE_SCOPE, next.syncState);
-    return next;
+    return saveSettingsSyncState(ctx, settings, next.syncState, targetCompanyId);
   }
 
   if (mappings.length === 0) {
@@ -13071,9 +13345,7 @@ async function performSync(
       ...settings,
       syncState: createSetupConfigurationErrorSyncState('missing_mapping', trigger)
     };
-    await ctx.state.set(SETTINGS_SCOPE, next);
-    await ctx.state.set(SYNC_STATE_SCOPE, next.syncState);
-    return next;
+    return saveSettingsSyncState(ctx, settings, next.syncState, targetCompanyId);
   }
 
   const mappingsMissingBoardAccess = getMappingsMissingPaperclipBoardAccess(settings, config, mappings);
@@ -13085,9 +13357,7 @@ async function performSync(
       ...settings,
       syncState: createSetupConfigurationErrorSyncState('missing_board_access', trigger)
     };
-    await ctx.state.set(SETTINGS_SCOPE, next);
-    await ctx.state.set(SYNC_STATE_SCOPE, next.syncState);
-    return next;
+    return saveSettingsSyncState(ctx, settings, next.syncState, targetCompanyId);
   }
 
   if (!ctx.issues || typeof ctx.issues.create !== 'function') {
@@ -13114,9 +13384,7 @@ async function performSync(
         )
       })
     };
-    await ctx.state.set(SETTINGS_SCOPE, next);
-    await ctx.state.set(SYNC_STATE_SCOPE, next.syncState);
-    return next;
+    return saveSettingsSyncState(ctx, settings, next.syncState, targetCompanyId);
   }
 
   activePaperclipApiAuthTokensByCompanyId = await resolvePaperclipApiAuthTokens(ctx, settings, config, mappings);
@@ -13194,7 +13462,8 @@ async function performSync(
         erroredIssuesCount: recoverableFailures.length,
         progress,
         recentFailures
-      })
+      }),
+      targetCompanyId
     );
     activeRunningSyncState = currentSettings;
     lastProgressPersistedAt = now;
@@ -13583,10 +13852,9 @@ async function performSync(
           recentFailures: buildRecentSyncFailureLogEntries(recoverableFailures)
         })
       };
-      await ctx.state.set(SETTINGS_SCOPE, next);
-      await ctx.state.set(SYNC_STATE_SCOPE, next.syncState);
+      await saveSettingsSyncState(ctx, currentSettings, next.syncState, targetCompanyId);
       await ctx.state.set(IMPORT_REGISTRY_SCOPE, nextRegistry);
-      return next;
+      return materializeScopedSettings(next, config, targetCompanyId);
     }
 
     const next = {
@@ -13644,10 +13912,9 @@ async function performSync(
         )
       })
     };
-    await ctx.state.set(SETTINGS_SCOPE, next);
-    await ctx.state.set(SYNC_STATE_SCOPE, next.syncState);
+    await saveSettingsSyncState(ctx, currentSettings, next.syncState, targetCompanyId);
     await ctx.state.set(IMPORT_REGISTRY_SCOPE, nextRegistry);
-    return next;
+    return materializeScopedSettings(next, config, targetCompanyId);
   }
 }
 
@@ -13677,33 +13944,38 @@ async function startSync(
     getResolvedConfig(ctx),
     ctx.state.get(SETTINGS_SCOPE).then((value) => normalizeSettings(value))
   ]);
+  const targetCompanyId = normalizeCompanyId(options.target?.companyId);
   const token = await resolveGithubToken(ctx, {
-    companyId: options.target?.companyId,
+    companyId: targetCompanyId,
     config,
     settings: persistedSettings
   }).catch(() => '');
-  let currentSettings = sanitizeSettingsForCurrentSetup(persistedSettings, {
+  let currentSettings = sanitizeSettingsForCurrentSetup(materializeScopedSettings(persistedSettings, config, targetCompanyId), {
     hasToken: Boolean(token.trim()),
-    hasMappings: getSyncableMappings(persistedSettings.mappings).length > 0
+    hasMappings: getSyncableMappingsForScope(persistedSettings.mappings, targetCompanyId).length > 0
   });
 
   const nextPaperclipApiBaseUrl =
     trigger === 'manual'
-      ? resolveTrustedPaperclipApiBaseUrlInput(options.paperclipApiBaseUrl, currentSettings, config)
-      : getConfiguredPaperclipApiBaseUrl(currentSettings, config);
+      ? resolveTrustedPaperclipApiBaseUrlInput(options.paperclipApiBaseUrl, persistedSettings, config, targetCompanyId)
+      : getConfiguredPaperclipApiBaseUrl(persistedSettings, config, targetCompanyId);
 
   if (nextPaperclipApiBaseUrl !== currentSettings.paperclipApiBaseUrl) {
-    currentSettings = {
-      ...currentSettings,
-      ...(nextPaperclipApiBaseUrl ? { paperclipApiBaseUrl: nextPaperclipApiBaseUrl } : {}),
-      updatedAt: new Date().toISOString()
-    };
-    await ctx.state.set(SETTINGS_SCOPE, currentSettings);
+    const nextPersistedSettings = upsertScopedPaperclipApiBaseUrl(
+      {
+        ...persistedSettings,
+        updatedAt: new Date().toISOString()
+      },
+      nextPaperclipApiBaseUrl,
+      targetCompanyId
+    );
+    await ctx.state.set(SETTINGS_SCOPE, nextPersistedSettings);
     await ctx.state.set(SYNC_STATE_SCOPE, currentSettings.syncState);
+    currentSettings = materializeScopedSettings(nextPersistedSettings, config, targetCompanyId);
   }
 
-  if (currentSettings !== persistedSettings) {
-    await saveSettingsSyncState(ctx, currentSettings, currentSettings.syncState);
+  if (JSON.stringify(currentSettings.syncState) !== JSON.stringify(getScopedSyncState(persistedSettings, targetCompanyId))) {
+    await saveSettingsSyncState(ctx, persistedSettings, currentSettings.syncState, targetCompanyId);
   }
 
   if (getActiveGitHubRateLimitPause(currentSettings.syncState)) {
@@ -13737,7 +14009,8 @@ async function startSync(
       ...currentSettings,
       syncState
     };
-    return saveSettingsSyncState(ctx, currentSettings, syncState);
+    activeRunningSyncCompanyId = targetCompanyId;
+    return saveSettingsSyncState(ctx, currentSettings, syncState, targetCompanyId);
   })();
 
   activeSyncPromise = (async () => {
@@ -13748,11 +14021,12 @@ async function startSync(
         target: options.target
       });
     } catch (error) {
-      return await createUnexpectedSyncErrorResult(ctx, trigger, error);
+      return await createUnexpectedSyncErrorResult(ctx, trigger, error, targetCompanyId);
     } finally {
       await setSyncCancellationRequest(ctx, null);
       activePaperclipApiAuthTokensByCompanyId = null;
       activeRunningSyncState = null;
+      activeRunningSyncCompanyId = undefined;
       activeSyncPromise = null;
     }
   })();
@@ -14648,23 +14922,22 @@ const plugin = definePlugin({
       const importRegistry = normalizeImportRegistry(await ctx.state.get(IMPORT_REGISTRY_SCOPE));
       const normalizedSettings = normalizeSettings(saved);
       const config = await getResolvedConfig(ctx);
-      const paperclipApiBaseUrl = getConfiguredPaperclipApiBaseUrl(normalizedSettings, config);
       const githubTokenConfigured = hasConfiguredGithubToken(normalizedSettings, config, requestedCompanyId);
       const configuredBoardTokenRef = getConfiguredPaperclipBoardApiTokenRef(config, requestedCompanyId);
       const savedBoardTokenRef = getSavedPaperclipBoardApiTokenRef(normalizedSettings, requestedCompanyId);
-      const settingsWithResolvedToken = paperclipApiBaseUrl === normalizedSettings.paperclipApiBaseUrl
-        ? normalizedSettings
-        : {
-            ...normalizedSettings,
-            ...(paperclipApiBaseUrl ? { paperclipApiBaseUrl } : {})
-          };
-      const settingsForResponse = sanitizeSettingsForCurrentSetup(settingsWithResolvedToken, {
+      const settingsForResponse = sanitizeSettingsForCurrentSetup(
+        materializeScopedSettings(normalizedSettings, config, requestedCompanyId),
+        {
         hasToken: githubTokenConfigured,
-        hasMappings: getSyncableMappings(settingsWithResolvedToken.mappings).length > 0
-      });
+        hasMappings: getSyncableMappingsForScope(normalizedSettings.mappings, requestedCompanyId).length > 0
+      }
+      );
 
-      if (settingsForResponse !== normalizedSettings) {
-        await saveSettingsSyncState(ctx, settingsForResponse, settingsForResponse.syncState);
+      if (
+        JSON.stringify(settingsForResponse.syncState)
+        !== JSON.stringify(getScopedSyncState(normalizedSettings, requestedCompanyId))
+      ) {
+        await saveSettingsSyncState(ctx, normalizedSettings, settingsForResponse.syncState, requestedCompanyId);
       }
 
       const scopedMappings = filterMappingsByCompany(settingsForResponse.mappings, requestedCompanyId);
@@ -14744,6 +15017,7 @@ const plugin = definePlugin({
         'githubTokenLogin' in record ? normalizeOptionalString(record.githubTokenLogin) : undefined;
       const hasMappingsPatch = 'mappings' in record;
       const hasAdvancedSettingsPatch = 'advancedSettings' in record;
+      const previousScopedSettings = materializeScopedSettings(previous, config, requestedCompanyId);
       const nextGitHubTokenRefs = {
         ...(previous.githubTokenRefs ?? {})
       };
@@ -14799,14 +15073,18 @@ const plugin = definePlugin({
               }))
             ]
           : inputMappings;
-      const current = normalizeSettings({
+      let current = normalizeSettings({
         mappings: mergedMappings,
         syncState: previous.syncState,
-        scheduleFrequencyMinutes: 'scheduleFrequencyMinutes' in record ? record.scheduleFrequencyMinutes : previous.scheduleFrequencyMinutes,
-        paperclipApiBaseUrl:
-          'paperclipApiBaseUrl' in record
-            ? resolveTrustedPaperclipApiBaseUrlInput(record.paperclipApiBaseUrl, previous, config)
-            : getConfiguredPaperclipApiBaseUrl(previous, config),
+        ...(previous.syncStateByCompanyId ? { syncStateByCompanyId: previous.syncStateByCompanyId } : {}),
+        scheduleFrequencyMinutes: previous.scheduleFrequencyMinutes,
+        ...(previous.scheduleFrequencyMinutesByCompanyId
+          ? { scheduleFrequencyMinutesByCompanyId: previous.scheduleFrequencyMinutesByCompanyId }
+          : {}),
+        ...(previous.paperclipApiBaseUrl ? { paperclipApiBaseUrl: previous.paperclipApiBaseUrl } : {}),
+        ...(previous.paperclipApiBaseUrlByCompanyId
+          ? { paperclipApiBaseUrlByCompanyId: previous.paperclipApiBaseUrlByCompanyId }
+          : {}),
         ...(githubTokenRefs ? { githubTokenRefs } : {}),
         ...(githubTokenLoginByCompanyId ? { githubTokenLoginByCompanyId } : {}),
         ...(githubTokenLogin ? { githubTokenLogin } : {}),
@@ -14817,6 +15095,16 @@ const plugin = definePlugin({
           : {}),
         ...(githubTokenRef ? { githubTokenRef } : {})
       });
+      const nextScheduleFrequencyMinutes =
+        'scheduleFrequencyMinutes' in record
+          ? normalizeScheduleFrequencyMinutes(record.scheduleFrequencyMinutes)
+          : getScopedScheduleFrequencyMinutes(previous, requestedCompanyId);
+      current = upsertScopedScheduleFrequencyMinutes(current, nextScheduleFrequencyMinutes, requestedCompanyId);
+      const nextPaperclipApiBaseUrl =
+        'paperclipApiBaseUrl' in record
+          ? resolveTrustedPaperclipApiBaseUrlInput(record.paperclipApiBaseUrl, previous, config, requestedCompanyId)
+          : getConfiguredPaperclipApiBaseUrl(previous, config, requestedCompanyId);
+      current = upsertScopedPaperclipApiBaseUrl(current, nextPaperclipApiBaseUrl, requestedCompanyId);
       const nextMappings = current.mappings.map((mapping, index) => ({
         id: mapping.id.trim() || createMappingId(index),
         repositoryUrl: parseRepositoryReference(mapping.repositoryUrl)?.url ?? mapping.repositoryUrl.trim(),
@@ -14824,11 +15112,13 @@ const plugin = definePlugin({
         paperclipProjectId: mapping.paperclipProjectId,
         companyId: mapping.companyId
       }));
+      const materializedCurrent = materializeScopedSettings(current, config, requestedCompanyId);
       const next = sanitizeSettingsForCurrentSetup({
+        ...current,
         mappings: nextMappings,
-        syncState: previous.syncState,
-        scheduleFrequencyMinutes: current.scheduleFrequencyMinutes,
-        ...(current.paperclipApiBaseUrl ? { paperclipApiBaseUrl: current.paperclipApiBaseUrl } : {}),
+        syncState: materializedCurrent.syncState,
+        scheduleFrequencyMinutes: materializedCurrent.scheduleFrequencyMinutes,
+        ...(materializedCurrent.paperclipApiBaseUrl ? { paperclipApiBaseUrl: materializedCurrent.paperclipApiBaseUrl } : {}),
         ...(current.githubTokenRefs ? { githubTokenRefs: current.githubTokenRefs } : {}),
         ...(current.githubTokenLoginByCompanyId ? { githubTokenLoginByCompanyId: current.githubTokenLoginByCompanyId } : {}),
         ...(current.githubTokenLogin ? { githubTokenLogin: current.githubTokenLogin } : {}),
@@ -14842,11 +15132,8 @@ const plugin = definePlugin({
         ...(githubTokenRef ? { githubTokenRef } : {}),
         updatedAt: new Date().toISOString()
       }, {
-        hasToken: hasConfiguredGithubToken({
-          ...(githubTokenRefs ? { githubTokenRefs } : {}),
-          ...(githubTokenRef ? { githubTokenRef } : {})
-        }, config),
-        hasMappings: getSyncableMappings(nextMappings).length > 0
+        hasToken: hasConfiguredGithubToken(current, config, requestedCompanyId),
+        hasMappings: getSyncableMappingsForScope(nextMappings, requestedCompanyId).length > 0
       });
 
       await ctx.state.set(SETTINGS_SCOPE, next);
@@ -14902,7 +15189,7 @@ const plugin = definePlugin({
         paperclipBoardAccessIdentityByCompanyId: _previousPaperclipBoardAccessIdentityByCompanyId,
         ...previousWithoutBoardAccess
       } = previous;
-      const next = sanitizeSettingsForCurrentSetup({
+      const nextBase = sanitizeSettingsForCurrentSetup({
         ...previousWithoutBoardAccess,
         ...(Object.keys(nextPaperclipBoardApiTokenRefs).length > 0
           ? { paperclipBoardApiTokenRefs: nextPaperclipBoardApiTokenRefs }
@@ -14912,9 +15199,10 @@ const plugin = definePlugin({
           : {}),
         updatedAt: new Date().toISOString()
       }, {
-        hasToken: hasConfiguredGithubToken(previous, config),
-        hasMappings: getSyncableMappings(previous.mappings).length > 0
+        hasToken: hasConfiguredGithubToken(previous, config, companyId),
+        hasMappings: getSyncableMappingsForScope(previous.mappings, companyId).length > 0
       });
+      const next = materializeScopedSettings(nextBase, config, companyId);
 
       await ctx.state.set(SETTINGS_SCOPE, next);
       await ctx.state.set(SYNC_STATE_SCOPE, next.syncState);
@@ -15017,7 +15305,7 @@ const plugin = definePlugin({
     });
 
     ctx.actions.register('sync.cancel', async () => {
-      const currentSettings = await getActiveOrCurrentSyncState(ctx);
+      const currentSettings = await getActiveOrCurrentSyncState(ctx, activeRunningSyncCompanyId);
       if (currentSettings.syncState.status !== 'running') {
         return currentSettings;
       }
@@ -15042,7 +15330,8 @@ const plugin = definePlugin({
           progress: currentSettings.syncState.progress,
           message: CANCELLING_SYNC_MESSAGE,
           cancelRequestedAt: cancellationRequest.requestedAt
-        })
+        }),
+        activeRunningSyncCompanyId
       );
       activeRunningSyncState = next;
       return next;
@@ -15052,11 +15341,26 @@ const plugin = definePlugin({
 
     ctx.jobs.register('sync.github-issues', async (job) => {
       const settings = normalizeSettings(await ctx.state.get(SETTINGS_SCOPE));
-      if (job.trigger === 'schedule' && !shouldRunScheduledSync(settings, job.scheduledAt)) {
+      const trigger = job.trigger === 'retry' ? 'retry' : 'schedule';
+      const scheduledTargets = listScheduledSyncTargets(settings);
+
+      if (scheduledTargets.length === 0) {
+        if (job.trigger === 'schedule' && !shouldRunScheduledSync(settings, job.scheduledAt)) {
+          return;
+        }
+
+        await startSync(ctx, trigger);
         return;
       }
 
-      await startSync(ctx, job.trigger === 'retry' ? 'retry' : 'schedule');
+      for (const target of scheduledTargets) {
+        const scopedSettings = materializeScopedSettings(settings, null, target?.companyId);
+        if (job.trigger === 'schedule' && !shouldRunScheduledSync(scopedSettings, job.scheduledAt)) {
+          continue;
+        }
+
+        await startSync(ctx, trigger, target ? { target } : {});
+      }
     });
   }
 });

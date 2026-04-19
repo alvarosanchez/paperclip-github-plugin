@@ -5496,6 +5496,76 @@ test('worker scopes global toolbar sync state to the requested company', async (
   assert.equal(companyThreeState.message, 'No GitHub repositories are mapped for this company.');
 });
 
+test('worker scopes toolbar sync status to the requested company', async () => {
+  const harness = createTestHarness({
+    manifest,
+    config: {
+      githubTokenRef: 'github-secret-ref'
+    }
+  });
+  await plugin.definition.setup(harness.ctx);
+
+  await harness.ctx.state.set(
+    {
+      scopeKind: 'instance',
+      stateKey: 'paperclip-github-plugin-settings'
+    },
+    {
+      mappings: [
+        {
+          id: 'mapping-a',
+          repositoryUrl: 'paperclipai/example-repo',
+          paperclipProjectName: 'Engineering',
+          paperclipProjectId: 'project-1',
+          companyId: 'company-1'
+        },
+        {
+          id: 'mapping-b',
+          repositoryUrl: 'paperclipai/another-repo',
+          paperclipProjectName: 'Operations',
+          paperclipProjectId: 'project-2',
+          companyId: 'company-2'
+        }
+      ],
+      syncStateByCompanyId: {
+        'company-1': {
+          status: 'running',
+          message: 'Syncing company one',
+          checkedAt: '2026-04-09T10:00:00.000Z'
+        },
+        'company-2': {
+          status: 'success',
+          message: 'Company two synced',
+          checkedAt: '2026-04-09T11:00:00.000Z'
+        }
+      },
+      updatedAt: '2026-04-09T11:00:00.000Z'
+    }
+  );
+
+  const companyOneState = await harness.getData<{
+    syncState: {
+      status?: string;
+      message?: string;
+    };
+  }>('sync.toolbarState', {
+    companyId: 'company-1'
+  });
+  const companyTwoState = await harness.getData<{
+    syncState: {
+      status?: string;
+      message?: string;
+    };
+  }>('sync.toolbarState', {
+    companyId: 'company-2'
+  });
+
+  assert.equal(companyOneState.syncState.status, 'running');
+  assert.equal(companyOneState.syncState.message, 'Syncing company one');
+  assert.equal(companyTwoState.syncState.status, 'success');
+  assert.equal(companyTwoState.syncState.message, 'Company two synced');
+});
+
 test('worker uses the saved githubTokenRef fallback for toolbar state when config is stale', async () => {
   const harness = createTestHarness({ manifest });
   await plugin.definition.setup(harness.ctx);
@@ -6309,6 +6379,46 @@ test('worker saves a configured schedule frequency alongside mappings', async ()
   assert.deepEqual(result.mappings, []);
 });
 
+test('worker scopes the saved schedule frequency to the requested company', async () => {
+  const harness = createTestHarness({ manifest });
+  await plugin.definition.setup(harness.ctx);
+
+  await harness.performAction('settings.saveRegistration', {
+    companyId: 'company-1',
+    scheduleFrequencyMinutes: 17
+  });
+  await harness.performAction('settings.saveRegistration', {
+    companyId: 'company-2',
+    scheduleFrequencyMinutes: 29
+  });
+
+  const companyOneResult = await harness.getData<{
+    scheduleFrequencyMinutes: number;
+  }>('settings.registration', {
+    companyId: 'company-1'
+  });
+  const companyTwoResult = await harness.getData<{
+    scheduleFrequencyMinutes: number;
+  }>('settings.registration', {
+    companyId: 'company-2'
+  });
+
+  assert.equal(companyOneResult.scheduleFrequencyMinutes, 17);
+  assert.equal(companyTwoResult.scheduleFrequencyMinutes, 29);
+
+  const savedSettings = harness.getState({
+    scopeKind: 'instance',
+    stateKey: 'paperclip-github-plugin-settings'
+  }) as {
+    scheduleFrequencyMinutesByCompanyId?: Record<string, number>;
+  };
+
+  assert.deepEqual(savedSettings.scheduleFrequencyMinutesByCompanyId, {
+    'company-1': 17,
+    'company-2': 29
+  });
+});
+
 test('settings.registration returns a cumulative synced issue total deduped by GitHub issue', async () => {
   const harness = createTestHarness({
     manifest,
@@ -6685,6 +6795,51 @@ test('worker normalizes and saves the Paperclip API base URL alongside setup', a
   };
 
   assert.equal(result.paperclipApiBaseUrl, 'http://127.0.0.1:63675');
+});
+
+test('worker scopes the saved Paperclip API base URL to the requested company', async () => {
+  const harness = createTestHarness({
+    manifest,
+    config: {
+      paperclipApiBaseUrl: 'http://127.0.0.1:63675'
+    }
+  });
+  await plugin.definition.setup(harness.ctx);
+
+  await harness.performAction('settings.saveRegistration', {
+    companyId: 'company-1',
+    paperclipApiBaseUrl: ' http://127.0.0.1:63675/api/companies/company-1/labels '
+  });
+  await harness.performAction('settings.saveRegistration', {
+    companyId: 'company-2',
+    paperclipApiBaseUrl: ' http://127.0.0.1:63675/api/companies/company-2/issues '
+  });
+
+  const companyOneResult = await harness.getData<{
+    paperclipApiBaseUrl?: string;
+  }>('settings.registration', {
+    companyId: 'company-1'
+  });
+  const companyTwoResult = await harness.getData<{
+    paperclipApiBaseUrl?: string;
+  }>('settings.registration', {
+    companyId: 'company-2'
+  });
+
+  assert.equal(companyOneResult.paperclipApiBaseUrl, 'http://127.0.0.1:63675');
+  assert.equal(companyTwoResult.paperclipApiBaseUrl, 'http://127.0.0.1:63675');
+
+  const savedSettings = harness.getState({
+    scopeKind: 'instance',
+    stateKey: 'paperclip-github-plugin-settings'
+  }) as {
+    paperclipApiBaseUrlByCompanyId?: Record<string, string>;
+  };
+
+  assert.deepEqual(savedSettings.paperclipApiBaseUrlByCompanyId, {
+    'company-1': 'http://127.0.0.1:63675',
+    'company-2': 'http://127.0.0.1:63675'
+  });
 });
 
 test('worker rejects untrusted Paperclip API origins when saving setup', async () => {
@@ -13109,6 +13264,79 @@ test('settings registration clears legacy setup errors once the missing token is
   assert.equal(savedState.syncState?.status, 'idle');
   assert.equal(savedState.syncState?.message, undefined);
   assert.equal(savedState.syncState?.checkedAt, undefined);
+});
+
+test('settings.registration returns the saved sync state for the requested company', async () => {
+  const harness = createTestHarness({ manifest });
+  await plugin.definition.setup(harness.ctx);
+
+  await harness.ctx.state.set(
+    {
+      scopeKind: 'instance',
+      stateKey: 'paperclip-github-plugin-settings'
+    },
+    {
+      mappings: [
+        {
+          id: 'mapping-a',
+          repositoryUrl: 'paperclipai/example-repo',
+          paperclipProjectName: 'Engineering',
+          paperclipProjectId: 'project-1',
+          companyId: 'company-1'
+        },
+        {
+          id: 'mapping-b',
+          repositoryUrl: 'paperclipai/another-repo',
+          paperclipProjectName: 'Operations',
+          paperclipProjectId: 'project-2',
+          companyId: 'company-2'
+        }
+      ],
+      syncStateByCompanyId: {
+        'company-1': {
+          status: 'running',
+          message: 'Syncing company one',
+          checkedAt: '2026-04-09T10:00:00.000Z'
+        },
+        'company-2': {
+          status: 'success',
+          message: 'Company two synced',
+          checkedAt: '2026-04-09T11:00:00.000Z'
+        }
+      },
+      scheduleFrequencyMinutesByCompanyId: {
+        'company-1': 15,
+        'company-2': 30
+      },
+      updatedAt: '2026-04-09T11:00:00.000Z'
+    }
+  );
+
+  const companyOneResult = await harness.getData<{
+    syncState: {
+      status?: string;
+      message?: string;
+      checkedAt?: string;
+    };
+  }>('settings.registration', {
+    companyId: 'company-1'
+  });
+  const companyTwoResult = await harness.getData<{
+    syncState: {
+      status?: string;
+      message?: string;
+      checkedAt?: string;
+    };
+  }>('settings.registration', {
+    companyId: 'company-2'
+  });
+
+  assert.equal(companyOneResult.syncState.status, 'running');
+  assert.equal(companyOneResult.syncState.message, 'Syncing company one');
+  assert.equal(companyOneResult.syncState.checkedAt, '2026-04-09T10:00:00.000Z');
+  assert.equal(companyTwoResult.syncState.status, 'success');
+  assert.equal(companyTwoResult.syncState.message, 'Company two synced');
+  assert.equal(companyTwoResult.syncState.checkedAt, '2026-04-09T11:00:00.000Z');
 });
 
 test('saving setup clears stale setup errors instead of resaving them from the UI payload', async () => {

@@ -11720,7 +11720,7 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
                   <h4>Sync</h4>
                   <div className="ghsync__section-tags">
                     <span className={manualSyncScopePillClass}>{manualSyncScopePillLabel}</span>
-                    <span className="ghsync__scope-pill ghsync__scope-pill--global">Shared cadence</span>
+                    <span className="ghsync__scope-pill ghsync__scope-pill--global">Company cadence</span>
                   </div>
                 </div>
                 {syncSectionDescription ? <p>{syncSectionDescription}</p> : null}
@@ -11761,9 +11761,9 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
                   </div>
 
                   <div className="ghsync__schedule-meta">
-                    <span className="ghsync__scope-pill ghsync__scope-pill--global">Shared</span>
+                    <span className="ghsync__scope-pill ghsync__scope-pill--global">Company</span>
                     <strong>Auto-sync {scheduleDescription}</strong>
-                    <span>All companies.</span>
+                    <span>Used only for {currentCompanyName}.</span>
                   </div>
                 </div>
 

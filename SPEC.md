@@ -12,13 +12,13 @@ The plugin MUST provide a settings page inside Paperclip where an operator can c
 - on authenticated deployments, a company-scoped multi-select of agents that should receive `GITHUB_TOKEN` propagation from the saved GitHub token secret
 - one or more GitHub repository mappings
 - company-scoped advanced defaults for imported issues: default assignee, default Paperclip status, and ignored GitHub issue authors, where a saved username such as `renovate` also matches GitHub bot logins such as `renovate[bot]`
-- the frequency for automatic scheduled sync runs
+- the frequency for automatic scheduled sync runs for that company
 - a Paperclip project name per mapping where synchronized issues should be created, including existing Paperclip projects that are already bound to a GitHub repository workspace
 
 The settings page MUST allow saving mappings and triggering a manual sync.
 - When the settings page is opened with a Paperclip company context, it MUST only display and save repository mappings for that company, and saving one company’s mappings MUST preserve mappings that belong to other companies.
 - When the settings page is opened with a Paperclip company context, it MUST only display and save advanced issue defaults for that company, and saving one company’s defaults MUST preserve defaults that belong to other companies.
-- The settings page SHOULD clearly label company-scoped setup versus plugin-instance-wide setup when both are shown together.
+- The settings page SHOULD clearly label company-scoped setup and defaults, including sync cadence, for the active company.
 - When a company context is present, the settings page SHOULD show the active company name prominently using a human-friendly label instead of a raw identifier.
 - When a company already has Paperclip projects bound to GitHub repository workspaces, the settings page SHOULD surface those projects so an operator can enable sync without recreating the project.
 - The settings page MUST only render the Paperclip board-access connect controls and the agent token-propagation selector when the current Paperclip deployment reports `deploymentMode: "authenticated"`.
