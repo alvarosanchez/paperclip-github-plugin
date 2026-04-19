@@ -2160,7 +2160,8 @@ test('manifest exposes GitHub Sync page, sidebar, dashboard, and settings UI met
   assert.equal(projectSidebarItemSlot?.order, 40);
   assert.equal(settingsSlot?.exportName, 'GitHubSyncSettingsPage');
   assert.equal(dashboardSlot?.exportName, 'GitHubSyncDashboardWidget');
-  assert.equal(issueDetailSlot?.exportName, 'GitHubSyncIssueDetailTab');
+  assert.equal(issueDetailSlot?.type, 'taskDetailView');
+  assert.equal(issueDetailSlot?.exportName, 'GitHubSyncIssueTaskDetailView');
   assert.equal(commentAnnotationSlot?.exportName, 'GitHubSyncCommentAnnotation');
   assert.equal(globalToolbarSlot?.exportName, 'GitHubSyncGlobalToolbarButton');
   assert.equal(entityToolbarSlot?.exportName, 'GitHubSyncEntityToolbarButton');
@@ -5432,7 +5433,7 @@ test('worker exposes toolbar sync state for global, project, and issue surfaces'
   assert.equal(projectState.canRun, true);
   assert.equal(projectState.label, 'Sync project');
   assert.equal(issueState.kind, 'issue');
-  assert.equal(issueState.visible, true);
+  assert.equal(issueState.visible, false);
   assert.equal(issueState.canRun, true);
   assert.equal(issueState.label, 'Sync #77');
 });

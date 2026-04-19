@@ -3,7 +3,6 @@ export type PluginConfigGitHubTokenRefs = Record<string, string>;
 
 export interface GitHubSyncPluginConfig extends Record<string, unknown> {
   githubTokenRefs?: PluginConfigGitHubTokenRefs;
-  githubTokenRef?: string;
   paperclipBoardApiTokenRefs?: PluginConfigBoardTokenRefs;
   paperclipApiBaseUrl?: string;
 }
@@ -76,7 +75,6 @@ export function normalizePluginConfig(value: unknown): GitHubSyncPluginConfig {
 
   const record = { ...(value as Record<string, unknown>) };
   const githubTokenRefs = normalizePluginConfigGitHubTokenRefs(record.githubTokenRefs);
-  const githubTokenRef = normalizeOptionalString(record.githubTokenRef);
   const paperclipBoardApiTokenRefs = normalizePluginConfigBoardTokenRefs(record.paperclipBoardApiTokenRefs);
   const paperclipApiBaseUrl = normalizePaperclipApiBaseUrl(record.paperclipApiBaseUrl);
 
@@ -84,12 +82,6 @@ export function normalizePluginConfig(value: unknown): GitHubSyncPluginConfig {
     record.githubTokenRefs = githubTokenRefs;
   } else {
     delete record.githubTokenRefs;
-  }
-
-  if (githubTokenRef) {
-    record.githubTokenRef = githubTokenRef;
-  } else {
-    delete record.githubTokenRef;
   }
 
   if (paperclipBoardApiTokenRefs) {

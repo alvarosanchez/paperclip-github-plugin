@@ -18,7 +18,6 @@ const seededRepositoryUrl = 'https://github.com/alvarosanchez/paperclip-github-p
 const seededIssueTitle = 'GitHub Sync Smoke Issue';
 const seededGitHubIssueUrl = 'https://github.com/paperclipai/example-repo/issues/999';
 const seededGitHubPullRequestUrl = 'https://github.com/paperclipai/example-repo/pull/1000';
-const issueDetailTabQuery = 'plugin:paperclip-github-plugin:paperclip-github-plugin-issue-detail-tab';
 const requestedPort = process.env.PAPERCLIP_E2E_PORT ? Number(process.env.PAPERCLIP_E2E_PORT) : 3100;
 const requestedDbPort = process.env.PAPERCLIP_E2E_DB_PORT ? Number(process.env.PAPERCLIP_E2E_DB_PORT) : 54329;
 const defaultTimeoutMs = 30000;
@@ -397,10 +396,7 @@ async function ensureSeedIssueWithGitHubMetadata(company, project) {
   }
 
   const companyIssuePrefix = resolveCompanyIssuePrefix(company, issueIdentifier);
-  const issueUrl = new URL(
-    `/${companyIssuePrefix}/issues/${encodeURIComponent(issueIdentifier)}?tab=${encodeURIComponent(issueDetailTabQuery)}`,
-    baseUrl
-  ).toString();
+  const issueUrl = new URL(`/${companyIssuePrefix}/issues/${encodeURIComponent(issueIdentifier)}`, baseUrl).toString();
 
   log(`Seeded issue ${issueIdentifier} with GitHub fallback metadata and comment links.`);
   return {
@@ -575,12 +571,10 @@ async function main() {
     log(`Opened smoke-test issue detail page: ${seededIssue.url}`);
 
     await page.getByRole('heading', { name: seededIssueTitle, exact: true }).waitFor({ timeout: 120000 });
-    const githubDetailTab = page.getByRole('tab', { name: 'GitHub', exact: true });
-    await githubDetailTab.click();
-
     const issueDetailSurface = page.locator('.ghsync-issue-detail');
     await issueDetailSurface.getByText('Issue #999', { exact: true }).waitFor({ timeout: 120000 });
     await issueDetailSurface.getByText('paperclipai/example-repo', { exact: true }).waitFor({ timeout: 120000 });
+    await issueDetailSurface.getByRole('button', { name: 'Sync #999', exact: true }).waitFor({ timeout: 120000 });
     const openOnGitHubLink = issueDetailSurface.getByRole('link', { name: 'Open on GitHub', exact: true });
     await openOnGitHubLink.waitFor({ timeout: 120000 });
     const openOnGitHubHref = await openOnGitHubLink.getAttribute('href');

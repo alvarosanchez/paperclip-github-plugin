@@ -10743,7 +10743,7 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
 
       const currentConfigResponse = await fetchJson<PluginConfigResponse | null>(`/api/plugins/${pluginId}/config`);
       const normalizedConfig = normalizePluginConfig(currentConfigResponse?.configJson);
-      githubTokenSecretRef = normalizedConfig.githubTokenRefs?.[companyId] ?? normalizedConfig.githubTokenRef;
+      githubTokenSecretRef = normalizedConfig.githubTokenRefs?.[companyId];
     }
 
     if (!githubTokenSecretRef) {
@@ -11765,7 +11765,7 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
                   <div className="ghsync__schedule-meta">
                     <span className="ghsync__scope-pill ghsync__scope-pill--global">Company</span>
                     <strong>Auto-sync {scheduleDescription}</strong>
-                    <span>Used only for {currentCompanyName}.</span>
+                    <span>Used for sync in {currentCompanyName}.</span>
                   </div>
                 </div>
 
@@ -13075,7 +13075,7 @@ function GitHubSyncIssueDetailTabContent(props: {
   );
 }
 
-export function GitHubSyncIssueDetailTab(): React.JSX.Element {
+export function GitHubSyncIssueTaskDetailView(): React.JSX.Element {
   const context = useHostContext();
   const themeMode = useResolvedThemeMode();
   const theme = themeMode === 'light' ? LIGHT_PALETTE : DARK_PALETTE;
@@ -13098,6 +13098,8 @@ export function GitHubSyncIssueDetailTab(): React.JSX.Element {
     />
   );
 }
+
+export const GitHubSyncIssueDetailTab = GitHubSyncIssueTaskDetailView;
 
 export function GitHubSyncCommentAnnotation(): React.JSX.Element | null {
   const context = useHostContext();

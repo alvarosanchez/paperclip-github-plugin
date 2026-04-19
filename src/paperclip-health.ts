@@ -33,3 +33,9 @@ export function requiresPaperclipBoardAccess(value: unknown): boolean {
   const health = normalizePaperclipHealthResponse(value);
   return health?.deploymentMode?.toLowerCase() === 'authenticated';
 }
+
+export function shouldShowPaperclipBoardAccessSettings(value: unknown): boolean {
+  const health = normalizePaperclipHealthResponse(value);
+  const deploymentMode = health?.deploymentMode?.toLowerCase();
+  return deploymentMode === 'authenticated' || deploymentMode === 'local_trusted';
+}

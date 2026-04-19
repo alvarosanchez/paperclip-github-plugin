@@ -77,6 +77,7 @@ const COMMENT_ANNOTATION_ENTITY_TYPE = 'paperclip-github-plugin.comment-annotati
 const AI_AUTHORED_COMMENT_FOOTER_PREFIX = 'Created by a Paperclip AI agent using ';
 const HIDDEN_GITHUB_IMPORT_MARKER_PREFIX = '<!-- paperclip-github-plugin-imported-from: ';
 const HIDDEN_GITHUB_IMPORT_MARKER_SUFFIX = ' -->';
+const EMPTY_GITHUB_ISSUE_DESCRIPTION_PLACEHOLDER = '_No description provided on GitHub._';
 
 type PluginSetupContext = Parameters<Parameters<typeof definePlugin>[0]['setup']>[0];
 type PaperclipIssueStatus = Issue['status'];
@@ -494,6 +495,7 @@ interface GitHubIssueRecord {
   body: string | null;
   htmlUrl: string;
   authorLogin?: string;
+  authorAssociation?: string;
   labels: GitHubIssueLabelRecord[];
   state: 'open' | 'closed';
   stateReason?: GitHubIssueStateReason;
@@ -540,6 +542,7 @@ interface GitHubApiIssueRecord {
   state: string;
   comments?: number;
   state_reason?: string | null;
+  author_association?: string | null;
   labels?: GitHubApiIssueLabelRecord[];
   pull_request?: unknown;
 }
@@ -819,6 +822,7 @@ interface GitHubIssueCommentRecord {
   body: string;
   url?: string;
   authorLogin?: string;
+  authorAssociation?: string;
   authorUrl?: string;
   authorAvatarUrl?: string;
   createdAt?: string;
@@ -1169,6 +1173,7 @@ const FAILED_STATUS_CONTEXT_STATES = new Set(['ERROR', 'FAILURE']);
 const PENDING_STATUS_CONTEXT_STATES = new Set(['EXPECTED', 'PENDING']);
 const GITHUB_REPOSITORY_MAINTAINER_WARMUP_CONCURRENCY = 4;
 const GITHUB_REPOSITORY_MAINTAINER_ROLE_NAMES = new Set(['admin', 'maintain']);
+const GITHUB_REPOSITORY_TRUSTED_AUTHOR_ASSOCIATIONS = new Set(['collaborator', 'member', 'owner']);
 
 const GITHUB_ISSUE_STATUS_SNAPSHOT_QUERY = `
   query GitHubIssueStatusSnapshot($owner: String!, $repo: String!, $issueNumber: Int!, $after: String) {
@@ -3522,7 +3527,7 @@ async function buildToolbarSyncState(
 
     return {
       kind: 'issue',
-      visible: Boolean(link),
+      visible: false,
       canRun: githubTokenConfigured && mappings.length > 0,
       label: link?.githubIssueNumber ? `Sync #${link.githubIssueNumber}` : 'Sync issue',
       message: link
@@ -5199,6 +5204,9 @@ function normalizeGitHubIssueRecord(issue: GitHubApiIssueRecord): GitHubIssueRec
     body: typeof issue.body === 'string' ? stripNullBytes(issue.body) : null,
     htmlUrl: issue.html_url,
     ...(normalizeGitHubUsername(issue.user?.login) ? { authorLogin: normalizeGitHubUsername(issue.user?.login) } : {}),
+    ...(normalizeGitHubLowercaseString(issue.author_association)
+      ? { authorAssociation: normalizeGitHubLowercaseString(issue.author_association) }
+      : {}),
     labels: normalizeGitHubIssueLabels(issue.labels),
     state: issue.state === 'closed' ? 'closed' : 'open',
     stateReason: normalizeGitHubIssueStateReason(issue.state_reason),
@@ -6404,6 +6412,33 @@ function buildGitHubRepositoryActorCacheKey(
   return `${repository.owner.toLowerCase()}/${repository.repo.toLowerCase()}:${login}`;
 }
 
+function getGitHubRepositoryTrustedAuthorStatusFromAssociation(
+  authorAssociation: string | null | undefined
+): boolean | undefined {
+  const normalizedAssociation = normalizeGitHubLowercaseString(authorAssociation);
+  if (!normalizedAssociation) {
+    return undefined;
+  }
+
+  return GITHUB_REPOSITORY_TRUSTED_AUTHOR_ASSOCIATIONS.has(normalizedAssociation);
+}
+
+function cacheGitHubRepositoryTrustedAuthorStatusFromAssociation(
+  repository: ParsedRepositoryReference,
+  login: string | null | undefined,
+  authorAssociation: string | null | undefined,
+  cache: Map<string, boolean>
+): boolean | undefined {
+  const normalizedLogin = normalizeGitHubUserLogin(login);
+  const trustedAuthorStatus = getGitHubRepositoryTrustedAuthorStatusFromAssociation(authorAssociation);
+  if (!normalizedLogin || trustedAuthorStatus === undefined) {
+    return trustedAuthorStatus;
+  }
+
+  cache.set(buildGitHubRepositoryActorCacheKey(repository, normalizedLogin), trustedAuthorStatus);
+  return trustedAuthorStatus;
+}
+
 async function isGitHubUserRepositoryMaintainer(
   octokit: Octokit,
   repository: ParsedRepositoryReference,
@@ -6496,6 +6531,9 @@ async function listNewGitHubIssueCommentsSinceCount(
         body: typeof comment.body === 'string' ? stripNullBytes(comment.body) : '',
         url: comment.html_url ?? undefined,
         authorLogin: normalizeGitHubUserLogin(comment.user?.login),
+        ...(normalizeGitHubLowercaseString(comment.author_association)
+          ? { authorAssociation: normalizeGitHubLowercaseString(comment.author_association) }
+          : {}),
         createdAt: comment.created_at ?? undefined,
         updatedAt: comment.updated_at ?? undefined
       });
@@ -6556,6 +6594,19 @@ async function hasTrustedNewGitHubIssueComment(params: {
       return true;
     }
 
+    const trustedAuthorStatus = cacheGitHubRepositoryTrustedAuthorStatusFromAssociation(
+      params.repository,
+      authorLogin,
+      comment.authorAssociation,
+      params.maintainerCache
+    );
+    if (trustedAuthorStatus === true) {
+      return true;
+    }
+    if (trustedAuthorStatus === false) {
+      continue;
+    }
+
     unseenAuthors.add(authorLogin);
   }
 
@@ -6584,6 +6635,16 @@ async function isMaintainerAuthoredGitHubIssue(params: {
     return false;
   }
 
+  const trustedAuthorStatus = cacheGitHubRepositoryTrustedAuthorStatusFromAssociation(
+    params.repository,
+    authorLogin,
+    params.githubIssue.authorAssociation,
+    params.maintainerCache
+  );
+  if (trustedAuthorStatus !== undefined) {
+    return trustedAuthorStatus;
+  }
+
   return isGitHubUserRepositoryMaintainer(
     params.octokit,
     params.repository,
@@ -6599,9 +6660,20 @@ async function warmGitHubRepositoryMaintainerCache(params: {
   maintainerCache: Map<string, boolean>;
 }): Promise<void> {
   const uniqueAuthorLogins = [...new Set(
-    params.githubIssues
-      .map((issue) => normalizeGitHubUserLogin(issue.authorLogin))
-      .filter((authorLogin): authorLogin is string => Boolean(authorLogin))
+    params.githubIssues.flatMap((issue) => {
+      const authorLogin = normalizeGitHubUserLogin(issue.authorLogin);
+      if (!authorLogin) {
+        return [];
+      }
+
+      const trustedAuthorStatus = cacheGitHubRepositoryTrustedAuthorStatusFromAssociation(
+        params.repository,
+        authorLogin,
+        issue.authorAssociation,
+        params.maintainerCache
+      );
+      return trustedAuthorStatus === undefined ? [authorLogin] : [];
+    })
   )].filter((authorLogin) => !params.maintainerCache.has(buildGitHubRepositoryActorCacheKey(params.repository, authorLogin)));
 
   if (uniqueAuthorLogins.length === 0) {
@@ -6929,7 +7001,7 @@ function buildPaperclipIssueDescription(issue: GitHubIssueRecord, linkedPullRequ
   }
 
   if (!normalizedBody) {
-    return hiddenImportMarker;
+    return `${EMPTY_GITHUB_ISSUE_DESCRIPTION_PLACEHOLDER}\n\n${hiddenImportMarker}`;
   }
 
   return `${normalizedBody}\n\n${hiddenImportMarker}`;
@@ -10214,6 +10286,9 @@ async function listAllGitHubIssueComments(
         body: typeof comment.body === 'string' ? stripNullBytes(comment.body) : '',
         url: comment.html_url ?? undefined,
         authorLogin: normalizeGitHubUserLogin(comment.user?.login),
+        ...(normalizeGitHubLowercaseString(comment.author_association)
+          ? { authorAssociation: normalizeGitHubLowercaseString(comment.author_association) }
+          : {}),
         authorUrl: comment.user?.html_url ?? undefined,
         authorAvatarUrl: comment.user?.avatar_url ?? undefined,
         createdAt: comment.created_at ?? undefined,
