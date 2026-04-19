@@ -7431,6 +7431,141 @@ test('worker imports admin-authored open issues as todo when collaborator permis
   }
 });
 
+test('worker imports member-authored open issues as todo when public author_association is present and collaborator permission requires auth', async () => {
+  const harness = createTestHarness({
+    manifest,
+    config: {
+      githubTokenRef: 'github-secret-ref'
+    }
+  });
+  await plugin.definition.setup(harness.ctx);
+
+  await harness.performAction('settings.saveRegistration', {
+    mappings: [
+      {
+        id: 'mapping-a',
+        repositoryUrl: 'paperclipai/example-repo',
+        paperclipProjectName: 'Engineering',
+        paperclipProjectId: 'project-1',
+        companyId: 'company-1'
+      }
+    ],
+    syncState: {
+      status: 'idle'
+    }
+  });
+
+  const originalFetch = globalThis.fetch;
+
+  globalThis.fetch = async (input, init) => {
+    const rawUrl = getRequestUrl(input);
+    const url = new URL(rawUrl);
+
+    if (url.pathname === '/repos/paperclipai/example-repo/issues' && ['all', 'open'].includes(url.searchParams.get('state') ?? '')) {
+      return jsonResponse([
+        {
+          id: 2621,
+          number: 29,
+          title: 'Member-authored issue',
+          body: 'This came from a repo member',
+          html_url: 'https://github.com/paperclipai/example-repo/issues/29',
+          user: {
+            login: 'repo-member'
+          },
+          author_association: 'MEMBER',
+          state: 'open',
+          comments: 0
+        },
+        {
+          id: 2622,
+          number: 30,
+          title: 'External issue',
+          body: 'This came from an outsider',
+          html_url: 'https://github.com/paperclipai/example-repo/issues/30',
+          user: {
+            login: 'external-reporter'
+          },
+          author_association: 'NONE',
+          state: 'open',
+          comments: 0
+        }
+      ]);
+    }
+
+    if (
+      url.pathname === '/repos/paperclipai/example-repo/collaborators/repo-member/permission'
+      || url.pathname === '/repos/paperclipai/example-repo/collaborators/external-reporter/permission'
+    ) {
+      return jsonResponse(
+        {
+          message: 'Requires authentication'
+        },
+        401
+      );
+    }
+
+    if (url.pathname === '/graphql') {
+      const { query, variables } = getGraphqlRequest(init);
+      const issueNumber = typeof variables.issueNumber === 'number' ? variables.issueNumber : undefined;
+
+      if (query.includes('query GitHubIssueParentRelationships')) {
+        return graphqlIssueParentRelationshipsResponse([
+          {
+            issueNumber: 29
+          },
+          {
+            issueNumber: 30
+          }
+        ]);
+      }
+
+      if (query.includes('query GitHubIssueStatusSnapshot') && (issueNumber === 29 || issueNumber === 30)) {
+        return graphqlResponse({
+          repository: {
+            issue: {
+              number: issueNumber,
+              state: 'OPEN',
+              stateReason: null,
+              comments: {
+                totalCount: 0
+              },
+              closedByPullRequestsReferences: {
+                pageInfo: {
+                  hasNextPage: false,
+                  endCursor: null
+                },
+                nodes: []
+              }
+            }
+          }
+        });
+      }
+    }
+
+    throw new Error(`Unexpected GitHub request: ${url.toString()}`);
+  };
+
+  try {
+    const sync = await harness.performAction('sync.runNow', {}) as {
+      syncState: { status: string; createdIssuesCount?: number; skippedIssuesCount?: number; syncedIssuesCount?: number };
+    };
+
+    assert.equal(sync.syncState.status, 'success');
+    assert.equal(sync.syncState.createdIssuesCount, 2);
+    assert.equal(sync.syncState.skippedIssuesCount, 0);
+    assert.equal(sync.syncState.syncedIssuesCount, 2);
+
+    const importedIssues = await harness.ctx.issues.list({
+      companyId: 'company-1'
+    });
+
+    assert.equal(importedIssues.find((issue) => issue.title === 'Member-authored issue')?.status, 'todo');
+    assert.equal(importedIssues.find((issue) => issue.title === 'External issue')?.status, 'backlog');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test('worker repairs missing import registry entries by reusing existing imported Paperclip issues', async () => {
   const harness = createTestHarness({
     manifest,
@@ -12567,6 +12702,223 @@ test('worker only resets imported issues to todo for new comments from the issue
       transitionComments[0]?.body ?? '',
       /a new GitHub comment from the issue author or a repository maintainer was added/
     );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('worker trusts public maintainer comment author_association when collaborator permission requires auth', async () => {
+  const harness = createTestHarness({
+    manifest,
+    config: {
+      githubTokenRef: 'github-secret-ref'
+    }
+  });
+  await plugin.definition.setup(harness.ctx);
+
+  await harness.performAction('settings.saveRegistration', {
+    mappings: [
+      {
+        id: 'mapping-a',
+        repositoryUrl: 'paperclipai/example-repo',
+        paperclipProjectName: 'Engineering',
+        paperclipProjectId: 'project-1',
+        companyId: 'company-1'
+      }
+    ],
+    syncState: {
+      status: 'idle'
+    }
+  });
+
+  const originalUpdate = harness.ctx.issues.update;
+
+  const maintainerCommentIssue = await harness.ctx.issues.create({
+    companyId: 'company-1',
+    projectId: 'project-1',
+    title: 'Member comment can reset'
+  });
+  await originalUpdate(maintainerCommentIssue.id, { status: 'in_progress' }, 'company-1');
+
+  const outsiderCommentIssue = await harness.ctx.issues.create({
+    companyId: 'company-1',
+    projectId: 'project-1',
+    title: 'External comment cannot reset'
+  });
+  await originalUpdate(outsiderCommentIssue.id, { status: 'in_progress' }, 'company-1');
+
+  await harness.ctx.state.set(
+    {
+      scopeKind: 'instance',
+      stateKey: 'paperclip-github-plugin-import-registry'
+    },
+    [
+      {
+        mappingId: 'mapping-a',
+        githubIssueId: 4501,
+        githubIssueNumber: 45,
+        paperclipIssueId: maintainerCommentIssue.id,
+        importedAt: '2026-04-09T09:00:00.000Z',
+        lastSeenCommentCount: 1,
+        repositoryUrl: 'https://github.com/paperclipai/example-repo',
+        paperclipProjectId: 'project-1',
+        companyId: 'company-1'
+      },
+      {
+        mappingId: 'mapping-a',
+        githubIssueId: 4601,
+        githubIssueNumber: 46,
+        paperclipIssueId: outsiderCommentIssue.id,
+        importedAt: '2026-04-09T09:00:00.000Z',
+        lastSeenCommentCount: 1,
+        repositoryUrl: 'https://github.com/paperclipai/example-repo',
+        paperclipProjectId: 'project-1',
+        companyId: 'company-1'
+      }
+    ]
+  );
+
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input, init) => {
+    const rawUrl = getRequestUrl(input);
+    const url = new URL(rawUrl);
+
+    if (url.pathname === '/repos/paperclipai/example-repo/issues' && ['all', 'open'].includes(url.searchParams.get('state') ?? '')) {
+      return jsonResponse([
+        {
+          id: 4501,
+          number: 45,
+          title: 'Member comment can reset',
+          body: null,
+          html_url: 'https://github.com/paperclipai/example-repo/issues/45',
+          user: {
+            login: 'external-reporter'
+          },
+          author_association: 'NONE',
+          state: 'open',
+          comments: 2
+        },
+        {
+          id: 4601,
+          number: 46,
+          title: 'External comment cannot reset',
+          body: null,
+          html_url: 'https://github.com/paperclipai/example-repo/issues/46',
+          user: {
+            login: 'another-reporter'
+          },
+          author_association: 'NONE',
+          state: 'open',
+          comments: 2
+        }
+      ]);
+    }
+
+    if (url.pathname === '/repos/paperclipai/example-repo/issues/45/comments') {
+      return jsonResponse([
+        {
+          id: 45011,
+          body: 'Initial issue comment',
+          user: {
+            login: 'someone-else'
+          },
+          author_association: 'NONE'
+        },
+        {
+          id: 45012,
+          body: 'Maintainer follow-up',
+          user: {
+            login: 'repo-member'
+          },
+          author_association: 'MEMBER'
+        }
+      ]);
+    }
+
+    if (url.pathname === '/repos/paperclipai/example-repo/issues/46/comments') {
+      return jsonResponse([
+        {
+          id: 46011,
+          body: 'Initial issue comment',
+          user: {
+            login: 'someone-else'
+          },
+          author_association: 'NONE'
+        },
+        {
+          id: 46012,
+          body: 'Drive-by comment',
+          user: {
+            login: 'random-driveby'
+          },
+          author_association: 'NONE'
+        }
+      ]);
+    }
+
+    if (
+      url.pathname === '/repos/paperclipai/example-repo/collaborators/repo-member/permission'
+      || url.pathname === '/repos/paperclipai/example-repo/collaborators/random-driveby/permission'
+    ) {
+      return jsonResponse(
+        {
+          message: 'Requires authentication'
+        },
+        401
+      );
+    }
+
+    if (url.pathname === '/graphql') {
+      const { query, variables } = getGraphqlRequest(init);
+      const issueNumber = typeof variables.issueNumber === 'number' ? variables.issueNumber : undefined;
+
+      if (query.includes('query GitHubIssueParentRelationships')) {
+        return graphqlIssueParentRelationshipsResponse([
+          {
+            issueNumber: 45
+          },
+          {
+            issueNumber: 46
+          }
+        ]);
+      }
+
+      if (query.includes('query GitHubIssueStatusSnapshot') && (issueNumber === 45 || issueNumber === 46)) {
+        return graphqlResponse({
+          repository: {
+            issue: {
+              number: issueNumber,
+              state: 'OPEN',
+              stateReason: null,
+              comments: {
+                totalCount: 2
+              },
+              closedByPullRequestsReferences: {
+                pageInfo: {
+                  hasNextPage: false,
+                  endCursor: null
+                },
+                nodes: []
+              }
+            }
+          }
+        });
+      }
+    }
+
+    throw new Error(`Unexpected GitHub request: ${url.toString()}`);
+  };
+
+  try {
+    const sync = await harness.performAction('sync.runNow', {
+      waitForCompletion: true
+    }) as {
+      syncState: { status: string };
+    };
+
+    assert.equal(sync.syncState.status, 'success');
+    assert.equal((await harness.ctx.issues.get(maintainerCommentIssue.id, 'company-1'))?.status, 'todo');
+    assert.equal((await harness.ctx.issues.get(outsiderCommentIssue.id, 'company-1'))?.status, 'in_progress');
   } finally {
     globalThis.fetch = originalFetch;
   }
