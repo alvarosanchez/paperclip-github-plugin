@@ -113,7 +113,7 @@ The plugin MUST persist repository mappings, company-scoped advanced issue defau
 - The plugin MUST register successfully in Paperclip.
 - The plugin MUST expose a dashboard widget contribution.
 - The plugin MUST expose a settings page contribution.
-- The plugin SHOULD expose an issue detail contribution for GitHub metadata.
+- The plugin SHOULD expose an issue task detail view contribution for GitHub metadata.
 - The plugin SHOULD expose a project sidebar item that opens a project-scoped Pull Requests page for the mapped repository and can show the current open pull request count for mapped projects through a lightweight count read instead of the heavier summary-card metrics path.
 - The project pull request sidebar count, page, and metrics reads SHOULD tolerate saved mappings that are missing either the company id or the project id when the active Paperclip project context still identifies the intended mapping safely, and they SHOULD also fall back to the active project's bound GitHub repository when no saved sync mapping exists but the project workspace already defines that repository.
 - The project Pull Requests page SHOULD render live open pull request data for the mapped repository, including checks, an explicit up-to-date branch state, target branch badges, review summary, unresolved review-thread state, non-review comment counts, last-updated timestamps, Paperclip issue linkage, and quick actions.
@@ -135,7 +135,7 @@ The plugin MUST persist repository mappings, company-scoped advanced issue defau
 - When a pull request is linked to a Paperclip issue, the project Pull Requests page SHOULD open that issue in a plugin-provided right drawer so operators can stay on the queue page, while still allowing explicit navigation away when desired.
 - When a pull request is not yet linked to a Paperclip issue, the project Pull Requests page SHOULD offer an inline create-issue action and wait for the returned Paperclip identifier before rendering the issue link or opening its drawer.
 - The settings page SHOULD audit the saved GitHub token against the mapped repositories in the active company and SHOULD warn when required pull-request-action permissions are missing or GitHub cannot verify them yet.
-- The plugin SHOULD expose manual sync buttons in the global toolbar and on mapped project/issue surfaces when the host renders those slot types.
+- The plugin SHOULD expose manual sync buttons in the global toolbar, on mapped project surfaces when the host renders those toolbar slot types, and inside the GitHub issue task detail view for issue-scoped sync.
 - The dashboard widget MUST summarize the current GitHub sync readiness and link to setup.
 - When the latest sync run records issue-level failures, the settings page SHOULD expose a saved failure log with per-failure repository, issue, phase, raw error, and suggested next-step details, and compact surfaces SHOULD still surface at least the latest saved failure snapshot.
 - The settings page MUST render inside the real Paperclip host.

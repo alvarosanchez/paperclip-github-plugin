@@ -4341,20 +4341,76 @@ const EXTENSION_SURFACE_STYLES = `
 
   .ghsync-issue-detail {
     display: grid;
-    gap: 16px;
+    gap: 12px;
     color: var(--ghsync-text);
     font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  }
+
+  .ghsync-issue-detail__header {
+    display: flex;
+    justify-content: space-between;
+    gap: 10px;
+    align-items: flex-start;
+    padding-bottom: 10px;
+    border-bottom: 1px solid var(--ghsync-border-soft);
+  }
+
+  .ghsync-issue-detail__header-copy {
+    display: grid;
+    gap: 4px;
+    min-width: 0;
+  }
+
+  .ghsync-issue-detail__actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    justify-content: flex-end;
+    align-items: center;
+  }
+
+  .ghsync-issue-detail__action-content {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .ghsync-issue-detail__action-button {
+    text-decoration: none;
+    white-space: nowrap;
+  }
+
+  .ghsync-issue-detail__stats {
+    display: grid;
+    gap: 8px 12px;
+    grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+  }
+
+  .ghsync-issue-detail__stat {
+    display: grid;
+    gap: 2px;
+    min-width: 0;
+  }
+
+  .ghsync-issue-detail__stat-label {
+    color: var(--ghsync-muted);
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+
+  .ghsync-issue-detail__stat-value {
+    color: var(--ghsync-title);
+    font-size: 13px;
+    font-weight: 600;
+    line-height: 1.35;
   }
 
   .ghsync-issue-detail__intro,
   .ghsync-issue-detail__section {
     display: grid;
-    gap: 8px;
-  }
-
-  .ghsync-issue-detail__intro {
-    padding-bottom: 12px;
-    border-bottom: 1px solid var(--ghsync-border-soft);
+    gap: 6px;
   }
 
   .ghsync-issue-detail__section-heading {
@@ -4373,6 +4429,16 @@ const EXTENSION_SURFACE_STYLES = `
 
   .ghsync-issue-detail__title h3 {
     margin: 0;
+  }
+
+  .ghsync-issue-detail .ghsync-extension-labels,
+  .ghsync-issue-detail .ghsync-extension-links {
+    gap: 6px;
+  }
+
+  .ghsync-issue-detail .ghsync-extension-pill {
+    padding: 5px 9px;
+    font-size: 11px;
   }
 
   ${SHARED_LOADING_STYLES}
@@ -12697,6 +12763,9 @@ function GitHubSyncToolbarButtonSurface(props: {
   entityId?: string | null;
   companyId?: string | null;
   projectId?: string | null;
+  embedded?: boolean;
+  ignoreVisibility?: boolean;
+  buttonClassName?: string;
 }): React.JSX.Element | null {
   const toast = usePluginToast();
   const runSyncNow = usePluginAction('sync.runNow');
@@ -12868,7 +12937,7 @@ function GitHubSyncToolbarButtonSurface(props: {
   }, [toolbarState.refresh, settingsRegistration.refresh, props.companyId, effectiveEntityId, props.entityType]);
 
   useEffect(() => {
-    if (!props.entityType) {
+    if (!props.entityType || props.embedded) {
       return;
     }
 
@@ -12888,9 +12957,15 @@ function GitHubSyncToolbarButtonSurface(props: {
     };
   });
 
-  if (!state.visible) {
+  if (!state.visible && !props.ignoreVisibility) {
     return null;
   }
+
+  const resolvedButtonClassName =
+    props.buttonClassName
+    ?? (props.entityType
+      ? HOST_ENTITY_BUTTON_CLASSNAME
+      : HOST_GLOBAL_BUTTON_CLASSNAME);
 
   async function handleRunSync(): Promise<void> {
     try {
@@ -12986,7 +13061,11 @@ function GitHubSyncToolbarButtonSurface(props: {
   return (
     <div
       ref={surfaceRef}
-      className={`ghsync-toolbar-button${props.entityType ? ' ghsync-toolbar-button--entity' : ''}`}
+      className={[
+        'ghsync-toolbar-button',
+        props.entityType && !props.embedded ? 'ghsync-toolbar-button--entity' : '',
+        props.embedded ? 'ghsync-toolbar-button--embedded' : ''
+      ].filter(Boolean).join(' ')}
       style={themeVars}
       title={toolbarState.error?.message ?? effectiveMessage}
     >
@@ -12996,7 +13075,7 @@ function GitHubSyncToolbarButtonSurface(props: {
         data-slot="button"
         data-variant="outline"
         data-size="sm"
-        className={props.entityType ? HOST_ENTITY_BUTTON_CLASSNAME : HOST_GLOBAL_BUTTON_CLASSNAME}
+        className={resolvedButtonClassName}
         disabled={
           toolbarState.loading
           || syncStartPending
@@ -13023,7 +13102,7 @@ export function GitHubSyncGlobalToolbarButton(): React.JSX.Element | null {
 export function GitHubSyncEntityToolbarButton(): React.JSX.Element | null {
   const context = useHostContext();
 
-  if ((context.entityType !== 'issue' && context.entityType !== 'project') || !context.entityId) {
+  if (context.entityType !== 'project' || !context.entityId) {
     return null;
   }
 
@@ -13037,7 +13116,30 @@ export function GitHubSyncEntityToolbarButton(): React.JSX.Element | null {
   );
 }
 
-function GitHubSyncIssueDetailTabContent(props: {
+function GitHubIssueDetailLinkButton(props: {
+  href: string;
+  label: string;
+}): React.JSX.Element {
+  return (
+    <a
+      href={props.href}
+      target="_blank"
+      rel="noreferrer"
+      className={getPluginActionClassName({
+        variant: 'secondary',
+        size: 'sm',
+        extraClassName: 'ghsync-issue-detail__action-button'
+      })}
+    >
+      <span className="ghsync-issue-detail__action-content">
+        <GitHubMarkIcon className="h-3.5 w-3.5" />
+        <span>{props.label}</span>
+      </span>
+    </a>
+  );
+}
+
+function GitHubSyncIssueTaskDetailViewContent(props: {
   companyId?: string | null;
   issueId?: string | null;
   loadingIssueId?: boolean;
@@ -13073,41 +13175,47 @@ function GitHubSyncIssueDetailTabContent(props: {
 
       {issueDetails ? (
         <>
-          <div className="ghsync-extension-heading">
-            <div>
+          <div className="ghsync-issue-detail__header">
+            <div className="ghsync-issue-detail__header-copy">
               <h4>Issue #{issueDetails.githubIssueNumber}</h4>
               <p>{formatGitHubRepositoryLabel(issueDetails.repositoryUrl)}</p>
             </div>
-            <a
-              href={issueDetails.githubIssueUrl}
-              target="_blank"
-              rel="noreferrer"
-              className={getPluginActionClassName({
-                variant: 'secondary',
-                size: 'sm',
-                extraClassName: 'ghsync-extension-link'
-              })}
-            >
-              Open on GitHub
-            </a>
+            <div className="ghsync-issue-detail__actions">
+              <GitHubIssueDetailLinkButton
+                href={issueDetails.githubIssueUrl}
+                label="Open on GitHub"
+              />
+              <GitHubSyncToolbarButtonSurface
+                companyId={props.companyId}
+                entityId={props.issueId}
+                entityType="issue"
+                embedded
+                ignoreVisibility
+                buttonClassName={getPluginActionClassName({
+                  variant: 'secondary',
+                  size: 'sm',
+                  extraClassName: 'ghsync-issue-detail__action-button'
+                })}
+              />
+            </div>
           </div>
 
-          <div className="ghsync-extension-grid">
-            <div className="ghsync-extension-metric">
-              <span>State</span>
-              <strong>{formatGitHubIssueState(issueDetails.githubIssueState, issueDetails.githubIssueStateReason)}</strong>
+          <div className="ghsync-issue-detail__stats">
+            <div className="ghsync-issue-detail__stat">
+              <span className="ghsync-issue-detail__stat-label">State</span>
+              <strong className="ghsync-issue-detail__stat-value">{formatGitHubIssueState(issueDetails.githubIssueState, issueDetails.githubIssueStateReason)}</strong>
             </div>
-            <div className="ghsync-extension-metric">
-              <span>Comments</span>
-              <strong>{issueDetails.commentsCount ?? 'Unknown'}</strong>
+            <div className="ghsync-issue-detail__stat">
+              <span className="ghsync-issue-detail__stat-label">Comments</span>
+              <strong className="ghsync-issue-detail__stat-value">{issueDetails.commentsCount ?? 'Unknown'}</strong>
             </div>
-            <div className="ghsync-extension-metric">
-              <span>Linked PRs</span>
-              <strong>{issueDetails.linkedPullRequestNumbers.length}</strong>
+            <div className="ghsync-issue-detail__stat">
+              <span className="ghsync-issue-detail__stat-label">Linked PRs</span>
+              <strong className="ghsync-issue-detail__stat-value">{issueDetails.linkedPullRequestNumbers.length}</strong>
             </div>
-            <div className="ghsync-extension-metric">
-              <span>Last synced</span>
-              <strong>{issueDetails.syncedAt ? formatDate(issueDetails.syncedAt, 'Unknown') : 'Pending refresh'}</strong>
+            <div className="ghsync-issue-detail__stat">
+              <span className="ghsync-issue-detail__stat-label">Last synced</span>
+              <strong className="ghsync-issue-detail__stat-value">{issueDetails.syncedAt ? formatDate(issueDetails.syncedAt, 'Unknown') : 'Pending refresh'}</strong>
             </div>
           </div>
 
@@ -13116,19 +13224,11 @@ function GitHubSyncIssueDetailTabContent(props: {
               <div className="ghsync-issue-detail__section-heading">Linked pull requests</div>
               <div className="ghsync-extension-links">
                 {issueDetails.linkedPullRequestNumbers.map((pullRequestNumber: number) => (
-                  <a
+                  <GitHubIssueDetailLinkButton
                     key={pullRequestNumber}
                     href={`${issueDetails.repositoryUrl}/pull/${pullRequestNumber}`}
-                    target="_blank"
-                    rel="noreferrer"
-                    className={getPluginActionClassName({
-                      variant: 'secondary',
-                      size: 'sm',
-                      extraClassName: 'ghsync-extension-link'
-                    })}
-                  >
-                    PR #{pullRequestNumber}
-                  </a>
+                    label={`PR #${pullRequestNumber}`}
+                  />
                 ))}
               </div>
             </div>
@@ -13162,7 +13262,7 @@ function GitHubSyncIssueDetailTabContent(props: {
   );
 }
 
-export function GitHubSyncIssueDetailTab(): React.JSX.Element {
+export function GitHubSyncIssueTaskDetailView(): React.JSX.Element {
   const context = useHostContext();
   const themeMode = useResolvedThemeMode();
   const theme = themeMode === 'light' ? LIGHT_PALETTE : DARK_PALETTE;
@@ -13176,7 +13276,7 @@ export function GitHubSyncIssueDetailTab(): React.JSX.Element {
   const detailKey = `${context.companyId ?? 'company-none'}:${resolvedIssue.issueIdentifier ?? context.entityId ?? 'issue-none'}`;
 
   return (
-    <GitHubSyncIssueDetailTabContent
+    <GitHubSyncIssueTaskDetailViewContent
       key={detailKey}
       companyId={context.companyId}
       issueId={resolvedIssue.issueId}

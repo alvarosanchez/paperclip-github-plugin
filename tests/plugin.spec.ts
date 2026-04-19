@@ -2182,7 +2182,8 @@ test('manifest exposes GitHub Sync page, sidebar, dashboard, and settings UI met
   assert.equal(projectSidebarItemSlot?.order, 40);
   assert.equal(settingsSlot?.exportName, 'GitHubSyncSettingsPage');
   assert.equal(dashboardSlot?.exportName, 'GitHubSyncDashboardWidget');
-  assert.equal(issueDetailSlot?.exportName, 'GitHubSyncIssueDetailTab');
+  assert.equal(issueDetailSlot?.type, 'taskDetailView');
+  assert.equal(issueDetailSlot?.exportName, 'GitHubSyncIssueTaskDetailView');
   assert.equal(commentAnnotationSlot?.exportName, 'GitHubSyncCommentAnnotation');
   assert.equal(globalToolbarSlot?.exportName, 'GitHubSyncGlobalToolbarButton');
   assert.equal(entityToolbarSlot?.exportName, 'GitHubSyncEntityToolbarButton');
@@ -5454,7 +5455,7 @@ test('worker exposes toolbar sync state for global, project, and issue surfaces'
   assert.equal(projectState.canRun, true);
   assert.equal(projectState.label, 'Sync project');
   assert.equal(issueState.kind, 'issue');
-  assert.equal(issueState.visible, true);
+  assert.equal(issueState.visible, false);
   assert.equal(issueState.canRun, true);
   assert.equal(issueState.label, 'Sync #77');
 });
@@ -5770,6 +5771,7 @@ test('worker filters issue-scoped GitHub link records even when entities.list ig
     issueId: secondIssue.id
   });
   const toolbarState = await harness.getData<{
+    visible: boolean;
     label: string;
   }>('sync.toolbarState', {
     companyId: 'company-1',
@@ -5779,6 +5781,7 @@ test('worker filters issue-scoped GitHub link records even when entities.list ig
 
   assert.equal(details?.paperclipIssueId, secondIssue.id);
   assert.equal(details?.githubIssueNumber, 202);
+  assert.equal(toolbarState.visible, false);
   assert.equal(toolbarState.label, 'Sync #202');
 });
 
@@ -6475,6 +6478,8 @@ test('settings.registration reports a configured token without resolving the sav
 });
 
 test('settings.registration reports a company-scoped configured token without resolving the saved secret', async () => {
+  const previousPaperclipHome = process.env.PAPERCLIP_HOME;
+  const isolatedPaperclipHome = await mkdtemp(join(tmpdir(), 'paperclip-github-plugin-settings-registration-'));
   const harness = createTestHarness({
     manifest,
     config: {
@@ -6483,30 +6488,42 @@ test('settings.registration reports a company-scoped configured token without re
       }
     }
   });
-  await plugin.definition.setup(harness.ctx);
+  process.env.PAPERCLIP_HOME = isolatedPaperclipHome;
 
-  let resolveCount = 0;
-  harness.ctx.secrets.resolve = async () => {
-    resolveCount += 1;
-    throw new Error('Rate limit exceeded for secret resolution');
-  };
+  try {
+    await plugin.definition.setup(harness.ctx);
 
-  const companyOneResult = await harness.getData<{
-    githubTokenConfigured?: boolean;
-    syncState?: { status?: string };
-  }>('settings.registration', {
-    companyId: 'company-1'
-  });
-  const companyTwoResult = await harness.getData<{
-    githubTokenConfigured?: boolean;
-  }>('settings.registration', {
-    companyId: 'company-2'
-  });
+    let resolveCount = 0;
+    harness.ctx.secrets.resolve = async () => {
+      resolveCount += 1;
+      throw new Error('Rate limit exceeded for secret resolution');
+    };
 
-  assert.equal(companyOneResult.githubTokenConfigured, true);
-  assert.equal(companyOneResult.syncState?.status, 'idle');
-  assert.equal(companyTwoResult.githubTokenConfigured, false);
-  assert.equal(resolveCount, 0);
+    const companyOneResult = await harness.getData<{
+      githubTokenConfigured?: boolean;
+      syncState?: { status?: string };
+    }>('settings.registration', {
+      companyId: 'company-1'
+    });
+    const companyTwoResult = await harness.getData<{
+      githubTokenConfigured?: boolean;
+    }>('settings.registration', {
+      companyId: 'company-2'
+    });
+
+    assert.equal(companyOneResult.githubTokenConfigured, true);
+    assert.equal(companyOneResult.syncState?.status, 'idle');
+    assert.equal(companyTwoResult.githubTokenConfigured, false);
+    assert.equal(resolveCount, 0);
+  } finally {
+    if (previousPaperclipHome === undefined) {
+      delete process.env.PAPERCLIP_HOME;
+    } else {
+      process.env.PAPERCLIP_HOME = previousPaperclipHome;
+    }
+
+    await rm(isolatedPaperclipHome, { recursive: true, force: true });
+  }
 });
 
 test('settings.saveRegistration persists the saved GitHub login label for later company-scoped settings reads', async () => {
