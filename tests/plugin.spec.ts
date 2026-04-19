@@ -7431,7 +7431,7 @@ test('worker imports admin-authored open issues as todo when collaborator permis
   }
 });
 
-test('worker imports member-authored open issues as todo when public author_association is present and collaborator permission requires auth', async () => {
+test('worker imports trusted-author-association open issues as todo when public author_association is present and collaborator permission requires auth', async () => {
   const harness = createTestHarness({
     manifest,
     config: {
@@ -12707,7 +12707,7 @@ test('worker only resets imported issues to todo for new comments from the issue
   }
 });
 
-test('worker trusts public maintainer comment author_association when collaborator permission requires auth', async () => {
+test('worker trusts public member author_association comments when collaborator permission requires auth', async () => {
   const harness = createTestHarness({
     manifest,
     config: {

@@ -1159,7 +1159,7 @@ const FAILED_STATUS_CONTEXT_STATES = new Set(['ERROR', 'FAILURE']);
 const PENDING_STATUS_CONTEXT_STATES = new Set(['EXPECTED', 'PENDING']);
 const GITHUB_REPOSITORY_MAINTAINER_WARMUP_CONCURRENCY = 4;
 const GITHUB_REPOSITORY_MAINTAINER_ROLE_NAMES = new Set(['admin', 'maintain']);
-const GITHUB_REPOSITORY_MAINTAINER_AUTHOR_ASSOCIATIONS = new Set(['collaborator', 'member', 'owner']);
+const GITHUB_REPOSITORY_TRUSTED_AUTHOR_ASSOCIATIONS = new Set(['collaborator', 'member', 'owner']);
 
 const GITHUB_ISSUE_STATUS_SNAPSHOT_QUERY = `
   query GitHubIssueStatusSnapshot($owner: String!, $repo: String!, $issueNumber: Int!, $after: String) {
@@ -6085,7 +6085,7 @@ function buildGitHubRepositoryActorCacheKey(
   return `${repository.owner.toLowerCase()}/${repository.repo.toLowerCase()}:${login}`;
 }
 
-function getGitHubRepositoryMaintainerStatusFromAuthorAssociation(
+function getGitHubRepositoryTrustedAuthorStatusFromAssociation(
   authorAssociation: string | null | undefined
 ): boolean | undefined {
   const normalizedAssociation = normalizeGitHubLowercaseString(authorAssociation);
@@ -6093,23 +6093,23 @@ function getGitHubRepositoryMaintainerStatusFromAuthorAssociation(
     return undefined;
   }
 
-  return GITHUB_REPOSITORY_MAINTAINER_AUTHOR_ASSOCIATIONS.has(normalizedAssociation);
+  return GITHUB_REPOSITORY_TRUSTED_AUTHOR_ASSOCIATIONS.has(normalizedAssociation);
 }
 
-function cacheGitHubRepositoryMaintainerStatusFromAuthorAssociation(
+function cacheGitHubRepositoryTrustedAuthorStatusFromAssociation(
   repository: ParsedRepositoryReference,
   login: string | null | undefined,
   authorAssociation: string | null | undefined,
   cache: Map<string, boolean>
 ): boolean | undefined {
   const normalizedLogin = normalizeGitHubUserLogin(login);
-  const maintainerStatus = getGitHubRepositoryMaintainerStatusFromAuthorAssociation(authorAssociation);
-  if (!normalizedLogin || maintainerStatus === undefined) {
-    return maintainerStatus;
+  const trustedAuthorStatus = getGitHubRepositoryTrustedAuthorStatusFromAssociation(authorAssociation);
+  if (!normalizedLogin || trustedAuthorStatus === undefined) {
+    return trustedAuthorStatus;
   }
 
-  cache.set(buildGitHubRepositoryActorCacheKey(repository, normalizedLogin), maintainerStatus);
-  return maintainerStatus;
+  cache.set(buildGitHubRepositoryActorCacheKey(repository, normalizedLogin), trustedAuthorStatus);
+  return trustedAuthorStatus;
 }
 
 async function isGitHubUserRepositoryMaintainer(
@@ -6267,16 +6267,16 @@ async function hasTrustedNewGitHubIssueComment(params: {
       return true;
     }
 
-    const maintainerStatus = cacheGitHubRepositoryMaintainerStatusFromAuthorAssociation(
+    const trustedAuthorStatus = cacheGitHubRepositoryTrustedAuthorStatusFromAssociation(
       params.repository,
       authorLogin,
       comment.authorAssociation,
       params.maintainerCache
     );
-    if (maintainerStatus === true) {
+    if (trustedAuthorStatus === true) {
       return true;
     }
-    if (maintainerStatus === false) {
+    if (trustedAuthorStatus === false) {
       continue;
     }
 
@@ -6308,14 +6308,14 @@ async function isMaintainerAuthoredGitHubIssue(params: {
     return false;
   }
 
-  const maintainerStatus = cacheGitHubRepositoryMaintainerStatusFromAuthorAssociation(
+  const trustedAuthorStatus = cacheGitHubRepositoryTrustedAuthorStatusFromAssociation(
     params.repository,
     authorLogin,
     params.githubIssue.authorAssociation,
     params.maintainerCache
   );
-  if (maintainerStatus !== undefined) {
-    return maintainerStatus;
+  if (trustedAuthorStatus !== undefined) {
+    return trustedAuthorStatus;
   }
 
   return isGitHubUserRepositoryMaintainer(
@@ -6339,13 +6339,13 @@ async function warmGitHubRepositoryMaintainerCache(params: {
         return [];
       }
 
-      const maintainerStatus = cacheGitHubRepositoryMaintainerStatusFromAuthorAssociation(
+      const trustedAuthorStatus = cacheGitHubRepositoryTrustedAuthorStatusFromAssociation(
         params.repository,
         authorLogin,
         issue.authorAssociation,
         params.maintainerCache
       );
-      return maintainerStatus === undefined ? [authorLogin] : [];
+      return trustedAuthorStatus === undefined ? [authorLogin] : [];
     })
   )].filter((authorLogin) => !params.maintainerCache.has(buildGitHubRepositoryActorCacheKey(params.repository, authorLogin)));
 
