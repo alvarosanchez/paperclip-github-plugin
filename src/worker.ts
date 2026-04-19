@@ -71,6 +71,7 @@ const MISSING_BOARD_ACCESS_SYNC_MESSAGE =
   'Connect Paperclip board access before running sync on this authenticated deployment.';
 const MISSING_BOARD_ACCESS_SYNC_ACTION =
   'Open plugin settings for each mapped company that sync will touch, connect Paperclip board access, approve the flow, and then run sync again.';
+const IMPORTED_ISSUE_WAKE_REASON = 'GitHub Sync imported an assigned issue that is ready for work.';
 const ISSUE_LINK_ENTITY_TYPE = 'paperclip-github-plugin.issue-link';
 const PULL_REQUEST_LINK_ENTITY_TYPE = 'paperclip-github-plugin.pull-request-link';
 const COMMENT_ANNOTATION_ENTITY_TYPE = 'paperclip-github-plugin.comment-annotation';
@@ -7576,6 +7577,10 @@ function getPaperclipHealthEndpoint(baseUrl: string): string {
   return new URL('/api/health', baseUrl).toString();
 }
 
+function getPaperclipAgentWakeupEndpoint(baseUrl: string, agentId: string): string {
+  return new URL(`/api/agents/${agentId}/wakeup`, baseUrl).toString();
+}
+
 function getActivePaperclipApiAuthToken(companyId?: string): string | undefined {
   if (!companyId) {
     return undefined;
@@ -7637,6 +7642,57 @@ async function detectPaperclipBoardAccessRequirement(paperclipApiBaseUrl?: strin
     return Boolean(health && requiresPaperclipBoardAccess(health));
   } catch {
     return false;
+  }
+}
+
+async function wakePaperclipAssigneeForImportedIssue(
+  ctx: PluginSetupContext,
+  params: {
+    assigneeAgentId?: string | null;
+    paperclipIssueId: string;
+    companyId?: string;
+    paperclipApiBaseUrl?: string;
+  }
+): Promise<void> {
+  if (!params.assigneeAgentId || !params.paperclipApiBaseUrl) {
+    return;
+  }
+
+  try {
+    const response = await fetchPaperclipApi(
+      getPaperclipAgentWakeupEndpoint(params.paperclipApiBaseUrl, params.assigneeAgentId),
+      {
+        method: 'POST',
+        headers: {
+          accept: 'application/json',
+          'content-type': 'application/json'
+        },
+        body: JSON.stringify({
+          source: 'assignment',
+          triggerDetail: 'system',
+          reason: IMPORTED_ISSUE_WAKE_REASON,
+          payload: {
+            issueId: params.paperclipIssueId,
+            mutation: 'import'
+          }
+        })
+      },
+      {
+        companyId: params.companyId
+      }
+    );
+
+    if (!response.ok) {
+      throw new Error(`Wakeup request failed with status ${response.status}.`);
+    }
+  } catch (error) {
+    ctx.logger.warn('GitHub sync could not wake the assignee for an imported Paperclip issue.', {
+      issueId: params.paperclipIssueId,
+      agentId: params.assigneeAgentId,
+      companyId: params.companyId,
+      paperclipApiBaseUrl: params.paperclipApiBaseUrl,
+      error: error instanceof Error ? error.message : String(error)
+    });
   }
 }
 
@@ -9177,11 +9233,21 @@ async function synchronizePaperclipIssueStatuses(
         defaultImportedStatus: advancedSettings.defaultStatus,
         maintainerAuthoredImportedIssue
       });
+      const shouldWakeImportedAssignee =
+        wasImportedThisRun && nextStatus === 'todo' && Boolean(paperclipIssue.assigneeAgentId);
 
       importedIssue.githubIssueNumber = githubIssue.number;
       importedIssue.lastSeenCommentCount = snapshot.commentCount;
 
       if (paperclipIssue.status === nextStatus) {
+        if (shouldWakeImportedAssignee) {
+          await wakePaperclipAssigneeForImportedIssue(ctx, {
+            assigneeAgentId: paperclipIssue.assigneeAgentId,
+            paperclipIssueId: importedIssue.paperclipIssueId,
+            companyId: mapping.companyId,
+            paperclipApiBaseUrl
+          });
+        }
         continue;
       }
 
@@ -9209,6 +9275,15 @@ async function synchronizePaperclipIssueStatuses(
         paperclipApiBaseUrl
       });
       updatedStatusesCount += 1;
+
+      if (shouldWakeImportedAssignee) {
+        await wakePaperclipAssigneeForImportedIssue(ctx, {
+          assigneeAgentId: paperclipIssue.assigneeAgentId,
+          paperclipIssueId: importedIssue.paperclipIssueId,
+          companyId: mapping.companyId,
+          paperclipApiBaseUrl
+        });
+      }
     } catch (error) {
       if (isGitHubRateLimitError(error)) {
         throw error;

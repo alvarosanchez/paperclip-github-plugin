@@ -7527,6 +7527,155 @@ test('worker imports maintainer-authored open issues without linked pull request
   }
 });
 
+test('worker wakes the assignee when a newly imported maintainer-authored issue stays in todo', async () => {
+  const harness = createTestHarness({
+    manifest,
+    config: {
+      githubTokenRef: 'github-secret-ref',
+      paperclipApiBaseUrl: 'http://127.0.0.1:63675'
+    }
+  });
+  await plugin.definition.setup(harness.ctx);
+
+  await harness.performAction('settings.saveRegistration', {
+    companyId: 'company-1',
+    mappings: [
+      {
+        id: 'mapping-a',
+        repositoryUrl: 'paperclipai/example-repo',
+        paperclipProjectName: 'Engineering',
+        paperclipProjectId: 'project-1',
+        companyId: 'company-1'
+      }
+    ],
+    advancedSettings: {
+      defaultAssigneeAgentId: 'agent-1',
+      defaultStatus: 'backlog',
+      ignoredIssueAuthorUsernames: ['renovate']
+    },
+    syncState: {
+      status: 'idle'
+    }
+  });
+
+  const wakeupRequests: Array<{ path: string; body: Record<string, unknown> | null }> = [];
+  const originalFetch = globalThis.fetch;
+
+  globalThis.fetch = async (input, init) => {
+    const rawUrl = getRequestUrl(input);
+    const url = new URL(rawUrl);
+    const method = (init?.method ?? 'GET').toUpperCase();
+
+    if (
+      url.origin === 'http://127.0.0.1:63675'
+      && url.pathname === '/api/agents/agent-1/wakeup'
+      && method === 'POST'
+    ) {
+      wakeupRequests.push({
+        path: url.pathname,
+        body: getJsonRequestBody(init)
+      });
+
+      return jsonResponse({
+        id: 'run-1',
+        agentId: 'agent-1',
+        status: 'queued'
+      });
+    }
+
+    if (url.pathname === '/repos/paperclipai/example-repo/issues' && ['all', 'open'].includes(url.searchParams.get('state') ?? '')) {
+      return jsonResponse([
+        {
+          id: 2621,
+          number: 29,
+          title: 'Maintainer-assigned issue',
+          body: 'Please pick this up',
+          html_url: 'https://github.com/paperclipai/example-repo/issues/29',
+          user: {
+            login: 'repo-maintainer'
+          },
+          state: 'open',
+          comments: 0
+        }
+      ]);
+    }
+
+    if (url.pathname === '/repos/paperclipai/example-repo/collaborators/repo-maintainer/permission') {
+      return jsonResponse({
+        permission: 'admin',
+        role_name: 'maintain',
+        user: {
+          login: 'repo-maintainer'
+        }
+      });
+    }
+
+    if (url.pathname === '/graphql') {
+      const { query, variables } = getGraphqlRequest(init);
+      const issueNumber = typeof variables.issueNumber === 'number' ? variables.issueNumber : undefined;
+
+      if (query.includes('query GitHubIssueParentRelationships')) {
+        return graphqlIssueParentRelationshipsResponse([
+          {
+            issueNumber: 29
+          }
+        ]);
+      }
+
+      if (query.includes('query GitHubIssueStatusSnapshot') && issueNumber === 29) {
+        return graphqlResponse({
+          repository: {
+            issue: {
+              number: 29,
+              state: 'OPEN',
+              stateReason: null,
+              comments: {
+                totalCount: 0
+              },
+              closedByPullRequestsReferences: {
+                pageInfo: {
+                  hasNextPage: false,
+                  endCursor: null
+                },
+                nodes: []
+              }
+            }
+          }
+        });
+      }
+    }
+
+    throw new Error(`Unexpected request: ${method} ${url.toString()}`);
+  };
+
+  try {
+    const sync = await harness.performAction('sync.runNow', {}) as {
+      syncState: { status: string; createdIssuesCount?: number };
+    };
+
+    assert.equal(sync.syncState.status, 'success');
+    assert.equal(sync.syncState.createdIssuesCount, 1);
+
+    const importedIssue = (await harness.ctx.issues.list({
+      companyId: 'company-1'
+    })).find((issue) => issue.title === 'Maintainer-assigned issue');
+
+    assert.ok(importedIssue);
+    assert.equal(importedIssue?.status, 'todo');
+    assert.equal(importedIssue?.assigneeAgentId, 'agent-1');
+    assert.equal(wakeupRequests.length, 1);
+    assert.deepEqual(wakeupRequests[0]?.body?.source, 'assignment');
+    assert.deepEqual(wakeupRequests[0]?.body?.triggerDetail, 'system');
+    assert.match(String(wakeupRequests[0]?.body?.reason ?? ''), /imported/i);
+    assert.deepEqual(wakeupRequests[0]?.body?.payload, {
+      issueId: importedIssue?.id,
+      mutation: 'import'
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test('worker imports admin-authored open issues as todo when collaborator permission omits role_name', async () => {
   const harness = createTestHarness({
     manifest,
