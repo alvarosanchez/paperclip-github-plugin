@@ -127,7 +127,7 @@ export const manifest: PaperclipPluginManifestV1 = {
         id: 'paperclip-github-plugin-toolbar-button',
         displayName: 'GitHub Sync',
         exportName: 'GitHubSyncEntityToolbarButton',
-        entityTypes: ['project', 'issue']
+        entityTypes: ['project']
       },
       {
         type: 'settingsPage',

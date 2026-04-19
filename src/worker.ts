@@ -9013,7 +9013,9 @@ function getConfiguredGithubTokenSource(
   const normalizedCompanyId = normalizeCompanyId(companyId);
   const secretRef =
     normalizedCompanyId
-      ? normalizeSecretRef(config.githubTokenRefs?.[normalizedCompanyId]) ?? getSavedGitHubTokenRef(settings, normalizedCompanyId)
+      ? normalizeSecretRef(config.githubTokenRefs?.[normalizedCompanyId])
+        ?? normalizeGitHubTokenRef(config.githubTokenRef)
+        ?? getSavedGitHubTokenRef(settings, normalizedCompanyId)
       : normalizeGitHubTokenRef(config.githubTokenRef) ?? getSavedGitHubTokenRef(settings);
   if (secretRef) {
     return { secretRef };

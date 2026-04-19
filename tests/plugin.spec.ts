@@ -2187,6 +2187,7 @@ test('manifest exposes GitHub Sync page, sidebar, dashboard, and settings UI met
   assert.equal(commentAnnotationSlot?.exportName, 'GitHubSyncCommentAnnotation');
   assert.equal(globalToolbarSlot?.exportName, 'GitHubSyncGlobalToolbarButton');
   assert.equal(entityToolbarSlot?.exportName, 'GitHubSyncEntityToolbarButton');
+  assert.deepEqual(entityToolbarSlot?.entityTypes, ['project']);
 });
 
 test('project.pullRequests.page returns live GitHub pull request summaries for the mapped repository', async () => {
