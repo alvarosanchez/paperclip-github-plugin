@@ -61,6 +61,7 @@ const CANCELLING_SYNC_MESSAGE = 'Cancellation requested. GitHub sync will stop a
 const SYNC_PROGRESS_PERSIST_INTERVAL_MS = 250;
 const MAX_SYNC_FAILURE_LOG_ENTRIES = 25;
 const GITHUB_SECONDARY_RATE_LIMIT_FALLBACK_MS = 60_000;
+const IMPORTED_ISSUE_WAKEUP_CONCURRENCY = 4;
 const MISSING_GITHUB_TOKEN_SYNC_MESSAGE = 'Configure a GitHub token before running sync.';
 const MISSING_GITHUB_TOKEN_SYNC_ACTION =
   'Open settings and save a GitHub token secret, or create $PAPERCLIP_HOME/plugins/github-sync/config.json (or ~/.paperclip/plugins/github-sync/config.json when PAPERCLIP_HOME is unset) with a "githubToken" value, and then run sync again.';
@@ -9075,6 +9076,10 @@ async function synchronizePaperclipIssueStatuses(
   let updatedDescriptionsCount = 0;
   let completedIssueCount = 0;
   const totalIssueCount = importedIssues.length;
+  const queuedImportedIssueWakeups: Array<{
+    assigneeAgentId?: string | null;
+    paperclipIssueId: string;
+  }> = [];
 
   for (const importedIssue of importedIssues) {
       if (assertNotCancelled) {
@@ -9241,11 +9246,9 @@ async function synchronizePaperclipIssueStatuses(
 
       if (paperclipIssue.status === nextStatus) {
         if (shouldWakeImportedAssignee) {
-          await wakePaperclipAssigneeForImportedIssue(ctx, {
+          queuedImportedIssueWakeups.push({
             assigneeAgentId: paperclipIssue.assigneeAgentId,
-            paperclipIssueId: importedIssue.paperclipIssueId,
-            companyId: mapping.companyId,
-            paperclipApiBaseUrl
+            paperclipIssueId: importedIssue.paperclipIssueId
           });
         }
         continue;
@@ -9277,11 +9280,9 @@ async function synchronizePaperclipIssueStatuses(
       updatedStatusesCount += 1;
 
       if (shouldWakeImportedAssignee) {
-        await wakePaperclipAssigneeForImportedIssue(ctx, {
+        queuedImportedIssueWakeups.push({
           assigneeAgentId: paperclipIssue.assigneeAgentId,
-          paperclipIssueId: importedIssue.paperclipIssueId,
-          companyId: mapping.companyId,
-          paperclipApiBaseUrl
+          paperclipIssueId: importedIssue.paperclipIssueId
         });
       }
     } catch (error) {
@@ -9304,6 +9305,17 @@ async function synchronizePaperclipIssueStatuses(
       }
     }
   }
+
+  await mapWithConcurrency(
+    queuedImportedIssueWakeups,
+    IMPORTED_ISSUE_WAKEUP_CONCURRENCY,
+    async (queuedWakeup) => wakePaperclipAssigneeForImportedIssue(ctx, {
+      assigneeAgentId: queuedWakeup.assigneeAgentId,
+      paperclipIssueId: queuedWakeup.paperclipIssueId,
+      companyId: mapping.companyId,
+      paperclipApiBaseUrl
+    })
+  );
 
   return {
     updatedStatusesCount,
