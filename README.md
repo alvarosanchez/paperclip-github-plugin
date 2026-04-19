@@ -53,7 +53,7 @@ Long-running syncs continue in the background, so quick actions do not have to w
 
 ### Company-aware configuration
 
-GitHub tokens and sync cadence are shared at the plugin instance level, while repository mappings, advanced import defaults, and Paperclip board access are managed per company. When you open settings inside a specific company, you only edit that company's mappings and defaults.
+GitHub tokens, repository mappings, advanced import defaults, and Paperclip board access are managed per company, while sync cadence remains shared at the plugin instance level. When you open settings inside a specific company, you only edit that company's setup.
 
 ### Project binding that respects existing work
 
@@ -153,9 +153,9 @@ Additional behavior:
 
 The plugin is designed to avoid persisting raw credentials in plugin state.
 
-- GitHub tokens saved through the UI are stored as Paperclip secret references.
+- GitHub tokens saved through the UI are stored as per-company Paperclip secret references.
 - Paperclip board access tokens are also stored as per-company secret references.
-- The settings UI also keeps lightweight non-secret identity labels for those saved connections, so later visits can still show who the shared GitHub token and company board access are connected as.
+- The settings UI also keeps lightweight non-secret identity labels for those saved connections, so later visits can still show who each company GitHub token and board access are connected as.
 - On authenticated deployments, any selected propagation agents receive `GITHUB_TOKEN` as an agent env secret-ref binding that points at the same saved GitHub token secret instead of a copied raw token.
 - The worker resolves those secret references at runtime instead of storing raw tokens in plugin state.
 - On authenticated Paperclip deployments, sync is blocked until the relevant company has connected Paperclip board access.

@@ -2067,23 +2067,31 @@ test('fetchPaperclipHealth returns null when the Paperclip health endpoint is un
   }
 });
 
-test('mergePluginConfig preserves existing config while merging board access refs by company', () => {
+test('mergePluginConfig preserves existing config while merging token and board access refs by company', () => {
   const result = mergePluginConfig(
     {
-      githubTokenRef: 'github-secret-ref',
+      githubTokenRefs: {
+        'company-1': 'github-secret-ref-1'
+      },
       paperclipBoardApiTokenRefs: {
         'company-1': 'board-secret-ref-1'
       },
       customFlag: true
     },
     {
+      githubTokenRefs: {
+        'company-2': 'github-secret-ref-2'
+      },
       paperclipBoardApiTokenRefs: {
         'company-2': 'board-secret-ref-2'
       }
     }
   );
 
-  assert.equal(result.githubTokenRef, 'github-secret-ref');
+  assert.deepEqual(result.githubTokenRefs, {
+    'company-1': 'github-secret-ref-1',
+    'company-2': 'github-secret-ref-2'
+  });
   assert.deepEqual(result.paperclipBoardApiTokenRefs, {
     'company-1': 'board-secret-ref-1',
     'company-2': 'board-secret-ref-2'
@@ -2125,7 +2133,7 @@ test('manifest exposes GitHub Sync page, sidebar, dashboard, and settings UI met
   assert.ok(manifest.capabilities.includes('issue.comments.read'));
   assert.ok(manifest.capabilities.includes('issue.comments.create'));
   assert.ok(manifest.capabilities.includes('agents.read'));
-  assert.equal((manifest.instanceConfigSchema as { properties?: Record<string, unknown> }).properties?.githubTokenRef ? 'present' : 'missing', 'present');
+  assert.equal((manifest.instanceConfigSchema as { properties?: Record<string, unknown> }).properties?.githubTokenRefs ? 'present' : 'missing', 'present');
   assert.equal((manifest.instanceConfigSchema as { properties?: Record<string, unknown> }).properties?.paperclipBoardApiTokenRefs ? 'present' : 'missing', 'present');
   const pullRequestsPageSlot = manifest.ui?.slots?.find((slot) => slot.id === 'paperclip-github-plugin-project-pull-requests-page');
   const projectSidebarItemSlot = manifest.ui?.slots?.find((slot) => slot.id === 'paperclip-github-plugin-project-pull-requests-sidebar-item');
@@ -6385,7 +6393,9 @@ test('settings.registration reports a configured token without resolving the sav
   const harness = createTestHarness({
     manifest,
     config: {
-      githubTokenRef: 'github-secret-ref'
+      githubTokenRefs: {
+        'company-1': 'github-secret-ref'
+      }
     }
   });
   await plugin.definition.setup(harness.ctx);
@@ -6399,10 +6409,48 @@ test('settings.registration reports a configured token without resolving the sav
   const result = await harness.getData<{
     githubTokenConfigured?: boolean;
     syncState?: { status?: string };
-  }>('settings.registration');
+  }>('settings.registration', {
+    companyId: 'company-1'
+  });
 
   assert.equal(result.githubTokenConfigured, true);
   assert.equal(result.syncState?.status, 'idle');
+  assert.equal(resolveCount, 0);
+});
+
+test('settings.registration reports company-specific GitHub token setup without resolving the saved secret', async () => {
+  const harness = createTestHarness({ manifest });
+  await plugin.definition.setup(harness.ctx);
+
+  let resolveCount = 0;
+  harness.ctx.secrets.resolve = async () => {
+    resolveCount += 1;
+    throw new Error('GitHub token resolution should not happen for settings data.');
+  };
+
+  await harness.performAction('settings.saveRegistration', {
+    companyId: 'company-1',
+    githubTokenRefs: {
+      'company-1': 'github-secret-ref-1'
+    }
+  });
+
+  const companyOneResult = await harness.getData<{
+    githubTokenConfigured?: boolean;
+    githubTokenLogin?: string;
+  }>('settings.registration', {
+    companyId: 'company-1'
+  });
+  const companyTwoResult = await harness.getData<{
+    githubTokenConfigured?: boolean;
+    githubTokenLogin?: string;
+  }>('settings.registration', {
+    companyId: 'company-2'
+  });
+
+  assert.equal(companyOneResult.githubTokenConfigured, true);
+  assert.equal(companyOneResult.githubTokenLogin, undefined);
+  assert.equal(companyTwoResult.githubTokenConfigured, false);
   assert.equal(resolveCount, 0);
 });
 
@@ -6411,7 +6459,10 @@ test('settings.saveRegistration persists the saved GitHub login label for later 
   await plugin.definition.setup(harness.ctx);
 
   const saveResult = await harness.performAction('settings.saveRegistration', {
-    githubTokenRef: 'github-secret-ref',
+    companyId: 'company-1',
+    githubTokenRefs: {
+      'company-1': 'github-secret-ref'
+    },
     githubTokenLogin: 'octocat'
   }) as {
     githubTokenLogin?: string;
@@ -6423,15 +6474,21 @@ test('settings.saveRegistration persists the saved GitHub login label for later 
     scopeKind: 'instance',
     stateKey: 'paperclip-github-plugin-settings'
   }) as {
+    githubTokenRefs?: Record<string, string>;
     githubTokenLogin?: string;
   };
 
+  assert.deepEqual(savedSettings.githubTokenRefs, {
+    'company-1': 'github-secret-ref'
+  });
   assert.equal(savedSettings.githubTokenLogin, 'octocat');
 
   const registrationResult = await harness.getData<{
     githubTokenConfigured?: boolean;
     githubTokenLogin?: string;
-  }>('settings.registration');
+  }>('settings.registration', {
+    companyId: 'company-1'
+  });
 
   assert.equal(registrationResult.githubTokenConfigured, true);
   assert.equal(registrationResult.githubTokenLogin, 'octocat');

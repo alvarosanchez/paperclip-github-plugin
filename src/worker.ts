@@ -87,7 +87,9 @@ type PaperclipIssueUpdatePatchWithLabels = Parameters<PluginSetupContext['issues
   labels?: PaperclipIssueLabel[];
 };
 type PaperclipLabelDirectory = Map<string, PaperclipIssueLabel[]>;
+type GitHubTokenRefs = Record<string, string>;
 type PaperclipBoardApiTokenRefs = Record<string, string>;
+type GitHubTokenLoginByCompanyId = Record<string, string>;
 type PaperclipBoardAccessIdentityByCompanyId = Record<string, string>;
 type CompanyAdvancedSettingsByCompanyId = Record<string, GitHubSyncAdvancedSettings>;
 type ProjectPullRequestFilter = 'all' | 'mergeable' | 'reviewable' | 'failing';
@@ -335,6 +337,8 @@ interface GitHubSyncSettings {
   syncState: SyncRunState;
   scheduleFrequencyMinutes: number;
   paperclipApiBaseUrl?: string;
+  githubTokenRefs?: GitHubTokenRefs;
+  githubTokenLoginByCompanyId?: GitHubTokenLoginByCompanyId;
   githubTokenRef?: string;
   githubTokenLogin?: string;
   paperclipBoardApiTokenRefs?: PaperclipBoardApiTokenRefs;
@@ -345,6 +349,7 @@ interface GitHubSyncSettings {
 }
 
 interface GitHubSyncConfig {
+  githubTokenRefs?: GitHubTokenRefs;
   githubTokenRef?: string;
   githubToken?: string;
   paperclipBoardApiTokenRefs?: PaperclipBoardApiTokenRefs;
@@ -2281,6 +2286,28 @@ function normalizeGitHubTokenRef(value: unknown): string | undefined {
   return normalizeSecretRef(value);
 }
 
+function normalizeGitHubTokenRefs(value: unknown): GitHubTokenRefs | undefined {
+  if (!value || typeof value !== 'object') {
+    return undefined;
+  }
+
+  const entries = Object.entries(value as Record<string, unknown>)
+    .map(([companyId, secretRef]) => {
+      const normalizedCompanyId = normalizeCompanyId(companyId);
+      const normalizedSecretRef = normalizeGitHubTokenRef(secretRef);
+      return normalizedCompanyId && normalizedSecretRef
+        ? [normalizedCompanyId, normalizedSecretRef] as const
+        : null;
+    })
+    .filter((entry): entry is readonly [string, string] => entry !== null);
+
+  if (entries.length === 0) {
+    return undefined;
+  }
+
+  return Object.fromEntries(entries);
+}
+
 function formatUtcTimestamp(value: string): string {
   const parsed = new Date(value);
   if (Number.isNaN(parsed.getTime())) {
@@ -3211,7 +3238,7 @@ async function hydrateRecoveredPaperclipIssueGitHubLink(
 
   let octokit: Octokit;
   try {
-    octokit = await createGitHubToolOctokit(ctx);
+    octokit = await createGitHubToolOctokit(ctx, fallbackLink.companyId);
   } catch {
     return null;
   }
@@ -3437,8 +3464,8 @@ async function buildToolbarSyncState(
 ): Promise<Record<string, unknown>> {
   const settings = await getActiveOrCurrentSyncState(ctx);
   const config = await getResolvedConfig(ctx);
-  const githubTokenConfigured = hasConfiguredGithubToken(settings, config);
   const companyId = typeof input.companyId === 'string' && input.companyId.trim() ? input.companyId.trim() : undefined;
+  const githubTokenConfigured = hasConfiguredGithubToken(settings, config, companyId);
   const entityId = typeof input.entityId === 'string' && input.entityId.trim() ? input.entityId.trim() : undefined;
   const entityType = typeof input.entityType === 'string' && input.entityType.trim() ? input.entityType.trim() : undefined;
   const savedMappingCount = companyId
@@ -3730,9 +3757,11 @@ function getPublicSettings(
   settings: GitHubSyncSettings
 ): Omit<
   GitHubSyncSettings,
-  'githubTokenRef' | 'paperclipBoardApiTokenRefs' | 'paperclipBoardAccessIdentityByCompanyId' | 'companyAdvancedSettingsByCompanyId'
+  'githubTokenRefs' | 'githubTokenLoginByCompanyId' | 'githubTokenRef' | 'paperclipBoardApiTokenRefs' | 'paperclipBoardAccessIdentityByCompanyId' | 'companyAdvancedSettingsByCompanyId'
 > {
   const {
+    githubTokenRefs: _githubTokenRefs,
+    githubTokenLoginByCompanyId: _githubTokenLoginByCompanyId,
     githubTokenRef: _githubTokenRef,
     paperclipBoardApiTokenRefs: _paperclipBoardApiTokenRefs,
     paperclipBoardAccessIdentityByCompanyId: _paperclipBoardAccessIdentityByCompanyId,
@@ -3740,6 +3769,19 @@ function getPublicSettings(
     ...publicSettings
   } = settings;
   return publicSettings;
+}
+
+function getGitHubTokenLogin(
+  settings: Pick<GitHubSyncSettings, 'githubTokenLoginByCompanyId' | 'githubTokenLogin'>,
+  companyId?: string
+): string | undefined {
+  const normalizedCompanyId = normalizeCompanyId(companyId);
+  if (!normalizedCompanyId) {
+    return undefined;
+  }
+
+  return normalizeOptionalString(settings.githubTokenLoginByCompanyId?.[normalizedCompanyId])
+    ?? normalizeOptionalString(settings.githubTokenLogin);
 }
 
 function getPaperclipBoardAccessIdentity(
@@ -3759,18 +3801,21 @@ function getPublicSettingsForScope(
   companyId?: string
 ): Omit<
   GitHubSyncSettings,
-  'githubTokenRef' | 'paperclipBoardApiTokenRefs' | 'paperclipBoardAccessIdentityByCompanyId' | 'companyAdvancedSettingsByCompanyId'
+  'githubTokenRefs' | 'githubTokenLoginByCompanyId' | 'githubTokenRef' | 'paperclipBoardApiTokenRefs' | 'paperclipBoardAccessIdentityByCompanyId' | 'companyAdvancedSettingsByCompanyId'
 > & {
   advancedSettings: GitHubSyncAdvancedSettings;
+  githubTokenLogin?: string;
   paperclipBoardAccessIdentity?: string;
 } {
   const publicSettings = getPublicSettings(settings);
+  const githubTokenLogin = getGitHubTokenLogin(settings, companyId);
   const paperclipBoardAccessIdentity = getPaperclipBoardAccessIdentity(settings, companyId);
 
   return {
     ...publicSettings,
     mappings: filterMappingsByCompany(publicSettings.mappings, companyId),
     advancedSettings: getCompanyAdvancedSettings(settings, companyId),
+    ...(githubTokenLogin ? { githubTokenLogin } : {}),
     ...(paperclipBoardAccessIdentity ? { paperclipBoardAccessIdentity } : {})
   };
 }
@@ -4173,12 +4218,14 @@ function normalizeConfig(value: unknown): GitHubSyncConfig {
   }
 
   const record = value as Record<string, unknown>;
+  const githubTokenRefs = normalizeGitHubTokenRefs(record.githubTokenRefs);
   const githubTokenRef = normalizeGitHubTokenRef(record.githubTokenRef);
   const githubToken = normalizeGitHubToken(record.githubToken);
   const paperclipBoardApiTokenRefs = normalizePaperclipBoardApiTokenRefs(record.paperclipBoardApiTokenRefs);
   const paperclipApiBaseUrl = normalizePaperclipApiBaseUrl(record.paperclipApiBaseUrl);
 
   return {
+    ...(githubTokenRefs ? { githubTokenRefs } : {}),
     ...(githubTokenRef ? { githubTokenRef } : {}),
     ...(githubToken ? { githubToken } : {}),
     ...(paperclipBoardApiTokenRefs ? { paperclipBoardApiTokenRefs } : {}),
@@ -4286,6 +4333,30 @@ function normalizePaperclipBoardApiTokenRefs(value: unknown): PaperclipBoardApiT
       const normalizedSecretRef = normalizeSecretRef(secretRef);
       return normalizedCompanyId && normalizedSecretRef
         ? [normalizedCompanyId, normalizedSecretRef] as const
+        : null;
+    })
+    .filter((entry): entry is readonly [string, string] => entry !== null);
+
+  if (entries.length === 0) {
+    return undefined;
+  }
+
+  return Object.fromEntries(entries);
+}
+
+function normalizeGitHubTokenLoginByCompanyId(
+  value: unknown
+): GitHubTokenLoginByCompanyId | undefined {
+  if (!value || typeof value !== 'object') {
+    return undefined;
+  }
+
+  const entries = Object.entries(value as Record<string, unknown>)
+    .map(([companyId, login]) => {
+      const normalizedCompanyId = normalizeCompanyId(companyId);
+      const normalizedLogin = normalizeOptionalString(login);
+      return normalizedCompanyId && normalizedLogin
+        ? [normalizedCompanyId, normalizedLogin] as const
         : null;
     })
     .filter((entry): entry is readonly [string, string] => entry !== null);
@@ -4619,6 +4690,8 @@ function normalizeSettings(value: unknown): GitHubSyncSettings {
 
   const record = value as Record<string, unknown>;
   const paperclipApiBaseUrl = resolvePaperclipApiBaseUrl(record.paperclipApiBaseUrl);
+  const githubTokenRefs = normalizeGitHubTokenRefs(record.githubTokenRefs);
+  const githubTokenLoginByCompanyId = normalizeGitHubTokenLoginByCompanyId(record.githubTokenLoginByCompanyId);
   const githubTokenRef = normalizeGitHubTokenRef(record.githubTokenRef);
   const githubTokenLogin = normalizeOptionalString(record.githubTokenLogin);
   const paperclipBoardApiTokenRefs = normalizePaperclipBoardApiTokenRefs(record.paperclipBoardApiTokenRefs);
@@ -4632,6 +4705,8 @@ function normalizeSettings(value: unknown): GitHubSyncSettings {
     syncState: normalizeSyncState(record.syncState),
     scheduleFrequencyMinutes: normalizeScheduleFrequencyMinutes(record.scheduleFrequencyMinutes),
     ...(paperclipApiBaseUrl ? { paperclipApiBaseUrl } : {}),
+    ...(githubTokenRefs ? { githubTokenRefs } : {}),
+    ...(githubTokenLoginByCompanyId ? { githubTokenLoginByCompanyId } : {}),
     ...(githubTokenRef ? { githubTokenRef } : {}),
     ...(githubTokenLogin ? { githubTokenLogin } : {}),
     ...(paperclipBoardApiTokenRefs ? { paperclipBoardApiTokenRefs } : {}),
@@ -8852,10 +8927,28 @@ async function getResolvedConfig(ctx: PluginSetupContext): Promise<GitHubSyncCon
 }
 
 function getConfiguredGithubTokenSource(
-  settings: Pick<GitHubSyncSettings, 'githubTokenRef'> | null | undefined,
-  config: GitHubSyncConfig
+  settings: Pick<GitHubSyncSettings, 'githubTokenRefs' | 'githubTokenRef'> | null | undefined,
+  config: GitHubSyncConfig,
+  companyId?: string
 ): ResolvedGitHubTokenSource {
-  const secretRef = normalizeGitHubTokenRef(config.githubTokenRef) ?? normalizeGitHubTokenRef(settings?.githubTokenRef);
+  const normalizedCompanyId = normalizeCompanyId(companyId);
+  const secretRef = normalizedCompanyId
+    ? normalizeSecretRef(config.githubTokenRefs?.[normalizedCompanyId])
+      ?? normalizeSecretRef(settings?.githubTokenRefs?.[normalizedCompanyId])
+      ?? normalizeGitHubTokenRef(config.githubTokenRef)
+      ?? normalizeGitHubTokenRef(settings?.githubTokenRef)
+    : normalizeGitHubTokenRef(config.githubTokenRef)
+      ?? normalizeGitHubTokenRef(settings?.githubTokenRef)
+      ?? (() => {
+        const configuredRefs = [
+          ...Object.values(config.githubTokenRefs ?? {}),
+          ...Object.values(settings?.githubTokenRefs ?? {})
+        ]
+          .map((value) => normalizeGitHubTokenRef(value))
+          .filter((value): value is string => Boolean(value));
+        const uniqueRefs = [...new Set(configuredRefs)];
+        return uniqueRefs.length === 1 ? uniqueRefs[0] : undefined;
+      })();
   if (secretRef) {
     return { secretRef };
   }
@@ -8865,18 +8958,31 @@ function getConfiguredGithubTokenSource(
 }
 
 function getConfiguredGithubTokenRef(
-  settings: Pick<GitHubSyncSettings, 'githubTokenRef'> | null | undefined,
-  config: GitHubSyncConfig
+  settings: Pick<GitHubSyncSettings, 'githubTokenRefs' | 'githubTokenRef'> | null | undefined,
+  config: GitHubSyncConfig,
+  companyId?: string
 ): string | undefined {
-  return getConfiguredGithubTokenSource(settings, config).secretRef;
+  return getConfiguredGithubTokenSource(settings, config, companyId).secretRef;
 }
 
 function hasConfiguredGithubToken(
-  settings: Pick<GitHubSyncSettings, 'githubTokenRef'> | null | undefined,
-  config: GitHubSyncConfig
+  settings: Pick<GitHubSyncSettings, 'githubTokenRefs' | 'githubTokenRef'> | null | undefined,
+  config: GitHubSyncConfig,
+  companyId?: string
 ): boolean {
-  const configuredTokenSource = getConfiguredGithubTokenSource(settings, config);
-  return Boolean(configuredTokenSource.secretRef ?? configuredTokenSource.token);
+  const configuredTokenSource = getConfiguredGithubTokenSource(settings, config, companyId);
+  if (configuredTokenSource.secretRef ?? configuredTokenSource.token) {
+    return true;
+  }
+
+  if (normalizeCompanyId(companyId)) {
+    return false;
+  }
+
+  return Boolean(
+    (settings?.githubTokenRefs && Object.keys(settings.githubTokenRefs).length > 0)
+    || (config.githubTokenRefs && Object.keys(config.githubTokenRefs).length > 0)
+  );
 }
 
 function getSavedPaperclipBoardApiTokenRef(
@@ -9004,13 +9110,14 @@ async function resolvePaperclipApiAuthTokens(
 async function resolveGithubToken(
   ctx: PluginSetupContext,
   options: {
-    settings?: Pick<GitHubSyncSettings, 'githubTokenRef'> | null | undefined;
+    companyId?: string;
+    settings?: Pick<GitHubSyncSettings, 'githubTokenRefs' | 'githubTokenRef'> | null | undefined;
     config?: GitHubSyncConfig;
   } = {}
 ): Promise<string> {
   const settings = options.settings ?? normalizeSettings(await ctx.state.get(SETTINGS_SCOPE));
   const config = options.config ?? await getResolvedConfig(ctx);
-  const configuredTokenSource = getConfiguredGithubTokenSource(settings, config);
+  const configuredTokenSource = getConfiguredGithubTokenSource(settings, config, options.companyId);
   if (configuredTokenSource.secretRef) {
     return ctx.secrets.resolve(configuredTokenSource.secretRef);
   }
@@ -9117,8 +9224,8 @@ async function executeGitHubTool(
   }
 }
 
-async function createGitHubToolOctokit(ctx: PluginSetupContext): Promise<Octokit> {
-  const token = (await resolveGithubToken(ctx)).trim();
+async function createGitHubToolOctokit(ctx: PluginSetupContext, companyId?: string): Promise<Octokit> {
+  const token = (await resolveGithubToken(ctx, { companyId })).trim();
   if (!token) {
     throw new Error(MISSING_GITHUB_TOKEN_SYNC_MESSAGE);
   }
@@ -11108,7 +11215,7 @@ async function getOrLoadCachedProjectPullRequestMetricsEntry(
   }
 
   const loadMetricsPromise = (async () => {
-    const resolvedOctokit = octokit ?? await createGitHubToolOctokit(ctx);
+    const resolvedOctokit = octokit ?? await createGitHubToolOctokit(ctx, scope.companyId);
     const metrics = await listProjectPullRequestMetrics(resolvedOctokit, scope);
     return cacheProjectPullRequestMetricsEntry(scope, metrics);
   })();
@@ -11158,7 +11265,7 @@ async function getOrLoadCachedProjectPullRequestCount(
   }
 
   const loadCountPromise = (async () => {
-    const resolvedOctokit = octokit ?? await createGitHubToolOctokit(ctx);
+    const resolvedOctokit = octokit ?? await createGitHubToolOctokit(ctx, scope.companyId);
     const totalOpenPullRequests = await listProjectPullRequestCount(resolvedOctokit, scope);
 
     return setCacheValue(
@@ -11312,7 +11419,7 @@ async function getOrLoadProjectPullRequestSummaryRecordsForNumbers(
 
   const missingPullRequestNumbers = normalizedPullRequestNumbers.filter((pullRequestNumber) => !recordsByNumber.has(pullRequestNumber));
   if (missingPullRequestNumbers.length > 0) {
-    const resolvedOctokit = octokit ?? await createGitHubToolOctokit(ctx);
+    const resolvedOctokit = octokit ?? await createGitHubToolOctokit(ctx, scope.companyId);
     const loadedRecords = await listProjectPullRequestSummaryRecordsByNumbers(
       ctx,
       resolvedOctokit,
@@ -11362,7 +11469,7 @@ async function getOrLoadCachedProjectPullRequestSummary(
       });
     }
 
-    const resolvedOctokit = octokit ?? await createGitHubToolOctokit(ctx);
+    const resolvedOctokit = octokit ?? await createGitHubToolOctokit(ctx, scope.companyId);
     const remainingSummary = await listProjectPullRequestSummaryRecords(ctx, resolvedOctokit, scope, {
       collectAll: true,
       first: PROJECT_PULL_REQUEST_SUMMARY_BATCH_SIZE,
@@ -11527,7 +11634,7 @@ async function buildProjectPullRequestsPageData(
 
   const scope = await requireProjectPullRequestScope(ctx, input, projectMappings);
   const config = await getResolvedConfig(ctx);
-  if (!hasConfiguredGithubToken(settings, config)) {
+  if (!hasConfiguredGithubToken(settings, config, scope.companyId)) {
     return {
       status: 'missing_token',
       projectId,
@@ -11547,7 +11654,7 @@ async function buildProjectPullRequestsPageData(
   }
 
   try {
-    const octokit = await createGitHubToolOctokit(ctx);
+    const octokit = await createGitHubToolOctokit(ctx, scope.companyId);
     const pageCacheKey = buildProjectPullRequestPageCacheKey(scope, filter, pageIndex, cursor);
     const cachedPage = getFreshCacheValue(activeProjectPullRequestPageCache, pageCacheKey);
     if (cachedPage) {
@@ -11732,7 +11839,7 @@ async function buildProjectPullRequestMetricsData(
   }
 
   const config = await getResolvedConfig(ctx);
-  if (!hasConfiguredGithubToken(settings, config)) {
+  if (!hasConfiguredGithubToken(settings, config, companyId)) {
     return {
       status: 'missing_token',
       projectId,
@@ -11789,7 +11896,7 @@ async function buildProjectPullRequestCountData(
   }
 
   const config = await getResolvedConfig(ctx);
-  if (!hasConfiguredGithubToken(settings, config)) {
+  if (!hasConfiguredGithubToken(settings, config, companyId)) {
     return {
       status: 'missing_token',
       projectId,
@@ -11832,7 +11939,7 @@ async function buildSettingsTokenPermissionAuditData(
 
   const settings = normalizeSettings(await ctx.state.get(SETTINGS_SCOPE));
   const config = await getResolvedConfig(ctx);
-  if (!hasConfiguredGithubToken(settings, config)) {
+  if (!hasConfiguredGithubToken(settings, config, requestedCompanyId)) {
     return {
       status: 'missing_token',
       allRequiredPermissionsGranted: false,
@@ -11855,7 +11962,7 @@ async function buildSettingsTokenPermissionAuditData(
   }
 
   try {
-    const octokit = await createGitHubToolOctokit(ctx);
+    const octokit = await createGitHubToolOctokit(ctx, requestedCompanyId);
     const repositories = await Promise.all(
       [
         ...new Map(
@@ -11951,7 +12058,7 @@ async function buildProjectPullRequestDetailData(
   const cachedLinkedIssue = cachedSummaryRecord
     ? getLinkedPaperclipIssueFromProjectPullRequestRecord(cachedSummaryRecord)
     : undefined;
-  const octokit = await createGitHubToolOctokit(ctx);
+  const octokit = await createGitHubToolOctokit(ctx, scope.companyId);
   const response = await octokit.rest.pulls.get({
     owner: scope.repository.owner,
     repo: scope.repository.repo,
@@ -12111,7 +12218,7 @@ async function createProjectPullRequestPaperclipIssue(
   }
 
   const scope = await requireProjectPullRequestScope(ctx, input);
-  const octokit = await createGitHubToolOctokit(ctx);
+  const octokit = await createGitHubToolOctokit(ctx, scope.companyId);
   const pullRequestResponse = await octokit.rest.pulls.get({
     owner: scope.repository.owner,
     repo: scope.repository.repo,
@@ -12205,7 +12312,7 @@ async function updateProjectPullRequestBranch(
   }
 
   const scope = await requireProjectPullRequestScope(ctx, input);
-  const octokit = await createGitHubToolOctokit(ctx);
+  const octokit = await createGitHubToolOctokit(ctx, scope.companyId);
   const pullRequestResponse = await octokit.rest.pulls.get({
     owner: scope.repository.owner,
     repo: scope.repository.repo,
@@ -12282,7 +12389,7 @@ async function mergeProjectPullRequest(
   }
 
   const scope = await requireProjectPullRequestScope(ctx, input);
-  const octokit = await createGitHubToolOctokit(ctx);
+  const octokit = await createGitHubToolOctokit(ctx, scope.companyId);
   const response = await octokit.rest.pulls.merge({
     owner: scope.repository.owner,
     repo: scope.repository.repo,
@@ -12313,7 +12420,7 @@ async function closeProjectPullRequest(
   }
 
   const scope = await requireProjectPullRequestScope(ctx, input);
-  const octokit = await createGitHubToolOctokit(ctx);
+  const octokit = await createGitHubToolOctokit(ctx, scope.companyId);
   const response = await octokit.rest.pulls.update({
     owner: scope.repository.owner,
     repo: scope.repository.repo,
@@ -12349,7 +12456,7 @@ async function addProjectPullRequestComment(
   }
 
   const scope = await requireProjectPullRequestScope(ctx, input);
-  const octokit = await createGitHubToolOctokit(ctx);
+  const octokit = await createGitHubToolOctokit(ctx, scope.companyId);
   const response = await createProjectPullRequestGitHubComment(octokit, scope, pullRequestNumber, body);
 
   invalidateProjectPullRequestCaches(scope);
@@ -12431,7 +12538,7 @@ async function requestProjectPullRequestCopilotAction(
   }
 
   const scope = await requireProjectPullRequestScope(ctx, input);
-  const octokit = await createGitHubToolOctokit(ctx);
+  const octokit = await createGitHubToolOctokit(ctx, scope.companyId);
   const pullRequestResponse = await octokit.rest.pulls.get({
     owner: scope.repository.owner,
     repo: scope.repository.repo,
@@ -12574,7 +12681,7 @@ async function reviewProjectPullRequest(
 
   const body = typeof input.body === 'string' ? input.body.trim() : '';
   const scope = await requireProjectPullRequestScope(ctx, input);
-  const octokit = await createGitHubToolOctokit(ctx);
+  const octokit = await createGitHubToolOctokit(ctx, scope.companyId);
   let response;
   try {
     response = await octokit.rest.pulls.createReview({
@@ -12631,7 +12738,7 @@ async function rerunProjectPullRequestCi(
   }
 
   const scope = await requireProjectPullRequestScope(ctx, input);
-  const octokit = await createGitHubToolOctokit(ctx);
+  const octokit = await createGitHubToolOctokit(ctx, scope.companyId);
   const pullRequestResponse = await octokit.rest.pulls.get({
     owner: scope.repository.owner,
     repo: scope.repository.repo,
@@ -12939,7 +13046,9 @@ async function performSync(
   const settings = normalizeSettings(await ctx.state.get(SETTINGS_SCOPE));
   const config = await getResolvedConfig(ctx);
   const importRegistry = normalizeImportRegistry(await ctx.state.get(IMPORT_REGISTRY_SCOPE));
-  const token = typeof options.resolvedToken === 'string' ? options.resolvedToken : await resolveGithubToken(ctx);
+  const token = typeof options.resolvedToken === 'string'
+    ? options.resolvedToken
+    : await resolveGithubToken(ctx, { companyId: options.target?.companyId });
   const paperclipApiBaseUrl = getConfiguredPaperclipApiBaseUrl(settings, config);
   const mappings = getSyncableMappingsForTarget(settings.mappings, options.target);
   activePaperclipApiAuthTokensByCompanyId = null;
@@ -13569,6 +13678,7 @@ async function startSync(
     ctx.state.get(SETTINGS_SCOPE).then((value) => normalizeSettings(value))
   ]);
   const token = await resolveGithubToken(ctx, {
+    companyId: options.target?.companyId,
     config,
     settings: persistedSettings
   }).catch(() => '');
@@ -13677,7 +13787,7 @@ function registerGitHubAgentTools(ctx: PluginSetupContext): void {
     getGitHubAgentToolDeclaration('search_repository_items'),
     async (params, runCtx) => executeGitHubTool(async () => {
       const input = getToolInputRecord(params);
-      const octokit = await createGitHubToolOctokit(ctx);
+      const octokit = await createGitHubToolOctokit(ctx, runCtx.companyId);
       const repository = await resolveGitHubToolRepository(ctx, runCtx, input);
       const rawQuery = normalizeOptionalToolString(input.query);
       if (!rawQuery) {
@@ -13754,7 +13864,7 @@ function registerGitHubAgentTools(ctx: PluginSetupContext): void {
     async (params, runCtx) => executeGitHubTool(async () => {
       const input = getToolInputRecord(params);
       const target = await resolveGitHubIssueToolTarget(ctx, runCtx, input);
-      const octokit = await createGitHubToolOctokit(ctx);
+      const octokit = await createGitHubToolOctokit(ctx, runCtx.companyId);
       const response = await octokit.rest.issues.get({
         owner: target.repository.owner,
         repo: target.repository.repo,
@@ -13807,7 +13917,7 @@ function registerGitHubAgentTools(ctx: PluginSetupContext): void {
     async (params, runCtx) => executeGitHubTool(async () => {
       const input = getToolInputRecord(params);
       const target = await resolveGitHubIssueToolTarget(ctx, runCtx, input);
-      const octokit = await createGitHubToolOctokit(ctx);
+      const octokit = await createGitHubToolOctokit(ctx, runCtx.companyId);
       const comments = await listAllGitHubIssueComments(octokit, target.repository, target.issueNumber);
 
       return buildToolSuccessResult(
@@ -13827,7 +13937,7 @@ function registerGitHubAgentTools(ctx: PluginSetupContext): void {
     async (params, runCtx) => executeGitHubTool(async () => {
       const input = getToolInputRecord(params);
       const target = await resolveGitHubIssueToolTarget(ctx, runCtx, input);
-      const octokit = await createGitHubToolOctokit(ctx);
+      const octokit = await createGitHubToolOctokit(ctx, runCtx.companyId);
       const currentResponse = await octokit.rest.issues.get({
         owner: target.repository.owner,
         repo: target.repository.repo,
@@ -13929,7 +14039,7 @@ function registerGitHubAgentTools(ctx: PluginSetupContext): void {
     async (params, runCtx) => executeGitHubTool(async () => {
       const input = getToolInputRecord(params);
       const target = await resolveGitHubIssueToolTarget(ctx, runCtx, input);
-      const octokit = await createGitHubToolOctokit(ctx);
+      const octokit = await createGitHubToolOctokit(ctx, runCtx.companyId);
       const body = appendAiAuthorshipFooter(String(input.body ?? ''), normalizeOptionalToolString(input.llmModel) ?? '');
       const response = await octokit.rest.issues.createComment({
         owner: target.repository.owner,
@@ -13971,7 +14081,7 @@ function registerGitHubAgentTools(ctx: PluginSetupContext): void {
         throw new Error('head, base, and title are required.');
       }
 
-      const octokit = await createGitHubToolOctokit(ctx);
+      const octokit = await createGitHubToolOctokit(ctx, runCtx.companyId);
       const response = await octokit.rest.pulls.create({
         owner: repository.owner,
         repo: repository.repo,
@@ -14010,7 +14120,7 @@ function registerGitHubAgentTools(ctx: PluginSetupContext): void {
     async (params, runCtx) => executeGitHubTool(async () => {
       const input = getToolInputRecord(params);
       const target = await resolveGitHubPullRequestToolTarget(ctx, runCtx, input);
-      const octokit = await createGitHubToolOctokit(ctx);
+      const octokit = await createGitHubToolOctokit(ctx, runCtx.companyId);
       const response = await octokit.rest.pulls.get({
         owner: target.repository.owner,
         repo: target.repository.repo,
@@ -14060,7 +14170,7 @@ function registerGitHubAgentTools(ctx: PluginSetupContext): void {
     async (params, runCtx) => executeGitHubTool(async () => {
       const input = getToolInputRecord(params);
       const target = await resolveGitHubPullRequestToolTarget(ctx, runCtx, input);
-      const octokit = await createGitHubToolOctokit(ctx);
+      const octokit = await createGitHubToolOctokit(ctx, runCtx.companyId);
       let currentResponse = await octokit.rest.pulls.get({
         owner: target.repository.owner,
         repo: target.repository.repo,
@@ -14134,7 +14244,7 @@ function registerGitHubAgentTools(ctx: PluginSetupContext): void {
     async (params, runCtx) => executeGitHubTool(async () => {
       const input = getToolInputRecord(params);
       const target = await resolveGitHubPullRequestToolTarget(ctx, runCtx, input);
-      const octokit = await createGitHubToolOctokit(ctx);
+      const octokit = await createGitHubToolOctokit(ctx, runCtx.companyId);
       const files = await listAllPullRequestFiles(octokit, target.repository, target.pullRequestNumber);
 
       return buildToolSuccessResult(
@@ -14154,7 +14264,7 @@ function registerGitHubAgentTools(ctx: PluginSetupContext): void {
     async (params, runCtx) => executeGitHubTool(async () => {
       const input = getToolInputRecord(params);
       const target = await resolveGitHubPullRequestToolTarget(ctx, runCtx, input);
-      const octokit = await createGitHubToolOctokit(ctx);
+      const octokit = await createGitHubToolOctokit(ctx, runCtx.companyId);
       const pullRequestResponse = await octokit.rest.pulls.get({
         owner: target.repository.owner,
         repo: target.repository.repo,
@@ -14262,7 +14372,7 @@ function registerGitHubAgentTools(ctx: PluginSetupContext): void {
     async (params, runCtx) => executeGitHubTool(async () => {
       const input = getToolInputRecord(params);
       const target = await resolveGitHubPullRequestToolTarget(ctx, runCtx, input);
-      const octokit = await createGitHubToolOctokit(ctx);
+      const octokit = await createGitHubToolOctokit(ctx, runCtx.companyId);
       const threads = await listDetailedPullRequestReviewThreads(octokit, target.repository, target.pullRequestNumber);
 
       return buildToolSuccessResult(
@@ -14279,7 +14389,7 @@ function registerGitHubAgentTools(ctx: PluginSetupContext): void {
   ctx.tools.register(
     'reply_to_review_thread',
     getGitHubAgentToolDeclaration('reply_to_review_thread'),
-    async (params) => executeGitHubTool(async () => {
+    async (params, runCtx) => executeGitHubTool(async () => {
       const input = getToolInputRecord(params);
       const threadId = normalizeOptionalToolString(input.threadId);
       if (!threadId) {
@@ -14287,7 +14397,7 @@ function registerGitHubAgentTools(ctx: PluginSetupContext): void {
       }
 
       const body = appendAiAuthorshipFooter(String(input.body ?? ''), normalizeOptionalToolString(input.llmModel) ?? '');
-      const octokit = await createGitHubToolOctokit(ctx);
+      const octokit = await createGitHubToolOctokit(ctx, runCtx.companyId);
       const response = await octokit.graphql<GitHubAddPullRequestReviewThreadReplyMutationResult>(
         GITHUB_ADD_PULL_REQUEST_REVIEW_THREAD_REPLY_MUTATION,
         {
@@ -14318,14 +14428,14 @@ function registerGitHubAgentTools(ctx: PluginSetupContext): void {
   ctx.tools.register(
     'resolve_review_thread',
     getGitHubAgentToolDeclaration('resolve_review_thread'),
-    async (params) => executeGitHubTool(async () => {
+    async (params, runCtx) => executeGitHubTool(async () => {
       const input = getToolInputRecord(params);
       const threadId = normalizeOptionalToolString(input.threadId);
       if (!threadId) {
         throw new Error('threadId is required.');
       }
 
-      const octokit = await createGitHubToolOctokit(ctx);
+      const octokit = await createGitHubToolOctokit(ctx, runCtx.companyId);
       const response = await octokit.graphql<GitHubResolveReviewThreadMutationResult>(
         GITHUB_RESOLVE_REVIEW_THREAD_MUTATION,
         {
@@ -14352,14 +14462,14 @@ function registerGitHubAgentTools(ctx: PluginSetupContext): void {
   ctx.tools.register(
     'unresolve_review_thread',
     getGitHubAgentToolDeclaration('unresolve_review_thread'),
-    async (params) => executeGitHubTool(async () => {
+    async (params, runCtx) => executeGitHubTool(async () => {
       const input = getToolInputRecord(params);
       const threadId = normalizeOptionalToolString(input.threadId);
       if (!threadId) {
         throw new Error('threadId is required.');
       }
 
-      const octokit = await createGitHubToolOctokit(ctx);
+      const octokit = await createGitHubToolOctokit(ctx, runCtx.companyId);
       const response = await octokit.graphql<GitHubUnresolveReviewThreadMutationResult>(
         GITHUB_UNRESOLVE_REVIEW_THREAD_MUTATION,
         {
@@ -14395,7 +14505,7 @@ function registerGitHubAgentTools(ctx: PluginSetupContext): void {
         throw new Error('Provide at least one user reviewer or team reviewer.');
       }
 
-      const octokit = await createGitHubToolOctokit(ctx);
+      const octokit = await createGitHubToolOctokit(ctx, runCtx.companyId);
       const response = await octokit.rest.pulls.requestReviewers({
         owner: target.repository.owner,
         repo: target.repository.repo,
@@ -14422,14 +14532,14 @@ function registerGitHubAgentTools(ctx: PluginSetupContext): void {
   ctx.tools.register(
     'list_organization_projects',
     getGitHubAgentToolDeclaration('list_organization_projects'),
-    async (params) => executeGitHubTool(async () => {
+    async (params, runCtx) => executeGitHubTool(async () => {
       const input = getToolInputRecord(params);
       const organization = normalizeOptionalToolString(input.organization);
       if (!organization) {
         throw new Error('organization is required.');
       }
 
-      const octokit = await createGitHubToolOctokit(ctx);
+      const octokit = await createGitHubToolOctokit(ctx, runCtx.companyId);
       const projects = await listGitHubOrganizationProjects(octokit, organization, {
         includeClosed: input.includeClosed === true,
         query: normalizeOptionalToolString(input.query),
@@ -14452,7 +14562,7 @@ function registerGitHubAgentTools(ctx: PluginSetupContext): void {
     async (params, runCtx) => executeGitHubTool(async () => {
       const input = getToolInputRecord(params);
       const target = await resolveGitHubPullRequestToolTarget(ctx, runCtx, input);
-      const octokit = await createGitHubToolOctokit(ctx);
+      const octokit = await createGitHubToolOctokit(ctx, runCtx.companyId);
       const projectTarget = await resolveGitHubProjectToolTarget(octokit, input);
       const pullRequest = await getGitHubPullRequestProjectItems(
         octokit,
@@ -14538,17 +14648,14 @@ const plugin = definePlugin({
       const importRegistry = normalizeImportRegistry(await ctx.state.get(IMPORT_REGISTRY_SCOPE));
       const normalizedSettings = normalizeSettings(saved);
       const config = await getResolvedConfig(ctx);
-      const githubTokenRef = getConfiguredGithubTokenRef(normalizedSettings, config);
       const paperclipApiBaseUrl = getConfiguredPaperclipApiBaseUrl(normalizedSettings, config);
-      const githubTokenConfigured = hasConfiguredGithubToken(normalizedSettings, config);
+      const githubTokenConfigured = hasConfiguredGithubToken(normalizedSettings, config, requestedCompanyId);
       const configuredBoardTokenRef = getConfiguredPaperclipBoardApiTokenRef(config, requestedCompanyId);
       const savedBoardTokenRef = getSavedPaperclipBoardApiTokenRef(normalizedSettings, requestedCompanyId);
-      const settingsWithResolvedToken = githubTokenRef === normalizedSettings.githubTokenRef
-        && paperclipApiBaseUrl === normalizedSettings.paperclipApiBaseUrl
+      const settingsWithResolvedToken = paperclipApiBaseUrl === normalizedSettings.paperclipApiBaseUrl
         ? normalizedSettings
         : {
             ...normalizedSettings,
-            ...(githubTokenRef ? { githubTokenRef } : {}),
             ...(paperclipApiBaseUrl ? { paperclipApiBaseUrl } : {})
           };
       const settingsForResponse = sanitizeSettingsForCurrentSetup(settingsWithResolvedToken, {
@@ -14633,15 +14740,45 @@ const plugin = definePlugin({
       const config = await getResolvedConfig(ctx);
       const record = input && typeof input === 'object' ? input as Record<string, unknown> : {};
       const requestedCompanyId = normalizeCompanyId(record.companyId);
+      const requestedGitHubTokenLogin =
+        'githubTokenLogin' in record ? normalizeOptionalString(record.githubTokenLogin) : undefined;
       const hasMappingsPatch = 'mappings' in record;
       const hasAdvancedSettingsPatch = 'advancedSettings' in record;
+      const nextGitHubTokenRefs = {
+        ...(previous.githubTokenRefs ?? {})
+      };
+      if (requestedCompanyId) {
+        const companyScopedGitHubTokenRef = normalizeGitHubTokenRefs(record.githubTokenRefs)?.[requestedCompanyId]
+          ?? ('githubTokenRef' in record ? normalizeGitHubTokenRef(record.githubTokenRef) : undefined);
+        if (companyScopedGitHubTokenRef) {
+          nextGitHubTokenRefs[requestedCompanyId] = companyScopedGitHubTokenRef;
+        }
+      }
+      const githubTokenRefs = Object.keys(nextGitHubTokenRefs).length > 0 ? nextGitHubTokenRefs : undefined;
       const githubTokenRef =
-        'githubTokenRef' in record
+        !requestedCompanyId && 'githubTokenRef' in record
           ? normalizeGitHubTokenRef(record.githubTokenRef)
           : normalizeGitHubTokenRef(previous.githubTokenRef) ?? normalizeGitHubTokenRef(config.githubTokenRef);
+      const nextGitHubTokenLoginByCompanyId = {
+        ...(previous.githubTokenLoginByCompanyId ?? {})
+      };
+      if (requestedCompanyId && 'githubTokenLogin' in record) {
+        const companyScopedGitHubTokenLogin = requestedGitHubTokenLogin;
+        if (companyScopedGitHubTokenLogin) {
+          nextGitHubTokenLoginByCompanyId[requestedCompanyId] = companyScopedGitHubTokenLogin;
+        } else {
+          delete nextGitHubTokenLoginByCompanyId[requestedCompanyId];
+        }
+      }
+      const githubTokenLoginByCompanyId =
+        Object.keys(nextGitHubTokenLoginByCompanyId).length > 0
+          ? nextGitHubTokenLoginByCompanyId
+          : undefined;
       const githubTokenLogin =
-        'githubTokenLogin' in record
-          ? normalizeOptionalString(record.githubTokenLogin)
+        !requestedCompanyId && 'githubTokenLogin' in record
+          ? requestedGitHubTokenLogin
+          : requestedCompanyId && requestedGitHubTokenLogin
+            ? requestedGitHubTokenLogin
           : previous.githubTokenLogin;
       const inputMappings = hasMappingsPatch ? normalizeMappings(record.mappings) : previous.mappings;
       const nextCompanyAdvancedSettingsByCompanyId = {
@@ -14670,6 +14807,8 @@ const plugin = definePlugin({
           'paperclipApiBaseUrl' in record
             ? resolveTrustedPaperclipApiBaseUrlInput(record.paperclipApiBaseUrl, previous, config)
             : getConfiguredPaperclipApiBaseUrl(previous, config),
+        ...(githubTokenRefs ? { githubTokenRefs } : {}),
+        ...(githubTokenLoginByCompanyId ? { githubTokenLoginByCompanyId } : {}),
         ...(githubTokenLogin ? { githubTokenLogin } : {}),
         paperclipBoardApiTokenRefs: previous.paperclipBoardApiTokenRefs,
         paperclipBoardAccessIdentityByCompanyId: previous.paperclipBoardAccessIdentityByCompanyId,
@@ -14690,6 +14829,8 @@ const plugin = definePlugin({
         syncState: previous.syncState,
         scheduleFrequencyMinutes: current.scheduleFrequencyMinutes,
         ...(current.paperclipApiBaseUrl ? { paperclipApiBaseUrl: current.paperclipApiBaseUrl } : {}),
+        ...(current.githubTokenRefs ? { githubTokenRefs: current.githubTokenRefs } : {}),
+        ...(current.githubTokenLoginByCompanyId ? { githubTokenLoginByCompanyId: current.githubTokenLoginByCompanyId } : {}),
         ...(current.githubTokenLogin ? { githubTokenLogin: current.githubTokenLogin } : {}),
         ...(current.paperclipBoardApiTokenRefs ? { paperclipBoardApiTokenRefs: current.paperclipBoardApiTokenRefs } : {}),
         ...(current.paperclipBoardAccessIdentityByCompanyId
@@ -14701,15 +14842,22 @@ const plugin = definePlugin({
         ...(githubTokenRef ? { githubTokenRef } : {}),
         updatedAt: new Date().toISOString()
       }, {
-        hasToken: hasConfiguredGithubToken({ githubTokenRef }, config),
+        hasToken: hasConfiguredGithubToken({
+          ...(githubTokenRefs ? { githubTokenRefs } : {}),
+          ...(githubTokenRef ? { githubTokenRef } : {})
+        }, config),
         hasMappings: getSyncableMappings(nextMappings).length > 0
       });
 
       await ctx.state.set(SETTINGS_SCOPE, next);
       await ctx.state.set(SYNC_STATE_SCOPE, next.syncState);
       clearGitHubRepositoryTokenCapabilityAudits();
+      const scopedGitHubTokenLogin =
+        (requestedCompanyId && 'githubTokenLogin' in record ? requestedGitHubTokenLogin : undefined)
+        ?? getGitHubTokenLogin(next, requestedCompanyId);
       return {
         ...getPublicSettingsForScope(next, requestedCompanyId),
+        ...(scopedGitHubTokenLogin ? { githubTokenLogin: scopedGitHubTokenLogin } : {}),
         availableAssignees: requestedCompanyId
           ? await listAvailableAssignees(ctx, requestedCompanyId)
           : []

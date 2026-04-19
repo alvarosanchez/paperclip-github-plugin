@@ -10345,8 +10345,12 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
     tokenStatus === 'invalid'
         ? 'GitHub rejected the last token.'
         : tokenStatus === 'required'
-          ? 'Add a token.'
-          : 'Shared token.';
+          ? hasCompanyContext
+            ? 'Add a token for this company.'
+            : 'Select a company.'
+          : hasCompanyContext
+            ? 'Company token.'
+            : 'Saved in one or more companies.';
   const tokenDescription = tokenStatusDescription;
   const tokenPermissionAuditData = tokenPermissionAudit.data;
   const tokenPermissionAuditMeta = getGitHubTokenPermissionAuditMeta(tokenPermissionAuditData);
@@ -10564,7 +10568,7 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
             <span className={`ghsync__scope-pill ${hasCompanyContext ? 'ghsync__scope-pill--company' : 'ghsync__scope-pill--mixed'}`}>
               {hasCompanyContext ? currentCompanyName : 'No company'}
             </span>
-            <span className="ghsync__scope-pill ghsync__scope-pill--global">Shared</span>
+            <span className="ghsync__scope-pill ghsync__scope-pill--company">Company</span>
             <span className="ghsync__badge ghsync__badge--neutral">
               <LoadingSpinner size="sm" label="Loading settings" />
               Loading
@@ -10723,15 +10727,21 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
       typeof options.githubTokenSecretRef === 'string' && options.githubTokenSecretRef.trim()
         ? options.githubTokenSecretRef.trim()
         : undefined;
+    const companyId = hostContext.companyId;
 
     if (!githubTokenSecretRef) {
+      if (!companyId) {
+        throw new Error('Company context is required to propagate the GitHub token.');
+      }
+
       const pluginId = await resolveCurrentPluginId(pluginIdFromLocation);
       if (!pluginId) {
         throw new Error('Plugin id is required to propagate the GitHub token to selected agents.');
       }
 
       const currentConfigResponse = await fetchJson<PluginConfigResponse | null>(`/api/plugins/${pluginId}/config`);
-      githubTokenSecretRef = normalizePluginConfig(currentConfigResponse?.configJson).githubTokenRef;
+      const normalizedConfig = normalizePluginConfig(currentConfigResponse?.configJson);
+      githubTokenSecretRef = normalizedConfig.githubTokenRefs?.[companyId] ?? normalizedConfig.githubTokenRef;
     }
 
     if (!githubTokenSecretRef) {
@@ -10793,11 +10803,15 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
       const secret = await resolveOrCreateCompanySecret(companyId, secretName, trimmedToken);
 
       await patchPluginConfig(pluginId, {
-        githubTokenRef: secret.id
+        githubTokenRefs: {
+          [companyId]: secret.id
+        }
       });
       await saveRegistration({
         companyId,
-        githubTokenRef: secret.id,
+        githubTokenRefs: {
+          [companyId]: secret.id
+        },
         githubTokenLogin: validation.login
       });
 
@@ -11169,7 +11183,7 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
           <span className={`ghsync__scope-pill ${hasCompanyContext ? 'ghsync__scope-pill--company' : 'ghsync__scope-pill--mixed'}`}>
             {hasCompanyContext ? currentCompanyName : 'No company'}
           </span>
-          <span className="ghsync__scope-pill ghsync__scope-pill--global">Shared</span>
+          <span className="ghsync__scope-pill ghsync__scope-pill--company">Company</span>
           <span className={`ghsync__badge ${getToneClass(tokenTone)}`}>
             <span className="ghsync__badge-dot" aria-hidden="true" />
             {tokenBannerLabel}
@@ -11197,7 +11211,7 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
                 <div className="ghsync__section-title-row">
                   <h4>GitHub access</h4>
                   <div className="ghsync__section-tags">
-                    <span className="ghsync__scope-pill ghsync__scope-pill--global">Shared</span>
+                    <span className="ghsync__scope-pill ghsync__scope-pill--company">Company</span>
                   </div>
                 </div>
                 <p>{tokenDescription}</p>
@@ -11210,11 +11224,9 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
             {!hasCompanyContext ? (
               <div className="ghsync__locked">
                 <div>
-                  <strong>{hasSavedToken ? 'Shared token ready' : 'Company required'}</strong>
+                  <strong>Company required</strong>
                   <span>
-                    {hasSavedToken
-                      ? 'Open a company to replace it.'
-                      : 'Open a company to save it.'}
+                    Open a company to view or save its token.
                   </span>
                 </div>
                 <span className="ghsync__badge ghsync__badge--neutral">Read only</span>
@@ -11271,8 +11283,8 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
             ) : (
               <div className="ghsync__connected">
                 <div>
-                  <strong>{validatedLogin ? `Authenticated as ${validatedLogin}` : 'Shared token ready'}</strong>
-                  <span>Shared across all companies.</span>
+                  <strong>{validatedLogin ? `Authenticated as ${validatedLogin}` : 'Company token ready'}</strong>
+                  <span>{`Used only for ${currentCompanyName}.`}</span>
                 </div>
                 <button
                   type="button"

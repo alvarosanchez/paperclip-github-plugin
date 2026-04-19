@@ -46,6 +46,13 @@ export const manifest: PaperclipPluginManifestV1 = {
   instanceConfigSchema: {
     type: 'object',
     properties: {
+      githubTokenRefs: {
+        type: 'object',
+        title: 'GitHub Token Secrets',
+        additionalProperties: {
+          type: 'string'
+        }
+      },
       githubTokenRef: {
         type: 'string',
         title: 'GitHub Token Secret'

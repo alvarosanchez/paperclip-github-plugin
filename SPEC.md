@@ -6,7 +6,7 @@ GitHub Sync is a Paperclip plugin for registering one or more GitHub repositorie
 
 The plugin MUST provide a settings page inside Paperclip where an operator can configure:
 
-- a GitHub token stored as a Paperclip secret reference
+- a GitHub token stored as a company-scoped Paperclip secret reference
 - an optional external config file at `${PAPERCLIP_HOME:-~/.paperclip}/plugins/github-sync/config.json` for worker-only global values such as a raw `githubToken`
 - Paperclip board access, which is optional on unauthenticated deployments and required when the Paperclip deployment reports `deploymentMode: "authenticated"`
 - on authenticated deployments, a company-scoped multi-select of agents that should receive `GITHUB_TOKEN` propagation from the saved GitHub token secret
@@ -33,7 +33,7 @@ The settings page MUST allow saving mappings and triggering a manual sync.
 
 - The raw GitHub token MUST NOT be persisted in plugin state.
 - Saving a token from the settings UI MUST create or reuse a company secret through the Paperclip host API.
-- The plugin MUST persist only the resulting secret UUID in plugin instance config.
+- The plugin MUST persist only the resulting secret UUID, keyed by company, in plugin instance config.
 - The worker MUST resolve that secret UUID at runtime via `ctx.secrets.resolve(...)`.
 - The plugin MAY persist lightweight non-secret display metadata such as the validated GitHub login alongside the saved GitHub token secret ref so hosted UI can keep connected-state copy consistent across refreshes without resolving the secret.
 - When authenticated deployment settings select agents for GitHub token propagation, the hosted settings UI MUST patch those agents through the host API so `adapterConfig.env.GITHUB_TOKEN` points at that same secret UUID instead of copying the raw token value.
