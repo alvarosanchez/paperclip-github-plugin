@@ -2372,6 +2372,71 @@ test('fetchPaperclipHealth returns null when the Paperclip health endpoint is un
   }
 });
 
+test('resolveGitHubIssueDetailTabState hides unlinked issue detail views while preserving loading, error, and cached-detail states', async () => {
+  const uiModule = await importFreshUiModule() as {
+    resolveGitHubIssueDetailTabState?: unknown;
+  };
+
+  assert.equal(typeof uiModule.resolveGitHubIssueDetailTabState, 'function');
+
+  const resolveGitHubIssueDetailTabState = uiModule.resolveGitHubIssueDetailTabState as (params: {
+    loadingIssueId?: boolean;
+    detailsLoading?: boolean;
+    detailsError?: boolean;
+    issueDetails?: { paperclipIssueId?: string } | null;
+  }) => 'loading' | 'error' | 'hidden' | 'ready';
+
+  assert.equal(
+    resolveGitHubIssueDetailTabState({
+      loadingIssueId: false,
+      detailsLoading: false,
+      detailsError: false,
+      issueDetails: null
+    }),
+    'hidden'
+  );
+  assert.equal(
+    resolveGitHubIssueDetailTabState({
+      loadingIssueId: true,
+      detailsLoading: false,
+      detailsError: false,
+      issueDetails: null
+    }),
+    'loading'
+  );
+  assert.equal(
+    resolveGitHubIssueDetailTabState({
+      loadingIssueId: false,
+      detailsLoading: false,
+      detailsError: true,
+      issueDetails: null
+    }),
+    'error'
+  );
+  assert.equal(
+    resolveGitHubIssueDetailTabState({
+      loadingIssueId: false,
+      detailsLoading: false,
+      detailsError: false,
+      issueDetails: {
+        paperclipIssueId: 'issue-123'
+      }
+    }),
+    'ready'
+  );
+  assert.equal(
+    resolveGitHubIssueDetailTabState({
+      loadingIssueId: false,
+      detailsLoading: false,
+      detailsError: true,
+      issueDetails: {
+        paperclipIssueId: 'issue-123'
+      }
+    }),
+    'ready'
+  );
+});
+
 test('mergePluginConfig preserves existing config while merging token and board access refs by company', () => {
   const result = mergePluginConfig(
     {

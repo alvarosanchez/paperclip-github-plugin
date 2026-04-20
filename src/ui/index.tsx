@@ -271,6 +271,8 @@ interface GitHubIssueDetailsData {
   syncedAt?: string;
 }
 
+type GitHubIssueDetailTabState = 'loading' | 'error' | 'hidden' | 'ready';
+
 interface IssueIdentifierResolutionData {
   issueId: string;
   issueIdentifier: string;
@@ -12956,12 +12958,18 @@ function GitHubSyncIssueDetailTabContent(props: {
   issueId?: string | null;
   loadingIssueId?: boolean;
   themeVars: React.CSSProperties;
-}): React.JSX.Element {
+}): React.JSX.Element | null {
   const details = usePluginData<GitHubIssueDetailsData | null>('issue.githubDetails', {
     ...(props.companyId ? { companyId: props.companyId } : {}),
     ...(props.issueId ? { issueId: props.issueId } : {})
   });
   const issueDetails = details.data?.paperclipIssueId === props.issueId ? details.data : null;
+  const detailTabState = resolveGitHubIssueDetailTabState({
+    loadingIssueId: props.loadingIssueId,
+    detailsLoading: details.loading,
+    detailsError: Boolean(details.error),
+    issueDetails
+  });
 
   useEffect(() => {
     if (!props.companyId || !props.issueId) {
@@ -12975,17 +12983,18 @@ function GitHubSyncIssueDetailTabContent(props: {
     }
   }, [details.refresh, props.companyId, props.issueId]);
 
+  if (detailTabState === 'hidden') {
+    return null;
+  }
+
   return (
     <section className="ghsync-issue-detail" style={props.themeVars}>
       <style>{EXTENSION_SURFACE_STYLES}</style>
 
-      {props.loadingIssueId || (details.loading && !issueDetails) ? <p className="ghsync-extension-empty">Loading GitHub sync details…</p> : null}
-      {details.error ? <p className="ghsync-extension-empty">{details.error.message}</p> : null}
-      {!props.loadingIssueId && !details.loading && !details.error && !issueDetails ? (
-        <p className="ghsync-extension-empty">GitHub Sync has not linked this Paperclip issue to a GitHub issue yet.</p>
-      ) : null}
+      {detailTabState === 'loading' ? <p className="ghsync-extension-empty">Loading GitHub sync details…</p> : null}
+      {detailTabState === 'error' && details.error ? <p className="ghsync-extension-empty">{details.error.message}</p> : null}
 
-      {issueDetails ? (
+      {detailTabState === 'ready' && issueDetails ? (
         <>
           <div className="ghsync-extension-heading">
             <div>
@@ -13076,7 +13085,28 @@ function GitHubSyncIssueDetailTabContent(props: {
   );
 }
 
-export function GitHubSyncIssueTaskDetailView(): React.JSX.Element {
+export function resolveGitHubIssueDetailTabState(params: {
+  loadingIssueId?: boolean;
+  detailsLoading?: boolean;
+  detailsError?: boolean;
+  issueDetails?: GitHubIssueDetailsData | null;
+}): GitHubIssueDetailTabState {
+  if (params.loadingIssueId || (params.detailsLoading && !params.issueDetails)) {
+    return 'loading';
+  }
+
+  if (params.issueDetails) {
+    return 'ready';
+  }
+
+  if (params.detailsError) {
+    return 'error';
+  }
+
+  return 'hidden';
+}
+
+export function GitHubSyncIssueTaskDetailView(): React.JSX.Element | null {
   const context = useHostContext();
   const themeMode = useResolvedThemeMode();
   const theme = themeMode === 'light' ? LIGHT_PALETTE : DARK_PALETTE;

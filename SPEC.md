@@ -114,6 +114,7 @@ The plugin MUST persist repository mappings, company-scoped advanced issue defau
 - The plugin MUST expose a dashboard widget contribution.
 - The plugin MUST expose a settings page contribution.
 - The plugin SHOULD expose an issue detail contribution for GitHub metadata.
+- The issue detail contribution SHOULD hide itself when the current Paperclip issue has no linked GitHub issue instead of rendering an unlinked empty-state placeholder.
 - The plugin SHOULD expose a project sidebar item that opens a project-scoped Pull Requests page for the mapped repository and can show the current open pull request count for mapped projects through a lightweight count read instead of the heavier summary-card metrics path.
 - The project pull request sidebar count, page, and metrics reads SHOULD tolerate saved mappings that are missing either the company id or the project id when the active Paperclip project context still identifies the intended mapping safely, and they SHOULD also fall back to the active project's bound GitHub repository when no saved sync mapping exists but the project workspace already defines that repository.
 - The project Pull Requests page SHOULD render live open pull request data for the mapped repository, including checks, an explicit up-to-date branch state, target branch badges, review summary, unresolved review-thread state, non-review comment counts, last-updated timestamps, Paperclip issue linkage, and quick actions.
