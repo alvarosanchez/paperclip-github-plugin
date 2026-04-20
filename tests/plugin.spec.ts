@@ -15299,6 +15299,128 @@ test('repeat sync.runNow keeps a live company-scoped sync in running state', asy
   }
 });
 
+test('company-scoped sync.runNow persists the completed scoped sync state', async () => {
+  const harness = createTestHarness({
+    manifest,
+    config: {
+      githubToken: 'ghp_test_token'
+    }
+  });
+  await plugin.definition.setup(harness.ctx);
+
+  await harness.performAction('settings.saveRegistration', {
+    mappings: [
+      {
+        id: 'mapping-a',
+        repositoryUrl: 'paperclipai/example-repo',
+        paperclipProjectName: 'Engineering',
+        paperclipProjectId: 'project-1',
+        companyId: 'company-1'
+      }
+    ],
+    syncState: {
+      status: 'idle'
+    }
+  });
+
+  const originalFetch = globalThis.fetch;
+
+  globalThis.fetch = async (input, init) => {
+    const rawUrl = getRequestUrl(input);
+    const url = new URL(rawUrl);
+
+    if (url.pathname === '/repos/paperclipai/example-repo/issues' && ['all', 'open'].includes(url.searchParams.get('state') ?? '')) {
+      return jsonResponse([
+        {
+          id: 1001,
+          number: 10,
+          title: 'Scoped sync success issue',
+          body: 'Body from GitHub',
+          html_url: 'https://github.com/paperclipai/example-repo/issues/10',
+          state: 'open'
+        }
+      ]);
+    }
+
+    if (url.pathname === '/graphql') {
+      const { query, variables } = getGraphqlRequest(init);
+      const issueNumber = typeof variables.issueNumber === 'number' ? variables.issueNumber : undefined;
+
+      if (query.includes('query GitHubIssueParentRelationships')) {
+        return graphqlIssueParentRelationshipsResponse([
+          {
+            issueNumber: 10
+          }
+        ]);
+      }
+
+      if (query.includes('query GitHubIssueStatusSnapshot') && issueNumber === 10) {
+        return graphqlResponse({
+          repository: {
+            issue: {
+              number: 10,
+              state: 'OPEN',
+              stateReason: null,
+              comments: {
+                totalCount: 0
+              },
+              closedByPullRequestsReferences: {
+                pageInfo: {
+                  hasNextPage: false,
+                  endCursor: null
+                },
+                nodes: []
+              }
+            }
+          }
+        });
+      }
+    }
+
+    throw new Error(`Unexpected GitHub request: ${url.toString()}`);
+  };
+
+  try {
+    const result = await harness.performAction('sync.runNow', {
+      companyId: 'company-1',
+      waitForCompletion: true
+    }) as {
+      syncState: {
+        status: string;
+      };
+    };
+
+    assert.equal(result.syncState.status, 'success');
+
+    const savedState = harness.getState({
+      scopeKind: 'instance',
+      stateKey: 'paperclip-github-plugin-settings'
+    }) as {
+      syncState: {
+        status: string;
+      };
+      syncStateByCompanyId?: Record<string, {
+        status?: string;
+      }>;
+    };
+
+    assert.equal(savedState.syncState.status, 'success');
+    assert.equal(savedState.syncStateByCompanyId?.['company-1']?.status, 'success');
+
+    const scopedSettings = await harness.getData<{
+      syncState: {
+        status: string;
+      };
+    }>('settings.registration', {
+      companyId: 'company-1'
+    });
+
+    assert.equal(scopedSettings.syncState.status, 'success');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test('worker can cancel a long-running manual sync after it has started', async () => {
   const harness = createTestHarness({
     manifest,
@@ -15383,7 +15505,9 @@ test('worker can cancel a long-running manual sync after it has started', async 
   };
 
   try {
-    const runningResult = await harness.performAction('sync.runNow', {}) as {
+    const runningResult = await harness.performAction('sync.runNow', {
+      companyId: 'company-1'
+    }) as {
       syncState: { status: string; message?: string };
     };
     assert.equal(runningResult.syncState.status, 'running');
@@ -15429,6 +15553,13 @@ test('worker can cancel a long-running manual sync after it has started', async 
         syncedIssuesCount?: number;
         message?: string;
       };
+      syncStateByCompanyId?: Record<string, {
+        status?: string;
+        createdIssuesCount?: number;
+        skippedIssuesCount?: number;
+        syncedIssuesCount?: number;
+        message?: string;
+      }>;
     };
 
     assert.equal(cancelledState.syncState.status, 'cancelled');
@@ -15437,6 +15568,22 @@ test('worker can cancel a long-running manual sync after it has started', async 
     assert.equal(cancelledState.syncState.syncedIssuesCount, 1);
     assert.match(cancelledState.syncState.message ?? '', /was cancelled before it finished/i);
     assert.match(cancelledState.syncState.message ?? '', /completed 0 of 1 issues/i);
+    assert.equal(cancelledState.syncStateByCompanyId?.['company-1']?.status, 'cancelled');
+    assert.equal(cancelledState.syncStateByCompanyId?.['company-1']?.createdIssuesCount, 0);
+    assert.equal(cancelledState.syncStateByCompanyId?.['company-1']?.skippedIssuesCount, 0);
+    assert.equal(cancelledState.syncStateByCompanyId?.['company-1']?.syncedIssuesCount, 1);
+    assert.match(cancelledState.syncStateByCompanyId?.['company-1']?.message ?? '', /was cancelled before it finished/i);
+    assert.match(cancelledState.syncStateByCompanyId?.['company-1']?.message ?? '', /completed 0 of 1 issues/i);
+
+    const scopedSettings = await harness.getData<{
+      syncState: {
+        status: string;
+      };
+    }>('settings.registration', {
+      companyId: 'company-1'
+    });
+
+    assert.equal(scopedSettings.syncState.status, 'cancelled');
   } finally {
     globalThis.fetch = originalFetch;
   }
