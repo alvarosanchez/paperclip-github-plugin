@@ -71,7 +71,7 @@ Paperclip issue linkage on the queue prefers the GitHub issue that the pull requ
 
 ### Agent workflows built in
 
-Paperclip agents can search GitHub for duplicates, read and update issues, post comments, create pull requests, inspect changed files and CI, reply to review threads, resolve or unresolve threads, request reviewers, list org-level GitHub Projects, and associate pull requests with those projects without leaving the Paperclip plugin surface.
+Paperclip agents can search GitHub for duplicates, read and update issues, post comments, create pull requests, inspect changed files and CI, reply to review threads, resolve or unresolve threads, request reviewers, search org-level GitHub Projects, and associate pull requests with those projects without leaving the Paperclip plugin surface.
 
 ## Requirements
 
@@ -185,9 +185,9 @@ The plugin exposes GitHub workflow tools to Paperclip agents, including:
 - issue reads, comment reads, comment writes, and metadata updates
 - pull request creation, reads, updates, changed-file inspection, and CI-check inspection
 - review-thread reads, replies, resolve and unresolve actions, and reviewer requests
-- organization-level GitHub Project listing and pull-request-to-project association
+- organization-level GitHub Project search/listing and pull-request-to-project association
 
-When an agent posts a GitHub comment or review-thread reply through the plugin, the message includes a footer disclosing that it was created by a Paperclip AI agent and which model was used.
+When an agent sends GitHub body content through the plugin, including issue bodies, pull request descriptions, comments, and review-thread replies, the plugin adds a footer disclosing that it was created by a Paperclip AI agent. If the tool caller supplies `llmModel`, the footer also includes the model name.
 
 Current host caveat: on authenticated Paperclip deployments, the Paperclip host currently guards `GET /api/plugins/tools` and `POST /api/plugins/tools/execute` with board authentication before dispatching to any plugin worker. If an agent run does not have board access for the target company, GitHub Sync tool discovery and execution fail with `403 {"error":"Board access required"}` before this plugin's worker code runs.
 

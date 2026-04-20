@@ -1281,6 +1281,239 @@ test('add_issue_comment appends the required AI footer with the llm model', asyn
   }
 });
 
+test('add_issue_comment appends a generic AI footer when llmModel is omitted', async () => {
+  const harness = await createGitHubAgentToolHarness();
+  const originalFetch = globalThis.fetch;
+  let postedBody = '';
+
+  globalThis.fetch = async (input, init) => {
+    const url = new URL(getRequestUrl(input));
+    if (url.pathname === '/repos/paperclipai/example-repo/issues/12/comments') {
+      const requestBody = getJsonRequestBody(init);
+      postedBody = typeof requestBody?.body === 'string' ? requestBody.body : '';
+      return jsonResponse({
+        id: 9002,
+        html_url: 'https://github.com/paperclipai/example-repo/issues/12#issuecomment-9002',
+        body: postedBody,
+        created_at: '2026-04-12T10:01:00Z',
+        user: {
+          login: 'paperclip-bot'
+        }
+      }, 201);
+    }
+
+    throw new Error(`Unexpected GitHub request: ${url.toString()}`);
+  };
+
+  try {
+    const result = await harness.executeTool('add_issue_comment', {
+      issueNumber: 12,
+      body: 'I am still investigating this.'
+    }, {
+      companyId: 'company-1',
+      projectId: 'project-1'
+    });
+
+    assert.ok(!result.error);
+    assert.match(postedBody, /^I am still investigating this\./);
+    assert.match(postedBody, /Created by a Paperclip AI agent\./);
+    assert.doesNotMatch(postedBody, /using /);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('create_pull_request appends the required AI footer to the pull request body', async () => {
+  const harness = await createGitHubAgentToolHarness();
+  const originalFetch = globalThis.fetch;
+  let createdBody = '';
+
+  globalThis.fetch = async (input, init) => {
+    const url = new URL(getRequestUrl(input));
+    if (url.pathname === '/repos/paperclipai/example-repo/pulls') {
+      const requestBody = getJsonRequestBody(init);
+      createdBody = typeof requestBody?.body === 'string' ? requestBody.body : '';
+      return jsonResponse({
+        number: 21,
+        title: 'Fix the importer',
+        body: createdBody,
+        html_url: 'https://github.com/paperclipai/example-repo/pull/21',
+        state: 'open',
+        draft: false,
+        head: {
+          ref: 'feature/fix-importer'
+        },
+        base: {
+          ref: 'main'
+        }
+      }, 201);
+    }
+
+    throw new Error(`Unexpected GitHub request: ${url.toString()}`);
+  };
+
+  try {
+    const result = await harness.executeTool('create_pull_request', {
+      head: 'feature/fix-importer',
+      base: 'main',
+      title: 'Fix the importer',
+      body: 'This closes the sync gap.',
+      llmModel: 'gpt-5.4'
+    }, {
+      companyId: 'company-1',
+      projectId: 'project-1'
+    });
+
+    assert.ok(!result.error);
+    assert.match(createdBody, /^This closes the sync gap\./);
+    assert.match(createdBody, /Created by a Paperclip AI agent using gpt-5\.4\./);
+    assert.match((result.data as { pullRequest: { body: string } }).pullRequest.body, /gpt-5\.4/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('update_issue refreshes the AI footer when updating the issue body', async () => {
+  const harness = await createGitHubAgentToolHarness();
+  const originalFetch = globalThis.fetch;
+  let updatedBody = '';
+
+  globalThis.fetch = async (input, init) => {
+    const url = new URL(getRequestUrl(input));
+    if (url.pathname === '/repos/paperclipai/example-repo/issues/12' && init?.method === 'PATCH') {
+      const requestBody = getJsonRequestBody(init);
+      updatedBody = typeof requestBody?.body === 'string' ? requestBody.body : '';
+      return jsonResponse({
+        id: 1200,
+        number: 12,
+        title: 'Importer bug',
+        body: updatedBody,
+        html_url: 'https://github.com/paperclipai/example-repo/issues/12',
+        state: 'open',
+        comments: 3,
+        user: {
+          login: 'octocat'
+        },
+        assignees: [],
+        labels: [],
+        milestone: null
+      });
+    }
+
+    if (url.pathname === '/repos/paperclipai/example-repo/issues/12') {
+      return jsonResponse({
+        id: 1200,
+        number: 12,
+        title: 'Importer bug',
+        body: 'Original issue body.',
+        html_url: 'https://github.com/paperclipai/example-repo/issues/12',
+        state: 'open',
+        comments: 3,
+        user: {
+          login: 'octocat'
+        },
+        assignees: [],
+        labels: [],
+        milestone: null
+      });
+    }
+
+    throw new Error(`Unexpected GitHub request: ${url.toString()}`);
+  };
+
+  try {
+    const result = await harness.executeTool('update_issue', {
+      issueNumber: 12,
+      body: 'Updated issue details.\n\n---\nCreated by a Paperclip AI agent using old-model.',
+      llmModel: 'gpt-5.4'
+    }, {
+      companyId: 'company-1',
+      projectId: 'project-1'
+    });
+
+    assert.ok(!result.error);
+    assert.equal(updatedBody.match(/Created by a Paperclip AI agent/g)?.length ?? 0, 1);
+    assert.doesNotMatch(updatedBody, /old-model/);
+    assert.match(updatedBody, /Created by a Paperclip AI agent using gpt-5\.4\./);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('update_pull_request refreshes the AI footer when updating the pull request body', async () => {
+  const harness = await createGitHubAgentToolHarness();
+  const originalFetch = globalThis.fetch;
+  let updatedBody = '';
+
+  globalThis.fetch = async (input, init) => {
+    const url = new URL(getRequestUrl(input));
+    if (url.pathname === '/repos/paperclipai/example-repo/pulls/7' && init?.method === 'PATCH') {
+      const requestBody = getJsonRequestBody(init);
+      updatedBody = typeof requestBody?.body === 'string' ? requestBody.body : '';
+      return jsonResponse({
+        number: 7,
+        title: 'Fix the importer',
+        body: updatedBody,
+        html_url: 'https://github.com/paperclipai/example-repo/pull/7',
+        state: 'open',
+        draft: false,
+        merged: false,
+        mergeable: true,
+        mergeable_state: 'clean',
+        head: {
+          ref: 'feature/fix-importer',
+          sha: 'abc123'
+        },
+        base: {
+          ref: 'main'
+        }
+      });
+    }
+
+    if (url.pathname === '/repos/paperclipai/example-repo/pulls/7') {
+      return jsonResponse({
+        number: 7,
+        title: 'Fix the importer',
+        body: 'Existing PR description.',
+        html_url: 'https://github.com/paperclipai/example-repo/pull/7',
+        state: 'open',
+        draft: false,
+        merged: false,
+        mergeable: true,
+        mergeable_state: 'clean',
+        head: {
+          ref: 'feature/fix-importer',
+          sha: 'abc123'
+        },
+        base: {
+          ref: 'main'
+        }
+      });
+    }
+
+    throw new Error(`Unexpected GitHub request: ${url.toString()}`);
+  };
+
+  try {
+    const result = await harness.executeTool('update_pull_request', {
+      pullRequestNumber: 7,
+      body: 'Updated PR summary.\n\n---\nCreated by a Paperclip AI agent using old-model.',
+      llmModel: 'gpt-5.4'
+    }, {
+      companyId: 'company-1',
+      projectId: 'project-1'
+    });
+
+    assert.ok(!result.error);
+    assert.equal(updatedBody.match(/Created by a Paperclip AI agent/g)?.length ?? 0, 1);
+    assert.doesNotMatch(updatedBody, /old-model/);
+    assert.match(updatedBody, /Created by a Paperclip AI agent using gpt-5\.4\./);
+    assert.match((result.data as { pullRequest: { body: string } }).pullRequest.body, /gpt-5\.4/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test('issue-targeted tools reject repository overrides that do not match the linked GitHub issue repository', async () => {
   const harness = await createGitHubAgentToolHarness();
   harness.seed({

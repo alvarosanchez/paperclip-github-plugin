@@ -40,7 +40,7 @@ const projectNumberProperty = {
 
 const llmModelProperty = {
   type: 'string',
-  description: 'Exact LLM name used to draft the comment. Required so the plugin can append the mandatory AI-authorship footer.'
+  description: 'Exact LLM name used to draft the GitHub content. When provided, the plugin includes it in the mandatory AI-authorship footer.'
 } as const;
 
 const issueTargetSchema = {
@@ -158,7 +158,7 @@ export const GITHUB_AGENT_TOOLS: PluginToolDeclaration[] = [
   {
     name: 'update_issue',
     displayName: 'Update Issue',
-    description: 'Update GitHub issue fields such as title, body, state, labels, assignees, or milestone.',
+    description: 'Update GitHub issue fields such as title, body, state, labels, assignees, or milestone. When body is provided, the plugin appends an AI-authorship footer and includes llmModel when supplied.',
     parametersSchema: {
       type: 'object',
       additionalProperties: false,
@@ -173,6 +173,7 @@ export const GITHUB_AGENT_TOOLS: PluginToolDeclaration[] = [
         body: {
           type: 'string'
         },
+        llmModel: llmModelProperty,
         state: {
           type: 'string',
           enum: ['open', 'closed']
@@ -224,11 +225,11 @@ export const GITHUB_AGENT_TOOLS: PluginToolDeclaration[] = [
   {
     name: 'add_issue_comment',
     displayName: 'Add Issue Comment',
-    description: 'Post a comment on a GitHub issue or pull request. Provide only the human-facing message body; include llmModel so the plugin can append the required AI-authorship footer.',
+    description: 'Post a comment on a GitHub issue or pull request. Provide only the human-facing message body; the plugin appends the required AI-authorship footer and includes llmModel when supplied.',
     parametersSchema: {
       type: 'object',
       additionalProperties: false,
-      required: ['body', 'llmModel'],
+      required: ['body'],
       ...issueTargetSchema,
       properties: {
         repository: repositoryProperty,
@@ -245,7 +246,7 @@ export const GITHUB_AGENT_TOOLS: PluginToolDeclaration[] = [
   {
     name: 'create_pull_request',
     displayName: 'Create Pull Request',
-    description: 'Open a GitHub pull request once the implementation branch is pushed.',
+    description: 'Open a GitHub pull request once the implementation branch is pushed. When body is provided, the plugin appends an AI-authorship footer and includes llmModel when supplied.',
     parametersSchema: {
       type: 'object',
       additionalProperties: false,
@@ -266,6 +267,7 @@ export const GITHUB_AGENT_TOOLS: PluginToolDeclaration[] = [
         body: {
           type: 'string'
         },
+        llmModel: llmModelProperty,
         draft: {
           type: 'boolean'
         }
@@ -290,7 +292,7 @@ export const GITHUB_AGENT_TOOLS: PluginToolDeclaration[] = [
   {
     name: 'update_pull_request',
     displayName: 'Update Pull Request',
-    description: 'Edit pull request title, body, base branch, open or close it, or convert between draft and ready for review.',
+    description: 'Edit pull request title, body, base branch, open or close it, or convert between draft and ready for review. When body is provided, the plugin appends an AI-authorship footer and includes llmModel when supplied.',
     parametersSchema: {
       type: 'object',
       additionalProperties: false,
@@ -305,6 +307,7 @@ export const GITHUB_AGENT_TOOLS: PluginToolDeclaration[] = [
         body: {
           type: 'string'
         },
+        llmModel: llmModelProperty,
         base: {
           type: 'string'
         },
@@ -367,11 +370,11 @@ export const GITHUB_AGENT_TOOLS: PluginToolDeclaration[] = [
   {
     name: 'reply_to_review_thread',
     displayName: 'Reply To Review Thread',
-    description: 'Reply to an existing pull request review thread. Provide only the human-facing body; include llmModel so the plugin can append the required AI-authorship footer.',
+    description: 'Reply to an existing pull request review thread. Provide only the human-facing body; the plugin appends the required AI-authorship footer and includes llmModel when supplied.',
     parametersSchema: {
       type: 'object',
       additionalProperties: false,
-      required: ['threadId', 'body', 'llmModel'],
+      required: ['threadId', 'body'],
       properties: {
         threadId: {
           type: 'string',
@@ -463,7 +466,7 @@ export const GITHUB_AGENT_TOOLS: PluginToolDeclaration[] = [
   {
     name: 'list_organization_projects',
     displayName: 'List Organization Projects',
-    description: 'List GitHub organization-level Projects so an agent can choose where to associate pull requests.',
+    description: 'Search or list GitHub organization-level Projects so an agent can choose where to associate pull requests.',
     parametersSchema: {
       type: 'object',
       additionalProperties: false,
