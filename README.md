@@ -34,7 +34,7 @@ The plugin adds a full in-host workflow instead of a one-off import script:
 - saved sync diagnostics that let operators inspect the latest per-issue failures, raw errors, and suggested next steps
 - a project sidebar item that opens a live project-scoped Pull Requests page for the mapped repository and can show the open PR count through a lightweight badge read
 - manual sync actions from global, project, and issue toolbar surfaces
-- a GitHub detail tab on synced Paperclip issues
+- a GitHub detail tab on synced Paperclip issues that stays hidden for Paperclip issues with no linked GitHub issue
 - GitHub link annotations on sync-generated status transition comments when the host supports comment annotations
 
 ## How it works
