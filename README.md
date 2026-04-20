@@ -187,7 +187,7 @@ The plugin exposes GitHub workflow tools to Paperclip agents, including:
 - review-thread reads, replies, resolve and unresolve actions, and reviewer requests
 - organization-level GitHub Project search/listing and pull-request-to-project association
 
-When an agent sends GitHub body content through the plugin, including issue bodies, pull request descriptions, comments, and review-thread replies, the plugin adds a footer disclosing that it was created by a Paperclip AI agent. If the tool caller supplies `llmModel`, the footer also includes the model name.
+When an agent sends GitHub body content through the plugin, including issue bodies, pull request descriptions, comments, and review-thread replies, the plugin adds a GitHub-flavored Markdown footer with a horizontal rule and compact heading that discloses AI authorship. If the tool caller supplies `llmModel`, the footer also includes the model name, for example `###### ✨ This comment was AI-generated using gpt-5.4`.
 
 Current host caveat: on authenticated Paperclip deployments, the Paperclip host currently guards `GET /api/plugins/tools` and `POST /api/plugins/tools/execute` with board authentication before dispatching to any plugin worker. If an agent run does not have board access for the target company, GitHub Sync tool discovery and execution fail with `403 {"error":"Board access required"}` before this plugin's worker code runs.
 

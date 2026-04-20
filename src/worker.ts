@@ -76,8 +76,10 @@ const IMPORTED_ISSUE_WAKE_REASON = 'GitHub Sync imported an assigned issue that 
 const ISSUE_LINK_ENTITY_TYPE = 'paperclip-github-plugin.issue-link';
 const PULL_REQUEST_LINK_ENTITY_TYPE = 'paperclip-github-plugin.pull-request-link';
 const COMMENT_ANNOTATION_ENTITY_TYPE = 'paperclip-github-plugin.comment-annotation';
-const AI_AUTHORED_COMMENT_FOOTER_PREFIX = 'Created by a Paperclip AI agent';
-const AI_AUTHORED_COMMENT_FOOTER_PATTERN = /\n\n---\nCreated by a Paperclip AI agent(?: using .+?)?\.\s*$/s;
+const AI_AUTHORED_FOOTER_MARKDOWN_PREFIX = '###### \u2728 This ';
+const AI_AUTHORED_LEGACY_FOOTER_PATTERN = /\n\n---\nCreated by a Paperclip AI agent(?: using [^\n]+)?\.\s*$/;
+const AI_AUTHORED_MARKDOWN_FOOTER_PATTERN =
+  /\n\n---\n###### ✨ This (?:comment|issue description|pull request description) was AI-generated(?: using [^\n]+)?\s*$/;
 const HIDDEN_GITHUB_IMPORT_MARKER_PREFIX = '<!-- paperclip-github-plugin-imported-from: ';
 const HIDDEN_GITHUB_IMPORT_MARKER_SUFFIX = ' -->';
 const EMPTY_GITHUB_ISSUE_DESCRIPTION_PLACEHOLDER = '_No description provided on GitHub._';
@@ -323,6 +325,8 @@ interface StatusTransitionCommentAnnotationInput {
   nextStatus: PaperclipIssueStatus;
   reason: string;
 }
+
+type AiAuthorshipFooterSubject = 'comment' | 'issue description' | 'pull request description';
 
 interface ResolvedSyncTarget {
   kind: 'company' | 'project' | 'issue';
@@ -10319,30 +10323,49 @@ async function getGitHubPullRequestProjectItems(
 }
 
 function stripAiAuthorshipFooter(body: string): string {
-  return body.replace(AI_AUTHORED_COMMENT_FOOTER_PATTERN, '');
+  let strippedBody = body;
+
+  while (true) {
+    const nextBody = strippedBody
+      .replace(AI_AUTHORED_LEGACY_FOOTER_PATTERN, '')
+      .replace(AI_AUTHORED_MARKDOWN_FOOTER_PATTERN, '');
+    if (nextBody === strippedBody) {
+      return strippedBody;
+    }
+
+    strippedBody = nextBody;
+  }
 }
 
-function formatAiAuthorshipFooter(llmModel?: string): string {
+function formatAiAuthorshipFooter(subject: AiAuthorshipFooterSubject, llmModel?: string): string {
   const trimmedModel = llmModel?.trim();
-  return `\n\n---\n${AI_AUTHORED_COMMENT_FOOTER_PREFIX}${trimmedModel ? ` using ${trimmedModel}` : ''}.`;
+  return `\n\n---\n${AI_AUTHORED_FOOTER_MARKDOWN_PREFIX}${subject} was AI-generated${trimmedModel ? ` using ${trimmedModel}` : ''}`;
 }
 
-function appendAiAuthorshipFooter(body: string, llmModel?: string): string {
+function appendAiAuthorshipFooter(
+  body: string,
+  subject: AiAuthorshipFooterSubject,
+  llmModel?: string
+): string {
   const trimmedBody = stripAiAuthorshipFooter(body).trim();
   if (!trimmedBody) {
     throw new Error('Comment body cannot be empty.');
   }
 
-  return `${trimmedBody}${formatAiAuthorshipFooter(llmModel)}`;
+  return `${trimmedBody}${formatAiAuthorshipFooter(subject, llmModel)}`;
 }
 
-function appendOptionalAiAuthorshipFooter(body: string, llmModel?: string): string {
+function appendOptionalAiAuthorshipFooter(
+  body: string,
+  subject: AiAuthorshipFooterSubject,
+  llmModel?: string
+): string | undefined {
   const trimmedBody = stripAiAuthorshipFooter(body).trim();
   if (!trimmedBody) {
-    return '';
+    return undefined;
   }
 
-  return `${trimmedBody}${formatAiAuthorshipFooter(llmModel)}`;
+  return `${trimmedBody}${formatAiAuthorshipFooter(subject, llmModel)}`;
 }
 
 async function fetchGitHubIssue(
@@ -14413,7 +14436,7 @@ function registerGitHubAgentTools(ctx: PluginSetupContext): void {
         : undefined;
       const llmModel = normalizeOptionalToolString(input.llmModel);
       const body = Object.prototype.hasOwnProperty.call(input, 'body') && typeof input.body === 'string'
-        ? appendOptionalAiAuthorshipFooter(input.body, llmModel)
+        ? appendOptionalAiAuthorshipFooter(input.body, 'issue description', llmModel)
         : undefined;
       const state = input.state === 'open' || input.state === 'closed' ? input.state : undefined;
       const milestoneNumber = Object.prototype.hasOwnProperty.call(input, 'milestoneNumber')
@@ -14488,7 +14511,7 @@ function registerGitHubAgentTools(ctx: PluginSetupContext): void {
       const input = getToolInputRecord(params);
       const target = await resolveGitHubIssueToolTarget(ctx, runCtx, input);
       const octokit = await createGitHubToolOctokit(ctx, runCtx.companyId);
-      const body = appendAiAuthorshipFooter(String(input.body ?? ''), normalizeOptionalToolString(input.llmModel));
+      const body = appendAiAuthorshipFooter(String(input.body ?? ''), 'comment', normalizeOptionalToolString(input.llmModel));
       const response = await octokit.rest.issues.createComment({
         owner: target.repository.owner,
         repo: target.repository.repo,
@@ -14530,7 +14553,11 @@ function registerGitHubAgentTools(ctx: PluginSetupContext): void {
       }
 
       const body = typeof input.body === 'string'
-        ? appendOptionalAiAuthorshipFooter(input.body, normalizeOptionalToolString(input.llmModel))
+        ? appendOptionalAiAuthorshipFooter(
+            input.body,
+            'pull request description',
+            normalizeOptionalToolString(input.llmModel)
+          )
         : undefined;
       const octokit = await createGitHubToolOctokit(ctx, runCtx.companyId);
       const response = await octokit.rest.pulls.create({
@@ -14635,7 +14662,7 @@ function registerGitHubAgentTools(ctx: PluginSetupContext): void {
         : undefined;
       const llmModel = normalizeOptionalToolString(input.llmModel);
       const body = Object.prototype.hasOwnProperty.call(input, 'body') && typeof input.body === 'string'
-        ? appendOptionalAiAuthorshipFooter(input.body, llmModel)
+        ? appendOptionalAiAuthorshipFooter(input.body, 'pull request description', llmModel)
         : undefined;
       const base = normalizeOptionalToolString(input.base);
       const state = input.state === 'open' || input.state === 'closed' ? input.state : undefined;
@@ -14848,7 +14875,7 @@ function registerGitHubAgentTools(ctx: PluginSetupContext): void {
         throw new Error('threadId is required.');
       }
 
-      const body = appendAiAuthorshipFooter(String(input.body ?? ''), normalizeOptionalToolString(input.llmModel));
+      const body = appendAiAuthorshipFooter(String(input.body ?? ''), 'comment', normalizeOptionalToolString(input.llmModel));
       const octokit = await createGitHubToolOctokit(ctx, runCtx.companyId);
       const response = await octokit.graphql<GitHubAddPullRequestReviewThreadReplyMutationResult>(
         GITHUB_ADD_PULL_REQUEST_REVIEW_THREAD_REPLY_MUTATION,

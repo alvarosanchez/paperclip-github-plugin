@@ -1274,7 +1274,7 @@ test('add_issue_comment appends the required AI footer with the llm model', asyn
 
     assert.ok(!result.error);
     assert.match(postedBody, /^I am investigating this now\./);
-    assert.match(postedBody, /Created by a Paperclip AI agent using gpt-5\.4\./);
+    assert.match(postedBody, /---\n###### ✨ This comment was AI-generated using gpt-5\.4/);
     assert.match((result.data as { comment: { body: string } }).comment.body, /gpt-5\.4/);
   } finally {
     globalThis.fetch = originalFetch;
@@ -1316,7 +1316,7 @@ test('add_issue_comment appends a generic AI footer when llmModel is omitted', a
 
     assert.ok(!result.error);
     assert.match(postedBody, /^I am still investigating this\./);
-    assert.match(postedBody, /Created by a Paperclip AI agent\./);
+    assert.match(postedBody, /---\n###### ✨ This comment was AI-generated$/);
     assert.doesNotMatch(postedBody, /using /);
   } finally {
     globalThis.fetch = originalFetch;
@@ -1366,8 +1366,79 @@ test('create_pull_request appends the required AI footer to the pull request bod
 
     assert.ok(!result.error);
     assert.match(createdBody, /^This closes the sync gap\./);
-    assert.match(createdBody, /Created by a Paperclip AI agent using gpt-5\.4\./);
+    assert.match(createdBody, /---\n###### ✨ This pull request description was AI-generated using gpt-5\.4/);
     assert.match((result.data as { pullRequest: { body: string } }).pullRequest.body, /gpt-5\.4/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('update_issue omits a blank body update after stripping AI footers', async () => {
+  const harness = await createGitHubAgentToolHarness();
+  const originalFetch = globalThis.fetch;
+  let patchRequestBody: Record<string, unknown> | null = null;
+
+  globalThis.fetch = async (input, init) => {
+    const url = new URL(getRequestUrl(input));
+    if (url.pathname === '/repos/paperclipai/example-repo/issues/12' && init?.method === 'PATCH') {
+      patchRequestBody = getJsonRequestBody(init);
+      const patchedTitle =
+        patchRequestBody !== null && typeof patchRequestBody.title === 'string'
+          ? patchRequestBody.title
+          : 'Retitled issue';
+      return jsonResponse({
+        id: 1200,
+        number: 12,
+        title: patchedTitle,
+        body: 'Original issue body.',
+        html_url: 'https://github.com/paperclipai/example-repo/issues/12',
+        state: 'open',
+        comments: 3,
+        user: {
+          login: 'octocat'
+        },
+        assignees: [],
+        labels: [],
+        milestone: null
+      });
+    }
+
+    if (url.pathname === '/repos/paperclipai/example-repo/issues/12') {
+      return jsonResponse({
+        id: 1200,
+        number: 12,
+        title: 'Importer bug',
+        body: 'Original issue body.',
+        html_url: 'https://github.com/paperclipai/example-repo/issues/12',
+        state: 'open',
+        comments: 3,
+        user: {
+          login: 'octocat'
+        },
+        assignees: [],
+        labels: [],
+        milestone: null
+      });
+    }
+
+    throw new Error(`Unexpected GitHub request: ${url.toString()}`);
+  };
+
+  try {
+    const result = await harness.executeTool('update_issue', {
+      issueNumber: 12,
+      title: 'Retitled issue',
+      body: '\n\n---\n###### ✨ This issue description was AI-generated using old-model'
+    }, {
+      companyId: 'company-1',
+      projectId: 'project-1'
+    });
+
+    assert.ok(!result.error);
+    assert.ok(patchRequestBody);
+    const patchTitle = patchRequestBody['title'];
+    assert.equal(patchTitle, 'Retitled issue');
+    assert.ok(!Object.prototype.hasOwnProperty.call(patchRequestBody, 'body'));
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -1424,7 +1495,7 @@ test('update_issue refreshes the AI footer when updating the issue body', async 
   try {
     const result = await harness.executeTool('update_issue', {
       issueNumber: 12,
-      body: 'Updated issue details.\n\n---\nCreated by a Paperclip AI agent using old-model.',
+      body: 'Updated issue details.\n\n---\nCreated by a Paperclip AI agent using old-model.\n\n---\nCreated by a Paperclip AI agent using older-model.',
       llmModel: 'gpt-5.4'
     }, {
       companyId: 'company-1',
@@ -1432,9 +1503,9 @@ test('update_issue refreshes the AI footer when updating the issue body', async 
     });
 
     assert.ok(!result.error);
-    assert.equal(updatedBody.match(/Created by a Paperclip AI agent/g)?.length ?? 0, 1);
+    assert.equal(updatedBody.match(/AI-generated/g)?.length ?? 0, 1);
     assert.doesNotMatch(updatedBody, /old-model/);
-    assert.match(updatedBody, /Created by a Paperclip AI agent using gpt-5\.4\./);
+    assert.match(updatedBody, /---\n###### ✨ This issue description was AI-generated using gpt-5\.4/);
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -1497,7 +1568,7 @@ test('update_pull_request refreshes the AI footer when updating the pull request
   try {
     const result = await harness.executeTool('update_pull_request', {
       pullRequestNumber: 7,
-      body: 'Updated PR summary.\n\n---\nCreated by a Paperclip AI agent using old-model.',
+      body: 'Updated PR summary.\n\n---\nCreated by a Paperclip AI agent using old-model.\n\n---\n###### ✨ This pull request description was AI-generated using older-model',
       llmModel: 'gpt-5.4'
     }, {
       companyId: 'company-1',
@@ -1505,9 +1576,9 @@ test('update_pull_request refreshes the AI footer when updating the pull request
     });
 
     assert.ok(!result.error);
-    assert.equal(updatedBody.match(/Created by a Paperclip AI agent/g)?.length ?? 0, 1);
+    assert.equal(updatedBody.match(/AI-generated/g)?.length ?? 0, 1);
     assert.doesNotMatch(updatedBody, /old-model/);
-    assert.match(updatedBody, /Created by a Paperclip AI agent using gpt-5\.4\./);
+    assert.match(updatedBody, /---\n###### ✨ This pull request description was AI-generated using gpt-5\.4/);
     assert.match((result.data as { pullRequest: { body: string } }).pullRequest.body, /gpt-5\.4/);
   } finally {
     globalThis.fetch = originalFetch;
@@ -1863,7 +1934,7 @@ test('review-thread tools list, reply to, resolve, and unresolve GitHub review t
       projectId: 'project-1'
     });
     assert.ok(!replyResult.error);
-    assert.match(repliedBody, /Created by a Paperclip AI agent using gpt-5\.4\./);
+    assert.match(repliedBody, /---\n###### ✨ This comment was AI-generated using gpt-5\.4/);
 
     const resolveResult = await harness.executeTool('resolve_review_thread', {
       threadId: 'THREAD_1'
