@@ -869,6 +869,54 @@ function isSyncCancellationRequested(syncState: SyncRunState): boolean {
   return syncState.status === 'running' && Boolean(syncState.cancelRequestedAt?.trim());
 }
 
+export function resolveToolbarButtonState(params: {
+  loading: boolean;
+  runningSync: boolean;
+  cancellingSync: boolean;
+  syncState: SyncRunState;
+  allowToolbarCancellation: boolean;
+  effectiveCanRun: boolean;
+  effectiveLabel: string;
+}): {
+  busy: boolean;
+  disabled: boolean;
+  label: string;
+  busyLabel: string;
+  cancellationRequested: boolean;
+  syncPersistedRunning: boolean;
+  syncStartPending: boolean;
+} {
+  const syncPersistedRunning = params.syncState.status === 'running';
+  const syncStartPending = params.runningSync && !syncPersistedRunning;
+  const cancellationRequested =
+    syncPersistedRunning && (params.cancellingSync || isSyncCancellationRequested(params.syncState));
+  const loadingVisible = params.loading && !syncPersistedRunning;
+
+  return {
+    busy:
+      loadingVisible
+      || syncStartPending
+      || cancellationRequested
+      || (!params.allowToolbarCancellation && syncPersistedRunning),
+    disabled:
+      loadingVisible
+      || syncStartPending
+      || (syncPersistedRunning ? (params.allowToolbarCancellation ? cancellationRequested : true) : !params.effectiveCanRun),
+    label: syncPersistedRunning && params.allowToolbarCancellation ? 'Cancel sync' : params.effectiveLabel,
+    busyLabel:
+      syncPersistedRunning
+        ? cancellationRequested
+          ? 'Cancelling…'
+          : 'Syncing…'
+        : loadingVisible
+          ? 'Loading…'
+          : 'Syncing…',
+    cancellationRequested,
+    syncPersistedRunning,
+    syncStartPending
+  };
+}
+
 function getSyncToastTitle(syncState: SyncRunState): string {
   if (getActiveRateLimitPause(syncState)) {
     return 'GitHub sync is paused';
@@ -12679,23 +12727,25 @@ function GitHubSyncToolbarButtonSurface(props: {
       ? getSyncSetupMessage(boardAccessSetupIssue, hasCompanyContext)
       : state.message;
   const effectiveLabel = boardAccessSetupIssue ? 'Board access required' : state.label;
-  const syncPersistedRunning = effectiveSyncState.status === 'running';
-  const syncStartPending = runningSync && !syncPersistedRunning;
   const allowToolbarCancellation = Boolean(props.entityType);
-  const cancellationRequested = syncPersistedRunning && (cancellingSync || isSyncCancellationRequested(effectiveSyncState));
-  const toolbarButtonBusy =
-    toolbarState.loading
-    || syncStartPending
-    || cancellationRequested
-    || (!allowToolbarCancellation && syncPersistedRunning);
-  const toolbarButtonLabel = syncPersistedRunning && allowToolbarCancellation ? 'Cancel sync' : effectiveLabel;
-  const toolbarButtonBusyLabel = toolbarState.loading
-    ? 'Loading…'
-    : syncPersistedRunning
-      ? cancellationRequested
-        ? 'Cancelling…'
-        : 'Syncing…'
-      : 'Syncing…';
+  const toolbarButtonState = resolveToolbarButtonState({
+    loading: toolbarState.loading,
+    runningSync,
+    cancellingSync,
+    syncState: effectiveSyncState,
+    allowToolbarCancellation,
+    effectiveCanRun,
+    effectiveLabel
+  });
+  const {
+    busy: toolbarButtonBusy,
+    disabled: toolbarButtonDisabled,
+    label: toolbarButtonLabel,
+    busyLabel: toolbarButtonBusyLabel,
+    syncPersistedRunning,
+    syncStartPending,
+    cancellationRequested
+  } = toolbarButtonState;
   const armSyncCompletionToast = useSyncCompletionToast(effectiveSyncState, toast);
 
   useEffect(() => {
@@ -12911,11 +12961,7 @@ function GitHubSyncToolbarButtonSurface(props: {
         data-variant="outline"
         data-size="sm"
         className={props.entityType ? HOST_ENTITY_BUTTON_CLASSNAME : HOST_GLOBAL_BUTTON_CLASSNAME}
-        disabled={
-          toolbarState.loading
-          || syncStartPending
-          || (syncPersistedRunning ? (allowToolbarCancellation ? cancellationRequested : true) : !effectiveCanRun)
-        }
+        disabled={toolbarButtonDisabled}
         onClick={syncPersistedRunning && allowToolbarCancellation ? handleCancelSync : handleRunSync}
       >
         <LoadingButtonContent

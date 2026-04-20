@@ -598,6 +598,110 @@ test('resolveSavedTokenUiState clears stale valid token state when no saved toke
   );
 });
 
+test('resolveToolbarButtonState keeps entity sync buttons stable during background refreshes', async () => {
+  const uiModule = await importFreshUiModule() as {
+    resolveToolbarButtonState?: unknown;
+  };
+
+  assert.equal(typeof uiModule.resolveToolbarButtonState, 'function');
+
+  const resolveToolbarButtonState = uiModule.resolveToolbarButtonState as (params: {
+    loading: boolean;
+    runningSync: boolean;
+    cancellingSync: boolean;
+    syncState: {
+      status: 'idle' | 'running' | 'success' | 'error' | 'cancelled';
+      cancelRequestedAt?: string;
+    };
+    allowToolbarCancellation: boolean;
+    effectiveCanRun: boolean;
+    effectiveLabel: string;
+  }) => {
+    busy: boolean;
+    disabled: boolean;
+    label: string;
+    busyLabel: string;
+    cancellationRequested: boolean;
+    syncPersistedRunning: boolean;
+    syncStartPending: boolean;
+  };
+
+  assert.deepEqual(
+    resolveToolbarButtonState({
+      loading: true,
+      runningSync: false,
+      cancellingSync: false,
+      syncState: {
+        status: 'running'
+      },
+      allowToolbarCancellation: true,
+      effectiveCanRun: true,
+      effectiveLabel: 'Sync project'
+    }),
+    {
+      busy: false,
+      disabled: false,
+      label: 'Cancel sync',
+      busyLabel: 'Syncing…',
+      cancellationRequested: false,
+      syncPersistedRunning: true,
+      syncStartPending: false
+    }
+  );
+});
+
+test('resolveToolbarButtonState keeps the global toolbar on syncing instead of loading during polling', async () => {
+  const uiModule = await importFreshUiModule() as {
+    resolveToolbarButtonState?: unknown;
+  };
+
+  assert.equal(typeof uiModule.resolveToolbarButtonState, 'function');
+
+  const resolveToolbarButtonState = uiModule.resolveToolbarButtonState as (params: {
+    loading: boolean;
+    runningSync: boolean;
+    cancellingSync: boolean;
+    syncState: {
+      status: 'idle' | 'running' | 'success' | 'error' | 'cancelled';
+      cancelRequestedAt?: string;
+    };
+    allowToolbarCancellation: boolean;
+    effectiveCanRun: boolean;
+    effectiveLabel: string;
+  }) => {
+    busy: boolean;
+    disabled: boolean;
+    label: string;
+    busyLabel: string;
+    cancellationRequested: boolean;
+    syncPersistedRunning: boolean;
+    syncStartPending: boolean;
+  };
+
+  assert.deepEqual(
+    resolveToolbarButtonState({
+      loading: true,
+      runningSync: false,
+      cancellingSync: false,
+      syncState: {
+        status: 'running'
+      },
+      allowToolbarCancellation: false,
+      effectiveCanRun: true,
+      effectiveLabel: 'Sync GitHub'
+    }),
+    {
+      busy: true,
+      disabled: true,
+      label: 'Sync GitHub',
+      busyLabel: 'Syncing…',
+      cancellationRequested: false,
+      syncPersistedRunning: true,
+      syncStartPending: false
+    }
+  );
+});
+
 test('syncGitHubTokenPropagationForAgents adds and removes agent GITHUB_TOKEN secret refs without clobbering unrelated env config', async () => {
   const uiModule = await importFreshUiModule() as {
     syncGitHubTokenPropagationForAgents?: unknown;
