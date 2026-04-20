@@ -4145,17 +4145,32 @@ function getInterruptedSyncFailurePhase(progress: SyncProgressState | undefined)
   }
 }
 
+function getActiveRunningSyncForScope(companyId?: string): GitHubSyncSettings | null {
+  const normalizedCompanyId = normalizeCompanyId(companyId);
+  if (activeRunningSyncState?.syncState.status !== 'running') {
+    return null;
+  }
+
+  const activeSyncMatchesScope =
+    normalizedCompanyId === undefined
+    || activeRunningSyncCompanyId === undefined
+    || activeRunningSyncCompanyId === normalizedCompanyId;
+  if (!activeSyncMatchesScope) {
+    return null;
+  }
+
+  return materializeScopedSettings(activeRunningSyncState, null, normalizedCompanyId);
+}
+
 async function reconcileOrphanedRunningSyncState(
   ctx: PluginSetupContext,
   companyId?: string,
   resolution: 'error' | 'cancelled' = 'error'
 ): Promise<GitHubSyncSettings> {
   const normalizedCompanyId = normalizeCompanyId(companyId);
-  if (
-    activeRunningSyncState?.syncState.status === 'running'
-    && activeRunningSyncCompanyId === normalizedCompanyId
-  ) {
-    return materializeScopedSettings(activeRunningSyncState, null, normalizedCompanyId);
+  const activeRunningSync = getActiveRunningSyncForScope(normalizedCompanyId);
+  if (activeRunningSync) {
+    return activeRunningSync;
   }
 
   const current = normalizeSettings(await ctx.state.get(SETTINGS_SCOPE));
@@ -4313,11 +4328,9 @@ async function getActiveOrCurrentSyncState(
   companyId?: string
 ): Promise<GitHubSyncSettings> {
   const normalizedCompanyId = normalizeCompanyId(companyId);
-  if (
-    activeRunningSyncState?.syncState.status === 'running'
-    && activeRunningSyncCompanyId === normalizedCompanyId
-  ) {
-    return materializeScopedSettings(activeRunningSyncState, null, normalizedCompanyId);
+  const activeRunningSync = getActiveRunningSyncForScope(normalizedCompanyId);
+  if (activeRunningSync) {
+    return activeRunningSync;
   }
 
   return reconcileOrphanedRunningSyncState(ctx, normalizedCompanyId);

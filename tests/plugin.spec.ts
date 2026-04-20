@@ -14877,6 +14877,259 @@ test('worker returns a running state for long manual syncs and persists the fina
   }
 });
 
+test('global toolbar reads keep a live company-scoped sync in running state', async () => {
+  const harness = createTestHarness({
+    manifest,
+    config: {
+      githubTokenRef: 'github-secret-ref'
+    }
+  });
+  await plugin.definition.setup(harness.ctx);
+
+  await harness.performAction('settings.saveRegistration', {
+    mappings: [
+      {
+        id: 'mapping-a',
+        repositoryUrl: 'paperclipai/example-repo',
+        paperclipProjectName: 'Engineering',
+        paperclipProjectId: 'project-1',
+        companyId: 'company-1'
+      }
+    ],
+    syncState: {
+      status: 'idle'
+    }
+  });
+
+  const originalFetch = globalThis.fetch;
+
+  globalThis.fetch = async (input, init) => {
+    const rawUrl = getRequestUrl(input);
+    const url = new URL(rawUrl);
+
+    if (url.pathname === '/repos/paperclipai/example-repo/issues' && ['all', 'open'].includes(url.searchParams.get('state') ?? '')) {
+      await delay(700);
+
+      return jsonResponse([
+        {
+          id: 1001,
+          number: 10,
+          title: 'Scoped sync issue',
+          body: 'Body from GitHub',
+          html_url: 'https://github.com/paperclipai/example-repo/issues/10',
+          state: 'open'
+        }
+      ]);
+    }
+
+    if (url.pathname === '/graphql') {
+      const { query, variables } = getGraphqlRequest(init);
+      const issueNumber = typeof variables.issueNumber === 'number' ? variables.issueNumber : undefined;
+
+      if (query.includes('query GitHubIssueParentRelationships')) {
+        return graphqlIssueParentRelationshipsResponse([
+          {
+            issueNumber: 10
+          }
+        ]);
+      }
+
+      if (query.includes('query GitHubIssueStatusSnapshot') && issueNumber === 10) {
+        return graphqlResponse({
+          repository: {
+            issue: {
+              number: 10,
+              state: 'OPEN',
+              stateReason: null,
+              comments: {
+                totalCount: 0
+              },
+              closedByPullRequestsReferences: {
+                pageInfo: {
+                  hasNextPage: false,
+                  endCursor: null
+                },
+                nodes: []
+              }
+            }
+          }
+        });
+      }
+    }
+
+    throw new Error(`Unexpected GitHub request: ${url.toString()}`);
+  };
+
+  try {
+    const scopedResult = await harness.performAction('sync.runNow', {
+      companyId: 'company-1'
+    }) as {
+      syncState: { status: string; message?: string };
+    };
+    assert.equal(scopedResult.syncState.status, 'running');
+
+    const globalToolbarState = await harness.getData<{
+      kind: string;
+      syncState: { status: string; message?: string };
+    }>('sync.toolbarState', {});
+    assert.equal(globalToolbarState.kind, 'global');
+    assert.equal(globalToolbarState.syncState.status, 'running');
+
+    const persistedState = harness.getState({
+      scopeKind: 'instance',
+      stateKey: 'paperclip-github-plugin-settings'
+    }) as {
+      syncState: { status: string; message?: string };
+    };
+    assert.equal(persistedState.syncState.status, 'running');
+
+    await waitFor(() => {
+      const current = harness.getState({
+        scopeKind: 'instance',
+        stateKey: 'paperclip-github-plugin-settings'
+      }) as {
+        syncState?: { status?: string };
+      } | undefined;
+
+      return current?.syncState?.status === 'success';
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('repeat sync.runNow keeps a live company-scoped sync in running state', async () => {
+  const harness = createTestHarness({
+    manifest,
+    config: {
+      githubTokenRef: 'github-secret-ref'
+    }
+  });
+  await plugin.definition.setup(harness.ctx);
+
+  await harness.performAction('settings.saveRegistration', {
+    mappings: [
+      {
+        id: 'mapping-a',
+        repositoryUrl: 'paperclipai/example-repo',
+        paperclipProjectName: 'Engineering',
+        paperclipProjectId: 'project-1',
+        companyId: 'company-1'
+      }
+    ],
+    syncState: {
+      status: 'idle'
+    }
+  });
+
+  const originalFetch = globalThis.fetch;
+
+  globalThis.fetch = async (input, init) => {
+    const rawUrl = getRequestUrl(input);
+    const url = new URL(rawUrl);
+
+    if (url.pathname === '/repos/paperclipai/example-repo/issues' && ['all', 'open'].includes(url.searchParams.get('state') ?? '')) {
+      await delay(700);
+
+      return jsonResponse([
+        {
+          id: 1001,
+          number: 10,
+          title: 'Scoped sync issue',
+          body: 'Body from GitHub',
+          html_url: 'https://github.com/paperclipai/example-repo/issues/10',
+          state: 'open'
+        }
+      ]);
+    }
+
+    if (url.pathname === '/graphql') {
+      const { query, variables } = getGraphqlRequest(init);
+      const issueNumber = typeof variables.issueNumber === 'number' ? variables.issueNumber : undefined;
+
+      if (query.includes('query GitHubIssueParentRelationships')) {
+        return graphqlIssueParentRelationshipsResponse([
+          {
+            issueNumber: 10
+          }
+        ]);
+      }
+
+      if (query.includes('query GitHubIssueStatusSnapshot') && issueNumber === 10) {
+        return graphqlResponse({
+          repository: {
+            issue: {
+              number: 10,
+              state: 'OPEN',
+              stateReason: null,
+              comments: {
+                totalCount: 0
+              },
+              closedByPullRequestsReferences: {
+                pageInfo: {
+                  hasNextPage: false,
+                  endCursor: null
+                },
+                nodes: []
+              }
+            }
+          }
+        });
+      }
+    }
+
+    throw new Error(`Unexpected GitHub request: ${url.toString()}`);
+  };
+
+  try {
+    const scopedRunPromise = harness.performAction('sync.runNow', {
+      companyId: 'company-1'
+    }) as Promise<{
+      syncState: { status: string; message?: string };
+    }>;
+
+    await waitFor(() => {
+      const current = harness.getState({
+        scopeKind: 'instance',
+        stateKey: 'paperclip-github-plugin-settings'
+      }) as {
+        syncState?: { status?: string };
+      } | undefined;
+
+      return current?.syncState?.status === 'running';
+    });
+
+    const repeatedResult = await harness.performAction('sync.runNow', {}) as {
+      syncState: { status: string; message?: string };
+    };
+    assert.equal(repeatedResult.syncState.status, 'running');
+
+    const persistedState = harness.getState({
+      scopeKind: 'instance',
+      stateKey: 'paperclip-github-plugin-settings'
+    }) as {
+      syncState: { status: string; message?: string };
+    };
+    assert.equal(persistedState.syncState.status, 'running');
+
+    const scopedResult = await scopedRunPromise;
+    assert.equal(scopedResult.syncState.status, 'running');
+
+    await waitFor(() => {
+      const current = harness.getState({
+        scopeKind: 'instance',
+        stateKey: 'paperclip-github-plugin-settings'
+      }) as {
+        syncState?: { status?: string };
+      } | undefined;
+
+      return current?.syncState?.status === 'success';
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test('worker can cancel a long-running manual sync after it has started', async () => {
   const harness = createTestHarness({
     manifest,
