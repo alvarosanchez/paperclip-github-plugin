@@ -5866,8 +5866,8 @@ test('worker scopes toolbar sync status to the requested company', async () => {
     companyId: 'company-2'
   });
 
-  assert.equal(companyOneState.syncState.status, 'running');
-  assert.equal(companyOneState.syncState.message, 'Syncing company one');
+  assert.equal(companyOneState.syncState.status, 'error');
+  assert.match(companyOneState.syncState.message ?? '', /worker restarted/i);
   assert.equal(companyTwoState.syncState.status, 'success');
   assert.equal(companyTwoState.syncState.message, 'Company two synced');
 });
@@ -14110,9 +14110,9 @@ test('settings.registration returns the saved sync state for the requested compa
     companyId: 'company-2'
   });
 
-  assert.equal(companyOneResult.syncState.status, 'running');
-  assert.equal(companyOneResult.syncState.message, 'Syncing company one');
-  assert.equal(companyOneResult.syncState.checkedAt, '2026-04-09T10:00:00.000Z');
+  assert.equal(companyOneResult.syncState.status, 'error');
+  assert.match(companyOneResult.syncState.message ?? '', /worker restarted/i);
+  assert.equal(typeof companyOneResult.syncState.checkedAt, 'string');
   assert.equal(companyTwoResult.syncState.status, 'success');
   assert.equal(companyTwoResult.syncState.message, 'Company two synced');
   assert.equal(companyTwoResult.syncState.checkedAt, '2026-04-09T11:00:00.000Z');
@@ -15083,6 +15083,344 @@ test('sync.runNow clears the cancellation marker with state.delete instead of wr
     assert.equal(result.syncState.syncedIssuesCount, 0);
     assert.equal(result.syncState.createdIssuesCount, 0);
     assert.ok(deletedStateKeys.includes('paperclip-github-plugin-sync-cancel-request'));
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('settings.registration recovers an orphaned running sync after a worker restart', async () => {
+  const harness = createTestHarness({ manifest });
+  await plugin.definition.setup(harness.ctx);
+
+  await harness.ctx.state.set(
+    {
+      scopeKind: 'instance',
+      stateKey: 'paperclip-github-plugin-settings'
+    },
+    {
+      mappings: [
+        {
+          id: 'mapping-a',
+          repositoryUrl: 'paperclipai/example-repo',
+          paperclipProjectName: 'Engineering',
+          paperclipProjectId: 'project-1',
+          companyId: 'company-1'
+        }
+      ],
+      syncState: {
+        status: 'running',
+        message: 'GitHub sync is running in the background. This page will update when it finishes.',
+        syncedIssuesCount: 3,
+        createdIssuesCount: 1,
+        skippedIssuesCount: 0,
+        erroredIssuesCount: 0,
+        lastRunTrigger: 'manual',
+        progress: {
+          phase: 'syncing',
+          totalRepositoryCount: 1,
+          currentRepositoryIndex: 1,
+          currentRepositoryUrl: 'https://github.com/paperclipai/example-repo',
+          completedIssueCount: 1,
+          totalIssueCount: 3,
+          currentIssueNumber: 10
+        }
+      },
+      scheduleFrequencyMinutes: 15,
+      updatedAt: '2026-04-09T09:00:00.000Z'
+    }
+  );
+
+  const result = await harness.getData<{
+    syncState: {
+      status: string;
+      message?: string;
+      checkedAt?: string;
+      createdIssuesCount?: number;
+      syncedIssuesCount?: number;
+      progress?: {
+        currentIssueNumber?: number;
+      };
+    };
+  }>('settings.registration', {
+    companyId: 'company-1'
+  });
+
+  assert.equal(result.syncState.status, 'error');
+  assert.match(result.syncState.message ?? '', /stopped unexpectedly/i);
+  assert.match(result.syncState.message ?? '', /worker restarted/i);
+  assert.equal(typeof result.syncState.checkedAt, 'string');
+  assert.equal(result.syncState.createdIssuesCount, 1);
+  assert.equal(result.syncState.syncedIssuesCount, 3);
+  assert.equal(result.syncState.progress?.currentIssueNumber, 10);
+
+  const savedState = harness.getState({
+    scopeKind: 'instance',
+    stateKey: 'paperclip-github-plugin-settings'
+  }) as {
+    syncState: {
+      status: string;
+      message?: string;
+      checkedAt?: string;
+    };
+  };
+
+  assert.equal(savedState.syncState.status, 'error');
+  assert.match(savedState.syncState.message ?? '', /worker restarted/i);
+  assert.equal(typeof savedState.syncState.checkedAt, 'string');
+});
+
+test('sync.cancel finalizes an orphaned running sync instead of leaving it stuck in running', async () => {
+  const harness = createTestHarness({ manifest });
+  await plugin.definition.setup(harness.ctx);
+
+  await harness.ctx.state.set(
+    {
+      scopeKind: 'instance',
+      stateKey: 'paperclip-github-plugin-settings'
+    },
+    {
+      mappings: [
+        {
+          id: 'mapping-a',
+          repositoryUrl: 'paperclipai/example-repo',
+          paperclipProjectName: 'Engineering',
+          paperclipProjectId: 'project-1',
+          companyId: 'company-1'
+        }
+      ],
+      syncState: {
+        status: 'running',
+        message: 'Cancellation requested. GitHub sync will stop after the current step finishes.',
+        syncedIssuesCount: 3,
+        createdIssuesCount: 1,
+        skippedIssuesCount: 0,
+        erroredIssuesCount: 0,
+        lastRunTrigger: 'manual',
+        cancelRequestedAt: '2026-04-09T09:01:00.000Z',
+        progress: {
+          phase: 'syncing',
+          totalRepositoryCount: 1,
+          currentRepositoryIndex: 1,
+          currentRepositoryUrl: 'https://github.com/paperclipai/example-repo',
+          completedIssueCount: 1,
+          totalIssueCount: 3,
+          currentIssueNumber: 10
+        }
+      },
+      scheduleFrequencyMinutes: 15,
+      updatedAt: '2026-04-09T09:00:00.000Z'
+    }
+  );
+  await harness.ctx.state.set(
+    {
+      scopeKind: 'instance',
+      stateKey: 'paperclip-github-plugin-sync-cancel-request'
+    },
+    {
+      requestedAt: '2026-04-09T09:01:00.000Z'
+    }
+  );
+
+  const result = await harness.performAction('sync.cancel', {}) as {
+    syncState: {
+      status: string;
+      message?: string;
+      checkedAt?: string;
+      cancelRequestedAt?: string;
+      syncedIssuesCount?: number;
+      progress?: {
+        totalIssueCount?: number;
+        completedIssueCount?: number;
+      };
+    };
+  };
+
+  assert.equal(result.syncState.status, 'cancelled');
+  assert.match(result.syncState.message ?? '', /was cancelled before it finished/i);
+  assert.equal(typeof result.syncState.checkedAt, 'string');
+  assert.equal(result.syncState.cancelRequestedAt, undefined);
+  assert.equal(result.syncState.syncedIssuesCount, 3);
+  assert.equal(result.syncState.progress?.completedIssueCount, 1);
+  assert.equal(result.syncState.progress?.totalIssueCount, 3);
+
+  const savedCancellationRequest = harness.getState({
+    scopeKind: 'instance',
+    stateKey: 'paperclip-github-plugin-sync-cancel-request'
+  });
+  assert.equal(savedCancellationRequest, undefined);
+});
+
+test('sync.cancel finalizes the only company-scoped orphaned running sync after a worker restart', async () => {
+  const harness = createTestHarness({ manifest });
+  await plugin.definition.setup(harness.ctx);
+
+  await harness.ctx.state.set(
+    {
+      scopeKind: 'instance',
+      stateKey: 'paperclip-github-plugin-settings'
+    },
+    {
+      mappings: [
+        {
+          id: 'mapping-a',
+          repositoryUrl: 'paperclipai/example-repo',
+          paperclipProjectName: 'Engineering',
+          paperclipProjectId: 'project-1',
+          companyId: 'company-1'
+        }
+      ],
+      syncState: {
+        status: 'idle'
+      },
+      syncStateByCompanyId: {
+        'company-1': {
+          status: 'running',
+          message: 'GitHub sync is running in the background. This page will update when it finishes.',
+          syncedIssuesCount: 3,
+          createdIssuesCount: 1,
+          skippedIssuesCount: 0,
+          erroredIssuesCount: 0,
+          lastRunTrigger: 'manual',
+          progress: {
+            phase: 'syncing',
+            totalRepositoryCount: 1,
+            currentRepositoryIndex: 1,
+            currentRepositoryUrl: 'https://github.com/paperclipai/example-repo',
+            completedIssueCount: 1,
+            totalIssueCount: 3,
+            currentIssueNumber: 10
+          }
+        }
+      },
+      scheduleFrequencyMinutes: 15,
+      updatedAt: '2026-04-09T09:00:00.000Z'
+    }
+  );
+
+  const result = await harness.performAction('sync.cancel', {}) as {
+    syncState: {
+      status: string;
+      message?: string;
+      checkedAt?: string;
+      cancelRequestedAt?: string;
+      syncedIssuesCount?: number;
+      progress?: {
+        totalIssueCount?: number;
+        completedIssueCount?: number;
+      };
+    };
+  };
+
+  assert.equal(result.syncState.status, 'cancelled');
+  assert.match(result.syncState.message ?? '', /was cancelled before it finished/i);
+  assert.equal(typeof result.syncState.checkedAt, 'string');
+  assert.equal(result.syncState.cancelRequestedAt, undefined);
+  assert.equal(result.syncState.syncedIssuesCount, 3);
+  assert.equal(result.syncState.progress?.completedIssueCount, 1);
+  assert.equal(result.syncState.progress?.totalIssueCount, 3);
+
+  const savedState = harness.getState({
+    scopeKind: 'instance',
+    stateKey: 'paperclip-github-plugin-settings'
+  }) as {
+    syncStateByCompanyId?: Record<string, {
+      status?: string;
+      message?: string;
+      checkedAt?: string;
+    }>;
+  };
+
+  assert.equal(savedState.syncStateByCompanyId?.['company-1']?.status, 'cancelled');
+  assert.match(savedState.syncStateByCompanyId?.['company-1']?.message ?? '', /was cancelled before it finished/i);
+  assert.equal(typeof savedState.syncStateByCompanyId?.['company-1']?.checkedAt, 'string');
+});
+
+test('scheduled job does not restart an orphaned running sync', async () => {
+  const harness = createTestHarness({
+    manifest,
+    config: {
+      githubToken: 'ghp_test_token'
+    }
+  });
+  await plugin.definition.setup(harness.ctx);
+
+  await harness.ctx.state.set(
+    {
+      scopeKind: 'instance',
+      stateKey: 'paperclip-github-plugin-settings'
+    },
+    {
+      mappings: [
+        {
+          id: 'mapping-a',
+          repositoryUrl: 'paperclipai/example-repo',
+          paperclipProjectName: 'Engineering',
+          paperclipProjectId: 'project-1',
+          companyId: 'company-1'
+        }
+      ],
+      syncState: {
+        status: 'running',
+        message: 'GitHub sync is running in the background. This page will update when it finishes.',
+        syncedIssuesCount: 2,
+        createdIssuesCount: 1,
+        skippedIssuesCount: 0,
+        erroredIssuesCount: 0,
+        lastRunTrigger: 'schedule',
+        progress: {
+          phase: 'syncing',
+          totalRepositoryCount: 1,
+          currentRepositoryIndex: 1,
+          currentRepositoryUrl: 'https://github.com/paperclipai/example-repo',
+          completedIssueCount: 1,
+          totalIssueCount: 2,
+          currentIssueNumber: 10
+        }
+      },
+      scheduleFrequencyMinutes: 15,
+      updatedAt: '2026-04-09T09:00:00.000Z'
+    }
+  );
+
+  const originalFetch = globalThis.fetch;
+  let githubRequestCount = 0;
+
+  globalThis.fetch = async (input) => {
+    const rawUrl = getRequestUrl(input);
+    const url = new URL(rawUrl);
+
+    if (url.pathname === '/repos/paperclipai/example-repo/issues' && ['all', 'open'].includes(url.searchParams.get('state') ?? '')) {
+      githubRequestCount += 1;
+      return jsonResponse([]);
+    }
+
+    throw new Error(`Unexpected GitHub request: ${url.toString()}`);
+  };
+
+  try {
+    await harness.runJob('sync.github-issues', {
+      trigger: 'schedule',
+      scheduledAt: '2026-04-09T09:45:00.000Z'
+    });
+
+    assert.equal(githubRequestCount, 0);
+
+    const savedState = harness.getState({
+      scopeKind: 'instance',
+      stateKey: 'paperclip-github-plugin-settings'
+    }) as {
+      syncState: {
+        status: string;
+        message?: string;
+        checkedAt?: string;
+        lastRunTrigger?: string;
+      };
+    };
+
+    assert.equal(savedState.syncState.status, 'error');
+    assert.match(savedState.syncState.message ?? '', /worker restarted/i);
+    assert.equal(typeof savedState.syncState.checkedAt, 'string');
+    assert.equal(savedState.syncState.lastRunTrigger, 'schedule');
   } finally {
     globalThis.fetch = originalFetch;
   }

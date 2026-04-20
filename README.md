@@ -47,7 +47,7 @@ During sync, the plugin imports one top-level Paperclip issue per GitHub issue, 
 
 When the host exposes plugin issue creation, imported GitHub issues are created through the Paperclip plugin SDK path so they are not attributed to the connected board user. The worker still uses direct local Paperclip REST calls for label sync and for description or status repair paths when those routes are available.
 
-Long-running syncs continue in the background, so quick actions do not have to wait for the whole import to finish. Once a sync has started, the settings page, dashboard widget, and toolbar actions can request cancellation; the worker stops cooperatively after the current repository or issue step finishes.
+Long-running syncs continue in the background, so quick actions do not have to wait for the whole import to finish. Once a sync has started, the settings page, dashboard widget, and toolbar actions can request cancellation; the worker stops cooperatively after the current repository or issue step finishes. If the worker restarts mid-run, GitHub Sync now recovers that orphaned `running` state on the next read or control action instead of leaving the UI stuck in `running` or silently restarting the old run.
 
 ## Highlights
 
@@ -203,6 +203,7 @@ Current host caveat: on authenticated Paperclip deployments, the Paperclip host 
 - If a GitHub-linked project does not show the **Pull requests** sidebar entry, reopen the plugin settings and re-save the mapping. The project pull request surfaces also recover older mappings when saved ids are missing, and they can fall back to the active project's bound GitHub repository when the project already has a GitHub workspace configured.
 - If GitHub rate limiting is hit, the plugin pauses sync until the reported reset time instead of retrying pointlessly.
 - If a manual sync takes longer than the host action window, it continues in the background and updates the UI when it finishes or when a cancellation request stops it.
+- If a sync shows `running` after the worker has restarted, the next settings read, toolbar read, cancel action, or scheduler tick will reconcile that stale run into an interrupted error or a cancelled result so you can retry cleanly.
 
 ## Development
 

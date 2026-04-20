@@ -58,6 +58,10 @@ const GITHUB_TOKEN_PERMISSION_AUDIT_CACHE_TTL_MS = 5 * 60_000;
 const MANUAL_SYNC_RESPONSE_GRACE_PERIOD_MS = 500;
 const RUNNING_SYNC_MESSAGE = 'GitHub sync is running in the background. This page will update when it finishes.';
 const CANCELLING_SYNC_MESSAGE = 'Cancellation requested. GitHub sync will stop after the current step finishes.';
+const INTERRUPTED_SYNC_MESSAGE =
+  'GitHub sync stopped unexpectedly before it finished. The worker restarted while the sync was running.';
+const INTERRUPTED_SYNC_ACTION =
+  'Run GitHub sync again. If it stops on the same repository or issue, retry that narrower scope to isolate the failing step.';
 const SYNC_PROGRESS_PERSIST_INTERVAL_MS = 250;
 const MAX_SYNC_FAILURE_LOG_ENTRIES = 25;
 const GITHUB_SECONDARY_RATE_LIMIT_FALLBACK_MS = 60_000;
@@ -4115,6 +4119,119 @@ async function getSyncCancellationRequest(
   return normalizeSyncCancellationRequest(await ctx.state.get(SYNC_CANCELLATION_SCOPE));
 }
 
+function buildInterruptedSyncMessage(progress: SyncProgressState | undefined): string {
+  const completedIssueCount =
+    typeof progress?.completedIssueCount === 'number' ? Math.max(0, progress.completedIssueCount) : undefined;
+  const totalIssueCount =
+    typeof progress?.totalIssueCount === 'number' ? Math.max(0, progress.totalIssueCount) : undefined;
+  const completionSummary =
+    completedIssueCount !== undefined && totalIssueCount !== undefined
+      ? ` Completed ${Math.min(completedIssueCount, totalIssueCount)} of ${totalIssueCount} issues before the worker restarted.`
+      : '';
+
+  return `${INTERRUPTED_SYNC_MESSAGE}${completionSummary}`;
+}
+
+function getInterruptedSyncFailurePhase(progress: SyncProgressState | undefined): SyncFailurePhase | undefined {
+  switch (progress?.phase) {
+    case 'preparing':
+      return 'building_import_plan';
+    case 'importing':
+      return 'importing_issue';
+    case 'syncing':
+      return 'evaluating_github_status';
+    default:
+      return undefined;
+  }
+}
+
+async function reconcileOrphanedRunningSyncState(
+  ctx: PluginSetupContext,
+  companyId?: string,
+  resolution: 'error' | 'cancelled' = 'error'
+): Promise<GitHubSyncSettings> {
+  const normalizedCompanyId = normalizeCompanyId(companyId);
+  if (
+    activeRunningSyncState?.syncState.status === 'running'
+    && activeRunningSyncCompanyId === normalizedCompanyId
+  ) {
+    return materializeScopedSettings(activeRunningSyncState, null, normalizedCompanyId);
+  }
+
+  const current = normalizeSettings(await ctx.state.get(SETTINGS_SCOPE));
+  const scopedSyncState = getScopedSyncState(current, normalizedCompanyId);
+  if (scopedSyncState.status !== 'running') {
+    return materializeScopedSettings(current, null, normalizedCompanyId);
+  }
+
+  const trigger = scopedSyncState.lastRunTrigger ?? 'manual';
+  const progress = normalizeSyncProgress(scopedSyncState.progress);
+  const syncCounts = {
+    syncedIssuesCount: scopedSyncState.syncedIssuesCount ?? 0,
+    createdIssuesCount: scopedSyncState.createdIssuesCount ?? 0,
+    skippedIssuesCount: scopedSyncState.skippedIssuesCount ?? 0,
+    erroredIssuesCount: scopedSyncState.erroredIssuesCount ?? 0
+  };
+
+  const nextSyncState =
+    resolution === 'cancelled' || Boolean(scopedSyncState.cancelRequestedAt?.trim())
+      ? createCancelledSyncState({
+          message: buildCancelledSyncMessage(undefined, progress),
+          trigger,
+          ...syncCounts,
+          ...(progress ? { progress } : {})
+        })
+      : (() => {
+          const errorDetails = normalizeSyncErrorDetails({
+            ...(getInterruptedSyncFailurePhase(progress) ? { phase: getInterruptedSyncFailurePhase(progress) } : {}),
+            ...(progress?.currentRepositoryUrl ? { repositoryUrl: progress.currentRepositoryUrl } : {}),
+            ...(typeof progress?.currentIssueNumber === 'number'
+              ? { githubIssueNumber: progress.currentIssueNumber }
+              : {}),
+            rawMessage: INTERRUPTED_SYNC_MESSAGE,
+            suggestedAction: INTERRUPTED_SYNC_ACTION
+          });
+          const message = buildInterruptedSyncMessage(progress);
+
+          return createErrorSyncState({
+            message,
+            trigger,
+            ...syncCounts,
+            ...(progress ? { progress } : {}),
+            ...(errorDetails ? { errorDetails } : {}),
+            recentFailures: appendRecentSyncFailureLogEntry(
+              scopedSyncState.recentFailures,
+              createSyncFailureLogEntry({
+                message,
+                ...(errorDetails ? { errorDetails } : {})
+              })
+            )
+          });
+        })();
+
+  const next = await saveSettingsSyncState(ctx, current, nextSyncState, normalizedCompanyId);
+  await setSyncCancellationRequest(ctx, null);
+  return next;
+}
+
+function resolvePersistedRunningSyncCompanyId(
+  settings: Pick<GitHubSyncSettings, 'syncState' | 'syncStateByCompanyId'>
+): string | undefined | null {
+  if (normalizeSyncState(settings.syncState).status === 'running') {
+    return undefined;
+  }
+
+  const runningCompanyIds = Object.entries(settings.syncStateByCompanyId ?? {})
+    .flatMap(([companyId, syncState]) => {
+      const normalizedCompanyId = normalizeCompanyId(companyId);
+      return normalizedCompanyId && normalizeSyncState(syncState).status === 'running'
+        ? [normalizedCompanyId]
+        : [];
+    });
+
+  return runningCompanyIds.length === 1 ? runningCompanyIds[0] : null;
+}
+
 function buildCancelledSyncMessage(
   target: ResolvedSyncTarget | undefined,
   progress: SyncProgressState | undefined
@@ -4203,8 +4320,7 @@ async function getActiveOrCurrentSyncState(
     return materializeScopedSettings(activeRunningSyncState, null, normalizedCompanyId);
   }
 
-  const current = normalizeSettings(await ctx.state.get(SETTINGS_SCOPE));
-  return materializeScopedSettings(current, null, normalizedCompanyId);
+  return reconcileOrphanedRunningSyncState(ctx, normalizedCompanyId);
 }
 
 function updateSyncFailureContext(
@@ -13477,6 +13593,10 @@ function shouldRunScheduledSync(settings: GitHubSyncSettings, scheduledAt?: stri
     return false;
   }
 
+  if (settings.syncState.status === 'running') {
+    return false;
+  }
+
   if (!settings.syncState.checkedAt) {
     return true;
   }
@@ -14135,6 +14255,8 @@ async function startSync(
 
     return quickResult ?? await getActiveOrCurrentSyncState(ctx);
   }
+
+  await reconcileOrphanedRunningSyncState(ctx, options.target?.companyId);
 
   const [config, persistedSettings] = await Promise.all([
     getResolvedConfig(ctx),
@@ -15123,6 +15245,7 @@ const plugin = definePlugin({
       const record = input && typeof input === 'object' ? input as Record<string, unknown> : {};
       const requestedCompanyId = normalizeCompanyId(record.companyId);
       const includeAssignees = Boolean(requestedCompanyId && record.includeAssignees === true);
+      await reconcileOrphanedRunningSyncState(ctx, requestedCompanyId);
       const saved = await ctx.state.get(SETTINGS_SCOPE);
       const importRegistry = normalizeImportRegistry(await ctx.state.get(IMPORT_REGISTRY_SCOPE));
       const normalizedSettings = normalizeSettings(saved);
@@ -15508,7 +15631,15 @@ const plugin = definePlugin({
     });
 
     ctx.actions.register('sync.cancel', async () => {
-      const currentSettings = await getActiveOrCurrentSyncState(ctx, activeRunningSyncCompanyId);
+      const persistedRunningSyncCompanyId =
+        activeRunningSyncState?.syncState.status === 'running'
+          ? activeRunningSyncCompanyId
+          : resolvePersistedRunningSyncCompanyId(normalizeSettings(await ctx.state.get(SETTINGS_SCOPE)));
+      const currentSettings = await reconcileOrphanedRunningSyncState(
+        ctx,
+        persistedRunningSyncCompanyId === null ? undefined : persistedRunningSyncCompanyId,
+        'cancelled'
+      );
       if (currentSettings.syncState.status !== 'running') {
         return currentSettings;
       }
@@ -15534,7 +15665,7 @@ const plugin = definePlugin({
           message: CANCELLING_SYNC_MESSAGE,
           cancelRequestedAt: cancellationRequest.requestedAt
         }),
-        activeRunningSyncCompanyId
+        persistedRunningSyncCompanyId === null ? undefined : persistedRunningSyncCompanyId
       );
       activeRunningSyncState = next;
       return next;
@@ -15548,7 +15679,8 @@ const plugin = definePlugin({
       const scheduledTargets = listScheduledSyncTargets(settings);
 
       if (scheduledTargets.length === 0) {
-        if (job.trigger === 'schedule' && !shouldRunScheduledSync(settings, job.scheduledAt)) {
+        const reconciledSettings = await reconcileOrphanedRunningSyncState(ctx);
+        if (job.trigger === 'schedule' && !shouldRunScheduledSync(reconciledSettings, job.scheduledAt)) {
           return;
         }
 
@@ -15557,7 +15689,7 @@ const plugin = definePlugin({
       }
 
       for (const target of scheduledTargets) {
-        const scopedSettings = materializeScopedSettings(settings, null, target?.companyId);
+        const scopedSettings = await reconcileOrphanedRunningSyncState(ctx, target?.companyId);
         if (job.trigger === 'schedule' && !shouldRunScheduledSync(scopedSettings, job.scheduledAt)) {
           continue;
         }
