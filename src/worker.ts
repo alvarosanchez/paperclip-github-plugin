@@ -14186,28 +14186,25 @@ async function performSync(
       return materializeScopedSettings(next, config, targetCompanyId);
     }
 
-    const next = {
-      ...currentSettings,
-      syncState: {
-        status: 'success' as const,
-        message: `${options.target ? `GitHub sync for ${options.target.displayLabel} is complete. ` : 'Sync complete. '}Imported ${createdIssuesCount} issues, updated ${updatedStatusesCount} issue status${updatedStatusesCount === 1 ? '' : 'es'}, updated ${updatedLabelsCount} issue label set${updatedLabelsCount === 1 ? '' : 's'}, updated ${updatedDescriptionsCount} issue description${updatedDescriptionsCount === 1 ? '' : 's'}, and skipped ${skippedIssuesCount} already-synced issue${skippedIssuesCount === 1 ? '' : 's'}.`,
-        checkedAt: new Date().toISOString(),
-        syncedIssuesCount,
-        createdIssuesCount,
-        skippedIssuesCount,
-        erroredIssuesCount: 0,
-        lastRunTrigger: trigger
-      }
+    const nextSyncState = {
+      status: 'success' as const,
+      message: `${options.target ? `GitHub sync for ${options.target.displayLabel} is complete. ` : 'Sync complete. '}Imported ${createdIssuesCount} issues, updated ${updatedStatusesCount} issue status${updatedStatusesCount === 1 ? '' : 'es'}, updated ${updatedLabelsCount} issue label set${updatedLabelsCount === 1 ? '' : 's'}, updated ${updatedDescriptionsCount} issue description${updatedDescriptionsCount === 1 ? '' : 's'}, and skipped ${skippedIssuesCount} already-synced issue${skippedIssuesCount === 1 ? '' : 's'}.`,
+      checkedAt: new Date().toISOString(),
+      syncedIssuesCount,
+      createdIssuesCount,
+      skippedIssuesCount,
+      erroredIssuesCount: 0,
+      lastRunTrigger: trigger
     };
-    await ctx.state.set(SETTINGS_SCOPE, next);
-    await ctx.state.set(SYNC_STATE_SCOPE, next.syncState);
+    const next = await saveSettingsSyncState(ctx, currentSettings, nextSyncState, targetCompanyId);
     await ctx.state.set(IMPORT_REGISTRY_SCOPE, nextRegistry);
     return next;
   } catch (error) {
     if (error instanceof SyncCancellationError) {
-      const next = {
-        ...currentSettings,
-        syncState: createCancelledSyncState({
+      const next = await saveSettingsSyncState(
+        ctx,
+        currentSettings,
+        createCancelledSyncState({
           message: buildCancelledSyncMessage(options.target, currentProgress),
           trigger,
           syncedIssuesCount,
@@ -14215,10 +14212,9 @@ async function performSync(
           skippedIssuesCount,
           erroredIssuesCount: recoverableFailures.length,
           progress: currentProgress
-        })
-      };
-      await ctx.state.set(SETTINGS_SCOPE, next);
-      await ctx.state.set(SYNC_STATE_SCOPE, next.syncState);
+        }),
+        targetCompanyId
+      );
       await ctx.state.set(IMPORT_REGISTRY_SCOPE, nextRegistry);
       return next;
     }
