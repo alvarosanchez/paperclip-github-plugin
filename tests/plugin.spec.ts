@@ -7280,6 +7280,15 @@ test('worker keeps deduplicating imported issues when the mapping id changes', a
       ]);
     }
 
+    if (url.pathname === '/repos/paperclipai/example-repo/collaborators/external-reporter/permission') {
+      return jsonResponse(
+        {
+          message: 'Not Found'
+        },
+        404
+      );
+    }
+
     if (url.pathname === '/graphql') {
       const { query, variables } = getGraphqlRequest(init);
       const issueNumber = typeof variables.issueNumber === 'number' ? variables.issueNumber : undefined;
@@ -7521,6 +7530,157 @@ test('worker imports maintainer-authored open issues without linked pull request
     assert.match(
       statusTransitionComments[0]?.body ?? '',
       /the GitHub issue is open with no linked pull requests/
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('worker promotes newly imported member-authored backlog issues to todo on first sync', { concurrency: false }, async () => {
+  const harness = createTestHarness({
+    manifest,
+    config: {
+      githubTokenRef: 'github-secret-ref'
+    }
+  });
+  await plugin.definition.setup(harness.ctx);
+
+  await harness.performAction('settings.saveRegistration', {
+    mappings: [
+      {
+        id: 'mapping-a',
+        repositoryUrl: 'paperclipai/example-repo',
+        paperclipProjectName: 'Engineering',
+        paperclipProjectId: 'project-1',
+        companyId: 'company-1'
+      }
+    ],
+    syncState: {
+      status: 'idle'
+    }
+  });
+
+  const originalCreate = harness.ctx.issues.create.bind(harness.ctx.issues);
+  const originalUpdate = harness.ctx.issues.update.bind(harness.ctx.issues);
+  harness.ctx.issues.create = async (input) => {
+    const created = await originalCreate(input);
+    return originalUpdate(created.id, { status: 'backlog' }, input.companyId);
+  };
+
+  const statusTransitionComments: Array<{ issueId: string; body: string }> = [];
+  const originalCreateComment = harness.ctx.issues.createComment;
+  harness.ctx.issues.createComment = async (issueId, body, companyId) => {
+    statusTransitionComments.push({ issueId, body });
+    return originalCreateComment(issueId, body, companyId);
+  };
+
+  const originalFetch = globalThis.fetch;
+
+  globalThis.fetch = async (input, init) => {
+    const rawUrl = getRequestUrl(input);
+    const url = new URL(rawUrl);
+
+    if (url.pathname === '/repos/paperclipai/example-repo/issues' && ['all', 'open'].includes(url.searchParams.get('state') ?? '')) {
+      return jsonResponse([
+        {
+          id: 2601,
+          number: 26,
+          title: 'Member-authored issue',
+          body: 'Ship this next',
+          html_url: 'https://github.com/paperclipai/example-repo/issues/26',
+          user: {
+            login: 'repo-member'
+          },
+          author_association: 'MEMBER',
+          state: 'open',
+          comments: 0
+        },
+        {
+          id: 2602,
+          number: 27,
+          title: 'Reporter-authored issue',
+          body: 'Please look into this',
+          html_url: 'https://github.com/paperclipai/example-repo/issues/27',
+          user: {
+            login: 'external-reporter'
+          },
+          state: 'open',
+          comments: 0
+        }
+      ]);
+    }
+
+    if (url.pathname === '/repos/paperclipai/example-repo/collaborators/external-reporter/permission') {
+      return jsonResponse(
+        {
+          message: 'Not Found'
+        },
+        404
+      );
+    }
+
+    if (url.pathname === '/graphql') {
+      const { query, variables } = getGraphqlRequest(init);
+      const issueNumber = typeof variables.issueNumber === 'number' ? variables.issueNumber : undefined;
+
+      if (query.includes('query GitHubIssueParentRelationships')) {
+        return graphqlIssueParentRelationshipsResponse([
+          {
+            issueNumber: 26
+          },
+          {
+            issueNumber: 27
+          }
+        ]);
+      }
+
+      if (query.includes('query GitHubIssueStatusSnapshot') && (issueNumber === 26 || issueNumber === 27)) {
+        return graphqlResponse({
+          repository: {
+            issue: {
+              number: issueNumber,
+              state: 'OPEN',
+              stateReason: null,
+              comments: {
+                totalCount: 0
+              },
+              closedByPullRequestsReferences: {
+                pageInfo: {
+                  hasNextPage: false,
+                  endCursor: null
+                },
+                nodes: []
+              }
+            }
+          }
+        });
+      }
+    }
+
+    throw new Error(`Unexpected GitHub request: ${url.toString()}`);
+  };
+
+  try {
+    const sync = await harness.performAction('sync.runNow', {}) as {
+      syncState: { status: string; createdIssuesCount?: number; skippedIssuesCount?: number; syncedIssuesCount?: number };
+    };
+
+    assert.equal(sync.syncState.status, 'success');
+    assert.equal(sync.syncState.createdIssuesCount, 2);
+    assert.equal(sync.syncState.skippedIssuesCount, 0);
+    assert.equal(sync.syncState.syncedIssuesCount, 2);
+
+    const importedIssues = await harness.ctx.issues.list({
+      companyId: 'company-1'
+    });
+
+    assert.equal(importedIssues.find((issue) => issue.title === 'Member-authored issue')?.status, 'todo');
+    assert.equal(importedIssues.find((issue) => issue.title === 'Reporter-authored issue')?.status, 'backlog');
+    assert.equal(statusTransitionComments.length, 1);
+    assert.match(statusTransitionComments[0]?.body ?? '', /from `backlog` to `todo`/);
+    assert.match(
+      statusTransitionComments[0]?.body ?? '',
+      /created by a repository maintainer/
     );
   } finally {
     globalThis.fetch = originalFetch;

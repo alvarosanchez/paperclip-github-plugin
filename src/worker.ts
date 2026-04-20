@@ -5931,9 +5931,10 @@ function resolvePaperclipIssueStatus(params: {
     return snapshot.stateReason === 'duplicate' || snapshot.stateReason === 'not_planned' ? 'cancelled' : 'done';
   }
 
-  // Backlog is manual-only for open issues. GitHub activity should never
-  // pull an already-backlogged Paperclip issue into an active state.
-  if (currentStatus === 'backlog') {
+  // Backlog is manual-only for open issues after the initial import. A real
+  // Paperclip host can create fresh issues in backlog, so first-sync status
+  // mapping still needs to run for newly imported issues.
+  if (currentStatus === 'backlog' && !wasImportedThisRun) {
     return 'backlog';
   }
 
