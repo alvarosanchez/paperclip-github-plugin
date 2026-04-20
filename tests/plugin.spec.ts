@@ -2372,7 +2372,7 @@ test('fetchPaperclipHealth returns null when the Paperclip health endpoint is un
   }
 });
 
-test('resolveGitHubIssueDetailTabState hides unlinked issue detail views while preserving loading and error states', async () => {
+test('resolveGitHubIssueDetailTabState hides unlinked issue detail views while preserving loading, error, and cached-detail states', async () => {
   const uiModule = await importFreshUiModule() as {
     resolveGitHubIssueDetailTabState?: unknown;
   };
@@ -2418,6 +2418,17 @@ test('resolveGitHubIssueDetailTabState hides unlinked issue detail views while p
       loadingIssueId: false,
       detailsLoading: false,
       detailsError: false,
+      issueDetails: {
+        paperclipIssueId: 'issue-123'
+      }
+    }),
+    'ready'
+  );
+  assert.equal(
+    resolveGitHubIssueDetailTabState({
+      loadingIssueId: false,
+      detailsLoading: false,
+      detailsError: true,
       issueDetails: {
         paperclipIssueId: 'issue-123'
       }

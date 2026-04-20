@@ -13095,15 +13095,15 @@ export function resolveGitHubIssueDetailTabState(params: {
     return 'loading';
   }
 
+  if (params.issueDetails) {
+    return 'ready';
+  }
+
   if (params.detailsError) {
     return 'error';
   }
 
-  if (!params.issueDetails) {
-    return 'hidden';
-  }
-
-  return 'ready';
+  return 'hidden';
 }
 
 export function GitHubSyncIssueTaskDetailView(): React.JSX.Element | null {
