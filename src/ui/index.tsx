@@ -153,6 +153,17 @@ function LoadingSkeleton(props: {
   return <span aria-hidden="true" className={['ghsync__skeleton', props.className].filter(Boolean).join(' ')} style={props.style} />;
 }
 
+function GitHubButtonLabel(props: {
+  label: string;
+}): React.JSX.Element {
+  return (
+    <span className="ghsync__button-content">
+      <GitHubMarkIcon className="ghsync-prs-icon" />
+      <span>{props.label}</span>
+    </span>
+  );
+}
+
 interface RepositoryMapping {
   id: string;
   repositoryUrl: string;
@@ -260,6 +271,7 @@ interface GitHubIssueDetailsData {
   githubIssueNumber: number;
   githubIssueUrl: string;
   repositoryUrl: string;
+  creator?: PreviewPullRequestPerson;
   githubIssueState?: 'open' | 'closed';
   githubIssueStateReason?: 'completed' | 'not_planned' | 'duplicate';
   commentsCount?: number;
@@ -4275,6 +4287,42 @@ const EXTENSION_SURFACE_STYLES = `
     justify-content: space-between;
     gap: 12px;
     align-items: start;
+  }
+
+  .ghsync-issue-detail__actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: center;
+    justify-content: flex-end;
+  }
+
+  .ghsync-issue-detail__headline {
+    display: grid;
+    gap: 8px;
+    min-width: 0;
+  }
+
+  .ghsync-issue-detail__creator-row {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .ghsync-issue-detail__creator-label {
+    color: var(--ghsync-muted);
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    line-height: 1;
+    text-transform: uppercase;
+  }
+
+  .ghsync-issue-detail__creator .ghsync-prs-avatar {
+    width: 20px;
+    height: 20px;
+    font-size: 10px;
   }
 
   .ghsync-extension-heading h3,
@@ -12662,10 +12710,9 @@ function GitHubSyncToolbarButtonSurface(props: {
   companyId?: string | null;
   projectId?: string | null;
 }): React.JSX.Element | null {
-  const toast = usePluginToast();
-  const runSyncNow = usePluginAction('sync.runNow');
-  const cancelSync = usePluginAction('sync.cancel');
-  const pluginIdFromLocation = getPluginIdFromLocation();
+  const themeMode = useResolvedThemeMode();
+  const theme = themeMode === 'light' ? LIGHT_PALETTE : DARK_PALETTE;
+  const themeVars = buildThemeVars(theme, themeMode);
   const surfaceRef = useRef<HTMLDivElement | null>(null);
   const resolvedIssue = useResolvedIssueId({
     companyId: props.companyId,
@@ -12673,9 +12720,89 @@ function GitHubSyncToolbarButtonSurface(props: {
     entityId: props.entityId,
     entityType: props.entityType
   });
+  const buttonController = useGitHubSyncButtonController({
+    ...props,
+    resolvedIssueId: resolvedIssue.issueId,
+    loadingIssueId: resolvedIssue.loading
+  });
+
+  useEffect(() => {
+    if (!props.entityType) {
+      return;
+    }
+
+    const hostWrapper = surfaceRef.current?.parentElement;
+    if (!hostWrapper) {
+      return;
+    }
+
+    const previousMarginLeft = hostWrapper.style.marginLeft;
+    const previousMarginInlineStart = hostWrapper.style.marginInlineStart;
+    hostWrapper.style.marginLeft = 'auto';
+    hostWrapper.style.marginInlineStart = 'auto';
+
+    return () => {
+      hostWrapper.style.marginLeft = previousMarginLeft;
+      hostWrapper.style.marginInlineStart = previousMarginInlineStart;
+    };
+  });
+
+  if (!buttonController.visible) {
+    return null;
+  }
+
+  return (
+    <div
+      ref={surfaceRef}
+      className={`ghsync-toolbar-button${props.entityType ? ' ghsync-toolbar-button--entity' : ''}`}
+      style={themeVars}
+      title={buttonController.title}
+    >
+      <style>{EXTENSION_SURFACE_STYLES}</style>
+      <button
+        type="button"
+        data-slot="button"
+        data-variant="outline"
+        data-size="sm"
+        className={props.entityType ? HOST_ENTITY_BUTTON_CLASSNAME : HOST_GLOBAL_BUTTON_CLASSNAME}
+        disabled={buttonController.disabled}
+        onClick={buttonController.onClick}
+      >
+        <LoadingButtonContent
+          busy={buttonController.busy}
+          label={buttonController.label}
+          busyLabel={buttonController.busyLabel}
+          icon={<GitHubMarkIcon className="h-3.5 w-3.5" />}
+        />
+      </button>
+    </div>
+  );
+}
+
+function useGitHubSyncButtonController(props: {
+  entityType?: 'project' | 'issue';
+  entityId?: string | null;
+  companyId?: string | null;
+  projectId?: string | null;
+  resolvedIssueId?: string | null;
+  loadingIssueId?: boolean;
+  forceVisible?: boolean;
+}): {
+  visible: boolean;
+  title: string;
+  busy: boolean;
+  disabled: boolean;
+  label: string;
+  busyLabel: string;
+  onClick: () => Promise<void>;
+} {
+  const toast = usePluginToast();
+  const runSyncNow = usePluginAction('sync.runNow');
+  const cancelSync = usePluginAction('sync.cancel');
+  const pluginIdFromLocation = getPluginIdFromLocation();
   const effectiveEntityId =
     props.entityType === 'issue'
-      ? resolvedIssue.issueId ?? '__ghsync_unresolved_issue__'
+      ? props.resolvedIssueId ?? '__ghsync_unresolved_issue__'
       : props.entityId;
   const toolbarState = usePluginData<SyncToolbarStateData>('sync.toolbarState', {
     ...(props.companyId ? { companyId: props.companyId } : {}),
@@ -12689,10 +12816,7 @@ function GitHubSyncToolbarButtonSurface(props: {
   const [runningSync, setRunningSync] = useState(false);
   const [cancellingSync, setCancellingSync] = useState(false);
   const [syncStateOverride, setSyncStateOverride] = useState<SyncRunState | null>(null);
-  const themeMode = useResolvedThemeMode();
   const boardAccessRequirement = usePaperclipBoardAccessRequirement();
-  const theme = themeMode === 'light' ? LIGHT_PALETTE : DARK_PALETTE;
-  const themeVars = buildThemeVars(theme, themeMode);
   const state = toolbarState.data ?? {
     kind: props.entityType ?? 'global',
     visible: !props.entityType,
@@ -12744,9 +12868,7 @@ function GitHubSyncToolbarButtonSurface(props: {
     disabled: toolbarButtonDisabled,
     label: toolbarButtonLabel,
     busyLabel: toolbarButtonBusyLabel,
-    syncPersistedRunning,
-    syncStartPending,
-    cancellationRequested
+    syncPersistedRunning
   } = toolbarButtonState;
   const armSyncCompletionToast = useSyncCompletionToast(effectiveSyncState, toast);
 
@@ -12833,31 +12955,6 @@ function GitHubSyncToolbarButtonSurface(props: {
     };
   }, [toolbarState.refresh, settingsRegistration.refresh, props.companyId, effectiveEntityId, props.entityType]);
 
-  useEffect(() => {
-    if (!props.entityType) {
-      return;
-    }
-
-    const hostWrapper = surfaceRef.current?.parentElement;
-    if (!hostWrapper) {
-      return;
-    }
-
-    const previousMarginLeft = hostWrapper.style.marginLeft;
-    const previousMarginInlineStart = hostWrapper.style.marginInlineStart;
-    hostWrapper.style.marginLeft = 'auto';
-    hostWrapper.style.marginInlineStart = 'auto';
-
-    return () => {
-      hostWrapper.style.marginLeft = previousMarginLeft;
-      hostWrapper.style.marginInlineStart = previousMarginInlineStart;
-    };
-  });
-
-  if (!state.visible) {
-    return null;
-  }
-
   async function handleRunSync(): Promise<void> {
     try {
       if (!effectiveCanRun) {
@@ -12870,7 +12967,7 @@ function GitHubSyncToolbarButtonSurface(props: {
         waitForCompletion: false,
         ...(props.companyId ? { companyId: props.companyId } : {}),
         ...(props.entityType === 'project' && props.entityId ? { projectId: props.entityId } : {}),
-        ...(props.entityType === 'issue' && resolvedIssue.issueId ? { issueId: resolvedIssue.issueId } : {}),
+        ...(props.entityType === 'issue' && props.resolvedIssueId ? { issueId: props.resolvedIssueId } : {}),
         ...(trustedPaperclipApiBaseUrl ? { paperclipApiBaseUrl: trustedPaperclipApiBaseUrl } : {})
       }) as {
         syncState?: SyncRunState;
@@ -12949,32 +13046,15 @@ function GitHubSyncToolbarButtonSurface(props: {
     }
   }
 
-  return (
-    <div
-      ref={surfaceRef}
-      className={`ghsync-toolbar-button${props.entityType ? ' ghsync-toolbar-button--entity' : ''}`}
-      style={themeVars}
-      title={toolbarState.error?.message ?? effectiveMessage}
-    >
-      <style>{EXTENSION_SURFACE_STYLES}</style>
-      <button
-        type="button"
-        data-slot="button"
-        data-variant="outline"
-        data-size="sm"
-        className={props.entityType ? HOST_ENTITY_BUTTON_CLASSNAME : HOST_GLOBAL_BUTTON_CLASSNAME}
-        disabled={toolbarButtonDisabled}
-        onClick={syncPersistedRunning && allowToolbarCancellation ? handleCancelSync : handleRunSync}
-      >
-        <LoadingButtonContent
-          busy={toolbarButtonBusy}
-          label={toolbarButtonLabel}
-          busyLabel={toolbarButtonBusyLabel}
-          icon={<GitHubMarkIcon className="h-3.5 w-3.5" />}
-        />
-      </button>
-    </div>
-  );
+  return {
+    visible: props.forceVisible ? true : state.visible,
+    title: toolbarState.error?.message ?? effectiveMessage ?? 'GitHub sync',
+    busy: toolbarButtonBusy,
+    disabled: toolbarButtonDisabled,
+    label: toolbarButtonLabel,
+    busyLabel: toolbarButtonBusyLabel,
+    onClick: syncPersistedRunning && allowToolbarCancellation ? handleCancelSync : handleRunSync
+  };
 }
 
 export function GitHubSyncGlobalToolbarButton(): React.JSX.Element | null {
@@ -13016,6 +13096,14 @@ function GitHubSyncIssueDetailTabContent(props: {
     detailsError: Boolean(details.error),
     issueDetails
   });
+  const issueSyncButton = useGitHubSyncButtonController({
+    companyId: props.companyId,
+    entityId: props.issueId,
+    entityType: 'issue',
+    resolvedIssueId: props.issueId,
+    loadingIssueId: props.loadingIssueId,
+    forceVisible: true
+  });
 
   useEffect(() => {
     if (!props.companyId || !props.issueId) {
@@ -13043,22 +13131,61 @@ function GitHubSyncIssueDetailTabContent(props: {
       {detailTabState === 'ready' && issueDetails ? (
         <>
           <div className="ghsync-extension-heading">
-            <div>
+            <div className="ghsync-issue-detail__headline">
               <h4>Issue #{issueDetails.githubIssueNumber}</h4>
               <p>{formatGitHubRepositoryLabel(issueDetails.repositoryUrl)}</p>
+              {issueDetails.creator ? (
+                <div className="ghsync-issue-detail__creator-row">
+                  <span className="ghsync-issue-detail__creator-label">Creator</span>
+                  <a
+                    href={issueDetails.creator.profileUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="ghsync-prs-table__person ghsync-issue-detail__creator"
+                  >
+                    <PreviewAvatar person={issueDetails.creator} />
+                    <span className="ghsync-prs-table__person-copy">
+                      <span className="ghsync-prs-table__person-name">{issueDetails.creator.name}</span>
+                      <span className="ghsync-prs-table__person-handle">{issueDetails.creator.handle}</span>
+                    </span>
+                  </a>
+                </div>
+              ) : null}
             </div>
-            <a
-              href={issueDetails.githubIssueUrl}
-              target="_blank"
-              rel="noreferrer"
-              className={getPluginActionClassName({
-                variant: 'secondary',
-                size: 'sm',
-                extraClassName: 'ghsync-extension-link'
-              })}
-            >
-              Open on GitHub
-            </a>
+            <div className="ghsync-issue-detail__actions">
+              {issueSyncButton.visible ? (
+                <button
+                  type="button"
+                  className={getPluginActionClassName({
+                    variant: 'secondary',
+                    size: 'sm',
+                    extraClassName: 'ghsync-extension-link'
+                  })}
+                  disabled={issueSyncButton.disabled}
+                  onClick={issueSyncButton.onClick}
+                  title={issueSyncButton.title}
+                >
+                  <LoadingButtonContent
+                    busy={issueSyncButton.busy}
+                    label={issueSyncButton.label}
+                    busyLabel={issueSyncButton.busyLabel}
+                    icon={<GitHubMarkIcon className="ghsync-prs-icon" />}
+                  />
+                </button>
+              ) : null}
+              <a
+                href={issueDetails.githubIssueUrl}
+                target="_blank"
+                rel="noreferrer"
+                className={getPluginActionClassName({
+                  variant: 'secondary',
+                  size: 'sm',
+                  extraClassName: 'ghsync-extension-link'
+                })}
+              >
+                <GitHubButtonLabel label="Open on GitHub" />
+              </a>
+            </div>
           </div>
 
           <div className="ghsync-extension-grid">
@@ -13096,7 +13223,7 @@ function GitHubSyncIssueDetailTabContent(props: {
                       extraClassName: 'ghsync-extension-link'
                     })}
                   >
-                    PR #{pullRequestNumber}
+                    <GitHubButtonLabel label={`PR #${pullRequestNumber}`} />
                   </a>
                 ))}
               </div>
@@ -13122,7 +13249,7 @@ function GitHubSyncIssueDetailTabContent(props: {
 
           {issueDetails.source !== 'entity' ? (
             <div className="ghsync-extension-note">
-              GitHub Sync recovered this link from older sync metadata. Run sync once to refresh GitHub state, labels, and linked PRs in this panel.
+              GitHub Sync recovered this link from older sync metadata. Run sync once to refresh the creator, GitHub state, labels, and linked PRs in this panel.
             </div>
           ) : null}
         </>
@@ -13214,7 +13341,7 @@ export function GitHubSyncCommentAnnotation(): React.JSX.Element | null {
               extraClassName: 'ghsync-extension-link'
             })}
           >
-            {link.label}
+            <GitHubButtonLabel label={link.label} />
           </a>
         ))}
       </div>
