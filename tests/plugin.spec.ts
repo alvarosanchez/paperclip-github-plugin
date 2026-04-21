@@ -2541,6 +2541,38 @@ test('resolveGitHubIssueDetailTabState hides unlinked issue detail views while p
   );
 });
 
+test('resolvePreviewPersonLabels collapses duplicate login-style names to a single visible label', async () => {
+  const uiModule = await importFreshUiModule() as {
+    resolvePreviewPersonLabels?: unknown;
+  };
+
+  assert.equal(typeof uiModule.resolvePreviewPersonLabels, 'function');
+
+  const resolvePreviewPersonLabels = uiModule.resolvePreviewPersonLabels as (person: {
+    name: string;
+    handle: string;
+  }) => {
+    primary: string;
+    secondary: string | null;
+  };
+
+  assert.deepEqual(resolvePreviewPersonLabels({
+    name: 'alvarosanchez',
+    handle: '@alvarosanchez'
+  }), {
+    primary: '@alvarosanchez',
+    secondary: null
+  });
+
+  assert.deepEqual(resolvePreviewPersonLabels({
+    name: 'Álvaro Sánchez',
+    handle: '@alvarosanchez'
+  }), {
+    primary: 'Álvaro Sánchez',
+    secondary: '@alvarosanchez'
+  });
+});
+
 test('mergePluginConfig preserves existing config while merging token and board access refs by company', () => {
   const result = mergePluginConfig(
     {
