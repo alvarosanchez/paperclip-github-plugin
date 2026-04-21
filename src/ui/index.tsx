@@ -359,6 +359,8 @@ interface PreviewPullRequestPerson {
   avatarUrl?: string;
 }
 
+type PreviewAvatarSize = 'sm' | 'md';
+
 interface PreviewPullRequestTimelineEntry {
   id: string;
   kind: 'description' | 'comment';
@@ -4319,12 +4321,6 @@ const EXTENSION_SURFACE_STYLES = `
     text-transform: uppercase;
   }
 
-  .ghsync-issue-detail__creator .ghsync-prs-avatar {
-    width: 20px;
-    height: 20px;
-    font-size: 10px;
-  }
-
   .ghsync-extension-heading h3,
   .ghsync-extension-heading h4 {
     margin: 0;
@@ -5381,6 +5377,31 @@ function formatShortDateTime(value?: string, fallback = 'Unknown time'): string 
 
 function pluralize(count: number, singular: string, plural = `${singular}s`): string {
   return `${count} ${count === 1 ? singular : plural}`;
+}
+
+export function resolvePreviewPersonLabels(person: {
+  name: string;
+  handle: string;
+}): {
+  primary: string;
+  secondary: string | null;
+} {
+  const displayHandle = person.handle.trim();
+  const displayName = person.name.trim() || displayHandle || 'Unknown user';
+  const normalizedName = displayName.replace(/^@/, '').trim().toLowerCase();
+  const normalizedHandle = displayHandle.replace(/^@/, '').trim().toLowerCase();
+
+  if (displayHandle && normalizedName && normalizedHandle && normalizedName === normalizedHandle) {
+    return {
+      primary: displayHandle,
+      secondary: null
+    };
+  }
+
+  return {
+    primary: displayName,
+    secondary: displayHandle && displayHandle !== displayName ? displayHandle : null
+  };
 }
 
 function hashString(value: string): number {
@@ -7414,24 +7435,75 @@ function SyncDiagnosticsPanel(props: {
 function PreviewAvatar(props: {
   person: PreviewPullRequestPerson;
   stacked?: boolean;
+  size?: PreviewAvatarSize;
 }): React.JSX.Element {
   const backgroundColor = getPreviewAvatarColor(props.person.handle);
   const className = props.stacked ? 'ghsync-prs-avatar-stack__item' : 'ghsync-prs-avatar';
+  const avatarSizePx = props.size === 'sm' ? 20 : 28;
+  const fontSizePx = props.size === 'sm' ? 10 : 11;
+  const labels = resolvePreviewPersonLabels(props.person);
+  const initialsSource = props.person.name.trim() || props.person.handle.replace(/^@/, '').trim();
+  const title = labels.secondary ? `${labels.primary} (${labels.secondary})` : labels.primary;
 
   return (
     <span
       className={className}
-      style={{ backgroundColor }}
-      title={`${props.person.name} (${props.person.handle})`}
+      style={{
+        backgroundColor,
+        width: avatarSizePx,
+        height: avatarSizePx,
+        fontSize: fontSizePx,
+        display: 'inline-flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        borderRadius: '999px',
+        color: 'white',
+        fontWeight: 700,
+        letterSpacing: '0.02em',
+        flex: '0 0 auto',
+        overflow: 'hidden'
+      }}
+      title={title}
       aria-hidden="true"
     >
       {props.person.avatarUrl ? (
-        <img src={props.person.avatarUrl} alt="" loading="lazy" />
+        <img
+          src={props.person.avatarUrl}
+          alt=""
+          loading="lazy"
+          style={{
+            width: '100%',
+            height: '100%',
+            borderRadius: 'inherit',
+            objectFit: 'cover',
+            display: 'block'
+          }}
+        />
       ) : (
-        getInitials(props.person.name)
+        getInitials(initialsSource)
       )}
     </span>
   );
+}
+
+function PreviewPersonCopy(props: {
+  person: PreviewPullRequestPerson;
+}): React.JSX.Element {
+  const labels = resolvePreviewPersonLabels(props.person);
+
+  return (
+    <span className="ghsync-prs-table__person-copy">
+      <span className="ghsync-prs-table__person-name">{labels.primary}</span>
+      {labels.secondary ? <span className="ghsync-prs-table__person-handle">{labels.secondary}</span> : null}
+    </span>
+  );
+}
+
+function PreviewPersonInlineLabel(props: {
+  person: PreviewPullRequestPerson;
+}): React.JSX.Element {
+  const labels = resolvePreviewPersonLabels(props.person);
+  return <span>{labels.secondary ? `${labels.primary} (${labels.secondary})` : labels.primary}</span>;
 }
 
 function PreviewMarkdown(props: {
@@ -8926,10 +8998,7 @@ export function GitHubSyncProjectPullRequestsPage(): React.JSX.Element {
                             rel="noreferrer"
                           >
                             <PreviewAvatar person={pullRequest.author} />
-                            <span className="ghsync-prs-table__person-copy">
-                              <span className="ghsync-prs-table__person-name">{pullRequest.author.name}</span>
-                              <span className="ghsync-prs-table__person-handle">{pullRequest.author.handle}</span>
-                            </span>
+                            <PreviewPersonCopy person={pullRequest.author} />
                           </a>
                         </td>
 
@@ -9427,7 +9496,7 @@ export function GitHubSyncProjectPullRequestsPage(): React.JSX.Element {
                       <span className="ghsync-prs-meta__label">Author</span>
                       <div className="ghsync-prs-meta__value ghsync-prs-meta__value--stack">
                         <PreviewAvatar person={selectedPullRequest.author} />
-                        <span>{selectedPullRequest.author.name} ({selectedPullRequest.author.handle})</span>
+                        <PreviewPersonInlineLabel person={selectedPullRequest.author} />
                       </div>
                     </div>
 
@@ -13140,11 +13209,8 @@ function GitHubSyncIssueDetailTabContent(props: {
                     rel="noreferrer"
                     className="ghsync-prs-table__person ghsync-issue-detail__creator"
                   >
-                    <PreviewAvatar person={issueDetails.creator} />
-                    <span className="ghsync-prs-table__person-copy">
-                      <span className="ghsync-prs-table__person-name">{issueDetails.creator.name}</span>
-                      <span className="ghsync-prs-table__person-handle">{issueDetails.creator.handle}</span>
-                    </span>
+                    <PreviewAvatar person={issueDetails.creator} size="sm" />
+                    <PreviewPersonCopy person={issueDetails.creator} />
                   </a>
                 </div>
               ) : null}
