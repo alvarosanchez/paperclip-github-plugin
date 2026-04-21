@@ -7444,21 +7444,39 @@ function PreviewAvatar(props: {
   const labels = resolvePreviewPersonLabels(props.person);
   const initialsSource = props.person.name.trim() || props.person.handle.replace(/^@/, '').trim();
   const title = labels.secondary ? `${labels.primary} (${labels.secondary})` : labels.primary;
+  const avatarStyle: React.CSSProperties = {
+    backgroundColor,
+    width: avatarSizePx,
+    height: avatarSizePx,
+    fontSize: fontSizePx,
+    display: 'inline-flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: 999,
+    color: 'white',
+    fontWeight: 700,
+    letterSpacing: '0.02em',
+    lineHeight: 1,
+    flex: '0 0 auto',
+    overflow: 'hidden'
+  };
+  const imageStyle: React.CSSProperties = {
+    width: '100%',
+    height: '100%',
+    borderRadius: 'inherit',
+    objectFit: 'cover',
+    display: 'block'
+  };
 
   return (
     <span
       className={className}
-      style={{
-        backgroundColor,
-        width: avatarSizePx,
-        height: avatarSizePx,
-        fontSize: fontSizePx
-      }}
+      style={avatarStyle}
       title={title}
       aria-hidden="true"
     >
       {props.person.avatarUrl ? (
-        <img src={props.person.avatarUrl} alt="" loading="lazy" />
+        <img src={props.person.avatarUrl} alt="" loading="lazy" style={imageStyle} />
       ) : (
         getInitials(initialsSource)
       )}
