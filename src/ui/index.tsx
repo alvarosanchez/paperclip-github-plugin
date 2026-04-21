@@ -2836,6 +2836,7 @@ const PROJECT_PULL_REQUESTS_PAGE_STYLES = `
   font-weight: 700;
   letter-spacing: 0.02em;
   flex: 0 0 auto;
+  overflow: hidden;
 }
 
 .ghsync-prs-avatar img,
@@ -7439,34 +7440,39 @@ function PreviewAvatar(props: {
 }): React.JSX.Element {
   const backgroundColor = getPreviewAvatarColor(props.person.handle);
   const className = props.stacked ? 'ghsync-prs-avatar-stack__item' : 'ghsync-prs-avatar';
-  const avatarSizePx = props.size === 'sm' ? 20 : 28;
-  const fontSizePx = props.size === 'sm' ? 10 : 11;
   const labels = resolvePreviewPersonLabels(props.person);
   const initialsSource = props.person.name.trim() || props.person.handle.replace(/^@/, '').trim();
   const title = labels.secondary ? `${labels.primary} (${labels.secondary})` : labels.primary;
   const avatarStyle: React.CSSProperties = {
-    backgroundColor,
-    width: avatarSizePx,
-    height: avatarSizePx,
-    fontSize: fontSizePx,
-    display: 'inline-flex',
-    alignItems: 'center',
-    justifyContent: 'center',
-    borderRadius: 999,
-    color: 'white',
-    fontWeight: 700,
-    letterSpacing: '0.02em',
-    lineHeight: 1,
-    flex: '0 0 auto',
-    overflow: 'hidden'
+    backgroundColor
   };
-  const imageStyle: React.CSSProperties = {
-    width: '100%',
-    height: '100%',
-    borderRadius: 'inherit',
-    objectFit: 'cover',
-    display: 'block'
-  };
+  const imageStyle =
+    props.size === 'sm'
+      ? {
+          width: '100%',
+          height: '100%',
+          borderRadius: 'inherit',
+          objectFit: 'cover' as const,
+          display: 'block'
+        }
+      : undefined;
+
+  if (props.size === 'sm') {
+    Object.assign(avatarStyle, {
+      width: 20,
+      height: 20,
+      fontSize: 10,
+      display: 'inline-flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      borderRadius: 999,
+      color: 'white',
+      fontWeight: 700,
+      letterSpacing: '0.02em',
+      flex: '0 0 auto',
+      overflow: 'hidden'
+    } satisfies React.CSSProperties);
+  }
 
   return (
     <span
