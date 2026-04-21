@@ -12722,8 +12722,7 @@ function GitHubSyncToolbarButtonSurface(props: {
   });
   const buttonController = useGitHubSyncButtonController({
     ...props,
-    resolvedIssueId: resolvedIssue.issueId,
-    loadingIssueId: resolvedIssue.loading
+    resolvedIssueId: resolvedIssue.issueId
   });
 
   useEffect(() => {
@@ -12745,7 +12744,7 @@ function GitHubSyncToolbarButtonSurface(props: {
       hostWrapper.style.marginLeft = previousMarginLeft;
       hostWrapper.style.marginInlineStart = previousMarginInlineStart;
     };
-  });
+  }, [props.entityType]);
 
   if (!buttonController.visible) {
     return null;
@@ -12785,7 +12784,6 @@ function useGitHubSyncButtonController(props: {
   companyId?: string | null;
   projectId?: string | null;
   resolvedIssueId?: string | null;
-  loadingIssueId?: boolean;
   forceVisible?: boolean;
 }): {
   visible: boolean;
@@ -13101,7 +13099,6 @@ function GitHubSyncIssueDetailTabContent(props: {
     entityId: props.issueId,
     entityType: 'issue',
     resolvedIssueId: props.issueId,
-    loadingIssueId: props.loadingIssueId,
     forceVisible: true
   });
 
