@@ -7452,33 +7452,13 @@ function PreviewAvatar(props: {
         backgroundColor,
         width: avatarSizePx,
         height: avatarSizePx,
-        fontSize: fontSizePx,
-        display: 'inline-flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        borderRadius: '999px',
-        color: 'white',
-        fontWeight: 700,
-        letterSpacing: '0.02em',
-        flex: '0 0 auto',
-        overflow: 'hidden'
+        fontSize: fontSizePx
       }}
       title={title}
       aria-hidden="true"
     >
       {props.person.avatarUrl ? (
-        <img
-          src={props.person.avatarUrl}
-          alt=""
-          loading="lazy"
-          style={{
-            width: '100%',
-            height: '100%',
-            borderRadius: 'inherit',
-            objectFit: 'cover',
-            display: 'block'
-          }}
-        />
+        <img src={props.person.avatarUrl} alt="" loading="lazy" />
       ) : (
         getInitials(initialsSource)
       )}
