@@ -6120,6 +6120,9 @@ test('worker issue.githubDetails returns issue-scoped GitHub detail payloads', a
       githubIssueId: 20202,
       githubIssueNumber: 202,
       githubIssueUrl: 'https://github.com/paperclipai/example-repo/issues/202',
+      creatorLogin: 'octocat',
+      creatorUrl: 'https://github.com/octocat',
+      creatorAvatarUrl: 'https://avatars.githubusercontent.com/u/1?v=4',
       githubIssueState: 'closed',
       githubIssueStateReason: 'completed',
       commentsCount: 4,
@@ -6141,6 +6144,12 @@ test('worker issue.githubDetails returns issue-scoped GitHub detail payloads', a
     paperclipIssueId: string;
     githubIssueNumber: number;
     linkedPullRequestNumbers: number[];
+    creator?: {
+      name: string;
+      handle: string;
+      profileUrl: string;
+      avatarUrl?: string;
+    };
   } | null>('issue.githubDetails', {
     companyId: 'company-1',
     issueId: secondIssue.id
@@ -6152,6 +6161,12 @@ test('worker issue.githubDetails returns issue-scoped GitHub detail payloads', a
   assert.equal(secondDetails?.paperclipIssueId, secondIssue.id);
   assert.equal(secondDetails?.githubIssueNumber, 202);
   assert.deepEqual(secondDetails?.linkedPullRequestNumbers, [2020, 2021]);
+  assert.deepEqual(secondDetails?.creator, {
+    name: 'octocat',
+    handle: '@octocat',
+    profileUrl: 'https://github.com/octocat',
+    avatarUrl: 'https://avatars.githubusercontent.com/u/1?v=4'
+  });
 });
 
 test('worker filters issue-scoped GitHub link records even when entities.list ignores scopeId', async () => {

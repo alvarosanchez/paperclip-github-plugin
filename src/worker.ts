@@ -274,6 +274,9 @@ interface GitHubIssueLinkEntityData {
   githubIssueId: number;
   githubIssueNumber: number;
   githubIssueUrl: string;
+  creatorLogin?: string;
+  creatorUrl?: string;
+  creatorAvatarUrl?: string;
   githubIssueState: 'open' | 'closed';
   githubIssueStateReason?: GitHubIssueStateReason;
   commentsCount: number;
@@ -506,6 +509,8 @@ interface GitHubIssueRecord {
   body: string | null;
   htmlUrl: string;
   authorLogin?: string;
+  authorUrl?: string;
+  authorAvatarUrl?: string;
   authorAssociation?: string;
   labels: GitHubIssueLabelRecord[];
   state: 'open' | 'closed';
@@ -549,6 +554,8 @@ interface GitHubApiIssueRecord {
   html_url: string;
   user?: {
     login?: string | null;
+    html_url?: string | null;
+    avatar_url?: string | null;
   } | null;
   state: string;
   comments?: number;
@@ -3598,6 +3605,15 @@ async function buildIssueGitHubDetails(
       githubIssueNumber: entityMatch.data.githubIssueNumber,
       githubIssueUrl: entityMatch.data.githubIssueUrl,
       repositoryUrl: entityMatch.data.repositoryUrl,
+      ...(entityMatch.data.creatorLogin
+        ? {
+            creator: buildProjectPullRequestPerson({
+              login: entityMatch.data.creatorLogin,
+              url: entityMatch.data.creatorUrl,
+              avatarUrl: entityMatch.data.creatorAvatarUrl
+            })
+          }
+        : {}),
       githubIssueState: entityMatch.data.githubIssueState,
       githubIssueStateReason: entityMatch.data.githubIssueStateReason,
       commentsCount: entityMatch.data.commentsCount,
@@ -5333,13 +5349,23 @@ function normalizeGitHubIssueLabels(value: GitHubApiIssueRecord['labels']): GitH
 }
 
 function normalizeGitHubIssueRecord(issue: GitHubApiIssueRecord): GitHubIssueRecord {
+  const authorLogin = normalizeGitHubUsername(issue.user?.login);
+  const authorUrl =
+    typeof issue.user?.html_url === 'string' && issue.user.html_url.trim() ? issue.user.html_url.trim() : undefined;
+  const authorAvatarUrl =
+    typeof issue.user?.avatar_url === 'string' && issue.user.avatar_url.trim()
+      ? issue.user.avatar_url.trim()
+      : undefined;
+
   return {
     id: issue.id,
     number: issue.number,
     title: stripNullBytes(issue.title),
     body: typeof issue.body === 'string' ? stripNullBytes(issue.body) : null,
     htmlUrl: issue.html_url,
-    ...(normalizeGitHubUsername(issue.user?.login) ? { authorLogin: normalizeGitHubUsername(issue.user?.login) } : {}),
+    ...(authorLogin ? { authorLogin } : {}),
+    ...(authorUrl ? { authorUrl } : {}),
+    ...(authorAvatarUrl ? { authorAvatarUrl } : {}),
     ...(normalizeGitHubLowercaseString(issue.author_association)
       ? { authorAssociation: normalizeGitHubLowercaseString(issue.author_association) }
       : {}),
@@ -7213,6 +7239,14 @@ function normalizeGitHubIssueLinkEntityData(value: unknown): GitHubIssueLinkEnti
     typeof record.githubIssueNumber === 'number' && record.githubIssueNumber > 0 ? Math.floor(record.githubIssueNumber) : undefined;
   const githubIssueUrl =
     typeof record.githubIssueUrl === 'string' ? normalizeGitHubIssueHtmlUrl(record.githubIssueUrl) : undefined;
+  const creatorLogin =
+    typeof record.creatorLogin === 'string' ? normalizeGitHubUsername(record.creatorLogin) : undefined;
+  const creatorUrl =
+    typeof record.creatorUrl === 'string' && record.creatorUrl.trim() ? record.creatorUrl.trim() : undefined;
+  const creatorAvatarUrl =
+    typeof record.creatorAvatarUrl === 'string' && record.creatorAvatarUrl.trim()
+      ? record.creatorAvatarUrl.trim()
+      : undefined;
   const githubIssueState = record.githubIssueState === 'closed' ? 'closed' : record.githubIssueState === 'open' ? 'open' : undefined;
   const commentsCount =
     typeof record.commentsCount === 'number' && record.commentsCount >= 0 ? Math.floor(record.commentsCount) : 0;
@@ -7235,6 +7269,9 @@ function normalizeGitHubIssueLinkEntityData(value: unknown): GitHubIssueLinkEnti
     githubIssueId,
     githubIssueNumber,
     githubIssueUrl,
+    ...(creatorLogin ? { creatorLogin } : {}),
+    ...(creatorUrl ? { creatorUrl } : {}),
+    ...(creatorAvatarUrl ? { creatorAvatarUrl } : {}),
     githubIssueState,
     ...(githubIssueStateReason ? { githubIssueStateReason } : {}),
     commentsCount,
@@ -7533,6 +7570,9 @@ function buildGitHubIssueLinkRecord(
       githubIssueId: githubIssue.id,
       githubIssueNumber: githubIssue.number,
       githubIssueUrl,
+      ...(githubIssue.authorLogin ? { creatorLogin: githubIssue.authorLogin } : {}),
+      ...(githubIssue.authorUrl ? { creatorUrl: githubIssue.authorUrl } : {}),
+      ...(githubIssue.authorAvatarUrl ? { creatorAvatarUrl: githubIssue.authorAvatarUrl } : {}),
       githubIssueState: githubIssue.state,
       ...(githubIssue.stateReason ? { githubIssueStateReason: githubIssue.stateReason } : {}),
       commentsCount: githubIssue.commentsCount,
