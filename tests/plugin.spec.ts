@@ -2893,6 +2893,240 @@ test('project.pullRequests.page returns live GitHub pull request summaries for t
   }
 });
 
+test('project.pullRequests.page blocks mergeability for non-default targets and outstanding changes requests', async () => {
+  const harness = await createProjectPullRequestsHarness();
+  const originalFetch = globalThis.fetch;
+
+  globalThis.fetch = async (input, init) => {
+    const requestUrl = getRequestUrl(input);
+    const requestPathname = getDecodedRequestPathname(input);
+    if (requestUrl === 'https://api.github.com/graphql') {
+      const { query } = getGraphqlRequest(init);
+      if (query.includes('GitHubProjectPullRequests')) {
+        return graphqlResponse({
+          repository: {
+            nameWithOwner: 'paperclipai/example-repo',
+            url: 'https://github.com/paperclipai/example-repo',
+            defaultBranchRef: {
+              name: 'main'
+            },
+            pullRequests: {
+              totalCount: 2,
+              pageInfo: {
+                hasNextPage: false,
+                endCursor: null
+              },
+              nodes: [
+                {
+                  id: 'PR_kwDOAA2',
+                  number: 42,
+                  title: 'Keep the release branch green',
+                  url: 'https://github.com/paperclipai/example-repo/pull/42',
+                  state: 'OPEN',
+                  mergeable: 'MERGEABLE',
+                  mergeStateStatus: 'CLEAN',
+                  createdAt: '2026-04-10T08:00:00.000Z',
+                  updatedAt: '2026-04-13T09:15:00.000Z',
+                  baseRefName: 'develop',
+                  headRefName: 'feature/non-default-target',
+                  changedFiles: 2,
+                  commits: {
+                    totalCount: 1
+                  },
+                  author: {
+                    login: 'alvaro',
+                    url: 'https://github.com/alvaro',
+                    avatarUrl: 'https://avatars.githubusercontent.com/u/1?v=4'
+                  },
+                  assignees: {
+                    nodes: []
+                  },
+                  labels: {
+                    nodes: []
+                  },
+                  comments: {
+                    totalCount: 0
+                  },
+                  closingIssuesReferences: {
+                    nodes: []
+                  },
+                  reviews: {
+                    pageInfo: {
+                      hasNextPage: false,
+                      endCursor: null
+                    },
+                    nodes: [
+                      {
+                        state: 'APPROVED',
+                        author: {
+                          login: 'reviewer'
+                        }
+                      }
+                    ]
+                  },
+                  reviewThreads: {
+                    totalCount: 0,
+                    pageInfo: {
+                      hasNextPage: false,
+                      endCursor: null
+                    },
+                    nodes: []
+                  },
+                  statusCheckRollup: {
+                    contexts: {
+                      pageInfo: {
+                        hasNextPage: false,
+                        endCursor: null
+                      },
+                      nodes: [
+                        {
+                          __typename: 'CheckRun',
+                          status: 'COMPLETED',
+                          conclusion: 'SUCCESS'
+                        }
+                      ]
+                    }
+                  }
+                },
+                {
+                  id: 'PR_kwDOAA3',
+                  number: 43,
+                  title: 'Ship after addressing review feedback',
+                  url: 'https://github.com/paperclipai/example-repo/pull/43',
+                  state: 'OPEN',
+                  mergeable: 'MERGEABLE',
+                  mergeStateStatus: 'CLEAN',
+                  createdAt: '2026-04-10T10:00:00.000Z',
+                  updatedAt: '2026-04-13T10:15:00.000Z',
+                  baseRefName: 'main',
+                  headRefName: 'feature/changes-requested',
+                  changedFiles: 3,
+                  commits: {
+                    totalCount: 2
+                  },
+                  author: {
+                    login: 'reviewer',
+                    url: 'https://github.com/reviewer',
+                    avatarUrl: 'https://avatars.githubusercontent.com/u/2?v=4'
+                  },
+                  assignees: {
+                    nodes: []
+                  },
+                  labels: {
+                    nodes: []
+                  },
+                  comments: {
+                    totalCount: 1
+                  },
+                  closingIssuesReferences: {
+                    nodes: []
+                  },
+                  reviews: {
+                    pageInfo: {
+                      hasNextPage: false,
+                      endCursor: null
+                    },
+                    nodes: [
+                      {
+                        state: 'APPROVED',
+                        author: {
+                          login: 'reviewer'
+                        }
+                      },
+                      {
+                        state: 'CHANGES_REQUESTED',
+                        author: {
+                          login: 'maintainer'
+                        }
+                      }
+                    ]
+                  },
+                  reviewThreads: {
+                    totalCount: 0,
+                    pageInfo: {
+                      hasNextPage: false,
+                      endCursor: null
+                    },
+                    nodes: []
+                  },
+                  statusCheckRollup: {
+                    contexts: {
+                      pageInfo: {
+                        hasNextPage: false,
+                        endCursor: null
+                      },
+                      nodes: [
+                        {
+                          __typename: 'CheckRun',
+                          status: 'COMPLETED',
+                          conclusion: 'SUCCESS'
+                        }
+                      ]
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        });
+      }
+    }
+
+    if (requestPathname === '/repos/paperclipai/example-repo/compare/develop...feature/non-default-target') {
+      return jsonResponse({
+        status: 'identical',
+        ahead_by: 0,
+        behind_by: 0
+      });
+    }
+
+    if (requestPathname === '/repos/paperclipai/example-repo/compare/main...feature/changes-requested') {
+      return jsonResponse({
+        status: 'identical',
+        ahead_by: 0,
+        behind_by: 0
+      });
+    }
+
+    throw new Error(`Unexpected fetch during project.pullRequests.page mergeability test: ${requestUrl}`);
+  };
+
+  try {
+    const data = await harness.getData<{
+      status: string;
+      defaultBranchName?: string;
+      pullRequests: Array<{
+        number: number;
+        reviewable?: boolean;
+        reviewApprovals: number;
+        reviewChangesRequested: number;
+        mergeable: boolean;
+      }>;
+    }>('project.pullRequests.page', {
+      companyId: 'company-1',
+      projectId: 'project-1'
+    });
+
+    assert.equal(data.status, 'ready');
+    assert.equal(data.defaultBranchName, 'main');
+
+    const nonDefaultTarget = data.pullRequests.find((pullRequest) => pullRequest.number === 42);
+    assert.ok(nonDefaultTarget);
+    assert.equal(nonDefaultTarget?.reviewable, true);
+    assert.equal(nonDefaultTarget?.reviewChangesRequested, 0);
+    assert.equal(nonDefaultTarget?.mergeable, false);
+
+    const changesRequested = data.pullRequests.find((pullRequest) => pullRequest.number === 43);
+    assert.ok(changesRequested);
+    assert.equal(changesRequested?.reviewable, true);
+    assert.equal(changesRequested?.reviewApprovals, 1);
+    assert.equal(changesRequested?.reviewChangesRequested, 1);
+    assert.equal(changesRequested?.mergeable, false);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test('project.pullRequests.page classifies pull request branch freshness for the Up to date column and sorts by last updated', async () => {
   const harness = await createProjectPullRequestsHarness();
   const originalFetch = globalThis.fetch;
@@ -3687,6 +3921,7 @@ test('project.pullRequests.page reuses cached metrics filter indexes and only fe
     return {
       number,
       mergeable: 'MERGEABLE',
+      baseRefName: 'main',
       reviews: {
         pageInfo: {
           hasNextPage: false,
@@ -4207,12 +4442,19 @@ test('project.pullRequests.detail returns the GitHub conversation in timeline or
       ]);
     }
 
+    if (requestUrl.pathname === '/repos/paperclipai/example-repo') {
+      return jsonResponse({
+        default_branch: 'main'
+      });
+    }
+
     throw new Error(`Unexpected fetch during project.pullRequests.detail test: ${requestUrl}`);
   };
 
   try {
     const detail = await harness.getData<{
       number: number;
+      mergeable: boolean;
       reviewApprovals: number;
       reviewCommentCount: number;
       paperclipIssueId?: string;
@@ -4232,6 +4474,7 @@ test('project.pullRequests.detail returns the GitHub conversation in timeline or
 
     assert.ok(detail);
     assert.equal(detail?.number, 42);
+    assert.equal(detail?.mergeable, true);
     assert.equal(detail?.reviewApprovals, 1);
     assert.equal(detail?.reviewCommentCount, 2);
     assert.equal(detail?.paperclipIssueId, linkedIssue.id);
@@ -4439,6 +4682,81 @@ test('project.pullRequests.merge merges the selected pull request', async () => 
     const requestUrl = new URL(getRequestUrl(input));
     const method = input instanceof Request ? input.method : init?.method ?? 'GET';
 
+    if (requestUrl.pathname === '/repos/paperclipai/example-repo/pulls/42' && method === 'GET') {
+      return jsonResponse({
+        html_url: 'https://github.com/paperclipai/example-repo/pull/42',
+        state: 'open',
+        merged: false,
+        mergeable: true,
+        base: {
+          ref: 'main'
+        },
+        head: {
+          ref: 'feature/project-pr-page'
+        }
+      });
+    }
+
+    if (requestUrl.pathname === '/repos/paperclipai/example-repo/pulls/42/reviews' && method === 'GET') {
+      return jsonResponse([
+        {
+          state: 'APPROVED',
+          user: {
+            login: 'reviewer'
+          }
+        }
+      ]);
+    }
+
+    if (requestUrl.pathname === '/repos/paperclipai/example-repo' && method === 'GET') {
+      return jsonResponse({
+        default_branch: 'main'
+      });
+    }
+
+    if (requestUrl.toString() === 'https://api.github.com/graphql') {
+      const { query } = getGraphqlRequest(init);
+      if (query.includes('GitHubPullRequestReviewThreadsDetailed')) {
+        return graphqlResponse({
+          repository: {
+            pullRequest: {
+              reviewThreads: {
+                pageInfo: {
+                  hasNextPage: false,
+                  endCursor: null
+                },
+                nodes: []
+              }
+            }
+          }
+        });
+      }
+
+      if (query.includes('GitHubPullRequestCiContexts')) {
+        return graphqlResponse({
+          repository: {
+            pullRequest: {
+              statusCheckRollup: {
+                contexts: {
+                  pageInfo: {
+                    hasNextPage: false,
+                    endCursor: null
+                  },
+                  nodes: [
+                    {
+                      __typename: 'CheckRun',
+                      status: 'COMPLETED',
+                      conclusion: 'SUCCESS'
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        });
+      }
+    }
+
     if (requestUrl.pathname === '/repos/paperclipai/example-repo/pulls/42/merge' && method === 'PUT') {
       return jsonResponse({
         sha: 'abc123',
@@ -4462,6 +4780,123 @@ test('project.pullRequests.merge merges the selected pull request', async () => 
 
     assert.equal(result.status, 'merged');
     assert.equal(result.githubUrl, 'https://github.com/paperclipai/example-repo/pull/42');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('project.pullRequests.merge rejects pull requests blocked by non-default targets or review feedback', async () => {
+  const harness = await createProjectPullRequestsHarness();
+  const originalFetch = globalThis.fetch;
+  let mergeRequested = false;
+
+  globalThis.fetch = async (input, init) => {
+    const requestUrl = new URL(getRequestUrl(input));
+    const method = input instanceof Request ? input.method : init?.method ?? 'GET';
+
+    if (requestUrl.pathname === '/repos/paperclipai/example-repo/pulls/42' && method === 'GET') {
+      return jsonResponse({
+        html_url: 'https://github.com/paperclipai/example-repo/pull/42',
+        state: 'open',
+        merged: false,
+        mergeable: true,
+        base: {
+          ref: 'release/1.x'
+        },
+        head: {
+          ref: 'feature/project-pr-page'
+        }
+      });
+    }
+
+    if (requestUrl.pathname === '/repos/paperclipai/example-repo/pulls/42/reviews' && method === 'GET') {
+      return jsonResponse([
+        {
+          state: 'APPROVED',
+          user: {
+            login: 'reviewer'
+          }
+        },
+        {
+          state: 'CHANGES_REQUESTED',
+          user: {
+            login: 'maintainer'
+          }
+        }
+      ]);
+    }
+
+    if (requestUrl.pathname === '/repos/paperclipai/example-repo' && method === 'GET') {
+      return jsonResponse({
+        default_branch: 'main'
+      });
+    }
+
+    if (requestUrl.toString() === 'https://api.github.com/graphql') {
+      const { query } = getGraphqlRequest(init);
+      if (query.includes('GitHubPullRequestReviewThreadsDetailed')) {
+        return graphqlResponse({
+          repository: {
+            pullRequest: {
+              reviewThreads: {
+                pageInfo: {
+                  hasNextPage: false,
+                  endCursor: null
+                },
+                nodes: []
+              }
+            }
+          }
+        });
+      }
+
+      if (query.includes('GitHubPullRequestCiContexts')) {
+        return graphqlResponse({
+          repository: {
+            pullRequest: {
+              statusCheckRollup: {
+                contexts: {
+                  pageInfo: {
+                    hasNextPage: false,
+                    endCursor: null
+                  },
+                  nodes: [
+                    {
+                      __typename: 'CheckRun',
+                      status: 'COMPLETED',
+                      conclusion: 'SUCCESS'
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        });
+      }
+    }
+
+    if (requestUrl.pathname === '/repos/paperclipai/example-repo/pulls/42/merge' && method === 'PUT') {
+      mergeRequested = true;
+      return jsonResponse({
+        sha: 'abc123',
+        merged: true,
+        message: 'Pull Request successfully merged'
+      });
+    }
+
+    throw new Error(`Unexpected fetch during blocked project.pullRequests.merge test: ${requestUrl}`);
+  };
+
+  try {
+    await assert.rejects(
+      harness.performAction('project.pullRequests.merge', {
+        companyId: 'company-1',
+        projectId: 'project-1',
+        pullRequestNumber: 42
+      }),
+      /not mergeable yet/i
+    );
+    assert.equal(mergeRequested, false);
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -5553,6 +5988,9 @@ test('project.pullRequests.metrics returns aggregate counts for the mapped repos
       if (query.includes('GitHubProjectPullRequestMetrics')) {
         return graphqlResponse({
           repository: {
+            defaultBranchRef: {
+              name: 'main'
+            },
             pullRequests: {
               totalCount: 3,
               pageInfo: {
@@ -5563,6 +6001,7 @@ test('project.pullRequests.metrics returns aggregate counts for the mapped repos
                 {
                   number: 41,
                   mergeable: 'MERGEABLE',
+                  baseRefName: 'main',
                   reviews: {
                     pageInfo: { hasNextPage: false, endCursor: null },
                     nodes: [
@@ -5608,6 +6047,7 @@ test('project.pullRequests.metrics returns aggregate counts for the mapped repos
                 {
                   number: 42,
                   mergeable: 'MERGEABLE',
+                  baseRefName: 'main',
                   reviews: {
                     pageInfo: { hasNextPage: false, endCursor: null },
                     nodes: []
@@ -5646,6 +6086,7 @@ test('project.pullRequests.metrics returns aggregate counts for the mapped repos
                 {
                   number: 43,
                   mergeable: 'MERGEABLE',
+                  baseRefName: 'main',
                   reviews: {
                     pageInfo: { hasNextPage: false, endCursor: null },
                     nodes: []
@@ -5695,6 +6136,161 @@ test('project.pullRequests.metrics returns aggregate counts for the mapped repos
     assert.equal(result.mergeablePullRequests, 1);
     assert.equal(result.reviewablePullRequests, 2);
     assert.equal(result.failingPullRequests, 1);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('project.pullRequests.metrics excludes non-default targets and outstanding changes requests from mergeable counts', async () => {
+  const harness = await createProjectPullRequestsHarness();
+  const originalFetch = globalThis.fetch;
+
+  globalThis.fetch = async (input, init) => {
+    const requestUrl = getRequestUrl(input);
+    if (requestUrl === 'https://api.github.com/graphql') {
+      const { query } = getGraphqlRequest(init);
+      if (query.includes('GitHubProjectPullRequestMetrics')) {
+        return graphqlResponse({
+          repository: {
+            defaultBranchRef: {
+              name: 'main'
+            },
+            pullRequests: {
+              totalCount: 3,
+              pageInfo: {
+                hasNextPage: false,
+                endCursor: null
+              },
+              nodes: [
+                {
+                  number: 41,
+                  mergeable: 'MERGEABLE',
+                  baseRefName: 'main',
+                  reviews: {
+                    pageInfo: { hasNextPage: false, endCursor: null },
+                    nodes: [
+                      {
+                        state: 'APPROVED',
+                        author: {
+                          login: 'reviewer'
+                        }
+                      }
+                    ]
+                  },
+                  reviewThreads: {
+                    pageInfo: { hasNextPage: false, endCursor: null },
+                    nodes: []
+                  },
+                  statusCheckRollup: {
+                    contexts: {
+                      pageInfo: { hasNextPage: false, endCursor: null },
+                      nodes: [
+                        {
+                          __typename: 'CheckRun',
+                          status: 'COMPLETED',
+                          conclusion: 'SUCCESS'
+                        }
+                      ]
+                    }
+                  }
+                },
+                {
+                  number: 42,
+                  mergeable: 'MERGEABLE',
+                  baseRefName: 'develop',
+                  reviews: {
+                    pageInfo: { hasNextPage: false, endCursor: null },
+                    nodes: [
+                      {
+                        state: 'APPROVED',
+                        author: {
+                          login: 'reviewer'
+                        }
+                      }
+                    ]
+                  },
+                  reviewThreads: {
+                    pageInfo: { hasNextPage: false, endCursor: null },
+                    nodes: []
+                  },
+                  statusCheckRollup: {
+                    contexts: {
+                      pageInfo: { hasNextPage: false, endCursor: null },
+                      nodes: [
+                        {
+                          __typename: 'CheckRun',
+                          status: 'COMPLETED',
+                          conclusion: 'SUCCESS'
+                        }
+                      ]
+                    }
+                  }
+                },
+                {
+                  number: 43,
+                  mergeable: 'MERGEABLE',
+                  baseRefName: 'main',
+                  reviews: {
+                    pageInfo: { hasNextPage: false, endCursor: null },
+                    nodes: [
+                      {
+                        state: 'APPROVED',
+                        author: {
+                          login: 'reviewer'
+                        }
+                      },
+                      {
+                        state: 'CHANGES_REQUESTED',
+                        author: {
+                          login: 'maintainer'
+                        }
+                      }
+                    ]
+                  },
+                  reviewThreads: {
+                    pageInfo: { hasNextPage: false, endCursor: null },
+                    nodes: []
+                  },
+                  statusCheckRollup: {
+                    contexts: {
+                      pageInfo: { hasNextPage: false, endCursor: null },
+                      nodes: [
+                        {
+                          __typename: 'CheckRun',
+                          status: 'COMPLETED',
+                          conclusion: 'SUCCESS'
+                        }
+                      ]
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        });
+      }
+    }
+
+    throw new Error(`Unexpected fetch during project.pullRequests.metrics mergeability test: ${requestUrl}`);
+  };
+
+  try {
+    const result = await harness.getData<{
+      status: string;
+      totalOpenPullRequests: number;
+      mergeablePullRequests: number;
+      reviewablePullRequests: number;
+      failingPullRequests: number;
+    }>('project.pullRequests.metrics', {
+      companyId: 'company-1',
+      projectId: 'project-1'
+    });
+
+    assert.equal(result.status, 'ready');
+    assert.equal(result.totalOpenPullRequests, 3);
+    assert.equal(result.mergeablePullRequests, 1);
+    assert.equal(result.reviewablePullRequests, 3);
+    assert.equal(result.failingPullRequests, 0);
   } finally {
     globalThis.fetch = originalFetch;
   }

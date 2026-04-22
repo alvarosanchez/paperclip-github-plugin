@@ -6075,13 +6075,33 @@ function resolvePreviewPullRequestReviewable(
     unresolvedCopilotThreads === 0;
 }
 
+function resolvePreviewPullRequestTargetsDefaultBranch(
+  record: Pick<PreviewPullRequestRecord, 'baseBranch'>,
+  options?: {
+    defaultBranchName?: string;
+  }
+): boolean {
+  const baseBranch = record.baseBranch.trim();
+  const defaultBranchName = options?.defaultBranchName?.trim();
+
+  return Boolean(baseBranch && defaultBranchName && baseBranch === defaultBranchName);
+}
+
 function resolvePreviewPullRequestMergeable(
-  record: Pick<PreviewPullRequestRecord, 'checksStatus' | 'reviewApprovals' | 'unresolvedReviewThreads' | 'githubMergeable'>
+  record: Pick<
+    PreviewPullRequestRecord,
+    'checksStatus' | 'reviewApprovals' | 'reviewChangesRequested' | 'unresolvedReviewThreads' | 'githubMergeable' | 'baseBranch'
+  >,
+  options?: {
+    defaultBranchName?: string;
+  }
 ): boolean {
   return record.githubMergeable === true &&
     record.checksStatus === 'passed' &&
     record.reviewApprovals > 0 &&
-    record.unresolvedReviewThreads === 0;
+    record.reviewChangesRequested === 0 &&
+    record.unresolvedReviewThreads === 0 &&
+    resolvePreviewPullRequestTargetsDefaultBranch(record, options);
 }
 
 function matchesPreviewPullRequestFilter(
@@ -8925,7 +8945,9 @@ export function GitHubSyncProjectPullRequestsPage(): React.JSX.Element {
         return {
           ...nextRecord,
           reviewable: resolvePreviewPullRequestReviewable(nextRecord),
-          mergeable: resolvePreviewPullRequestMergeable(nextRecord)
+          mergeable: resolvePreviewPullRequestMergeable(nextRecord, {
+            defaultBranchName: pageData.defaultBranchName
+          })
         };
       });
       if (options?.closeModal) {
@@ -8995,7 +9017,9 @@ export function GitHubSyncProjectPullRequestsPage(): React.JSX.Element {
         return {
           ...nextRecord,
           reviewable: resolvePreviewPullRequestReviewable(nextRecord),
-          mergeable: resolvePreviewPullRequestMergeable(nextRecord)
+          mergeable: resolvePreviewPullRequestMergeable(nextRecord, {
+            defaultBranchName: pageData.defaultBranchName
+          })
         };
       });
       closeRerunCiModal();
@@ -10035,7 +10059,7 @@ export function GitHubSyncProjectPullRequestsPage(): React.JSX.Element {
                     <div className="ghsync-prs-meta__row">
                       <span className="ghsync-prs-meta__label">Mergeability</span>
                       <div className="ghsync-prs-meta__value">
-                        {selectedPullRequest.mergeable ? 'Mergeable now' : 'Blocked until checks and review feedback settle'}
+                        {selectedPullRequest.mergeable ? 'Mergeable now' : 'Blocked by checks, review feedback, or target branch rules'}
                       </div>
                     </div>
                   </div>
