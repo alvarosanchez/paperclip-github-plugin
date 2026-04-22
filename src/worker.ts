@@ -2150,7 +2150,7 @@ function buildGitHubPullRequestWriteActionError(params: {
   action: 'comment' | 'review' | 'update_branch';
   error: unknown;
   repositoryLabel: string;
-  reviewType?: 'APPROVE' | 'REQUEST_CHANGES';
+  reviewType?: 'APPROVE' | 'REQUEST_CHANGES' | 'COMMENT';
   body?: string;
 }): Error {
   const rateLimitPause = getGitHubRateLimitPauseDetails(params.error);
@@ -14175,12 +14175,17 @@ async function reviewProjectPullRequest(
       ? 'APPROVE'
       : input.review === 'request_changes'
         ? 'REQUEST_CHANGES'
+        : input.review === 'comment'
+          ? 'COMMENT'
         : undefined;
   if (!reviewType) {
-    throw new Error('review must be "approve" or "request_changes".');
+    throw new Error('review must be "approve", "request_changes", or "comment".');
   }
 
   const body = typeof input.body === 'string' ? input.body.trim() : '';
+  if (reviewType === 'COMMENT' && !body) {
+    throw new Error('Add a review summary before submitting a comment-only review.');
+  }
   const scope = await requireProjectPullRequestScope(ctx, input);
   const octokit = await createGitHubToolOctokit(ctx, scope.companyId);
   let response;
@@ -14211,7 +14216,9 @@ async function reviewProjectPullRequest(
     review:
       reviewType === 'APPROVE'
         ? 'approved'
-        : 'changes_requested',
+        : reviewType === 'REQUEST_CHANGES'
+          ? 'changes_requested'
+          : 'commented',
     reviewUrl: response.data.html_url ?? `${scope.repository.url}/pull/${pullRequestNumber}`
   };
 }

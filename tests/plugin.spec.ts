@@ -5744,6 +5744,76 @@ test('project.pullRequests.review submits a GitHub pull request review', async (
   }
 });
 
+test('project.pullRequests.review submits a comment-only GitHub pull request review', async () => {
+  const harness = await createProjectPullRequestsHarness();
+  const originalFetch = globalThis.fetch;
+  let requestBody: Record<string, unknown> | null = null;
+  globalThis.fetch = async (input, init) => {
+    const requestUrl = new URL(getRequestUrl(input));
+    const method = input instanceof Request ? input.method : init?.method ?? 'GET';
+
+    if (requestUrl.pathname === '/repos/paperclipai/example-repo/pulls/42/reviews' && method === 'POST') {
+      requestBody = getJsonRequestBody(init);
+      return jsonResponse({
+        id: 7002,
+        html_url: 'https://github.com/paperclipai/example-repo/pull/42#pullrequestreview-7002'
+      });
+    }
+
+    throw new Error(`Unexpected fetch during project.pullRequests.review comment test: ${requestUrl}`);
+  };
+
+  try {
+    const result = await harness.performAction<{
+      reviewId: number;
+      review: string;
+      reviewUrl: string;
+    }>('project.pullRequests.review', {
+      companyId: 'company-1',
+      projectId: 'project-1',
+      pullRequestNumber: 42,
+      review: 'comment',
+      body: 'Needs a bit more context before I can approve this.'
+    });
+
+    assert.deepEqual(requestBody, {
+      event: 'COMMENT',
+      body: 'Needs a bit more context before I can approve this.'
+    });
+    assert.equal(result.reviewId, 7002);
+    assert.equal(result.review, 'commented');
+    assert.equal(result.reviewUrl, 'https://github.com/paperclipai/example-repo/pull/42#pullrequestreview-7002');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('project.pullRequests.review requires a summary for comment-only reviews', async () => {
+  const harness = await createProjectPullRequestsHarness();
+  const originalFetch = globalThis.fetch;
+  let fetchCalled = false;
+  globalThis.fetch = async () => {
+    fetchCalled = true;
+    throw new Error('Fetch should not be called when a comment-only review is missing its summary.');
+  };
+
+  try {
+    await assert.rejects(
+      harness.performAction('project.pullRequests.review', {
+        companyId: 'company-1',
+        projectId: 'project-1',
+        pullRequestNumber: 42,
+        review: 'comment',
+        body: '   '
+      }),
+      /Add a review summary before submitting a comment-only review/i
+    );
+    assert.equal(fetchCalled, false);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test('project.pullRequests.review explains request-changes validation failures when no summary is provided', async () => {
   const harness = await createProjectPullRequestsHarness();
   const originalFetch = globalThis.fetch;
