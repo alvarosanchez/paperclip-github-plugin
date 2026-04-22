@@ -100,6 +100,7 @@ The plugin MUST persist repository mappings, company-scoped advanced issue defau
 - An open GitHub issue with a linked PR that has green CI and all review threads resolved MUST map to Paperclip `in_review`.
 - A closed GitHub issue completed as finished work MUST map to Paperclip `done`.
 - A closed GitHub issue closed as not planned or duplicate MUST map to Paperclip `cancelled`.
+- When sync moves an imported Paperclip issue into `done` or `cancelled`, it MUST clear any pending Paperclip review or approval execution state as part of that same transition so the host does not reject the terminal status update.
 - A new GitHub issue comment on an open imported issue MUST move the corresponding Paperclip issue back into active work only when at least one newly added comment since the last sync was written by the original GitHub issue author or by a repository maintainer/admin that the worker can verify through the GitHub API, and that active-work status MUST be `in_progress` when the worker can route the issue back to an executor through execution-policy or configured handoff data and `todo` otherwise.
 - A new GitHub issue comment from any other GitHub account MUST NOT move the corresponding Paperclip issue back into active work.
 - If that Paperclip issue is currently `backlog`, trusted GitHub comments MUST still leave it in `backlog`.
