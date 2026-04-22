@@ -1,4 +1,5 @@
 export interface GitHubSyncAssigneeOption {
+  kind: 'agent' | 'user';
   id: string;
   name: string;
   title?: string;
@@ -17,6 +18,7 @@ export function normalizeCompanyAssigneeOptionsResponse(response: unknown): GitH
       }
 
       const record = entry as Record<string, unknown>;
+      const kind = record.kind === 'user' ? 'user' : 'agent';
       const id = typeof record.id === 'string' ? record.id.trim() : '';
       const name = typeof record.name === 'string' ? record.name.trim() : '';
       const status = typeof record.status === 'string' ? record.status.trim() : '';
@@ -27,6 +29,7 @@ export function normalizeCompanyAssigneeOptionsResponse(response: unknown): GitH
       }
 
       return {
+        kind,
         id,
         name,
         ...(title ? { title } : {}),
@@ -34,5 +37,11 @@ export function normalizeCompanyAssigneeOptionsResponse(response: unknown): GitH
       };
     })
     .filter((entry): entry is GitHubSyncAssigneeOption => entry !== null)
-    .sort((left, right) => left.name.localeCompare(right.name));
+    .sort((left, right) => {
+      if (left.kind !== right.kind) {
+        return left.kind === 'user' ? -1 : 1;
+      }
+
+      return left.name.localeCompare(right.name);
+    });
 }

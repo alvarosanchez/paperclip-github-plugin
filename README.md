@@ -28,7 +28,7 @@ With this plugin, you can:
 
 The plugin adds a full in-host workflow instead of a one-off import script:
 
-- a hosted settings page for GitHub auth, repository mappings, company defaults, and sync controls
+- a hosted settings page for GitHub auth, repository mappings, company defaults, execution-policy handoff fallbacks, and sync controls
 - authenticated-only setup controls for Paperclip board access and company-scoped agent token propagation
 - a dashboard widget that shows readiness, sync status, and last-run results
 - saved sync diagnostics that let operators inspect the latest per-issue failures, raw errors, and suggested next steps
@@ -45,7 +45,7 @@ The plugin adds a full in-host workflow instead of a one-off import script:
 
 During sync, the plugin imports one top-level Paperclip issue per GitHub issue, updates already imported issues instead of recreating them, maps GitHub labels into Paperclip labels, and keeps GitHub-specific metadata in dedicated Paperclip surfaces rather than stuffing everything into the issue description.
 
-When the host exposes plugin issue creation, imported GitHub issues are created through the Paperclip plugin SDK path so they are not attributed to the connected board user. The worker still uses direct local Paperclip REST calls for label sync and for description or status repair paths when those routes are available.
+When the host exposes plugin issue creation, imported GitHub issues are created through the Paperclip plugin SDK path so they are not attributed to the connected board user. The worker still uses direct local Paperclip REST calls for label sync and for description, assignee, or status repair paths when those routes are available.
 
 Long-running syncs continue in the background, so quick actions do not have to wait for the whole import to finish. Once a sync has started, the settings page, dashboard widget, and toolbar actions can request cancellation; the worker stops cooperatively after the current repository or issue step finishes. If the worker restarts mid-run, GitHub Sync now recovers that orphaned `running` state on the next read or control action instead of leaving the UI stuck in `running` or silently restarting the old run.
 
@@ -111,7 +111,7 @@ npx paperclipai plugin install --local "$PWD"
 4. If the deployment is authenticated, choose which agents in the current company should receive the saved GitHub token as `GITHUB_TOKEN`.
 5. Add one or more repository mappings for the current company.
 6. For each mapping, either choose an existing GitHub-linked Paperclip project or enter the project name that should receive synced issues.
-7. Optionally configure company-wide defaults for imported issues, including the default assignee, the default Paperclip status, and ignored GitHub usernames. Bot aliases such as `renovate[bot]` are matched when you save `renovate`.
+7. Optionally configure company-wide defaults for imported issues, including the default assignee, the default Paperclip status, executor/reviewer/approver handoff assignees for sync-driven transitions, and ignored GitHub usernames. When Paperclip board access is connected, each assignee dropdown also offers `Me` for the connected board user. `Automatic routing` means GitHub Sync follows the issue's Paperclip execution policy first and only uses the saved fallback when Paperclip does not expose the next reviewer, approver, or return assignee yet. Bot aliases such as `renovate[bot]` are matched when you save `renovate`.
 8. Choose the automatic sync interval in minutes.
 9. Save the settings and run the first manual sync.
 10. Repeat inside other companies if they need their own mappings, defaults, board access, or agent token propagation.
@@ -136,7 +136,7 @@ When the local Paperclip API is available, the plugin also syncs labels by name,
 | Open issue with no linked pull request, created by a repository maintainer | `todo` on first import |
 | Open issue with no linked pull request | Configured default status, which defaults to `backlog` |
 | Open issue with a linked pull request and unfinished CI | `in_progress` |
-| Open issue with failing CI or unresolved review threads | `todo` |
+| Open issue with failing CI or unresolved review threads | `todo`, or `in_progress` when GitHub Sync can hand the work back to an executor |
 | Open issue with green CI and all review threads resolved | `in_review` |
 | Closed issue completed as finished work | `done` |
 | Closed issue closed as `not_planned` or `duplicate` | `cancelled` |
@@ -144,10 +144,14 @@ When the local Paperclip API is available, the plugin also syncs labels by name,
 Additional behavior:
 
 - Open issues with no linked pull request that are created by a verified repository maintainer/admin bypass the default imported status and start in `todo`.
+- When Paperclip board access is connected for a company, the advanced assignee dropdowns list both company agents and `Me` for the connected board user.
 - Newly imported issues that finish sync in `todo` and are assigned to an agent enqueue an assignee wakeup so the agent can pick them up promptly.
+- When sync moves work into `in_review`, GitHub Sync first follows the Paperclip issue execution policy's current reviewer or approver when that stage is visible on the issue. If Paperclip does not expose that participant yet, the plugin falls back to the configured reviewer or approver handoff assignee.
+- When sync moves work back into active execution, GitHub Sync first follows the Paperclip issue execution policy `returnAssignee` when it is available. Otherwise it falls back to the configured executor handoff assignee and then to the default imported assignee.
+- Sync-driven handoffs to agent assignees best-effort enqueue an explicit wakeup so the next reviewer, approver, or executor can pick the issue up even when their agent is not running heartbeats.
 - Open imported issues that are already in `backlog` stay in `backlog` until someone changes them in Paperclip.
 - If an imported issue is `done` or `cancelled` and GitHub shows it open again with no linked pull request, sync moves it to `todo` so agents can pick it up again.
-- Trusted new GitHub comments from the original issue author or a verified maintainer/admin can move an open imported issue back to `todo`.
+- Trusted new GitHub comments from the original issue author or a verified maintainer/admin can move an open imported issue back into active work, using `in_progress` when GitHub Sync can route the issue to an executor and otherwise `todo`.
 - When the sync changes a Paperclip issue status, it adds a Paperclip comment explaining what changed and why.
 
 ## Security and authentication

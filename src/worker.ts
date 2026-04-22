@@ -77,6 +77,7 @@ const MISSING_BOARD_ACCESS_SYNC_MESSAGE =
 const MISSING_BOARD_ACCESS_SYNC_ACTION =
   'Open plugin settings for each mapped company that sync will touch, connect Paperclip board access, approve the flow, and then run sync again.';
 const IMPORTED_ISSUE_WAKE_REASON = 'GitHub Sync imported an assigned issue that is ready for work.';
+const STATUS_TRANSITION_WAKE_REASON = 'GitHub Sync moved an assigned issue into its next active state.';
 const ISSUE_LINK_ENTITY_TYPE = 'paperclip-github-plugin.issue-link';
 const PULL_REQUEST_LINK_ENTITY_TYPE = 'paperclip-github-plugin.pull-request-link';
 const COMMENT_ANNOTATION_ENTITY_TYPE = 'paperclip-github-plugin.comment-annotation';
@@ -101,6 +102,7 @@ type GitHubTokenRefs = Record<string, string>;
 type PaperclipBoardApiTokenRefs = Record<string, string>;
 type GitHubTokenLoginByCompanyId = Record<string, string>;
 type PaperclipBoardAccessIdentityByCompanyId = Record<string, string>;
+type PaperclipBoardAccessUserIdByCompanyId = Record<string, string>;
 type CompanyAdvancedSettingsByCompanyId = Record<string, GitHubSyncAdvancedSettings>;
 type ProjectPullRequestFilter = 'all' | 'mergeable' | 'reviewable' | 'failing';
 type ProjectPullRequestUpToDateStatus = 'up_to_date' | 'can_update' | 'conflicts' | 'unknown';
@@ -159,16 +161,65 @@ interface RepositoryMapping {
 
 interface GitHubSyncAdvancedSettings {
   defaultAssigneeAgentId?: string;
+  defaultAssigneeUserId?: string;
+  executorAssigneeAgentId?: string;
+  executorAssigneeUserId?: string;
+  reviewerAssigneeAgentId?: string;
+  reviewerAssigneeUserId?: string;
+  approverAssigneeAgentId?: string;
+  approverAssigneeUserId?: string;
   defaultStatus: PaperclipIssueStatus;
   ignoredIssueAuthorUsernames: string[];
   githubTokenPropagationAgentIds?: string[];
 }
 
 interface GitHubSyncAssigneeOption {
+  kind: 'agent' | 'user';
   id: string;
   name: string;
   title?: string;
   status?: PaperclipAgentStatus;
+}
+
+type PaperclipIssueExecutionStageType = 'review' | 'approval';
+
+type PaperclipIssueAssigneePrincipal =
+  | { kind: 'agent'; id: string }
+  | { kind: 'user'; id: string };
+
+interface PaperclipIssueExecutionStage {
+  id?: string;
+  type: PaperclipIssueExecutionStageType;
+  participants: PaperclipIssueAssigneePrincipal[];
+}
+
+interface PaperclipIssueExecutionPolicy {
+  stages: PaperclipIssueExecutionStage[];
+}
+
+interface PaperclipIssueExecutionState {
+  status?: string;
+  currentStageId: string | null;
+  currentStageIndex: number | null;
+  currentStageType: PaperclipIssueExecutionStageType | null;
+  currentParticipant: PaperclipIssueAssigneePrincipal | null;
+  returnAssignee: PaperclipIssueAssigneePrincipal | null;
+  completedStageIds: string[];
+  lastDecisionId?: string | null;
+  lastDecisionOutcome?: string | null;
+}
+
+interface PaperclipIssueSyncContext {
+  assignee: PaperclipIssueAssigneePrincipal | null;
+  executionPolicy: PaperclipIssueExecutionPolicy | null;
+  executionState: PaperclipIssueExecutionState | null;
+}
+
+type SyncTransitionAssigneeRole = 'executor' | 'reviewer' | 'approver';
+
+interface SyncTransitionAssigneeResolution {
+  principal: PaperclipIssueAssigneePrincipal;
+  role: SyncTransitionAssigneeRole;
 }
 
 interface PaperclipIssueDrawerAgentSummary {
@@ -361,6 +412,7 @@ interface GitHubSyncSettings {
   githubTokenLogin?: string;
   paperclipBoardApiTokenRefs?: PaperclipBoardApiTokenRefs;
   paperclipBoardAccessIdentityByCompanyId?: PaperclipBoardAccessIdentityByCompanyId;
+  paperclipBoardAccessUserIdByCompanyId?: PaperclipBoardAccessUserIdByCompanyId;
   companyAdvancedSettingsByCompanyId?: CompanyAdvancedSettingsByCompanyId;
   totalSyncedIssuesCount?: number;
   updatedAt?: string;
@@ -3802,6 +3854,7 @@ function getPublicSettings(
   | 'githubTokenRef'
   | 'paperclipBoardApiTokenRefs'
   | 'paperclipBoardAccessIdentityByCompanyId'
+  | 'paperclipBoardAccessUserIdByCompanyId'
   | 'companyAdvancedSettingsByCompanyId'
   | 'syncStateByCompanyId'
   | 'scheduleFrequencyMinutesByCompanyId'
@@ -3813,6 +3866,7 @@ function getPublicSettings(
     githubTokenRef: _githubTokenRef,
     paperclipBoardApiTokenRefs: _paperclipBoardApiTokenRefs,
     paperclipBoardAccessIdentityByCompanyId: _paperclipBoardAccessIdentityByCompanyId,
+    paperclipBoardAccessUserIdByCompanyId: _paperclipBoardAccessUserIdByCompanyId,
     companyAdvancedSettingsByCompanyId: _companyAdvancedSettingsByCompanyId,
     syncStateByCompanyId: _syncStateByCompanyId,
     scheduleFrequencyMinutesByCompanyId: _scheduleFrequencyMinutesByCompanyId,
@@ -3847,6 +3901,18 @@ function getPaperclipBoardAccessIdentity(
   return normalizeOptionalString(settings.paperclipBoardAccessIdentityByCompanyId?.[normalizedCompanyId]);
 }
 
+function getPaperclipBoardAccessUserId(
+  settings: Pick<GitHubSyncSettings, 'paperclipBoardAccessUserIdByCompanyId'>,
+  companyId?: string
+): string | undefined {
+  const normalizedCompanyId = normalizeCompanyId(companyId);
+  if (!normalizedCompanyId) {
+    return undefined;
+  }
+
+  return normalizeOptionalString(settings.paperclipBoardAccessUserIdByCompanyId?.[normalizedCompanyId]);
+}
+
 function getPublicSettingsForScope(
   settings: GitHubSyncSettings,
   companyId?: string
@@ -3857,6 +3923,7 @@ function getPublicSettingsForScope(
   | 'githubTokenRef'
   | 'paperclipBoardApiTokenRefs'
   | 'paperclipBoardAccessIdentityByCompanyId'
+  | 'paperclipBoardAccessUserIdByCompanyId'
   | 'companyAdvancedSettingsByCompanyId'
   | 'syncStateByCompanyId'
   | 'scheduleFrequencyMinutesByCompanyId'
@@ -3879,31 +3946,79 @@ function getPublicSettingsForScope(
   };
 }
 
+function compareGitHubSyncAssigneeOptions(
+  left: GitHubSyncAssigneeOption,
+  right: GitHubSyncAssigneeOption
+): number {
+  if (left.kind !== right.kind) {
+    return left.kind === 'user' ? -1 : 1;
+  }
+
+  return left.name.localeCompare(right.name);
+}
+
+function sortGitHubSyncAssigneeOptions(
+  options: GitHubSyncAssigneeOption[]
+): GitHubSyncAssigneeOption[] {
+  return [...options].sort(compareGitHubSyncAssigneeOptions);
+}
+
+function getConnectedBoardUserAssigneeOption(
+  settings: Pick<GitHubSyncSettings, 'paperclipBoardAccessIdentityByCompanyId' | 'paperclipBoardAccessUserIdByCompanyId'>,
+  companyId: string
+): GitHubSyncAssigneeOption | null {
+  const userId = getPaperclipBoardAccessUserId(settings, companyId);
+  if (!userId) {
+    return null;
+  }
+
+  const identityLabel = getPaperclipBoardAccessIdentity(settings, companyId);
+  return {
+    kind: 'user',
+    id: userId,
+    name: 'Me',
+    ...(identityLabel ? { title: identityLabel } : {})
+  };
+}
+
 async function listAvailableAssignees(
   ctx: PluginSetupContext,
-  companyId: string
+  companyId: string,
+  settings?: Pick<GitHubSyncSettings, 'paperclipBoardAccessIdentityByCompanyId' | 'paperclipBoardAccessUserIdByCompanyId'>
 ): Promise<GitHubSyncAssigneeOption[]> {
+  const connectedBoardUserOption = settings
+    ? getConnectedBoardUserAssigneeOption(settings, companyId)
+    : null;
+
   try {
     const agents = await ctx.agents.list({
       companyId,
       limit: 500
     });
 
-    return agents
+    const assignees: GitHubSyncAssigneeOption[] = agents
       .filter((agent) => agent.status !== 'terminated')
       .map((agent) => ({
+        kind: 'agent' as const,
         id: agent.id,
         name: agent.name,
         ...(agent.title?.trim() ? { title: agent.title.trim() } : {}),
         ...(agent.status ? { status: agent.status } : {})
-      }))
-      .sort((left, right) => left.name.localeCompare(right.name));
+      }));
+
+    if (connectedBoardUserOption) {
+      assignees.push(connectedBoardUserOption);
+    }
+
+    return sortGitHubSyncAssigneeOptions(
+      [...new Map(assignees.map((assignee) => [`${assignee.kind}:${assignee.id}`, assignee] as const)).values()]
+    );
   } catch (error) {
     ctx.logger.warn('Unable to list company agents for GitHub Sync advanced settings.', {
       companyId,
       error: getErrorMessage(error)
     });
-    return [];
+    return connectedBoardUserOption ? [connectedBoardUserOption] : [];
   }
 }
 
@@ -4578,6 +4693,30 @@ function normalizePaperclipBoardAccessIdentityByCompanyId(
   return Object.fromEntries(entries);
 }
 
+function normalizePaperclipBoardAccessUserIdByCompanyId(
+  value: unknown
+): PaperclipBoardAccessUserIdByCompanyId | undefined {
+  if (!value || typeof value !== 'object') {
+    return undefined;
+  }
+
+  const entries = Object.entries(value as Record<string, unknown>)
+    .map(([companyId, userId]) => {
+      const normalizedCompanyId = normalizeCompanyId(companyId);
+      const normalizedUserId = normalizeOptionalString(userId);
+      return normalizedCompanyId && normalizedUserId
+        ? [normalizedCompanyId, normalizedUserId] as const
+        : null;
+    })
+    .filter((entry): entry is readonly [string, string] => entry !== null);
+
+  if (entries.length === 0) {
+    return undefined;
+  }
+
+  return Object.fromEntries(entries);
+}
+
 function normalizeSyncCancellationRequest(value: unknown): SyncCancellationRequest | null {
   if (!value || typeof value !== 'object') {
     return null;
@@ -4706,13 +4845,36 @@ function normalizeAgentIds(value: unknown): string[] {
   return [...new Set(entries)].sort((left, right) => left.localeCompare(right));
 }
 
+function normalizeAdvancedSettingsAssigneeOverride(
+  record: Record<string, unknown>,
+  keys: {
+    agentId: keyof GitHubSyncAdvancedSettings;
+    userId: keyof GitHubSyncAdvancedSettings;
+  }
+): Partial<GitHubSyncAdvancedSettings> {
+  const userId = normalizeOptionalString(record[keys.userId as string]);
+  if (userId) {
+    return {
+      [keys.userId]: userId
+    } as Partial<GitHubSyncAdvancedSettings>;
+  }
+
+  const agentId = normalizeOptionalString(record[keys.agentId as string]);
+  if (agentId) {
+    return {
+      [keys.agentId]: agentId
+    } as Partial<GitHubSyncAdvancedSettings>;
+  }
+
+  return {};
+}
+
 function normalizeAdvancedSettings(value: unknown): GitHubSyncAdvancedSettings {
   if (!value || typeof value !== 'object') {
     return DEFAULT_ADVANCED_SETTINGS;
   }
 
   const record = value as Record<string, unknown>;
-  const defaultAssigneeAgentId = normalizeOptionalString(record.defaultAssigneeAgentId);
   const defaultStatus =
     'defaultStatus' in record
       ? coercePaperclipIssueStatus(record.defaultStatus)
@@ -4727,7 +4889,22 @@ function normalizeAdvancedSettings(value: unknown): GitHubSyncAdvancedSettings {
       : [];
 
   return {
-    ...(defaultAssigneeAgentId ? { defaultAssigneeAgentId } : {}),
+    ...normalizeAdvancedSettingsAssigneeOverride(record, {
+      agentId: 'defaultAssigneeAgentId',
+      userId: 'defaultAssigneeUserId'
+    }),
+    ...normalizeAdvancedSettingsAssigneeOverride(record, {
+      agentId: 'executorAssigneeAgentId',
+      userId: 'executorAssigneeUserId'
+    }),
+    ...normalizeAdvancedSettingsAssigneeOverride(record, {
+      agentId: 'reviewerAssigneeAgentId',
+      userId: 'reviewerAssigneeUserId'
+    }),
+    ...normalizeAdvancedSettingsAssigneeOverride(record, {
+      agentId: 'approverAssigneeAgentId',
+      userId: 'approverAssigneeUserId'
+    }),
     defaultStatus,
     ignoredIssueAuthorUsernames,
     ...(githubTokenPropagationAgentIds.length > 0 ? { githubTokenPropagationAgentIds } : {})
@@ -4962,6 +5139,9 @@ function normalizeSettings(value: unknown): GitHubSyncSettings {
   const paperclipBoardAccessIdentityByCompanyId = normalizePaperclipBoardAccessIdentityByCompanyId(
     record.paperclipBoardAccessIdentityByCompanyId
   );
+  const paperclipBoardAccessUserIdByCompanyId = normalizePaperclipBoardAccessUserIdByCompanyId(
+    record.paperclipBoardAccessUserIdByCompanyId
+  );
   const companyAdvancedSettingsByCompanyId = normalizeCompanyAdvancedSettingsByCompanyId(record.companyAdvancedSettingsByCompanyId);
 
   return {
@@ -4978,6 +5158,7 @@ function normalizeSettings(value: unknown): GitHubSyncSettings {
     ...(githubTokenLogin ? { githubTokenLogin } : {}),
     ...(paperclipBoardApiTokenRefs ? { paperclipBoardApiTokenRefs } : {}),
     ...(paperclipBoardAccessIdentityByCompanyId ? { paperclipBoardAccessIdentityByCompanyId } : {}),
+    ...(paperclipBoardAccessUserIdByCompanyId ? { paperclipBoardAccessUserIdByCompanyId } : {}),
     ...(companyAdvancedSettingsByCompanyId ? { companyAdvancedSettingsByCompanyId } : {}),
     updatedAt: typeof record.updatedAt === 'string' ? record.updatedAt : undefined
   };
@@ -5910,10 +6091,13 @@ function classifyGitHubPullRequestCiState(contexts: GitHubCiContextRecord[]): Gi
 }
 
 function resolvePaperclipStatusFromLinkedPullRequests(
-  linkedPullRequests: GitHubPullRequestStatusSnapshot[]
+  linkedPullRequests: GitHubPullRequestStatusSnapshot[],
+  options?: {
+    preferInProgress?: boolean;
+  }
 ): PaperclipIssueStatus {
   if (linkedPullRequests.some((pullRequest) => pullRequest.hasUnresolvedReviewThreads || pullRequest.ciState === 'red')) {
-    return 'todo';
+    return options?.preferInProgress ? 'in_progress' : 'todo';
   }
 
   if (
@@ -5953,6 +6137,534 @@ function normalizePaperclipIssueStatus(value: unknown): PaperclipIssueStatus | u
   return PAPERCLIP_ISSUE_STATUSES.includes(value as PaperclipIssueStatus)
     ? value as PaperclipIssueStatus
     : undefined;
+}
+
+function normalizePaperclipIssueExecutionStageType(value: unknown): PaperclipIssueExecutionStageType | undefined {
+  return value === 'review' || value === 'approval' ? value : undefined;
+}
+
+function normalizePaperclipIssueAssigneePrincipal(value: unknown): PaperclipIssueAssigneePrincipal | null {
+  if (!value || typeof value !== 'object') {
+    return null;
+  }
+
+  const record = value as Record<string, unknown>;
+  const principalType = normalizeOptionalString(record.type);
+  const agentId = normalizeOptionalString(record.agentId);
+  const userId = normalizeOptionalString(record.userId);
+
+  if ((principalType === undefined || principalType === 'agent') && agentId) {
+    return {
+      kind: 'agent',
+      id: agentId
+    };
+  }
+
+  if ((principalType === undefined || principalType === 'user') && userId) {
+    return {
+      kind: 'user',
+      id: userId
+    };
+  }
+
+  return null;
+}
+
+function normalizePaperclipIssueExecutionStage(value: unknown): PaperclipIssueExecutionStage | null {
+  if (!value || typeof value !== 'object') {
+    return null;
+  }
+
+  const record = value as Record<string, unknown>;
+  const type = normalizePaperclipIssueExecutionStageType(record.type);
+  const participants = Array.isArray(record.participants)
+    ? record.participants
+      .map((participant) => normalizePaperclipIssueAssigneePrincipal(participant))
+      .filter((participant): participant is PaperclipIssueAssigneePrincipal => participant !== null)
+    : [];
+
+  if (!type || participants.length === 0) {
+    return null;
+  }
+
+  const id = normalizeOptionalString(record.id);
+
+  return {
+    ...(id ? { id } : {}),
+    type,
+    participants
+  };
+}
+
+function normalizePaperclipIssueExecutionPolicy(value: unknown): PaperclipIssueExecutionPolicy | null {
+  if (!value || typeof value !== 'object') {
+    return null;
+  }
+
+  const rawStages = (value as { stages?: unknown }).stages;
+  const stages = Array.isArray(rawStages)
+    ? rawStages
+      .map((stage) => normalizePaperclipIssueExecutionStage(stage))
+      .filter((stage): stage is PaperclipIssueExecutionStage => stage !== null)
+    : [];
+
+  return stages.length > 0
+    ? {
+        stages
+      }
+    : null;
+}
+
+function normalizePaperclipIssueExecutionState(value: unknown): PaperclipIssueExecutionState | null {
+  if (!value || typeof value !== 'object') {
+    return null;
+  }
+
+  const record = value as Record<string, unknown>;
+  const status = normalizeOptionalString(record.status);
+  const currentStageId = normalizeOptionalString(record.currentStageId) ?? null;
+  const currentStageIndex =
+    typeof record.currentStageIndex === 'number' && Number.isInteger(record.currentStageIndex)
+      ? record.currentStageIndex
+      : null;
+  const currentStageType = normalizePaperclipIssueExecutionStageType(record.currentStageType) ?? null;
+  const currentParticipant = normalizePaperclipIssueAssigneePrincipal(record.currentParticipant);
+  const returnAssignee = normalizePaperclipIssueAssigneePrincipal(record.returnAssignee);
+  const lastDecisionId = normalizeOptionalString(record.lastDecisionId) ?? null;
+  const lastDecisionOutcome = normalizeOptionalString(record.lastDecisionOutcome) ?? null;
+  const completedStageIds = Array.isArray(record.completedStageIds)
+    ? record.completedStageIds
+      .map((stageId) => normalizeOptionalString(stageId))
+      .filter((stageId): stageId is string => Boolean(stageId))
+    : [];
+
+  if (
+    !status
+    && currentStageId === null
+    && currentStageIndex === null
+    && currentStageType === null
+    && currentParticipant === null
+    && returnAssignee === null
+    && completedStageIds.length === 0
+    && lastDecisionId === null
+    && lastDecisionOutcome === null
+  ) {
+    return null;
+  }
+
+  return {
+    ...(status ? { status } : {}),
+    currentStageId,
+    currentStageIndex,
+    currentStageType,
+    currentParticipant,
+    returnAssignee,
+    completedStageIds,
+    ...(lastDecisionId !== null ? { lastDecisionId } : {}),
+    ...(lastDecisionOutcome !== null ? { lastDecisionOutcome } : {})
+  };
+}
+
+function getPaperclipIssueAssigneePrincipal(issue: Issue): PaperclipIssueAssigneePrincipal | null {
+  const record = issue as unknown as Record<string, unknown>;
+  const assigneeAgentId = normalizeOptionalString(record.assigneeAgentId);
+
+  if (assigneeAgentId) {
+    return {
+      kind: 'agent',
+      id: assigneeAgentId
+    };
+  }
+
+  const assigneeUserId = normalizeOptionalString(record.assigneeUserId);
+  return assigneeUserId
+    ? {
+        kind: 'user',
+        id: assigneeUserId
+      }
+    : null;
+}
+
+function getPaperclipIssueSyncContext(issue: Issue): PaperclipIssueSyncContext {
+  const record = issue as unknown as Record<string, unknown>;
+
+  return {
+    assignee: getPaperclipIssueAssigneePrincipal(issue),
+    executionPolicy: normalizePaperclipIssueExecutionPolicy(record.executionPolicy),
+    executionState: normalizePaperclipIssueExecutionState(record.executionState)
+  };
+}
+
+function isSamePaperclipIssueAssigneePrincipal(
+  left: PaperclipIssueAssigneePrincipal | null | undefined,
+  right: PaperclipIssueAssigneePrincipal | null | undefined
+): boolean {
+  if (!left || !right) {
+    return !left && !right;
+  }
+
+  return left.kind === right.kind && left.id === right.id;
+}
+
+function serializePaperclipIssueAssigneePrincipal(
+  principal: PaperclipIssueAssigneePrincipal | null
+): Record<string, string | null> | null {
+  if (!principal) {
+    return null;
+  }
+
+  return principal.kind === 'agent'
+    ? {
+        type: 'agent',
+        agentId: principal.id,
+        userId: null
+      }
+    : {
+        type: 'user',
+        agentId: null,
+        userId: principal.id
+      };
+}
+
+function selectPaperclipIssueExecutionStageParticipant(
+  stage: PaperclipIssueExecutionStage,
+  options: {
+    preferred?: PaperclipIssueAssigneePrincipal | null;
+    exclude?: PaperclipIssueAssigneePrincipal | null;
+  } = {}
+): PaperclipIssueAssigneePrincipal | null {
+  const participants = stage.participants.filter((participant) => !isSamePaperclipIssueAssigneePrincipal(
+    participant,
+    options.exclude
+  ));
+  if (participants.length === 0) {
+    return null;
+  }
+
+  if (options.preferred) {
+    const preferredParticipant = participants.find((participant) => isSamePaperclipIssueAssigneePrincipal(
+      participant,
+      options.preferred
+    ));
+    if (preferredParticipant) {
+      return preferredParticipant;
+    }
+  }
+
+  return participants[0] ?? null;
+}
+
+function findPaperclipIssueExecutionStageMatch(
+  executionPolicy: PaperclipIssueExecutionPolicy | null,
+  executionState: PaperclipIssueExecutionState | null
+): { stage: PaperclipIssueExecutionStage; index: number } | null {
+  const stages = executionPolicy?.stages ?? [];
+  if (stages.length === 0) {
+    return null;
+  }
+
+  const currentStageId = executionState?.currentStageId;
+  if (currentStageId) {
+    const matchedStageIndex = stages.findIndex((stage) => stage.id === currentStageId);
+    if (matchedStageIndex >= 0) {
+      const matchedStage = stages[matchedStageIndex];
+      if (matchedStage) {
+        return {
+          stage: matchedStage,
+          index: matchedStageIndex
+        };
+      }
+    }
+  }
+
+  const currentStageIndex = executionState?.currentStageIndex;
+  if (
+    typeof currentStageIndex === 'number'
+    && currentStageIndex >= 0
+    && currentStageIndex < stages.length
+  ) {
+    const matchedStage = stages[currentStageIndex];
+    if (matchedStage) {
+      return {
+        stage: matchedStage,
+        index: currentStageIndex
+      };
+    }
+  }
+
+  const completedStageIds = new Set(executionState?.completedStageIds ?? []);
+  for (const [stageIndex, stage] of stages.entries()) {
+    if (!stage.id || !completedStageIds.has(stage.id)) {
+      return {
+        stage,
+        index: stageIndex
+      };
+    }
+  }
+
+  const firstStage = stages[0];
+  return firstStage
+    ? {
+        stage: firstStage,
+        index: 0
+      }
+    : null;
+}
+
+function findPaperclipIssueExecutionStage(
+  executionPolicy: PaperclipIssueExecutionPolicy | null,
+  executionState: PaperclipIssueExecutionState | null
+): PaperclipIssueExecutionStage | null {
+  return findPaperclipIssueExecutionStageMatch(executionPolicy, executionState)?.stage ?? null;
+}
+
+function getConfiguredAdvancedAssigneePrincipal(
+  advancedSettings: GitHubSyncAdvancedSettings,
+  role: 'default' | SyncTransitionAssigneeRole
+): PaperclipIssueAssigneePrincipal | null {
+  switch (role) {
+    case 'default':
+      return advancedSettings.defaultAssigneeUserId
+        ? { kind: 'user', id: advancedSettings.defaultAssigneeUserId }
+        : advancedSettings.defaultAssigneeAgentId
+          ? { kind: 'agent', id: advancedSettings.defaultAssigneeAgentId }
+          : null;
+    case 'executor':
+      return advancedSettings.executorAssigneeUserId
+        ? { kind: 'user', id: advancedSettings.executorAssigneeUserId }
+        : advancedSettings.executorAssigneeAgentId
+          ? { kind: 'agent', id: advancedSettings.executorAssigneeAgentId }
+          : null;
+    case 'reviewer':
+      return advancedSettings.reviewerAssigneeUserId
+        ? { kind: 'user', id: advancedSettings.reviewerAssigneeUserId }
+        : advancedSettings.reviewerAssigneeAgentId
+          ? { kind: 'agent', id: advancedSettings.reviewerAssigneeAgentId }
+          : null;
+    case 'approver':
+      return advancedSettings.approverAssigneeUserId
+        ? { kind: 'user', id: advancedSettings.approverAssigneeUserId }
+        : advancedSettings.approverAssigneeAgentId
+          ? { kind: 'agent', id: advancedSettings.approverAssigneeAgentId }
+          : null;
+  }
+}
+
+function resolvePaperclipIssueReviewAssignee(
+  syncContext: PaperclipIssueSyncContext,
+  advancedSettings: GitHubSyncAdvancedSettings
+): SyncTransitionAssigneeResolution | null {
+  const currentParticipant = syncContext.executionState?.currentParticipant;
+  const currentStageType = syncContext.executionState?.currentStageType;
+
+  if (currentParticipant && currentStageType) {
+    return {
+      principal: currentParticipant,
+      role: currentStageType === 'approval' ? 'approver' : 'reviewer'
+    };
+  }
+
+  const nextStageMatch = findPaperclipIssueExecutionStageMatch(syncContext.executionPolicy, syncContext.executionState);
+  const nextStage = nextStageMatch?.stage ?? null;
+  const nextStageParticipant = nextStage
+    ? selectPaperclipIssueExecutionStageParticipant(nextStage, {
+        exclude: syncContext.executionState?.returnAssignee ?? syncContext.assignee
+      })
+    : null;
+  if (nextStage && nextStageParticipant) {
+    return {
+      principal: nextStageParticipant,
+      role: nextStage.type === 'approval' ? 'approver' : 'reviewer'
+    };
+  }
+
+  const approverOverride = getConfiguredAdvancedAssigneePrincipal(advancedSettings, 'approver');
+  if (nextStage?.type === 'approval' && approverOverride) {
+    return {
+      principal: approverOverride,
+      role: 'approver'
+    };
+  }
+
+  const reviewerOverride = getConfiguredAdvancedAssigneePrincipal(advancedSettings, 'reviewer');
+  if (reviewerOverride) {
+    return {
+      principal: reviewerOverride,
+      role: 'reviewer'
+    };
+  }
+
+  if (approverOverride) {
+    return {
+      principal: approverOverride,
+      role: 'approver'
+    };
+  }
+
+  return null;
+}
+
+function resolvePaperclipIssueExecutorAssignee(
+  syncContext: PaperclipIssueSyncContext,
+  advancedSettings: GitHubSyncAdvancedSettings
+): SyncTransitionAssigneeResolution | null {
+  const returnAssignee = syncContext.executionState?.returnAssignee;
+  if (returnAssignee) {
+    return {
+      principal: returnAssignee,
+      role: 'executor'
+    };
+  }
+
+  const executorOverride = getConfiguredAdvancedAssigneePrincipal(advancedSettings, 'executor');
+  if (executorOverride) {
+    return {
+      principal: executorOverride,
+      role: 'executor'
+    };
+  }
+
+  const defaultOverride = getConfiguredAdvancedAssigneePrincipal(advancedSettings, 'default');
+  if (defaultOverride) {
+    return {
+      principal: defaultOverride,
+      role: 'executor'
+    };
+  }
+
+  return null;
+}
+
+function resolveSyncTransitionAssignee(params: {
+  nextStatus: PaperclipIssueStatus;
+  syncContext: PaperclipIssueSyncContext;
+  advancedSettings: GitHubSyncAdvancedSettings;
+}): SyncTransitionAssigneeResolution | null {
+  const { nextStatus, syncContext, advancedSettings } = params;
+
+  if (nextStatus === 'in_review') {
+    return resolvePaperclipIssueReviewAssignee(syncContext, advancedSettings);
+  }
+
+  if (nextStatus === 'todo' || nextStatus === 'in_progress') {
+    return resolvePaperclipIssueExecutorAssignee(syncContext, advancedSettings);
+  }
+
+  return null;
+}
+
+function doesPaperclipIssueAssigneeMatch(
+  currentAssignee: PaperclipIssueAssigneePrincipal | null,
+  nextAssignee: PaperclipIssueAssigneePrincipal | null
+): boolean {
+  return isSamePaperclipIssueAssigneePrincipal(currentAssignee, nextAssignee);
+}
+
+function isActionablePaperclipIssueStatus(status: PaperclipIssueStatus): boolean {
+  return status === 'todo' || status === 'in_progress' || status === 'in_review';
+}
+
+function buildPaperclipPendingExecutionState(params: {
+  previousState: PaperclipIssueExecutionState | null;
+  stage: PaperclipIssueExecutionStage;
+  stageIndex: number;
+  participant: PaperclipIssueAssigneePrincipal;
+  returnAssignee: PaperclipIssueAssigneePrincipal | null;
+}): Record<string, unknown> {
+  const { previousState, stage, stageIndex, participant, returnAssignee } = params;
+
+  return {
+    status: 'pending',
+    currentStageId: stage.id ?? null,
+    currentStageIndex: stageIndex,
+    currentStageType: stage.type,
+    currentParticipant: serializePaperclipIssueAssigneePrincipal(participant),
+    returnAssignee: serializePaperclipIssueAssigneePrincipal(returnAssignee),
+    completedStageIds: [...(previousState?.completedStageIds ?? [])],
+    lastDecisionId: previousState?.lastDecisionId ?? null,
+    lastDecisionOutcome: previousState?.lastDecisionOutcome ?? null
+  };
+}
+
+function buildPaperclipChangesRequestedExecutionState(params: {
+  previousState: PaperclipIssueExecutionState;
+  stage: PaperclipIssueExecutionStage;
+  stageIndex: number;
+}): Record<string, unknown> {
+  const { previousState, stage, stageIndex } = params;
+
+  return {
+    status: 'changes_requested',
+    currentStageId: stage.id ?? previousState.currentStageId ?? null,
+    currentStageIndex: stageIndex,
+    currentStageType: stage.type,
+    currentParticipant: serializePaperclipIssueAssigneePrincipal(previousState.currentParticipant),
+    returnAssignee: serializePaperclipIssueAssigneePrincipal(previousState.returnAssignee),
+    completedStageIds: [...previousState.completedStageIds],
+    lastDecisionId: previousState.lastDecisionId ?? null,
+    lastDecisionOutcome: 'changes_requested'
+  };
+}
+
+function buildSyncFallbackExecutionStatePatch(params: {
+  currentStatus: PaperclipIssueStatus;
+  nextStatus: PaperclipIssueStatus;
+  syncContext: PaperclipIssueSyncContext;
+  nextAssignee?: PaperclipIssueAssigneePrincipal | null;
+}): Record<string, unknown> | null | undefined {
+  const { currentStatus, nextStatus, syncContext, nextAssignee } = params;
+  const previousState = syncContext.executionState;
+
+  if (
+    (currentStatus === 'done' || currentStatus === 'cancelled')
+    && nextStatus !== 'done'
+    && nextStatus !== 'cancelled'
+  ) {
+    return previousState ? null : undefined;
+  }
+
+  if (nextStatus === 'in_review' && syncContext.executionPolicy) {
+    const nextStageMatch = findPaperclipIssueExecutionStageMatch(syncContext.executionPolicy, previousState);
+    if (!nextStageMatch) {
+      return previousState ? null : undefined;
+    }
+
+    const returnAssignee = previousState?.returnAssignee ?? syncContext.assignee;
+    const participant = selectPaperclipIssueExecutionStageParticipant(nextStageMatch.stage, {
+      preferred:
+        previousState?.status === 'changes_requested'
+          ? nextAssignee ?? previousState.currentParticipant
+          : nextAssignee ?? previousState?.currentParticipant,
+      exclude: returnAssignee
+    });
+
+    if (!participant) {
+      return previousState ? null : undefined;
+    }
+
+    return buildPaperclipPendingExecutionState({
+      previousState,
+      stage: nextStageMatch.stage,
+      stageIndex: nextStageMatch.index,
+      participant,
+      returnAssignee
+    });
+  }
+
+  if ((nextStatus === 'todo' || nextStatus === 'in_progress') && currentStatus === 'in_review') {
+    const currentStageMatch = findPaperclipIssueExecutionStageMatch(syncContext.executionPolicy, previousState);
+    if (previousState?.status === 'pending' && previousState.returnAssignee && currentStageMatch) {
+      return buildPaperclipChangesRequestedExecutionState({
+        previousState,
+        stage: currentStageMatch.stage,
+        stageIndex: currentStageMatch.index
+      });
+    }
+
+    return previousState ? null : undefined;
+  }
+
+  return undefined;
 }
 
 function describeGitHubStatusTransitionReason(params: {
@@ -6078,6 +6790,7 @@ function resolvePaperclipIssueStatus(params: {
   wasImportedThisRun: boolean;
   defaultImportedStatus: PaperclipIssueStatus;
   maintainerAuthoredImportedIssue?: boolean;
+  hasExecutorHandoffTarget?: boolean;
 }): PaperclipIssueStatus {
   const {
     currentStatus,
@@ -6086,7 +6799,8 @@ function resolvePaperclipIssueStatus(params: {
     hasTrustedNewComment,
     wasImportedThisRun,
     defaultImportedStatus,
-    maintainerAuthoredImportedIssue
+    maintainerAuthoredImportedIssue,
+    hasExecutorHandoffTarget
   } = params;
 
   if (snapshot.state === 'closed') {
@@ -6102,11 +6816,13 @@ function resolvePaperclipIssueStatus(params: {
 
   const baselineCommentCount = previousCommentCount ?? snapshot.commentCount;
   if (snapshot.commentCount > baselineCommentCount && hasTrustedNewComment) {
-    return 'todo';
+    return hasExecutorHandoffTarget ? 'in_progress' : 'todo';
   }
 
   if (snapshot.linkedPullRequests.length > 0) {
-    return resolvePaperclipStatusFromLinkedPullRequests(snapshot.linkedPullRequests);
+    return resolvePaperclipStatusFromLinkedPullRequests(snapshot.linkedPullRequests, {
+      preferInProgress: hasExecutorHandoffTarget
+    });
   }
 
   if (wasImportedThisRun) {
@@ -7821,13 +8537,17 @@ async function detectPaperclipBoardAccessRequirement(paperclipApiBaseUrl?: strin
   }
 }
 
-async function wakePaperclipAssigneeForImportedIssue(
+async function wakePaperclipIssueAssignee(
   ctx: PluginSetupContext,
   params: {
     assigneeAgentId?: string | null;
     paperclipIssueId: string;
     companyId?: string;
     paperclipApiBaseUrl?: string;
+    reason: string;
+    mutation: 'import' | 'status_transition';
+    previousStatus?: PaperclipIssueStatus;
+    nextStatus?: PaperclipIssueStatus;
   }
 ): Promise<void> {
   if (!params.assigneeAgentId || !params.paperclipApiBaseUrl) {
@@ -7846,10 +8566,12 @@ async function wakePaperclipAssigneeForImportedIssue(
         body: JSON.stringify({
           source: 'assignment',
           triggerDetail: 'system',
-          reason: IMPORTED_ISSUE_WAKE_REASON,
+          reason: params.reason,
           payload: {
             issueId: params.paperclipIssueId,
-            mutation: 'import'
+            mutation: params.mutation,
+            ...(params.previousStatus ? { previousStatus: params.previousStatus } : {}),
+            ...(params.nextStatus ? { nextStatus: params.nextStatus } : {})
           }
         })
       },
@@ -7862,11 +8584,12 @@ async function wakePaperclipAssigneeForImportedIssue(
       throw new Error(`Wakeup request failed with status ${response.status}.`);
     }
   } catch (error) {
-    ctx.logger.warn('GitHub sync could not wake the assignee for an imported Paperclip issue.', {
+    ctx.logger.warn('GitHub sync could not wake the assignee for a Paperclip issue.', {
       issueId: params.paperclipIssueId,
       agentId: params.assigneeAgentId,
       companyId: params.companyId,
       paperclipApiBaseUrl: params.paperclipApiBaseUrl,
+      mutation: params.mutation,
       error: error instanceof Error ? error.message : String(error)
     });
   }
@@ -8876,20 +9599,46 @@ function doIssueNumberListsMatch(left: number[], right: number[]): boolean {
   return left.every((value, index) => value === right[index]);
 }
 
-async function updatePaperclipIssueStatus(
+async function updatePaperclipIssueState(
   ctx: PluginSetupContext,
   params: {
     companyId: string;
     issueId: string;
+    currentStatus: PaperclipIssueStatus;
+    syncContext: PaperclipIssueSyncContext;
     nextStatus: PaperclipIssueStatus;
+    nextAssignee?: PaperclipIssueAssigneePrincipal | null;
     transitionComment: string;
     transitionCommentAnnotation?: StoredStatusTransitionCommentAnnotation;
     paperclipApiBaseUrl?: string;
   }
 ): Promise<void> {
-  const { companyId, issueId, nextStatus, transitionComment, transitionCommentAnnotation, paperclipApiBaseUrl } = params;
+  const {
+    companyId,
+    issueId,
+    currentStatus,
+    syncContext,
+    nextStatus,
+    nextAssignee,
+    transitionComment,
+    transitionCommentAnnotation,
+    paperclipApiBaseUrl
+  } = params;
   const trimmedTransitionComment = transitionComment.trim();
-  let statusUpdated = false;
+  let issueUpdated = false;
+  const issuePatch: Record<string, unknown> = {
+    status: nextStatus
+  };
+
+  if (nextAssignee) {
+    if (nextAssignee.kind === 'agent') {
+      issuePatch.assigneeAgentId = nextAssignee.id;
+      issuePatch.assigneeUserId = null;
+    } else {
+      issuePatch.assigneeAgentId = null;
+      issuePatch.assigneeUserId = nextAssignee.id;
+    }
+  }
 
   if (paperclipApiBaseUrl) {
     try {
@@ -8901,9 +9650,7 @@ async function updatePaperclipIssueStatus(
             accept: 'application/json',
             'content-type': 'application/json'
           },
-          body: JSON.stringify({
-            status: nextStatus
-          })
+          body: JSON.stringify(issuePatch)
         },
         {
           companyId
@@ -8916,7 +9663,7 @@ async function updatePaperclipIssueStatus(
       });
 
       if (!payloadResult.failure) {
-        statusUpdated = true;
+        issueUpdated = true;
       }
 
       if (payloadResult.failure && (payloadResult.failure.status ?? response.status) !== 404 && (payloadResult.failure.status ?? response.status) !== 405) {
@@ -8940,8 +9687,31 @@ async function updatePaperclipIssueStatus(
     }
   }
 
-  if (!statusUpdated) {
-    await ctx.issues.update(issueId, { status: nextStatus }, companyId);
+  if (!issueUpdated) {
+    const fallbackExecutionStatePatch = buildSyncFallbackExecutionStatePatch({
+      currentStatus,
+      nextStatus,
+      syncContext,
+      nextAssignee
+    });
+    const preserveExistingUserAssigneeWithoutLocalApi = nextAssignee?.kind === 'user' && !paperclipApiBaseUrl;
+    const sdkIssuePatch: Record<string, unknown> = {
+      ...issuePatch,
+      ...(fallbackExecutionStatePatch !== undefined ? { executionState: fallbackExecutionStatePatch } : {})
+    };
+
+    if (preserveExistingUserAssigneeWithoutLocalApi) {
+      delete sdkIssuePatch.assigneeAgentId;
+      delete sdkIssuePatch.assigneeUserId;
+      ctx.logger.warn('GitHub sync could not reassign a Paperclip issue to a user without the local Paperclip API. Preserving the existing assignee.', {
+        companyId,
+        issueId,
+        nextStatus,
+        assigneeUserId: nextAssignee.id
+      });
+    }
+
+    await ctx.issues.update(issueId, sdkIssuePatch as PaperclipIssueUpdatePatchWithLabels, companyId);
   }
   if (trimmedTransitionComment && typeof ctx.issues.createComment === 'function') {
     const createdComment = await ctx.issues.createComment(issueId, trimmedTransitionComment, companyId);
@@ -9024,6 +9794,63 @@ function shouldIgnoreGitHubIssue(
   );
 }
 
+async function assignImportedPaperclipIssueToUser(
+  ctx: PluginSetupContext,
+  params: {
+    companyId: string;
+    issueId: string;
+    assigneeUserId: string;
+    paperclipApiBaseUrl?: string;
+  }
+): Promise<void> {
+  if (!params.paperclipApiBaseUrl) {
+    ctx.logger.warn('GitHub sync could not assign a newly imported Paperclip issue to a user without the local Paperclip API. Preserving the imported issue assignment.', {
+      companyId: params.companyId,
+      issueId: params.issueId,
+      assigneeUserId: params.assigneeUserId
+    });
+    return;
+  }
+
+  try {
+    const response = await fetchPaperclipApi(
+      getPaperclipIssueEndpoint(params.paperclipApiBaseUrl, params.issueId),
+      {
+        method: 'PATCH',
+        headers: {
+          accept: 'application/json',
+          'content-type': 'application/json'
+        },
+        body: JSON.stringify({
+          assigneeAgentId: null,
+          assigneeUserId: params.assigneeUserId
+        })
+      },
+      {
+        companyId: params.companyId
+      }
+    );
+
+    const payloadResult = await readPaperclipApiJsonResponse<unknown>(response, {
+      operationLabel: 'issue update',
+      bodyRequired: false
+    });
+    if (!payloadResult.failure) {
+      return;
+    }
+
+    throw new Error(payloadResult.failure.errorMessage ?? `Issue update failed with status ${payloadResult.failure.status ?? response.status}.`);
+  } catch (error) {
+    ctx.logger.warn('GitHub sync could not assign a newly imported Paperclip issue to a Paperclip user.', {
+      companyId: params.companyId,
+      issueId: params.issueId,
+      assigneeUserId: params.assigneeUserId,
+      paperclipApiBaseUrl: params.paperclipApiBaseUrl,
+      error: getErrorMessage(error)
+    });
+  }
+}
+
 async function createPaperclipIssue(
   ctx: PluginSetupContext,
   mapping: RepositoryMapping,
@@ -9039,18 +9866,30 @@ async function createPaperclipIssue(
 
   const title = issue.title;
   const description = buildPaperclipIssueDescription(issue);
+  const defaultAssignee = getConfiguredAdvancedAssigneePrincipal(advancedSettings, 'default');
   const createdIssue = await ctx.issues.create({
     companyId: mapping.companyId,
     projectId: mapping.paperclipProjectId,
     title,
     ...(description ? { description } : {}),
-    ...(advancedSettings.defaultAssigneeAgentId
-      ? { assigneeAgentId: advancedSettings.defaultAssigneeAgentId }
+    ...(defaultAssignee?.kind === 'agent'
+      ? { assigneeAgentId: defaultAssignee.id }
+      : defaultAssignee?.kind === 'user'
+        ? { assigneeUserId: defaultAssignee.id }
       : {})
   });
   const ensuredCreatedIssueId = createdIssue.id;
   const normalizedCreatedIssueDescription = createdIssue.description ?? undefined;
   const createPath: IssueDescriptionUpdatePath = 'sdk';
+
+  if (defaultAssignee?.kind === 'user') {
+    await assignImportedPaperclipIssueToUser(ctx, {
+      companyId: mapping.companyId,
+      issueId: ensuredCreatedIssueId,
+      assigneeUserId: defaultAssignee.id,
+      paperclipApiBaseUrl
+    });
+  }
 
   if (normalizeIssueDescriptionValue(normalizedCreatedIssueDescription) !== description) {
     logIssueDescriptionDiagnostic(
@@ -9251,9 +10090,13 @@ async function synchronizePaperclipIssueStatuses(
   let updatedDescriptionsCount = 0;
   let completedIssueCount = 0;
   const totalIssueCount = importedIssues.length;
-  const queuedImportedIssueWakeups: Array<{
+  const queuedIssueWakeups: Array<{
     assigneeAgentId?: string | null;
     paperclipIssueId: string;
+    reason: string;
+    mutation: 'import' | 'status_transition';
+    previousStatus?: PaperclipIssueStatus;
+    nextStatus?: PaperclipIssueStatus;
   }> = [];
 
   for (const importedIssue of importedIssues) {
@@ -9404,6 +10247,11 @@ async function synchronizePaperclipIssueStatuses(
               maintainerCache: repositoryMaintainerCache
             })
           : false;
+      const paperclipIssueSyncContext = getPaperclipIssueSyncContext(paperclipIssue);
+      const executorTransitionAssignee = resolvePaperclipIssueExecutorAssignee(
+        paperclipIssueSyncContext,
+        advancedSettings
+      );
       const nextStatus = resolvePaperclipIssueStatus({
         currentStatus: paperclipIssue.status,
         snapshot,
@@ -9411,19 +10259,38 @@ async function synchronizePaperclipIssueStatuses(
         hasTrustedNewComment,
         wasImportedThisRun,
         defaultImportedStatus: advancedSettings.defaultStatus,
-        maintainerAuthoredImportedIssue
+        maintainerAuthoredImportedIssue,
+        hasExecutorHandoffTarget: Boolean(executorTransitionAssignee)
       });
+      const nextTransitionAssignee = resolveSyncTransitionAssignee({
+        nextStatus,
+        syncContext: paperclipIssueSyncContext,
+        advancedSettings
+      });
+      const nextAssigneeChanged = nextTransitionAssignee
+        ? !doesPaperclipIssueAssigneeMatch(paperclipIssueSyncContext.assignee, nextTransitionAssignee.principal)
+        : false;
       const shouldWakeImportedAssignee =
-        wasImportedThisRun && nextStatus === 'todo' && Boolean(paperclipIssue.assigneeAgentId);
+        wasImportedThisRun
+        && paperclipIssue.status === nextStatus
+        && nextStatus === 'todo'
+        && paperclipIssueSyncContext.assignee?.kind === 'agent';
+      const shouldWakeTransitionAssignee =
+        paperclipIssue.status !== nextStatus
+        && nextTransitionAssignee?.principal.kind === 'agent'
+        && isActionablePaperclipIssueStatus(nextStatus)
+        && (nextAssigneeChanged || paperclipIssue.status !== nextStatus);
 
       importedIssue.githubIssueNumber = githubIssue.number;
       importedIssue.lastSeenCommentCount = snapshot.commentCount;
 
       if (paperclipIssue.status === nextStatus) {
         if (shouldWakeImportedAssignee) {
-          queuedImportedIssueWakeups.push({
-            assigneeAgentId: paperclipIssue.assigneeAgentId,
-            paperclipIssueId: importedIssue.paperclipIssueId
+          queuedIssueWakeups.push({
+            assigneeAgentId: paperclipIssueSyncContext.assignee?.kind === 'agent' ? paperclipIssueSyncContext.assignee.id : null,
+            paperclipIssueId: importedIssue.paperclipIssueId,
+            reason: IMPORTED_ISSUE_WAKE_REASON,
+            mutation: 'import'
           });
         }
         continue;
@@ -9444,20 +10311,27 @@ async function synchronizePaperclipIssueStatuses(
         repositoryUrl: repository.url,
         githubIssueNumber: githubIssue.number
       });
-      await updatePaperclipIssueStatus(ctx, {
+      await updatePaperclipIssueState(ctx, {
         companyId: mapping.companyId,
         issueId: importedIssue.paperclipIssueId,
+        currentStatus: paperclipIssue.status,
+        syncContext: paperclipIssueSyncContext,
         nextStatus,
+        ...(nextTransitionAssignee ? { nextAssignee: nextTransitionAssignee.principal } : {}),
         transitionComment: transitionComment.body,
         transitionCommentAnnotation: transitionComment.annotation,
         paperclipApiBaseUrl
       });
       updatedStatusesCount += 1;
 
-      if (shouldWakeImportedAssignee) {
-        queuedImportedIssueWakeups.push({
-          assigneeAgentId: paperclipIssue.assigneeAgentId,
-          paperclipIssueId: importedIssue.paperclipIssueId
+      if (shouldWakeTransitionAssignee && nextTransitionAssignee?.principal.kind === 'agent') {
+        queuedIssueWakeups.push({
+          assigneeAgentId: nextTransitionAssignee.principal.id,
+          paperclipIssueId: importedIssue.paperclipIssueId,
+          reason: STATUS_TRANSITION_WAKE_REASON,
+          mutation: 'status_transition',
+          previousStatus: paperclipIssue.status,
+          nextStatus
         });
       }
     } catch (error) {
@@ -9482,13 +10356,17 @@ async function synchronizePaperclipIssueStatuses(
   }
 
   await mapWithConcurrency(
-    queuedImportedIssueWakeups,
+    queuedIssueWakeups,
     IMPORTED_ISSUE_WAKEUP_CONCURRENCY,
-    async (queuedWakeup) => wakePaperclipAssigneeForImportedIssue(ctx, {
+    async (queuedWakeup) => wakePaperclipIssueAssignee(ctx, {
       assigneeAgentId: queuedWakeup.assigneeAgentId,
       paperclipIssueId: queuedWakeup.paperclipIssueId,
       companyId: mapping.companyId,
-      paperclipApiBaseUrl
+      paperclipApiBaseUrl,
+      reason: queuedWakeup.reason,
+      mutation: queuedWakeup.mutation,
+      previousStatus: queuedWakeup.previousStatus,
+      nextStatus: queuedWakeup.nextStatus
     })
   );
 
@@ -15319,7 +16197,7 @@ const plugin = definePlugin({
 
       const scopedMappings = filterMappingsByCompany(settingsForResponse.mappings, requestedCompanyId);
       const availableAssignees = includeAssignees && requestedCompanyId
-        ? await listAvailableAssignees(ctx, requestedCompanyId)
+        ? await listAvailableAssignees(ctx, requestedCompanyId, settingsForResponse)
         : [];
 
       return {
@@ -15465,6 +16343,7 @@ const plugin = definePlugin({
         ...(githubTokenLogin ? { githubTokenLogin } : {}),
         paperclipBoardApiTokenRefs: previous.paperclipBoardApiTokenRefs,
         paperclipBoardAccessIdentityByCompanyId: previous.paperclipBoardAccessIdentityByCompanyId,
+        paperclipBoardAccessUserIdByCompanyId: previous.paperclipBoardAccessUserIdByCompanyId,
         ...(Object.keys(nextCompanyAdvancedSettingsByCompanyId).length > 0
           ? { companyAdvancedSettingsByCompanyId: nextCompanyAdvancedSettingsByCompanyId }
           : {}),
@@ -15501,6 +16380,9 @@ const plugin = definePlugin({
         ...(current.paperclipBoardAccessIdentityByCompanyId
           ? { paperclipBoardAccessIdentityByCompanyId: current.paperclipBoardAccessIdentityByCompanyId }
           : {}),
+        ...(current.paperclipBoardAccessUserIdByCompanyId
+          ? { paperclipBoardAccessUserIdByCompanyId: current.paperclipBoardAccessUserIdByCompanyId }
+          : {}),
         ...(current.companyAdvancedSettingsByCompanyId
           ? { companyAdvancedSettingsByCompanyId: current.companyAdvancedSettingsByCompanyId }
           : {}),
@@ -15521,7 +16403,7 @@ const plugin = definePlugin({
         ...getPublicSettingsForScope(next, requestedCompanyId),
         ...(scopedGitHubTokenLogin ? { githubTokenLogin: scopedGitHubTokenLogin } : {}),
         availableAssignees: requestedCompanyId
-          ? await listAvailableAssignees(ctx, requestedCompanyId)
+          ? await listAvailableAssignees(ctx, requestedCompanyId, next)
           : []
       };
     });
@@ -15542,12 +16424,16 @@ const plugin = definePlugin({
       const nextPaperclipBoardAccessIdentityByCompanyId = {
         ...(previous.paperclipBoardAccessIdentityByCompanyId ?? {})
       };
+      const nextPaperclipBoardAccessUserIdByCompanyId = {
+        ...(previous.paperclipBoardAccessUserIdByCompanyId ?? {})
+      };
 
       if (nextSecretRef) {
         nextPaperclipBoardApiTokenRefs[companyId] = nextSecretRef;
       } else {
         delete nextPaperclipBoardApiTokenRefs[companyId];
         delete nextPaperclipBoardAccessIdentityByCompanyId[companyId];
+        delete nextPaperclipBoardAccessUserIdByCompanyId[companyId];
       }
 
       if ('paperclipBoardAccessIdentity' in record) {
@@ -15559,9 +16445,19 @@ const plugin = definePlugin({
         }
       }
 
+      if ('paperclipBoardAccessUserId' in record) {
+        const nextUserId = normalizeOptionalString(record.paperclipBoardAccessUserId);
+        if (nextUserId) {
+          nextPaperclipBoardAccessUserIdByCompanyId[companyId] = nextUserId;
+        } else {
+          delete nextPaperclipBoardAccessUserIdByCompanyId[companyId];
+        }
+      }
+
       const {
         paperclipBoardApiTokenRefs: _previousPaperclipBoardApiTokenRefs,
         paperclipBoardAccessIdentityByCompanyId: _previousPaperclipBoardAccessIdentityByCompanyId,
+        paperclipBoardAccessUserIdByCompanyId: _previousPaperclipBoardAccessUserIdByCompanyId,
         ...previousWithoutBoardAccess
       } = previous;
       const nextBase = sanitizeSettingsForCurrentSetup({
@@ -15571,6 +16467,9 @@ const plugin = definePlugin({
           : {}),
         ...(Object.keys(nextPaperclipBoardAccessIdentityByCompanyId).length > 0
           ? { paperclipBoardAccessIdentityByCompanyId: nextPaperclipBoardAccessIdentityByCompanyId }
+          : {}),
+        ...(Object.keys(nextPaperclipBoardAccessUserIdByCompanyId).length > 0
+          ? { paperclipBoardAccessUserIdByCompanyId: nextPaperclipBoardAccessUserIdByCompanyId }
           : {}),
         updatedAt: new Date().toISOString()
       }, {
