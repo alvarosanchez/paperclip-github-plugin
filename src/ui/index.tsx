@@ -9505,11 +9505,12 @@ export function GitHubSyncProjectPullRequestsPage(): React.JSX.Element {
                                   type="button"
                                   className="ghsync-prs-table__icon-button"
                                   title={`Review #${pullRequest.number}`}
+                                  aria-label={`Review #${pullRequest.number}`}
                                   onClick={() => openReviewModal(pullRequest.id)}
                                   disabled={reviewPending}
                                 >
                                   <LoadingIconButtonContent
-                                    busy={reviewPending}
+                                    busy={false}
                                     busyLabel={`Reviewing #${pullRequest.number}`}
                                     icon={<ReviewIcon className="ghsync-prs-icon" />}
                                   />
@@ -9518,6 +9519,7 @@ export function GitHubSyncProjectPullRequestsPage(): React.JSX.Element {
                                   type="button"
                                   className={`ghsync-prs-table__icon-button ${getPreviewPullRequestInlineActionToneClass('success')}`}
                                   title={`Approve #${pullRequest.number}`}
+                                  aria-label={`Approve #${pullRequest.number}`}
                                   onClick={() => {
                                     void handleQuickPullRequestReview(pullRequest, 'approve');
                                   }}
@@ -9533,6 +9535,7 @@ export function GitHubSyncProjectPullRequestsPage(): React.JSX.Element {
                                   type="button"
                                   className={`ghsync-prs-table__icon-button ${getPreviewPullRequestInlineActionToneClass('danger')}`}
                                   title={`Request changes on #${pullRequest.number}`}
+                                  aria-label={`Request changes on #${pullRequest.number}`}
                                   onClick={() => {
                                     void handleQuickPullRequestReview(pullRequest, 'request_changes');
                                   }}
