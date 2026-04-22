@@ -15273,6 +15273,314 @@ test('worker preserves execution-policy changes-requested state when the local P
   }
 });
 
+test('worker preserves execution-policy changes-requested state when a user handoff falls back through the SDK without the local Paperclip API', async () => {
+  const harness = createTestHarness({
+    manifest,
+    config: {
+      githubTokenRef: 'github-secret-ref'
+    }
+  });
+  await plugin.definition.setup(harness.ctx);
+
+  await harness.performAction('settings.saveRegistration', {
+    companyId: 'company-1',
+    mappings: [
+      {
+        id: 'mapping-a',
+        repositoryUrl: 'paperclipai/example-repo',
+        paperclipProjectName: 'Engineering',
+        paperclipProjectId: 'project-1',
+        companyId: 'company-1'
+      }
+    ],
+    syncState: {
+      status: 'idle'
+    }
+  });
+
+  const originalUpdate = harness.ctx.issues.update;
+  const importedIssue = await harness.ctx.issues.create({
+    companyId: 'company-1',
+    projectId: 'project-1',
+    title: 'User handoff SDK fallback preserves changes requested state',
+    description: '* GitHub issue: [#46](https://github.com/paperclipai/example-repo/issues/46)\n\n---\n\nBody'
+  });
+  await originalUpdate(
+    importedIssue.id,
+    {
+      status: 'in_review',
+      assigneeAgentId: 'agent-2',
+      executionPolicy: {
+        mode: 'normal',
+        commentRequired: true,
+        stages: [
+          {
+            id: 'review-stage',
+            type: 'review',
+            participants: [{ type: 'agent', agentId: 'agent-2' }]
+          }
+        ]
+      },
+      executionState: {
+        status: 'pending',
+        currentStageId: 'review-stage',
+        currentStageIndex: 0,
+        currentStageType: 'review',
+        currentParticipant: { type: 'agent', agentId: 'agent-2' },
+        returnAssignee: { type: 'user', userId: 'user-1' },
+        completedStageIds: []
+      }
+    } as never,
+    'company-1'
+  );
+
+  await harness.ctx.state.set(
+    {
+      scopeKind: 'instance',
+      stateKey: 'paperclip-github-plugin-import-registry'
+    },
+    [
+      {
+        mappingId: 'mapping-a',
+        githubIssueId: 4601,
+        githubIssueNumber: 46,
+        paperclipIssueId: importedIssue.id,
+        importedAt: '2026-04-09T09:00:00.000Z',
+        lastSeenCommentCount: 0,
+        repositoryUrl: 'https://github.com/paperclipai/example-repo',
+        paperclipProjectId: 'project-1',
+        companyId: 'company-1'
+      }
+    ]
+  );
+
+  const directStatusUpdateCalls: Array<{ issueId: string; patch: Record<string, unknown> }> = [];
+  harness.ctx.issues.update = async (issueId, patch, companyId) => {
+    directStatusUpdateCalls.push({
+      issueId,
+      patch: (patch ?? {}) as Record<string, unknown>
+    });
+
+    return originalUpdate(issueId, patch, companyId);
+  };
+
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input, init) => {
+    const rawUrl = getRequestUrl(input);
+    const url = new URL(rawUrl);
+
+    if (url.pathname === '/repos/paperclipai/example-repo/issues' && ['all', 'open'].includes(url.searchParams.get('state') ?? '')) {
+      return jsonResponse([
+        {
+          id: 4601,
+          number: 46,
+          title: 'User handoff SDK fallback preserves changes requested state',
+          body: 'Body',
+          html_url: 'https://github.com/paperclipai/example-repo/issues/46',
+          state: 'open',
+          comments: 0
+        }
+      ]);
+    }
+
+    if (url.pathname === '/graphql') {
+      const { query, variables } = getGraphqlRequest(init);
+      const issueNumber = typeof variables.issueNumber === 'number' ? variables.issueNumber : undefined;
+      const pullRequestNumber =
+        typeof variables.pullRequestNumber === 'number' ? variables.pullRequestNumber : undefined;
+
+      if (query.includes('query GitHubIssueParentRelationships')) {
+        return graphqlIssueParentRelationshipsResponse([
+          {
+            issueNumber: 46
+          }
+        ]);
+      }
+
+      if (query.includes('query GitHubRepositoryOpenIssueLinkedPullRequests')) {
+        return graphqlResponse({
+          repository: {
+            issues: {
+              pageInfo: {
+                hasNextPage: false,
+                endCursor: null
+              },
+              nodes: [
+                {
+                  number: 46,
+                  closedByPullRequestsReferences: {
+                    pageInfo: {
+                      hasNextPage: false,
+                      endCursor: null
+                    },
+                    nodes: [
+                      {
+                        number: 460,
+                        state: 'OPEN'
+                      }
+                    ]
+                  }
+                }
+              ]
+            }
+          }
+        });
+      }
+
+      if (query.includes('query GitHubRepositoryOpenPullRequestStatuses')) {
+        return graphqlResponse({
+          repository: {
+            pullRequests: {
+              pageInfo: {
+                hasNextPage: false,
+                endCursor: null
+              },
+              nodes: [
+                {
+                  number: 460,
+                  reviewThreads: {
+                    pageInfo: {
+                      hasNextPage: false,
+                      endCursor: null
+                    },
+                    nodes: [{ isResolved: false }]
+                  },
+                  statusCheckRollup: {
+                    contexts: {
+                      pageInfo: {
+                        hasNextPage: false,
+                        endCursor: null
+                      },
+                      nodes: [
+                        {
+                          __typename: 'StatusContext',
+                          state: 'SUCCESS'
+                        }
+                      ]
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        });
+      }
+
+      if (query.includes('query GitHubIssueStatusSnapshot') && issueNumber === 46) {
+        return graphqlResponse({
+          repository: {
+            issue: {
+              number: 46,
+              state: 'OPEN',
+              stateReason: null,
+              comments: {
+                totalCount: 0
+              },
+              closedByPullRequestsReferences: {
+                pageInfo: {
+                  hasNextPage: false,
+                  endCursor: null
+                },
+                nodes: [
+                  {
+                    number: 460,
+                    state: 'OPEN'
+                  }
+                ]
+              }
+            }
+          }
+        });
+      }
+
+      if (query.includes('query GitHubPullRequestReviewThreads') && pullRequestNumber === 460) {
+        return graphqlResponse({
+          repository: {
+            pullRequest: {
+              reviewThreads: {
+                pageInfo: {
+                  hasNextPage: false,
+                  endCursor: null
+                },
+                nodes: [{ isResolved: false }]
+              }
+            }
+          }
+        });
+      }
+
+      if (query.includes('query GitHubPullRequestCiContexts') && pullRequestNumber === 460) {
+        return graphqlResponse({
+          repository: {
+            pullRequest: {
+              statusCheckRollup: {
+                contexts: {
+                  pageInfo: {
+                    hasNextPage: false,
+                    endCursor: null
+                  },
+                  nodes: [
+                    {
+                      __typename: 'StatusContext',
+                      state: 'SUCCESS'
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        });
+      }
+    }
+
+    throw new Error(`Unexpected GitHub request: ${url.toString()}`);
+  };
+
+  try {
+    const sync = await harness.performAction('sync.runNow', {
+      waitForCompletion: true
+    }) as {
+      syncState: { status: string };
+    };
+
+    assert.equal(sync.syncState.status, 'success');
+    const directStatusPatches = directStatusUpdateCalls.filter((call) => typeof call.patch.status === 'string');
+    assert.equal(directStatusPatches.length, 1);
+    assert.equal(directStatusPatches[0]?.patch.status, 'in_progress');
+    assert.equal('assigneeAgentId' in (directStatusPatches[0]?.patch ?? {}), false);
+    assert.equal('assigneeUserId' in (directStatusPatches[0]?.patch ?? {}), false);
+    assert.deepEqual(directStatusPatches[0]?.patch.executionState, {
+      status: 'changes_requested',
+      currentStageId: 'review-stage',
+      currentStageIndex: 0,
+      currentStageType: 'review',
+      currentParticipant: { type: 'agent', agentId: 'agent-2', userId: null },
+      returnAssignee: { type: 'user', agentId: null, userId: 'user-1' },
+      completedStageIds: [],
+      lastDecisionId: null,
+      lastDecisionOutcome: 'changes_requested'
+    });
+
+    const updatedIssue = await harness.ctx.issues.get(importedIssue.id, 'company-1') as Record<string, any> | null;
+    assert.equal(updatedIssue?.status, 'in_progress');
+    assert.equal(updatedIssue?.assigneeAgentId, 'agent-2');
+    assert.equal(updatedIssue?.assigneeUserId ?? null, null);
+    assert.deepEqual(updatedIssue?.executionState, {
+      status: 'changes_requested',
+      currentStageId: 'review-stage',
+      currentStageIndex: 0,
+      currentStageType: 'review',
+      currentParticipant: { type: 'agent', agentId: 'agent-2', userId: null },
+      returnAssignee: { type: 'user', agentId: null, userId: 'user-1' },
+      completedStageIds: [],
+      lastDecisionId: null,
+      lastDecisionOutcome: 'changes_requested'
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test('worker moves reopened imported issues with no linked pull requests from done back to todo', async () => {
   const harness = createTestHarness({
     manifest,

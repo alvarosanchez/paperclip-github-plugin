@@ -9696,32 +9696,22 @@ async function updatePaperclipIssueState(
     });
     const preserveExistingUserAssigneeWithoutLocalApi = nextAssignee?.kind === 'user' && !paperclipApiBaseUrl;
     const sdkIssuePatch: Record<string, unknown> = {
-      ...issuePatch
+      ...issuePatch,
+      ...(fallbackExecutionStatePatch !== undefined ? { executionState: fallbackExecutionStatePatch } : {})
     };
-    if (!preserveExistingUserAssigneeWithoutLocalApi || fallbackExecutionStatePatch === null) {
-      if (fallbackExecutionStatePatch !== undefined) {
-        sdkIssuePatch.executionState = fallbackExecutionStatePatch;
-      }
-    }
 
     if (preserveExistingUserAssigneeWithoutLocalApi) {
+      delete sdkIssuePatch.assigneeAgentId;
+      delete sdkIssuePatch.assigneeUserId;
       ctx.logger.warn('GitHub sync could not reassign a Paperclip issue to a user without the local Paperclip API. Preserving the existing assignee.', {
         companyId,
         issueId,
         nextStatus,
         assigneeUserId: nextAssignee.id
       });
-      await ctx.issues.update(
-        issueId,
-        {
-          status: nextStatus,
-          ...(fallbackExecutionStatePatch === null ? { executionState: null } : {})
-        } as unknown as PaperclipIssueUpdatePatchWithLabels,
-        companyId
-      );
-    } else {
-      await ctx.issues.update(issueId, sdkIssuePatch as PaperclipIssueUpdatePatchWithLabels, companyId);
     }
+
+    await ctx.issues.update(issueId, sdkIssuePatch as PaperclipIssueUpdatePatchWithLabels, companyId);
   }
   if (trimmedTransitionComment && typeof ctx.issues.createComment === 'function') {
     const createdComment = await ctx.issues.createComment(issueId, trimmedTransitionComment, companyId);
