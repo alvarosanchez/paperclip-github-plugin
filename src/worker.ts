@@ -1155,6 +1155,7 @@ interface GitHubProjectPullRequestMetricsQueryResult {
       nodes?: Array<{
         number?: number | null;
         mergeable?: 'MERGEABLE' | 'CONFLICTING' | 'UNKNOWN' | null;
+        baseRefName?: string | null;
         reviews?: {
           pageInfo?: GitHubPageInfo | null;
           nodes?: Array<{
@@ -1493,6 +1494,7 @@ const GITHUB_PROJECT_PULL_REQUEST_SUMMARY_FIELDS =
 const GITHUB_PROJECT_PULL_REQUEST_METRICS_FIELDS = `
           number
           mergeable
+          baseRefName
           reviews(first: 100) {
             pageInfo {
               hasNextPage
@@ -5816,15 +5818,36 @@ function resolveProjectPullRequestReviewable(
     record.copilotUnresolvedReviewThreads === 0;
 }
 
+function resolveProjectPullRequestTargetsDefaultBranch(
+  record: Pick<Record<string, unknown>, 'baseBranch' | 'defaultBranchName'>
+): boolean {
+  const baseBranch = normalizeOptionalString(record.baseBranch);
+  const defaultBranchName = normalizeOptionalString(record.defaultBranchName);
+
+  return Boolean(baseBranch && defaultBranchName && baseBranch === defaultBranchName);
+}
+
 function resolveProjectPullRequestMergeable(
-  record: Pick<Record<string, unknown>, 'checksStatus' | 'reviewApprovals' | 'unresolvedReviewThreads' | 'githubMergeable'>
+  record: Pick<
+    Record<string, unknown>,
+    'checksStatus'
+    | 'reviewApprovals'
+    | 'reviewChangesRequested'
+    | 'unresolvedReviewThreads'
+    | 'githubMergeable'
+    | 'baseBranch'
+    | 'defaultBranchName'
+  >
 ): boolean {
   return record.githubMergeable === true &&
     record.checksStatus === 'passed' &&
     typeof record.reviewApprovals === 'number' &&
     record.reviewApprovals > 0 &&
+    typeof record.reviewChangesRequested === 'number' &&
+    record.reviewChangesRequested === 0 &&
     typeof record.unresolvedReviewThreads === 'number' &&
-    record.unresolvedReviewThreads === 0;
+    record.unresolvedReviewThreads === 0 &&
+    resolveProjectPullRequestTargetsDefaultBranch(record);
 }
 
 function resolveProjectPullRequestUpToDateStatus(
@@ -12231,7 +12254,8 @@ async function buildProjectPullRequestSummaryRecord(
   repository: ParsedRepositoryReference,
   node: GitHubProjectPullRequestSummaryNode,
   issueLookup: ProjectPullRequestIssueLookup,
-  pullRequestStatusCache: Map<number, GitHubPullRequestStatusSnapshot>
+  pullRequestStatusCache: Map<number, GitHubPullRequestStatusSnapshot>,
+  defaultBranchName?: string
 ): Promise<Record<string, unknown> | null> {
   if (!node || typeof node.number !== 'number' || !node.url || !node.title?.trim()) {
     return null;
@@ -12291,8 +12315,11 @@ async function buildProjectPullRequestSummaryRecord(
   const mergeable = resolveProjectPullRequestMergeable({
     checksStatus,
     reviewApprovals: reviewSummary.approvals,
+    reviewChangesRequested: reviewSummary.changesRequested,
     unresolvedReviewThreads: reviewThreadSummary.unresolvedReviewThreads,
-    githubMergeable
+    githubMergeable,
+    baseBranch: node.baseRefName,
+    defaultBranchName
   });
   const upToDateStatus = resolveProjectPullRequestUpToDateStatus({
     mergeStateStatus: node.mergeStateStatus,
@@ -12391,7 +12418,8 @@ async function listProjectPullRequestSummaryRecords(
           scope.repository,
           node,
           issueLookup,
-          pullRequestStatusCache
+          pullRequestStatusCache,
+          defaultBranchName
         )
     );
 
@@ -12419,7 +12447,8 @@ async function buildProjectPullRequestMetricCounts(
   octokit: Octokit,
   repository: ParsedRepositoryReference,
   node: NonNullable<NonNullable<NonNullable<GitHubProjectPullRequestMetricsQueryResult['repository']>['pullRequests']>['nodes']>[number],
-  pullRequestStatusCache: Map<number, GitHubPullRequestStatusSnapshot>
+  pullRequestStatusCache: Map<number, GitHubPullRequestStatusSnapshot>,
+  defaultBranchName?: string
 ): Promise<{
   pullRequestNumber: number | null;
   mergeablePullRequests: number;
@@ -12477,8 +12506,11 @@ async function buildProjectPullRequestMetricCounts(
   const mergeable = resolveProjectPullRequestMergeable({
     checksStatus,
     reviewApprovals: reviewSummary.approvals,
+    reviewChangesRequested: reviewSummary.changesRequested,
     unresolvedReviewThreads: reviewThreadSummary.unresolvedReviewThreads,
-    githubMergeable
+    githubMergeable,
+    baseBranch: node.baseRefName,
+    defaultBranchName
   });
 
   return {
@@ -12541,7 +12573,14 @@ async function listProjectPullRequestMetrics(
     const pageMetrics = await mapWithConcurrency(
       pageNodes,
       PROJECT_PULL_REQUEST_SUMMARY_CONCURRENCY,
-      async (node) => buildProjectPullRequestMetricCounts(octokit, scope.repository, node, pullRequestStatusCache)
+      async (node) =>
+        buildProjectPullRequestMetricCounts(
+          octokit,
+          scope.repository,
+          node,
+          pullRequestStatusCache,
+          defaultBranchName
+        )
     );
 
     for (const pageMetric of pageMetrics) {
@@ -13541,6 +13580,25 @@ function getPullRequestApiState(value: {
   return value.state === 'closed' ? 'closed' : 'open';
 }
 
+async function getGitHubRepositoryDefaultBranchName(
+  octokit: Octokit,
+  repository: ParsedRepositoryReference
+): Promise<string | undefined> {
+  try {
+    const response = await octokit.rest.repos.get({
+      owner: repository.owner,
+      repo: repository.repo,
+      headers: {
+        'X-GitHub-Api-Version': GITHUB_API_VERSION
+      }
+    });
+
+    return normalizeOptionalString(response.data.default_branch);
+  } catch {
+    return undefined;
+  }
+}
+
 async function buildProjectPullRequestDetailData(
   ctx: PluginSetupContext,
   input: Record<string, unknown>
@@ -13561,6 +13619,17 @@ async function buildProjectPullRequestDetailData(
     activeProjectPullRequestSummaryRecordCache,
     buildProjectPullRequestSummaryRecordCacheKey(scope, pullRequestNumber)
   );
+  const cachedSummary = getFreshCacheValue(
+    activeProjectPullRequestSummaryCache,
+    buildProjectPullRequestSummaryCacheKey(scope)
+  );
+  const cachedMetrics = getFreshCacheValue(
+    activeProjectPullRequestMetricsCache,
+    buildProjectPullRequestMetricsCacheKey(scope)
+  );
+  const cachedDefaultBranchName =
+    normalizeOptionalString(cachedSummary?.defaultBranchName)
+    ?? normalizeOptionalString(cachedMetrics?.defaultBranchName);
   const cachedLinkedIssue = cachedSummaryRecord
     ? getLinkedPaperclipIssueFromProjectPullRequestRecord(cachedSummaryRecord)
     : undefined;
@@ -13583,7 +13652,10 @@ async function buildProjectPullRequestDetailData(
       reviewThreadSummary
     })
   );
-  const [reviewSummary, reviewThreadSummary, comments, linkedIssue, statusSnapshot] = await Promise.all([
+  const defaultBranchNamePromise = cachedDefaultBranchName
+    ? Promise.resolve(cachedDefaultBranchName)
+    : getGitHubRepositoryDefaultBranchName(octokit, scope.repository);
+  const [reviewSummary, reviewThreadSummary, comments, linkedIssue, statusSnapshot, defaultBranchName] = await Promise.all([
     reviewSummaryPromise,
     reviewThreadSummaryPromise,
     listAllGitHubIssueComments(octokit, scope.repository, pullRequestNumber),
@@ -13597,7 +13669,8 @@ async function buildProjectPullRequestDetailData(
             issueLookup
           );
         })(),
-    statusSnapshotPromise
+    statusSnapshotPromise,
+    defaultBranchNamePromise
   ]);
   const author = buildProjectPullRequestPerson({
     login: pullRequest.user?.login,
@@ -13650,8 +13723,11 @@ async function buildProjectPullRequestDetailData(
   const mergeable = resolveProjectPullRequestMergeable({
     checksStatus,
     reviewApprovals: reviewSummary.approvals,
+    reviewChangesRequested: reviewSummary.changesRequested,
     unresolvedReviewThreads: reviewThreadSummary.unresolvedReviewThreads,
-    githubMergeable
+    githubMergeable,
+    baseBranch: pullRequest.base.ref,
+    defaultBranchName
   });
 
   return setCacheValue(
@@ -13896,6 +13972,58 @@ async function mergeProjectPullRequest(
 
   const scope = await requireProjectPullRequestScope(ctx, input);
   const octokit = await createGitHubToolOctokit(ctx, scope.companyId);
+  const pullRequestResponse = await octokit.rest.pulls.get({
+    owner: scope.repository.owner,
+    repo: scope.repository.repo,
+    pull_number: pullRequestNumber,
+    headers: {
+      'X-GitHub-Api-Version': GITHUB_API_VERSION
+    }
+  });
+  const pullRequest = pullRequestResponse.data;
+  const reviewSummaryPromise =
+    getOrLoadCachedGitHubPullRequestReviewSummary(octokit, scope.repository, pullRequestNumber);
+  const reviewThreadSummaryPromise =
+    getOrLoadCachedGitHubPullRequestReviewThreadSummary(octokit, scope.repository, pullRequestNumber);
+  const statusSnapshotPromise = reviewThreadSummaryPromise.then((reviewThreadSummary) =>
+    getGitHubPullRequestStatusSnapshot(octokit, scope.repository, pullRequestNumber, new Map(), {
+      reviewThreadSummary
+    })
+  );
+  const defaultBranchNamePromise = getGitHubRepositoryDefaultBranchName(octokit, scope.repository);
+  const [reviewSummary, reviewThreadSummary, statusSnapshot, defaultBranchName] = await Promise.all([
+    reviewSummaryPromise,
+    reviewThreadSummaryPromise,
+    statusSnapshotPromise,
+    defaultBranchNamePromise
+  ]);
+  if (!defaultBranchName) {
+    throw new Error(
+      'Could not determine the repository default branch before merging this pull request. Retry the merge, and if it keeps failing check GitHub token permissions and connectivity.'
+    );
+  }
+  const checksStatus =
+    statusSnapshot.ciState === 'green'
+      ? 'passed'
+      : statusSnapshot.ciState === 'red'
+        ? 'failed'
+        : 'pending';
+  const mergeable = resolveProjectPullRequestMergeable({
+    checksStatus,
+    reviewApprovals: reviewSummary.approvals,
+    reviewChangesRequested: reviewSummary.changesRequested,
+    unresolvedReviewThreads: reviewThreadSummary.unresolvedReviewThreads,
+    githubMergeable: pullRequest.mergeable === true,
+    baseBranch: pullRequest.base.ref,
+    defaultBranchName
+  });
+
+  if (!mergeable) {
+    throw new Error(
+      'This pull request is not mergeable yet. It must target the current default branch, have passing checks, at least one approval, no outstanding changes requests, and no unresolved review threads.'
+    );
+  }
+
   const response = await octokit.rest.pulls.merge({
     owner: scope.repository.owner,
     repo: scope.repository.repo,
