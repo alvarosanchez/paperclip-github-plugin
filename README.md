@@ -61,7 +61,7 @@ If a company already has a Paperclip project bound to a GitHub repository worksp
 
 ### Status sync with delivery context
 
-The plugin does more than mirror issue text. It looks at linked pull requests, CI, review threads, and trusted new GitHub comments so imported Paperclip issues can reflect where the work actually is.
+The plugin does more than mirror issue text. It looks at linked pull requests, CI, review threads, and trusted new GitHub comments so imported Paperclip issues can reflect where the work actually is. When sync closes an imported issue as `done` or `cancelled`, it also clears any pending Paperclip review or approval execution state so the host accepts the terminal transition cleanly.
 
 ### Project pull request command center
 

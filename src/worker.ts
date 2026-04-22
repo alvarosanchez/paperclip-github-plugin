@@ -6623,6 +6623,10 @@ function buildSyncFallbackExecutionStatePatch(params: {
     return previousState ? null : undefined;
   }
 
+  if (nextStatus === 'done' || nextStatus === 'cancelled') {
+    return previousState ? null : undefined;
+  }
+
   if (nextStatus === 'in_review' && syncContext.executionPolicy) {
     const nextStageMatch = findPaperclipIssueExecutionStageMatch(syncContext.executionPolicy, previousState);
     if (!nextStageMatch) {
@@ -9626,8 +9630,15 @@ async function updatePaperclipIssueState(
   } = params;
   const trimmedTransitionComment = transitionComment.trim();
   let issueUpdated = false;
+  const syncExecutionStatePatch = buildSyncFallbackExecutionStatePatch({
+    currentStatus,
+    nextStatus,
+    syncContext,
+    nextAssignee
+  });
   const issuePatch: Record<string, unknown> = {
-    status: nextStatus
+    status: nextStatus,
+    ...(syncExecutionStatePatch === null ? { executionState: null } : {})
   };
 
   if (nextAssignee) {
@@ -9688,16 +9699,10 @@ async function updatePaperclipIssueState(
   }
 
   if (!issueUpdated) {
-    const fallbackExecutionStatePatch = buildSyncFallbackExecutionStatePatch({
-      currentStatus,
-      nextStatus,
-      syncContext,
-      nextAssignee
-    });
     const preserveExistingUserAssigneeWithoutLocalApi = nextAssignee?.kind === 'user' && !paperclipApiBaseUrl;
     const sdkIssuePatch: Record<string, unknown> = {
       ...issuePatch,
-      ...(fallbackExecutionStatePatch !== undefined ? { executionState: fallbackExecutionStatePatch } : {})
+      ...(syncExecutionStatePatch !== undefined ? { executionState: syncExecutionStatePatch } : {})
     };
 
     if (preserveExistingUserAssigneeWithoutLocalApi) {

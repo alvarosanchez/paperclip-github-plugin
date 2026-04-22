@@ -14383,6 +14383,196 @@ test('worker uses the local Paperclip issue PATCH API for status transitions whe
   }
 });
 
+test('worker clears pending review and approval execution state before closing an imported issue', async () => {
+  const harness = createTestHarness({
+    manifest,
+    config: {
+      githubTokenRef: 'github-secret-ref',
+      paperclipApiBaseUrl: 'http://127.0.0.1:63675'
+    }
+  });
+  await plugin.definition.setup(harness.ctx);
+  harness.ctx.http.fetch = async () => {
+    throw new Error('Local Paperclip issue API calls should use direct worker fetch, not ctx.http.fetch.');
+  };
+
+  await harness.performAction('settings.saveRegistration', {
+    mappings: [
+      {
+        id: 'mapping-a',
+        repositoryUrl: 'paperclipai/example-repo',
+        paperclipProjectName: 'Engineering',
+        paperclipProjectId: 'project-1',
+        companyId: 'company-1'
+      }
+    ],
+    syncState: {
+      status: 'idle'
+    },
+    paperclipApiBaseUrl: 'http://127.0.0.1:63675'
+  });
+
+  const originalUpdate = harness.ctx.issues.update;
+  const importedIssue = await harness.ctx.issues.create({
+    companyId: 'company-1',
+    projectId: 'project-1',
+    title: 'Blocked review issue',
+    description: 'Body\n\n<!-- paperclip-github-plugin-imported-from: https://github.com/paperclipai/example-repo/issues/45 -->'
+  });
+  await originalUpdate(
+    importedIssue.id,
+    {
+      status: 'blocked',
+      assigneeAgentId: 'agent-3',
+      executionPolicy: {
+        mode: 'normal',
+        commentRequired: true,
+        stages: [
+          {
+            id: 'review-stage',
+            type: 'review',
+            participants: [{ type: 'agent', agentId: 'agent-2' }]
+          },
+          {
+            id: 'approval-stage',
+            type: 'approval',
+            participants: [{ type: 'agent', agentId: 'agent-3' }]
+          }
+        ]
+      },
+      executionState: {
+        status: 'pending',
+        currentStageId: 'approval-stage',
+        currentStageIndex: 1,
+        currentStageType: 'approval',
+        currentParticipant: { type: 'agent', agentId: 'agent-3' },
+        returnAssignee: { type: 'agent', agentId: 'agent-1' },
+        completedStageIds: ['review-stage']
+      }
+    } as never,
+    'company-1'
+  );
+
+  await harness.ctx.state.set(
+    {
+      scopeKind: 'instance',
+      stateKey: 'paperclip-github-plugin-import-registry'
+    },
+    [
+      {
+        mappingId: 'mapping-a',
+        githubIssueId: 4501,
+        githubIssueNumber: 45,
+        paperclipIssueId: importedIssue.id,
+        importedAt: '2026-04-09T09:00:00.000Z',
+        lastSeenCommentCount: 0,
+        repositoryUrl: 'https://github.com/paperclipai/example-repo',
+        paperclipProjectId: 'project-1',
+        companyId: 'company-1'
+      }
+    ]
+  );
+
+  const directStatusUpdateCalls: Array<{ issueId: string; patch: Record<string, unknown> }> = [];
+  harness.ctx.issues.update = async (issueId, patch, companyId) => {
+    if (patch && typeof patch === 'object' && 'status' in patch) {
+      directStatusUpdateCalls.push({
+        issueId,
+        patch: (patch ?? {}) as Record<string, unknown>
+      });
+    }
+
+    return originalUpdate(issueId, patch, companyId);
+  };
+
+  const patchRequests: Array<{ issueId: string; body: Record<string, unknown> | null }> = [];
+  const originalFetch = globalThis.fetch;
+
+  globalThis.fetch = async (input, init) => {
+    const rawUrl = getRequestUrl(input);
+    const url = new URL(rawUrl);
+
+    if (url.pathname === `/api/issues/${importedIssue.id}`) {
+      const method = typeof input === 'string' || input instanceof URL ? init?.method : input.method;
+      assert.equal(method, 'PATCH');
+
+      const body = getJsonRequestBody(init);
+      patchRequests.push({
+        issueId: importedIssue.id,
+        body
+      });
+
+      if (body?.status === 'done') {
+        if (!Object.prototype.hasOwnProperty.call(body, 'executionState') || body.executionState !== null) {
+          return jsonResponse({
+            error: 'Clear reviewers and approvers before closing the issue.'
+          }, 422);
+        }
+
+        await originalUpdate(importedIssue.id, {
+          status: 'done',
+          executionState: null
+        } as never, 'company-1');
+      }
+
+      const updated = await harness.ctx.issues.get(importedIssue.id, 'company-1');
+      return jsonResponse(updated ?? {});
+    }
+
+    if (url.pathname === '/repos/paperclipai/example-repo/issues' && ['all', 'open'].includes(url.searchParams.get('state') ?? '')) {
+      return jsonResponse([
+        {
+          id: 4501,
+          number: 45,
+          title: 'Blocked review issue',
+          body: 'Body',
+          html_url: 'https://github.com/paperclipai/example-repo/issues/45',
+          state: 'closed',
+          state_reason: 'completed',
+          comments: 0
+        }
+      ]);
+    }
+
+    if (url.pathname === '/graphql') {
+      const { query } = getGraphqlRequest(init);
+
+      if (query.includes('query GitHubIssueParentRelationships')) {
+        return graphqlIssueParentRelationshipsResponse([
+          {
+            issueNumber: 45
+          }
+        ]);
+      }
+    }
+
+    throw new Error(`Unexpected GitHub request: ${url.toString()}`);
+  };
+
+  try {
+    const sync = await harness.performAction('sync.runNow', {
+      waitForCompletion: true
+    }) as {
+      syncState: { status: string };
+    };
+
+    assert.equal(sync.syncState.status, 'success');
+    const statusPatchRequests = patchRequests.filter((request) => typeof request.body?.status === 'string');
+    assert.equal(statusPatchRequests.length, 1);
+    assert.equal(statusPatchRequests[0]?.issueId, importedIssue.id);
+    assert.equal(statusPatchRequests[0]?.body?.status, 'done');
+    assert.equal(Object.prototype.hasOwnProperty.call(statusPatchRequests[0]?.body ?? {}, 'executionState'), true);
+    assert.equal(statusPatchRequests[0]?.body?.executionState, null);
+    assert.equal(directStatusUpdateCalls.length, 0);
+
+    const updatedIssue = await harness.ctx.issues.get(importedIssue.id, 'company-1') as Record<string, any> | null;
+    assert.equal(updatedIssue?.status, 'done');
+    assert.equal(updatedIssue?.executionState ?? null, null);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test('comment.annotation falls back to GitHub links found in plain issue comments', async () => {
   const harness = createTestHarness({
     manifest
