@@ -11,7 +11,7 @@ The plugin MUST provide a settings page inside Paperclip where an operator can c
 - Paperclip board access, which is optional on unauthenticated deployments and required when the Paperclip deployment reports `deploymentMode: "authenticated"`
 - on authenticated deployments, a company-scoped multi-select of agents that should receive `GITHUB_TOKEN` propagation from the saved GitHub token secret
 - one or more GitHub repository mappings
-- company-scoped advanced defaults for imported issues: default assignee, default Paperclip status, and ignored GitHub issue authors, where a saved username such as `renovate` also matches GitHub bot logins such as `renovate[bot]`
+- company-scoped advanced defaults for imported issues: default assignee, default Paperclip status, executor/reviewer/approver handoff assignees for sync-driven status transitions, and ignored GitHub issue authors, where a saved username such as `renovate` also matches GitHub bot logins such as `renovate[bot]`
 - the frequency for automatic scheduled sync runs for that company
 - a Paperclip project name per mapping where synchronized issues should be created, including existing Paperclip projects that are already bound to a GitHub repository workspace
 
@@ -24,6 +24,8 @@ The settings page MUST allow saving mappings and triggering a manual sync.
 - The settings page MUST only render the Paperclip board-access connect controls and the agent token-propagation selector when the current Paperclip deployment reports `deploymentMode: "authenticated"`.
 - When the settings page successfully validates a saved GitHub token, it SHOULD persist the validated GitHub login as non-secret display metadata so later visits can continue showing `Authenticated as ...` instead of falling back to a generic ready state.
 - When the settings page successfully connects Paperclip board access for a company, it SHOULD persist a company-scoped non-secret identity label so later visits can continue showing `Connected as ...` instead of falling back to a generic connected state.
+- When the active company has a saved Paperclip board-access user id, every advanced-settings assignee dropdown MUST include a `Me` option that maps to that connected board user alongside the available agents.
+- Execution-policy fallback dropdown copy SHOULD use operator-facing language such as `Automatic routing` and explain that Paperclip execution-policy participants and `returnAssignee` win before company-level reviewer, approver, or executor fallbacks.
 - The plugin SHOULD also expose manual sync entry points from Paperclip toolbar surfaces when the SDK supports them.
 - When a manual sync will outlive a quick action response, the worker MUST persist a `running` sync state immediately and complete the sync asynchronously.
 - Once a sync is running, the settings page, dashboard widget, and toolbar sync entry points MUST provide a way to request cancellation, and the worker MUST stop cooperatively after the current repository or issue step finishes.
@@ -63,7 +65,7 @@ The plugin MUST persist repository mappings, company-scoped advanced issue defau
 - The sync flow MUST ignore GitHub issues whose author username matches a configured ignored username for that mapping company.
 - The sync flow MUST create one top-level Paperclip issue per imported GitHub issue when the target mapping has a resolved Paperclip project identifier.
 - When the Paperclip runtime exposes plugin issue creation, the sync flow SHOULD prefer `ctx.issues.create(...)` for imported issue creation and reserve direct Paperclip REST issue calls for repair or update paths so imported issues are not attributed to the connected board user.
-- When the mapping company has a configured default assignee, the sync flow MUST assign newly created imported Paperclip issues to that Paperclip agent.
+- When the mapping company has a configured default assignee, the sync flow MUST assign newly created imported Paperclip issues to that Paperclip assignee, whether the saved principal is a Paperclip agent or the connected board user.
 - Imported Paperclip issues MUST keep the original GitHub issue title without adding a `[GitHub]` prefix.
 - Imported issue descriptions SHOULD contain the normalized GitHub body when present and MUST normalize the GitHub raw HTML constructs that Paperclip cannot render in multiline descriptions.
 - Imported issue descriptions MUST also retain a machine-readable hidden marker for the source GitHub issue URL so agents and repair paths can still recognize imported issues when plugin-owned entity or registry state is missing.
@@ -86,16 +88,20 @@ The plugin MUST persist repository mappings, company-scoped advanced issue defau
 - An open GitHub issue without a linked PR that was created by a repository maintainer/admin MUST map to Paperclip `todo` when it is first imported.
 - An open GitHub issue without a linked PR MUST otherwise map to the configured default Paperclip status when it is first imported, and that default MUST be `backlog` when the company has not chosen another status.
 - When a newly imported GitHub issue finishes sync in Paperclip `todo` and is assigned to an agent, the worker MUST best-effort enqueue an assignment wakeup for that assignee using the imported Paperclip issue as wake context.
+- When sync moves a Paperclip issue into `in_review`, the worker MUST prefer the current reviewer or approver from the issue execution policy and execution state when Paperclip exposes that participant, and it MUST otherwise fall back to the configured reviewer or approver handoff assignee when one is saved.
+- When sync moves a Paperclip issue back into active execution (`todo` or `in_progress`), the worker MUST prefer the issue execution policy `returnAssignee` when Paperclip exposes it, and it MUST otherwise fall back to the configured executor handoff assignee when one is saved before falling back to the default imported assignee.
+- Configured default, reviewer, approver, and executor handoff assignees MAY target either a Paperclip agent or the connected board user for that company.
+- When sync moves an assigned issue into an actionable agent-owned state because of a sync-driven status transition, the worker MUST best-effort enqueue an explicit assignment wakeup for that assignee using the imported Paperclip issue as wake context.
 - If an imported Paperclip issue is currently `backlog` and its linked GitHub issue is still open, the sync flow MUST preserve `backlog`; only a manual Paperclip transition may move it out of `backlog`.
 - If a Paperclip issue that came from an open GitHub issue without a linked PR is later moved out of `backlog`, the sync flow SHOULD preserve that Paperclip status until another open-issue GitHub rule applies.
 - If that Paperclip issue is currently `done` or `cancelled` while the linked GitHub issue is open with no linked PR, the sync flow MUST move it to `todo` instead of `backlog` so it re-enters the active queue.
 - An open GitHub issue with a linked PR that still has unfinished CI jobs MUST map to Paperclip `in_progress`.
-- An open GitHub issue with a linked PR that has red CI jobs or unresolved review threads MUST map to Paperclip `todo`.
+- An open GitHub issue with a linked PR that has red CI jobs or unresolved review threads MUST map to Paperclip `todo`, unless the worker can route the issue back to an executor through execution-policy or configured handoff data, in which case it MUST map to `in_progress`.
 - An open GitHub issue with a linked PR that has green CI and all review threads resolved MUST map to Paperclip `in_review`.
 - A closed GitHub issue completed as finished work MUST map to Paperclip `done`.
 - A closed GitHub issue closed as not planned or duplicate MUST map to Paperclip `cancelled`.
-- A new GitHub issue comment on an open imported issue MUST move the corresponding Paperclip issue back to `todo` only when at least one newly added comment since the last sync was written by the original GitHub issue author or by a repository maintainer/admin that the worker can verify through the GitHub API.
-- A new GitHub issue comment from any other GitHub account MUST NOT move the corresponding Paperclip issue back to `todo`.
+- A new GitHub issue comment on an open imported issue MUST move the corresponding Paperclip issue back into active work only when at least one newly added comment since the last sync was written by the original GitHub issue author or by a repository maintainer/admin that the worker can verify through the GitHub API, and that active-work status MUST be `in_progress` when the worker can route the issue back to an executor through execution-policy or configured handoff data and `todo` otherwise.
+- A new GitHub issue comment from any other GitHub account MUST NOT move the corresponding Paperclip issue back into active work.
 - If that Paperclip issue is currently `backlog`, trusted GitHub comments MUST still leave it in `backlog`.
 - Whenever the sync flow changes a Paperclip issue status, it MUST add a Paperclip issue comment that explains the old status, the new status, and the GitHub condition that caused the transition.
 - When the SDK supports comment annotations, the plugin SHOULD render the referenced GitHub issue and PR links as a comment annotation attached to those sync-created comments.

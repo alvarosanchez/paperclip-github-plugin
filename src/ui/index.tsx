@@ -232,6 +232,13 @@ type PaperclipIssueStatus = 'backlog' | 'todo' | 'in_progress' | 'in_review' | '
 
 interface GitHubSyncAdvancedSettings {
   defaultAssigneeAgentId?: string;
+  defaultAssigneeUserId?: string;
+  executorAssigneeAgentId?: string;
+  executorAssigneeUserId?: string;
+  reviewerAssigneeAgentId?: string;
+  reviewerAssigneeUserId?: string;
+  approverAssigneeAgentId?: string;
+  approverAssigneeUserId?: string;
   defaultStatus: PaperclipIssueStatus;
   ignoredIssueAuthorUsernames: string[];
   githubTokenPropagationAgentIds?: string[];
@@ -252,6 +259,11 @@ interface GitHubSyncSettings {
   paperclipBoardAccessConfigSyncRef?: string;
   totalSyncedIssuesCount?: number;
   updatedAt?: string;
+}
+
+interface GitHubSyncAssigneePrincipal {
+  kind: 'agent' | 'user';
+  id: string;
 }
 
 interface SyncToolbarStateData {
@@ -323,11 +335,15 @@ interface CliAuthChallengePollResponse {
 }
 
 interface CliAuthIdentityResponse {
+  id?: string | null;
+  userId?: string | null;
   login?: string | null;
   email?: string | null;
   displayName?: string | null;
   name?: string | null;
   user?: {
+    id?: string | null;
+    userId?: string | null;
     login?: string | null;
     email?: string | null;
     displayName?: string | null;
@@ -1786,9 +1802,15 @@ const PAGE_STYLES = `
 
 .ghsync__picker {
   position: relative;
+  min-width: 0;
+}
+
+.ghsync__picker--full {
+  width: 100%;
 }
 
 .ghsync__picker-trigger {
+  box-sizing: border-box;
   width: fit-content;
   max-width: 100%;
   min-height: 0;
@@ -1819,6 +1841,10 @@ const PAGE_STYLES = `
 
 .ghsync__picker-trigger:hover {
   background: var(--ghsync-surfaceRaised);
+}
+
+.ghsync__picker--full .ghsync__picker-trigger {
+  width: 100%;
 }
 
 .ghsync__picker-trigger--assignee {
@@ -1871,6 +1897,7 @@ const PAGE_STYLES = `
 }
 
 .ghsync__picker-panel {
+  box-sizing: border-box;
   position: absolute;
   top: calc(100% + 8px);
   left: 0;
@@ -1883,7 +1910,8 @@ const PAGE_STYLES = `
 }
 
 .ghsync__picker-panel--assignee {
-  width: min(20rem, calc(100vw - 2rem));
+  width: min(20rem, 100%);
+  max-width: calc(100vw - 2rem);
 }
 
 .ghsync__picker-panel--status {
@@ -4513,19 +4541,60 @@ function normalizeAgentIds(value: unknown): string[] {
   )].sort((left, right) => left.localeCompare(right));
 }
 
+function normalizeAdvancedSettingsAssigneeOverride(
+  record: Record<string, unknown>,
+  keys: {
+    agentId: keyof GitHubSyncAdvancedSettings;
+    userId: keyof GitHubSyncAdvancedSettings;
+  }
+): Partial<GitHubSyncAdvancedSettings> {
+  const rawUserId = record[keys.userId as string];
+  const userId = typeof rawUserId === 'string' && rawUserId.trim()
+    ? rawUserId.trim()
+    : undefined;
+  if (userId) {
+    return {
+      [keys.userId]: userId
+    } as Partial<GitHubSyncAdvancedSettings>;
+  }
+
+  const rawAgentId = record[keys.agentId as string];
+  const agentId = typeof rawAgentId === 'string' && rawAgentId.trim()
+    ? rawAgentId.trim()
+    : undefined;
+  if (agentId) {
+    return {
+      [keys.agentId]: agentId
+    } as Partial<GitHubSyncAdvancedSettings>;
+  }
+
+  return {};
+}
+
 function normalizeAdvancedSettings(value: unknown): GitHubSyncAdvancedSettings {
   if (!value || typeof value !== 'object') {
     return DEFAULT_ADVANCED_SETTINGS;
   }
 
   const record = value as Record<string, unknown>;
-  const defaultAssigneeAgentId =
-    typeof record.defaultAssigneeAgentId === 'string' && record.defaultAssigneeAgentId.trim()
-      ? record.defaultAssigneeAgentId.trim()
-      : undefined;
 
   return {
-    ...(defaultAssigneeAgentId ? { defaultAssigneeAgentId } : {}),
+    ...normalizeAdvancedSettingsAssigneeOverride(record, {
+      agentId: 'defaultAssigneeAgentId',
+      userId: 'defaultAssigneeUserId'
+    }),
+    ...normalizeAdvancedSettingsAssigneeOverride(record, {
+      agentId: 'executorAssigneeAgentId',
+      userId: 'executorAssigneeUserId'
+    }),
+    ...normalizeAdvancedSettingsAssigneeOverride(record, {
+      agentId: 'reviewerAssigneeAgentId',
+      userId: 'reviewerAssigneeUserId'
+    }),
+    ...normalizeAdvancedSettingsAssigneeOverride(record, {
+      agentId: 'approverAssigneeAgentId',
+      userId: 'approverAssigneeUserId'
+    }),
     defaultStatus: normalizePaperclipIssueStatus(record.defaultStatus),
     ignoredIssueAuthorUsernames:
       'ignoredIssueAuthorUsernames' in record
@@ -4554,6 +4623,13 @@ function getComparableAdvancedSettings(value: GitHubSyncAdvancedSettings | null 
 
   return {
     ...(settings.defaultAssigneeAgentId ? { defaultAssigneeAgentId: settings.defaultAssigneeAgentId } : {}),
+    ...(settings.defaultAssigneeUserId ? { defaultAssigneeUserId: settings.defaultAssigneeUserId } : {}),
+    ...(settings.executorAssigneeAgentId ? { executorAssigneeAgentId: settings.executorAssigneeAgentId } : {}),
+    ...(settings.executorAssigneeUserId ? { executorAssigneeUserId: settings.executorAssigneeUserId } : {}),
+    ...(settings.reviewerAssigneeAgentId ? { reviewerAssigneeAgentId: settings.reviewerAssigneeAgentId } : {}),
+    ...(settings.reviewerAssigneeUserId ? { reviewerAssigneeUserId: settings.reviewerAssigneeUserId } : {}),
+    ...(settings.approverAssigneeAgentId ? { approverAssigneeAgentId: settings.approverAssigneeAgentId } : {}),
+    ...(settings.approverAssigneeUserId ? { approverAssigneeUserId: settings.approverAssigneeUserId } : {}),
     defaultStatus: settings.defaultStatus,
     ignoredIssueAuthorUsernames: [...settings.ignoredIssueAuthorUsernames].sort((left, right) => left.localeCompare(right)),
     ...(settings.githubTokenPropagationAgentIds?.length
@@ -4568,39 +4644,156 @@ function formatAssigneeOptionLabel(option: GitHubSyncAssigneeOption): string {
     : option.name;
 }
 
-function getAvailableAssigneeOptions(
-  options: GitHubSyncAssigneeOption[] | null | undefined,
-  selectedAgentId?: string
-): GitHubSyncAssigneeOption[] {
-  const normalizedOptions = [...(options ?? [])];
+function getAssigneeOptionKey(option: Pick<GitHubSyncAssigneeOption, 'kind' | 'id'>): string {
+  return `${option.kind}:${option.id}`;
+}
 
-  if (selectedAgentId && !normalizedOptions.some((option) => option.id === selectedAgentId)) {
-    normalizedOptions.push({
-      id: selectedAgentId,
-      name: 'Unavailable agent'
-    });
+function getAssigneeOptionValue(option: Pick<GitHubSyncAssigneeOption, 'kind' | 'id'>): string {
+  return getAssigneeOptionKey(option);
+}
+
+function parseAssigneeOptionValue(value: string | null | undefined): GitHubSyncAssigneePrincipal | null {
+  const trimmedValue = typeof value === 'string' ? value.trim() : '';
+  if (!trimmedValue) {
+    return null;
   }
 
-  return normalizedOptions;
+  if (trimmedValue.startsWith('agent:')) {
+    const id = trimmedValue.slice('agent:'.length).trim();
+    return id ? { kind: 'agent', id } : null;
+  }
+
+  if (trimmedValue.startsWith('user:')) {
+    const id = trimmedValue.slice('user:'.length).trim();
+    return id ? { kind: 'user', id } : null;
+  }
+
+  return { kind: 'agent', id: trimmedValue };
+}
+
+function getAdvancedSettingsAssigneePrincipal(
+  advancedSettings: GitHubSyncAdvancedSettings,
+  role: 'default' | 'executor' | 'reviewer' | 'approver'
+): GitHubSyncAssigneePrincipal | null {
+  switch (role) {
+    case 'default':
+      return advancedSettings.defaultAssigneeUserId
+        ? { kind: 'user', id: advancedSettings.defaultAssigneeUserId }
+        : advancedSettings.defaultAssigneeAgentId
+          ? { kind: 'agent', id: advancedSettings.defaultAssigneeAgentId }
+          : null;
+    case 'executor':
+      return advancedSettings.executorAssigneeUserId
+        ? { kind: 'user', id: advancedSettings.executorAssigneeUserId }
+        : advancedSettings.executorAssigneeAgentId
+          ? { kind: 'agent', id: advancedSettings.executorAssigneeAgentId }
+          : null;
+    case 'reviewer':
+      return advancedSettings.reviewerAssigneeUserId
+        ? { kind: 'user', id: advancedSettings.reviewerAssigneeUserId }
+        : advancedSettings.reviewerAssigneeAgentId
+          ? { kind: 'agent', id: advancedSettings.reviewerAssigneeAgentId }
+          : null;
+    case 'approver':
+      return advancedSettings.approverAssigneeUserId
+        ? { kind: 'user', id: advancedSettings.approverAssigneeUserId }
+        : advancedSettings.approverAssigneeAgentId
+          ? { kind: 'agent', id: advancedSettings.approverAssigneeAgentId }
+          : null;
+  }
+}
+
+function setAdvancedSettingsAssigneePrincipal(
+  advancedSettings: GitHubSyncAdvancedSettings,
+  role: 'default' | 'executor' | 'reviewer' | 'approver',
+  principal: GitHubSyncAssigneePrincipal | null
+): GitHubSyncAdvancedSettings {
+  switch (role) {
+    case 'default':
+      return {
+        ...advancedSettings,
+        defaultAssigneeAgentId: principal?.kind === 'agent' ? principal.id : undefined,
+        defaultAssigneeUserId: principal?.kind === 'user' ? principal.id : undefined
+      };
+    case 'executor':
+      return {
+        ...advancedSettings,
+        executorAssigneeAgentId: principal?.kind === 'agent' ? principal.id : undefined,
+        executorAssigneeUserId: principal?.kind === 'user' ? principal.id : undefined
+      };
+    case 'reviewer':
+      return {
+        ...advancedSettings,
+        reviewerAssigneeAgentId: principal?.kind === 'agent' ? principal.id : undefined,
+        reviewerAssigneeUserId: principal?.kind === 'user' ? principal.id : undefined
+      };
+    case 'approver':
+      return {
+        ...advancedSettings,
+        approverAssigneeAgentId: principal?.kind === 'agent' ? principal.id : undefined,
+        approverAssigneeUserId: principal?.kind === 'user' ? principal.id : undefined
+      };
+  }
+}
+
+function getSelectedAssigneeOptionValue(
+  advancedSettings: GitHubSyncAdvancedSettings,
+  role: 'default' | 'executor' | 'reviewer' | 'approver'
+): string {
+  const principal = getAdvancedSettingsAssigneePrincipal(advancedSettings, role);
+  return principal ? getAssigneeOptionValue(principal) : '';
+}
+
+function compareAssigneeOptions(left: GitHubSyncAssigneeOption, right: GitHubSyncAssigneeOption): number {
+  if (left.kind !== right.kind) {
+    return left.kind === 'user' ? -1 : 1;
+  }
+
+  return left.name.localeCompare(right.name);
+}
+
+function getAvailableAssigneeOptions(
+  options: GitHubSyncAssigneeOption[] | null | undefined,
+  selectedAssignees?: GitHubSyncAssigneePrincipal | Array<GitHubSyncAssigneePrincipal | null | undefined> | null
+): GitHubSyncAssigneeOption[] {
+  const normalizedOptions = [...(options ?? [])];
+  const selectedPrincipals = Array.isArray(selectedAssignees)
+    ? selectedAssignees.filter((selectedAssignee): selectedAssignee is GitHubSyncAssigneePrincipal => Boolean(selectedAssignee))
+    : selectedAssignees
+      ? [selectedAssignees]
+      : [];
+
+  for (const selectedPrincipal of selectedPrincipals) {
+    if (!normalizedOptions.some((option) => getAssigneeOptionKey(option) === getAssigneeOptionKey(selectedPrincipal))) {
+      normalizedOptions.push({
+        kind: selectedPrincipal.kind,
+        id: selectedPrincipal.id,
+        name: selectedPrincipal.kind === 'user' ? 'Unavailable user' : 'Unavailable agent'
+      });
+    }
+  }
+
+  return normalizedOptions.sort(compareAssigneeOptions);
 }
 
 function getAvailablePropagationAgentOptions(
   options: GitHubSyncAssigneeOption[] | null | undefined,
   selectedAgentIds: string[] | null | undefined
 ): GitHubSyncAssigneeOption[] {
-  const normalizedOptions = [...(options ?? [])];
+  const normalizedOptions = [...(options ?? []).filter((option) => option.kind === 'agent')];
   const selectedIds = normalizeAgentIds(selectedAgentIds);
 
   for (const selectedAgentId of selectedIds) {
     if (!normalizedOptions.some((option) => option.id === selectedAgentId)) {
       normalizedOptions.push({
+        kind: 'agent',
         id: selectedAgentId,
         name: 'Unavailable agent'
       });
     }
   }
 
-  return normalizedOptions.sort((left, right) => left.name.localeCompare(right.name));
+  return normalizedOptions.sort(compareAssigneeOptions);
 }
 
 function formatAdvancedSettingsSummary(
@@ -4608,15 +4801,25 @@ function formatAdvancedSettingsSummary(
   availableAssignees: GitHubSyncAssigneeOption[],
   options?: { includePropagation?: boolean }
 ): string {
-  const assigneeLabel = advancedSettings.defaultAssigneeAgentId
-    ? formatAssigneeOptionLabel(
-      availableAssignees.find((option) => option.id === advancedSettings.defaultAssigneeAgentId)
-      ?? {
-        id: advancedSettings.defaultAssigneeAgentId,
-        name: 'Unavailable agent'
-      }
-    )
-    : 'Unassigned';
+  const resolveAssigneeLabel = (
+    principal: GitHubSyncAssigneePrincipal | null,
+    fallbackLabel = 'None'
+  ): string => {
+    return principal
+      ? formatAssigneeOptionLabel(
+        availableAssignees.find((option) => getAssigneeOptionKey(option) === getAssigneeOptionKey(principal))
+        ?? {
+          kind: principal.kind,
+          id: principal.id,
+          name: principal.kind === 'user' ? 'Unavailable user' : 'Unavailable agent'
+        }
+      )
+      : fallbackLabel;
+  };
+  const assigneeLabel = resolveAssigneeLabel(getAdvancedSettingsAssigneePrincipal(advancedSettings, 'default'), 'Unassigned');
+  const executorLabel = resolveAssigneeLabel(getAdvancedSettingsAssigneePrincipal(advancedSettings, 'executor'), 'Automatic routing');
+  const reviewerLabel = resolveAssigneeLabel(getAdvancedSettingsAssigneePrincipal(advancedSettings, 'reviewer'), 'Automatic routing');
+  const approverLabel = resolveAssigneeLabel(getAdvancedSettingsAssigneePrincipal(advancedSettings, 'approver'), 'Automatic routing');
   const statusLabel =
     PAPERCLIP_STATUS_OPTIONS.find((option) => option.value === advancedSettings.defaultStatus)?.label
     ?? 'Backlog';
@@ -4624,16 +4827,17 @@ function formatAdvancedSettingsSummary(
     advancedSettings.ignoredIssueAuthorUsernames.length > 0
       ? advancedSettings.ignoredIssueAuthorUsernames.join(', ')
       : 'none';
+  const handoffLabel = `Back to work: ${executorLabel} · Review: ${reviewerLabel} · Approval: ${approverLabel}`;
   if (options?.includePropagation) {
     const propagatedAgentsLabel =
       advancedSettings.githubTokenPropagationAgentIds?.length
         ? `${advancedSettings.githubTokenPropagationAgentIds.length} selected`
         : 'none';
 
-    return `Assignee: ${assigneeLabel} · Status: ${statusLabel} · Ignore: ${ignoredAuthorsLabel} · Propagate: ${propagatedAgentsLabel}`;
+    return `Import: ${assigneeLabel} · ${handoffLabel} · Status: ${statusLabel} · Ignore: ${ignoredAuthorsLabel} · Propagate: ${propagatedAgentsLabel}`;
   }
 
-  return `Assignee: ${assigneeLabel} · Status: ${statusLabel} · Ignore: ${ignoredAuthorsLabel}`;
+  return `Import: ${assigneeLabel} · ${handoffLabel} · Status: ${statusLabel} · Ignore: ${ignoredAuthorsLabel}`;
 }
 
 export function resolveSavedTokenUiState(params: {
@@ -4686,7 +4890,7 @@ interface SettingsSelectOption {
   value: string;
   label: string;
   tone?: SelectTone;
-  icon?: 'agent';
+  icon?: 'agent' | 'user';
 }
 
 function PickerChevronIcon(): React.JSX.Element {
@@ -4731,6 +4935,34 @@ function AgentIcon(): React.JSX.Element {
       />
     </svg>
   );
+}
+
+function UserIcon(): React.JSX.Element {
+  return (
+    <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <circle cx="8" cy="5.1" r="2.3" stroke="currentColor" strokeWidth="1.2" />
+      <path
+        d="M3.25 12.85C3.78 10.83 5.62 9.4 7.82 9.4H8.18C10.38 9.4 12.22 10.83 12.75 12.85"
+        stroke="currentColor"
+        strokeWidth="1.2"
+        strokeLinecap="round"
+      />
+    </svg>
+  );
+}
+
+function SettingsSelectIcon(props: {
+  icon?: SettingsSelectOption['icon'];
+}): React.JSX.Element | null {
+  if (props.icon === 'agent') {
+    return <AgentIcon />;
+  }
+
+  if (props.icon === 'user') {
+    return <UserIcon />;
+  }
+
+  return null;
 }
 
 function SettingsAssigneePicker(props: {
@@ -4793,7 +5025,7 @@ function SettingsAssigneePicker(props: {
   }, [disabled, open]);
 
   return (
-    <div className="ghsync__picker" ref={rootRef}>
+    <div className="ghsync__picker ghsync__picker--full" ref={rootRef}>
       <button
         id={id}
         type="button"
@@ -4810,9 +5042,9 @@ function SettingsAssigneePicker(props: {
         }}
       >
         <span className="ghsync__picker-trigger-main">
-          {selectedOption?.icon === 'agent' ? (
+          {selectedOption?.icon ? (
             <span className="ghsync__picker-agent-icon" aria-hidden="true">
-              <AgentIcon />
+              <SettingsSelectIcon icon={selectedOption.icon} />
             </span>
           ) : null}
           <span className="ghsync__picker-trigger-label">{selectedOption?.label ?? 'No assignee'}</span>
@@ -4861,9 +5093,9 @@ function SettingsAssigneePicker(props: {
                     }}
                   >
                     <span className="ghsync__picker-trigger-main">
-                      {option.icon === 'agent' ? (
+                      {option.icon ? (
                         <span className="ghsync__picker-agent-icon" aria-hidden="true">
-                          <AgentIcon />
+                          <SettingsSelectIcon icon={option.icon} />
                         </span>
                       ) : null}
                       <span className="ghsync__picker-option-label">{option.label}</span>
@@ -4946,7 +5178,7 @@ function SettingsAgentMultiPicker(props: {
   }, [disabled, open]);
 
   return (
-    <div className="ghsync__picker" ref={rootRef}>
+    <div className="ghsync__picker ghsync__picker--full" ref={rootRef}>
       <button
         id={id}
         type="button"
@@ -5014,9 +5246,9 @@ function SettingsAgentMultiPicker(props: {
                     }}
                   >
                     <span className="ghsync__picker-trigger-main">
-                      {option.icon === 'agent' ? (
+                      {option.icon ? (
                         <span className="ghsync__picker-agent-icon" aria-hidden="true">
-                          <AgentIcon />
+                          <SettingsSelectIcon icon={option.icon} />
                         </span>
                       ) : null}
                       <span className="ghsync__picker-option-label">{option.label}</span>
@@ -6469,6 +6701,23 @@ function getCliAuthIdentityLabel(identity: CliAuthIdentityResponse): string | nu
   return null;
 }
 
+function getCliAuthIdentityUserId(identity: CliAuthIdentityResponse): string | null {
+  const candidates = [
+    identity.user?.id,
+    identity.user?.userId,
+    identity.id,
+    identity.userId
+  ];
+
+  for (const candidate of candidates) {
+    if (typeof candidate === 'string' && candidate.trim()) {
+      return candidate.trim();
+    }
+  }
+
+  return null;
+}
+
 function waitForDuration(durationMs: number): Promise<void> {
   return new Promise((resolve) => {
     globalThis.setTimeout(resolve, durationMs);
@@ -6532,14 +6781,20 @@ async function waitForBoardAccessApproval(challenge: CliAuthChallengeResponse): 
   }
 }
 
-async function fetchBoardAccessIdentity(boardApiToken: string): Promise<string | null> {
+async function fetchBoardAccessIdentity(boardApiToken: string): Promise<{
+  label: string | null;
+  userId: string | null;
+}> {
   const identity = await fetchJson<CliAuthIdentityResponse>('/api/cli-auth/me', {
     headers: {
       authorization: `Bearer ${boardApiToken.trim()}`
     }
   });
 
-  return getCliAuthIdentityLabel(identity);
+  return {
+    label: getCliAuthIdentityLabel(identity),
+    userId: getCliAuthIdentityUserId(identity)
+  };
 }
 
 function getSyncStatus(syncState: SyncRunState, runningSync: boolean, syncUnlocked: boolean): { label: string; tone: Tone } {
@@ -10567,7 +10822,12 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
     (currentSettings?.availableAssignees?.length ? currentSettings.availableAssignees : null)
     ?? (form.availableAssignees?.length ? form.availableAssignees : null)
     ?? browserAvailableAssignees,
-    form.advancedSettings.defaultAssigneeAgentId
+    [
+      getAdvancedSettingsAssigneePrincipal(form.advancedSettings, 'default'),
+      getAdvancedSettingsAssigneePrincipal(form.advancedSettings, 'executor'),
+      getAdvancedSettingsAssigneePrincipal(form.advancedSettings, 'reviewer'),
+      getAdvancedSettingsAssigneePrincipal(form.advancedSettings, 'approver')
+    ]
   );
   const propagationAgents = getAvailablePropagationAgentOptions(
     (currentSettings?.availableAssignees?.length ? currentSettings.availableAssignees : null)
@@ -10705,9 +10965,17 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
   const assigneeSelectOptions: SettingsSelectOption[] = [
     { value: '', label: 'Unassigned' },
     ...availableAssignees.map((option) => ({
-      value: option.id,
+      value: getAssigneeOptionValue(option),
       label: formatAssigneeOptionLabel(option),
-      icon: 'agent' as const
+      icon: option.kind
+    }))
+  ];
+  const transitionAssigneeSelectOptions: SettingsSelectOption[] = [
+    { value: '', label: 'Automatic routing' },
+    ...availableAssignees.map((option) => ({
+      value: getAssigneeOptionValue(option),
+      label: formatAssigneeOptionLabel(option),
+      icon: option.kind
     }))
   ];
   const propagationAgentOptions: SettingsSelectOption[] = propagationAgents.map((option) => ({
@@ -11079,7 +11347,7 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
       }
 
       const boardApiToken = await waitForBoardAccessApproval(challenge);
-      const identity = await fetchBoardAccessIdentity(boardApiToken);
+      const boardIdentity = await fetchBoardAccessIdentity(boardApiToken);
       const secretName = `paperclip_board_api_${companyId.replace(/[^a-z0-9]+/gi, '_').toLowerCase()}`;
       const secret = await resolveOrCreateCompanySecret(companyId, secretName, boardApiToken);
 
@@ -11091,16 +11359,17 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
       await updateBoardAccess({
         companyId,
         paperclipBoardApiTokenRef: secret.id,
-        paperclipBoardAccessIdentity: identity ?? ''
+        paperclipBoardAccessIdentity: boardIdentity.label ?? '',
+        paperclipBoardAccessUserId: boardIdentity.userId ?? ''
       });
 
-      setBoardAccessIdentity(identity);
+      setBoardAccessIdentity(boardIdentity.label);
       setForm((current) => ({
         ...current,
         paperclipBoardAccessConfigured: true
       }));
       toast({
-        title: identity ? `Paperclip board access connected as ${identity}` : 'Paperclip board access connected',
+        title: boardIdentity.label ? `Paperclip board access connected as ${boardIdentity.label}` : 'Paperclip board access connected',
         body: 'Direct Paperclip REST calls can now authenticate in authenticated deployments.',
         tone: 'success'
       });
@@ -11797,16 +12066,17 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
                     <label htmlFor="advanced-default-assignee">Default assignee</label>
                     <SettingsAssigneePicker
                       id="advanced-default-assignee"
-                      value={form.advancedSettings.defaultAssigneeAgentId ?? ''}
+                      value={getSelectedAssigneeOptionValue(form.advancedSettings, 'default')}
                       options={assigneeSelectOptions}
                       disabled={settingsMutationsLocked}
                       onChange={(nextValue) => {
                         setForm((current) => ({
                           ...current,
-                          advancedSettings: {
-                            ...current.advancedSettings,
-                            ...(nextValue ? { defaultAssigneeAgentId: nextValue } : { defaultAssigneeAgentId: undefined })
-                          }
+                          advancedSettings: setAdvancedSettingsAssigneePrincipal(
+                            current.advancedSettings,
+                            'default',
+                            parseAssigneeOptionValue(nextValue)
+                          )
                         }));
                       }}
                     />
@@ -11830,7 +12100,86 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
                       }}
                     />
                   </div>
+
+                  <div className="ghsync__field">
+                    <label htmlFor="advanced-executor-assignee">Executor handoff</label>
+                    <SettingsAssigneePicker
+                      id="advanced-executor-assignee"
+                      value={getSelectedAssigneeOptionValue(form.advancedSettings, 'executor')}
+                      options={transitionAssigneeSelectOptions}
+                      disabled={settingsMutationsLocked}
+                      onChange={(nextValue) => {
+                        setForm((current) => ({
+                          ...current,
+                          advancedSettings: setAdvancedSettingsAssigneePrincipal(
+                            current.advancedSettings,
+                            'executor',
+                            parseAssigneeOptionValue(nextValue)
+                          )
+                        }));
+                      }}
+                    />
+                    <p className="ghsync__hint">
+                      The assignee that resumes work when GitHub Sync sends an issue back to active execution, such as failing CI,
+                      unresolved review threads, or a trusted new GitHub comment.
+                    </p>
+                  </div>
+
+                  <div className="ghsync__field">
+                    <label htmlFor="advanced-reviewer-assignee">Reviewer handoff</label>
+                    <SettingsAssigneePicker
+                      id="advanced-reviewer-assignee"
+                      value={getSelectedAssigneeOptionValue(form.advancedSettings, 'reviewer')}
+                      options={transitionAssigneeSelectOptions}
+                      disabled={settingsMutationsLocked}
+                      onChange={(nextValue) => {
+                        setForm((current) => ({
+                          ...current,
+                          advancedSettings: setAdvancedSettingsAssigneePrincipal(
+                            current.advancedSettings,
+                            'reviewer',
+                            parseAssigneeOptionValue(nextValue)
+                          )
+                        }));
+                      }}
+                    />
+                    <p className="ghsync__hint">
+                      The assignee that reviews work when GitHub Sync moves an issue into `in_review` because linked pull requests
+                      are green and all review threads are resolved.
+                    </p>
+                  </div>
+
+                  <div className="ghsync__field">
+                    <label htmlFor="advanced-approver-assignee">Approver handoff</label>
+                    <SettingsAssigneePicker
+                      id="advanced-approver-assignee"
+                      value={getSelectedAssigneeOptionValue(form.advancedSettings, 'approver')}
+                      options={transitionAssigneeSelectOptions}
+                      disabled={settingsMutationsLocked}
+                      onChange={(nextValue) => {
+                        setForm((current) => ({
+                          ...current,
+                          advancedSettings: setAdvancedSettingsAssigneePrincipal(
+                            current.advancedSettings,
+                            'approver',
+                            parseAssigneeOptionValue(nextValue)
+                          )
+                        }));
+                      }}
+                    />
+                    <p className="ghsync__hint">
+                      The assignee that approves work for the same `in_review` handoff when Paperclip&apos;s execution policy says the
+                      current stage is approval instead of review.
+                    </p>
+                  </div>
                 </div>
+
+                <p className="ghsync__hint">
+                  Choose &quot;Automatic routing&quot; to let GitHub Sync follow the issue&apos;s Paperclip execution policy and
+                  built-in fallback behavior. Pick a specific assignee only when you want a company-wide fallback for missing
+                  reviewer, approver, or return-assignee data. When Paperclip board access is connected for this company, each
+                  assignee picker also includes &quot;Me&quot; so the connected board user can take the handoff instead of an agent.
+                </p>
 
                 <div className="ghsync__field">
                   <label htmlFor="advanced-ignored-authors">Ignore issues from GitHub usernames</label>
