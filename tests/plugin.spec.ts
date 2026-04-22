@@ -4902,6 +4902,117 @@ test('project.pullRequests.merge rejects pull requests blocked by non-default ta
   }
 });
 
+test('project.pullRequests.merge explains when the default branch cannot be determined', async () => {
+  const harness = await createProjectPullRequestsHarness();
+  const originalFetch = globalThis.fetch;
+  let mergeRequested = false;
+
+  globalThis.fetch = async (input, init) => {
+    const requestUrl = new URL(getRequestUrl(input));
+    const method = input instanceof Request ? input.method : init?.method ?? 'GET';
+
+    if (requestUrl.pathname === '/repos/paperclipai/example-repo/pulls/42' && method === 'GET') {
+      return jsonResponse({
+        html_url: 'https://github.com/paperclipai/example-repo/pull/42',
+        state: 'open',
+        merged: false,
+        mergeable: true,
+        base: {
+          ref: 'main'
+        },
+        head: {
+          ref: 'feature/project-pr-page'
+        }
+      });
+    }
+
+    if (requestUrl.pathname === '/repos/paperclipai/example-repo/pulls/42/reviews' && method === 'GET') {
+      return jsonResponse([
+        {
+          state: 'APPROVED',
+          user: {
+            login: 'reviewer'
+          }
+        }
+      ]);
+    }
+
+    if (requestUrl.pathname === '/repos/paperclipai/example-repo' && method === 'GET') {
+      return jsonResponse({
+        message: 'repository lookup failed'
+      }, 500);
+    }
+
+    if (requestUrl.toString() === 'https://api.github.com/graphql') {
+      const { query } = getGraphqlRequest(init);
+      if (query.includes('GitHubPullRequestReviewThreadsDetailed')) {
+        return graphqlResponse({
+          repository: {
+            pullRequest: {
+              reviewThreads: {
+                pageInfo: {
+                  hasNextPage: false,
+                  endCursor: null
+                },
+                nodes: []
+              }
+            }
+          }
+        });
+      }
+
+      if (query.includes('GitHubPullRequestCiContexts')) {
+        return graphqlResponse({
+          repository: {
+            pullRequest: {
+              statusCheckRollup: {
+                contexts: {
+                  pageInfo: {
+                    hasNextPage: false,
+                    endCursor: null
+                  },
+                  nodes: [
+                    {
+                      __typename: 'CheckRun',
+                      status: 'COMPLETED',
+                      conclusion: 'SUCCESS'
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        });
+      }
+    }
+
+    if (requestUrl.pathname === '/repos/paperclipai/example-repo/pulls/42/merge' && method === 'PUT') {
+      mergeRequested = true;
+      return jsonResponse({
+        sha: 'abc123',
+        merged: true,
+        message: 'Pull Request successfully merged'
+      });
+    }
+
+    throw new Error(`Unexpected fetch during default-branch project.pullRequests.merge test: ${requestUrl}`);
+  };
+
+  try {
+    await assert.rejects(
+      harness.performAction('project.pullRequests.merge', {
+        companyId: 'company-1',
+        projectId: 'project-1',
+        pullRequestNumber: 42
+      }),
+      /could not determine the repository default branch/i
+    );
+    assert.equal(mergeRequested, false);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test('project.pullRequests.close closes the selected pull request', async () => {
   const harness = await createProjectPullRequestsHarness();
   const originalFetch = globalThis.fetch;

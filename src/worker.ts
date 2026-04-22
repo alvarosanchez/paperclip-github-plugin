@@ -13985,12 +13985,18 @@ async function mergeProjectPullRequest(
       reviewThreadSummary
     })
   );
-  const defaultBranchName = await getGitHubRepositoryDefaultBranchName(octokit, scope.repository);
-  const [reviewSummary, reviewThreadSummary, statusSnapshot] = await Promise.all([
+  const defaultBranchNamePromise = getGitHubRepositoryDefaultBranchName(octokit, scope.repository);
+  const [reviewSummary, reviewThreadSummary, statusSnapshot, defaultBranchName] = await Promise.all([
     reviewSummaryPromise,
     reviewThreadSummaryPromise,
-    statusSnapshotPromise
+    statusSnapshotPromise,
+    defaultBranchNamePromise
   ]);
+  if (!defaultBranchName) {
+    throw new Error(
+      'Could not determine the repository default branch before merging this pull request. Retry the merge, and if it keeps failing check GitHub token permissions and connectivity.'
+    );
+  }
   const checksStatus =
     statusSnapshot.ciState === 'green'
       ? 'passed'
