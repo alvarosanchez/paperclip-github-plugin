@@ -13638,7 +13638,7 @@ test('worker maps GitHub issue and linked PR state onto Paperclip statuses while
   }
 });
 
-test('worker treats action-required GitHub merge state statuses as executor work', async () => {
+test('worker routes non-review-ready GitHub merge state statuses back to active execution', async () => {
   const harness = createTestHarness({
     manifest,
     config: {
@@ -13728,6 +13728,15 @@ test('worker treats action-required GitHub merge state statuses as executor work
       pullRequestNumber: 450,
       title: 'Unknown mergeability',
       mergeable: 'UNKNOWN' as const,
+      mergeStateStatus: 'UNKNOWN',
+      expectedReason: /unknown mergeability/
+    },
+    {
+      githubIssueId: 4601,
+      githubIssueNumber: 46,
+      pullRequestNumber: 460,
+      title: 'Merge state still resolving',
+      mergeable: 'MERGEABLE' as const,
       mergeStateStatus: 'UNKNOWN',
       expectedReason: /unknown mergeability/
     }

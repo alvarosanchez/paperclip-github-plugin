@@ -1534,6 +1534,7 @@ const GITHUB_PROJECT_PULL_REQUEST_SUMMARY_FIELDS =
 const GITHUB_PROJECT_PULL_REQUEST_METRICS_FIELDS = `
           number
           mergeable
+          mergeStateStatus
           baseRefName
           reviews(first: 100) {
             pageInfo {
@@ -6792,7 +6793,7 @@ function describeGitHubStatusTransitionReason(params: {
   )];
   const hasUnfinishedCi = snapshot.linkedPullRequests.some((pullRequest) => pullRequest.ciState === 'unfinished');
   const hasUnknownMergeability = snapshot.linkedPullRequests.some(
-    (pullRequest) => pullRequest.mergeStateStatus === 'unknown' && pullRequest.mergeability !== 'mergeable'
+    (pullRequest) => pullRequest.mergeStateStatus === 'unknown'
   );
 
   if (blockingConditions.length > 0) {
@@ -7131,8 +7132,7 @@ function isGitHubPullRequestReviewReadyForSync(
     return false;
   }
 
-  return REVIEW_READY_GITHUB_PULL_REQUEST_MERGE_STATE_STATUSES.has(pullRequest.mergeStateStatus)
-    || (pullRequest.mergeStateStatus === 'unknown' && pullRequest.mergeability === 'mergeable');
+  return REVIEW_READY_GITHUB_PULL_REQUEST_MERGE_STATE_STATUSES.has(pullRequest.mergeStateStatus);
 }
 
 function listGitHubPullRequestSyncBlockingConditions(
