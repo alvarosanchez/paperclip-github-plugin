@@ -13111,6 +13111,7 @@ test('worker maps GitHub issue and linked PR state onto Paperclip statuses while
   const pendingCiIssue = await makePaperclipIssue('Pending CI', 'backlog');
   const redCiIssue = await makePaperclipIssue('Red CI', 'backlog');
   const unresolvedThreadIssue = await makePaperclipIssue('Unresolved review thread', 'backlog');
+  const conflictingPullRequestIssue = await makePaperclipIssue('Merge conflict', 'in_review');
   const greenReviewIssue = await makePaperclipIssue('Green review', 'todo');
   const completedIssue = await makePaperclipIssue('Completed', 'backlog');
   const notPlannedIssue = await makePaperclipIssue('Not planned', 'backlog');
@@ -13175,6 +13176,14 @@ test('worker maps GitHub issue and linked PR state onto Paperclip statuses while
         githubIssueId: 3007,
         githubIssueNumber: 35,
         paperclipIssueId: greenReviewIssue.id,
+        importedAt: '2026-04-09T09:00:00.000Z',
+        lastSeenCommentCount: 0
+      },
+      {
+        mappingId: 'mapping-a',
+        githubIssueId: 3011,
+        githubIssueNumber: 40,
+        paperclipIssueId: conflictingPullRequestIssue.id,
         importedAt: '2026-04-09T09:00:00.000Z',
         lastSeenCommentCount: 0
       },
@@ -13276,6 +13285,15 @@ test('worker maps GitHub issue and linked PR state onto Paperclip statuses while
       comments: 0
     },
     {
+      id: 3011,
+      number: 40,
+      title: 'Merge conflict',
+      body: null,
+      html_url: 'https://github.com/paperclipai/example-repo/issues/40',
+      state: 'open',
+      comments: 0
+    },
+    {
       id: 3008,
       number: 36,
       title: 'Completed',
@@ -13315,6 +13333,7 @@ test('worker maps GitHub issue and linked PR state onto Paperclip statuses while
     [33, { state: 'OPEN', stateReason: null, comments: 0, linkedPullRequests: [330] }],
     [34, { state: 'OPEN', stateReason: null, comments: 0, linkedPullRequests: [340] }],
     [35, { state: 'OPEN', stateReason: null, comments: 0, linkedPullRequests: [350] }],
+    [40, { state: 'OPEN', stateReason: null, comments: 0, linkedPullRequests: [400] }],
     [36, { state: 'CLOSED', stateReason: 'COMPLETED', comments: 0, linkedPullRequests: [] }],
     [37, { state: 'CLOSED', stateReason: 'NOT_PLANNED', comments: 0, linkedPullRequests: [] }],
     [38, { state: 'CLOSED', stateReason: 'DUPLICATE', comments: 0, linkedPullRequests: [] }]
@@ -13324,7 +13343,8 @@ test('worker maps GitHub issue and linked PR state onto Paperclip statuses while
     [320, false],
     [330, false],
     [340, true],
-    [350, false]
+    [350, false],
+    [400, false]
   ]);
 
   const ciContexts = new Map<number, Array<Record<string, string | null>>>([
@@ -13366,7 +13386,30 @@ test('worker maps GitHub issue and linked PR state onto Paperclip statuses while
           state: 'SUCCESS'
         }
       ]
+    ],
+    [
+      400,
+      [
+        {
+          __typename: 'StatusContext',
+          state: 'SUCCESS'
+        }
+      ]
     ]
+  ]);
+  const pullRequestMergeability = new Map<number, 'MERGEABLE' | 'CONFLICTING'>([
+    [320, 'MERGEABLE'],
+    [330, 'MERGEABLE'],
+    [340, 'MERGEABLE'],
+    [350, 'MERGEABLE'],
+    [400, 'CONFLICTING']
+  ]);
+  const pullRequestMergeStateStatus = new Map<number, string>([
+    [320, 'CLEAN'],
+    [330, 'CLEAN'],
+    [340, 'CLEAN'],
+    [350, 'CLEAN'],
+    [400, 'DIRTY']
   ]);
 
   const originalFetch = globalThis.fetch;
@@ -13485,6 +13528,8 @@ test('worker maps GitHub issue and linked PR state onto Paperclip statuses while
         return graphqlResponse({
           repository: {
             pullRequest: {
+              mergeable: pullRequestMergeability.get(pullRequestNumber) ?? 'MERGEABLE',
+              mergeStateStatus: pullRequestMergeStateStatus.get(pullRequestNumber) ?? 'CLEAN',
               statusCheckRollup: {
                 contexts: {
                   pageInfo: {
@@ -13510,8 +13555,8 @@ test('worker maps GitHub issue and linked PR state onto Paperclip statuses while
 
     assert.equal(sync.syncState.status, 'success');
     assert.equal(sync.syncState.createdIssuesCount, 0);
-    assert.equal(sync.syncState.skippedIssuesCount, 7);
-    assert.equal(sync.syncState.syncedIssuesCount, 10);
+    assert.equal(sync.syncState.skippedIssuesCount, 8);
+    assert.equal(sync.syncState.syncedIssuesCount, 11);
 
     const issues = await harness.ctx.issues.list({
       companyId: 'company-1'
@@ -13523,11 +13568,12 @@ test('worker maps GitHub issue and linked PR state onto Paperclip statuses while
     assert.equal(issues.find((issue) => issue.title === 'Pending CI')?.status, 'backlog');
     assert.equal(issues.find((issue) => issue.title === 'Red CI')?.status, 'backlog');
     assert.equal(issues.find((issue) => issue.title === 'Unresolved review thread')?.status, 'backlog');
+    assert.equal(issues.find((issue) => issue.title === 'Merge conflict')?.status, 'todo');
     assert.equal(issues.find((issue) => issue.title === 'Green review')?.status, 'in_review');
     assert.equal(issues.find((issue) => issue.title === 'Completed')?.status, 'done');
     assert.equal(issues.find((issue) => issue.title === 'Not planned')?.status, 'cancelled');
     assert.equal(issues.find((issue) => issue.title === 'Duplicate')?.status, 'cancelled');
-    assert.equal(statusTransitionComments.length, 5);
+    assert.equal(statusTransitionComments.length, 6);
     assert.equal(statusTransitionComments.some((comment) => comment.issueId === preservedIssue.id), false);
     assert.equal(statusTransitionComments.some((comment) => comment.issueId === backlogCommentedIssue.id), false);
     assert.equal(statusTransitionComments.some((comment) => comment.issueId === pendingCiIssue.id), false);
@@ -13544,6 +13590,14 @@ test('worker maps GitHub issue and linked PR state onto Paperclip statuses while
     assert.doesNotMatch(
       statusTransitionComments.find((comment) => comment.issueId === commentedIssue.id)?.body ?? '',
       /paperclipai\/example-repo#31/
+    );
+    assert.match(
+      statusTransitionComments.find((comment) => comment.issueId === conflictingPullRequestIssue.id)?.body ?? '',
+      /from `in review` to `todo`/
+    );
+    assert.match(
+      statusTransitionComments.find((comment) => comment.issueId === conflictingPullRequestIssue.id)?.body ?? '',
+      /merge conflicts/
     );
     assert.match(
       statusTransitionComments.find((comment) => comment.issueId === greenReviewIssue.id)?.body ?? '',
@@ -13579,6 +13633,275 @@ test('worker maps GitHub issue and linked PR state onto Paperclip statuses while
     assert.equal(importRegistry.find((entry) => entry.githubIssueId === 3003)?.lastSeenCommentCount, 2);
     assert.equal(importRegistry.find((entry) => entry.githubIssueId === 3010)?.githubIssueNumber, 38);
     assert.equal(backlogCommentIssueCommentRequests, 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('worker treats action-required GitHub merge state statuses as executor work', async () => {
+  const harness = createTestHarness({
+    manifest,
+    config: {
+      githubTokenRef: 'github-secret-ref'
+    }
+  });
+  await plugin.definition.setup(harness.ctx);
+  harness.seed({
+    agents: [
+      createAgentFixture({
+        id: 'agent-1',
+        companyId: 'company-1',
+        name: 'Elliot',
+        title: 'Executor'
+      })
+    ]
+  });
+
+  await harness.performAction('settings.saveRegistration', {
+    companyId: 'company-1',
+    mappings: [
+      {
+        id: 'mapping-a',
+        repositoryUrl: 'paperclipai/example-repo',
+        paperclipProjectName: 'Engineering',
+        paperclipProjectId: 'project-1',
+        companyId: 'company-1'
+      }
+    ],
+    advancedSettings: {
+      executorAssigneeAgentId: 'agent-1',
+      defaultStatus: 'backlog',
+      ignoredIssueAuthorUsernames: ['renovate']
+    },
+    syncState: {
+      status: 'idle'
+    }
+  });
+
+  const statusTransitionComments: Array<{ issueId: string; body: string }> = [];
+  const originalCreateComment = harness.ctx.issues.createComment;
+  harness.ctx.issues.createComment = async (issueId, body, companyId) => {
+    statusTransitionComments.push({ issueId, body });
+    return originalCreateComment(issueId, body, companyId);
+  };
+
+  const scenarios = [
+    {
+      githubIssueId: 4101,
+      githubIssueNumber: 41,
+      pullRequestNumber: 410,
+      title: 'Behind branch',
+      mergeable: 'MERGEABLE' as const,
+      mergeStateStatus: 'BEHIND',
+      expectedReason: /out-of-date branch state/
+    },
+    {
+      githubIssueId: 4201,
+      githubIssueNumber: 42,
+      pullRequestNumber: 420,
+      title: 'Blocked merge',
+      mergeable: 'UNKNOWN' as const,
+      mergeStateStatus: 'BLOCKED',
+      expectedReason: /blocked merge requirements/
+    },
+    {
+      githubIssueId: 4301,
+      githubIssueNumber: 43,
+      pullRequestNumber: 430,
+      title: 'Draft pull request',
+      mergeable: 'UNKNOWN' as const,
+      mergeStateStatus: 'DRAFT',
+      expectedReason: /draft status/
+    },
+    {
+      githubIssueId: 4401,
+      githubIssueNumber: 44,
+      pullRequestNumber: 440,
+      title: 'Unstable merge requirements',
+      mergeable: 'UNKNOWN' as const,
+      mergeStateStatus: 'UNSTABLE',
+      expectedReason: /unstable merge requirements/
+    },
+    {
+      githubIssueId: 4501,
+      githubIssueNumber: 45,
+      pullRequestNumber: 450,
+      title: 'Unknown mergeability',
+      mergeable: 'UNKNOWN' as const,
+      mergeStateStatus: 'UNKNOWN',
+      expectedReason: /unknown mergeability/
+    }
+  ];
+
+  const importedIssues = await Promise.all(
+    scenarios.map(async (scenario) => {
+      const created = await harness.ctx.issues.create({
+        companyId: 'company-1',
+        projectId: 'project-1',
+        title: scenario.title
+      });
+
+      return created.status === 'in_review'
+        ? created
+        : harness.ctx.issues.update(created.id, { status: 'in_review' }, 'company-1');
+    })
+  );
+
+  await harness.ctx.state.set(
+    {
+      scopeKind: 'instance',
+      stateKey: 'paperclip-github-plugin-import-registry'
+    },
+    importedIssues.map((issue, index) => ({
+      mappingId: 'mapping-a',
+      githubIssueId: scenarios[index]?.githubIssueId ?? 0,
+      githubIssueNumber: scenarios[index]?.githubIssueNumber ?? 0,
+      paperclipIssueId: issue.id,
+      importedAt: '2026-04-09T09:00:00.000Z',
+      lastSeenCommentCount: 0
+    }))
+  );
+
+  const originalFetch = globalThis.fetch;
+
+  globalThis.fetch = async (input, init) => {
+    const url = new URL(getRequestUrl(input));
+
+    if (url.pathname === '/repos/paperclipai/example-repo/issues' && ['all', 'open'].includes(url.searchParams.get('state') ?? '')) {
+      return jsonResponse(
+        scenarios.map((scenario) => ({
+          id: scenario.githubIssueId,
+          number: scenario.githubIssueNumber,
+          title: scenario.title,
+          body: null,
+          html_url: `https://github.com/paperclipai/example-repo/issues/${scenario.githubIssueNumber}`,
+          state: 'open',
+          comments: 0
+        }))
+      );
+    }
+
+    if (url.pathname === '/graphql') {
+      const { query, variables } = getGraphqlRequest(init);
+      const issueNumber = typeof variables.issueNumber === 'number' ? variables.issueNumber : undefined;
+      const pullRequestNumber =
+        typeof variables.pullRequestNumber === 'number' ? variables.pullRequestNumber : undefined;
+
+      if (query.includes('query GitHubIssueParentRelationships')) {
+        return graphqlIssueParentRelationshipsResponse(
+          scenarios.map((scenario) => ({
+            issueNumber: scenario.githubIssueNumber
+          }))
+        );
+      }
+
+      if (query.includes('query GitHubIssueStatusSnapshot') && issueNumber !== undefined) {
+        const scenario = scenarios.find((entry) => entry.githubIssueNumber === issueNumber);
+        if (!scenario) {
+          throw new Error(`Missing merge-state scenario for issue #${issueNumber}.`);
+        }
+
+        return graphqlResponse({
+          repository: {
+            issue: {
+              number: scenario.githubIssueNumber,
+              state: 'OPEN',
+              stateReason: null,
+              comments: {
+                totalCount: 0
+              },
+              closedByPullRequestsReferences: {
+                pageInfo: {
+                  hasNextPage: false,
+                  endCursor: null
+                },
+                nodes: [
+                  {
+                    number: scenario.pullRequestNumber,
+                    state: 'OPEN'
+                  }
+                ]
+              }
+            }
+          }
+        });
+      }
+
+      if (query.includes('query GitHubPullRequestReviewThreads') && pullRequestNumber !== undefined) {
+        return graphqlResponse({
+          repository: {
+            pullRequest: {
+              reviewThreads: {
+                pageInfo: {
+                  hasNextPage: false,
+                  endCursor: null
+                },
+                nodes: [{ isResolved: true }]
+              }
+            }
+          }
+        });
+      }
+
+      if (query.includes('query GitHubPullRequestCiContexts') && pullRequestNumber !== undefined) {
+        const scenario = scenarios.find((entry) => entry.pullRequestNumber === pullRequestNumber);
+        if (!scenario) {
+          throw new Error(`Missing merge-state scenario for pull request #${pullRequestNumber}.`);
+        }
+
+        return graphqlResponse({
+          repository: {
+            pullRequest: {
+              mergeable: scenario.mergeable,
+              mergeStateStatus: scenario.mergeStateStatus,
+              statusCheckRollup: {
+                contexts: {
+                  pageInfo: {
+                    hasNextPage: false,
+                    endCursor: null
+                  },
+                  nodes: [
+                    {
+                      __typename: 'StatusContext',
+                      state: 'SUCCESS'
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        });
+      }
+    }
+
+    throw new Error(`Unexpected GitHub request: ${url.toString()}`);
+  };
+
+  try {
+    const sync = await harness.performAction('sync.runNow', {}) as {
+      syncState: { status: string; syncedIssuesCount?: number };
+    };
+
+    assert.equal(sync.syncState.status, 'success');
+    assert.equal(sync.syncState.syncedIssuesCount, scenarios.length);
+
+    const issues = await harness.ctx.issues.list({
+      companyId: 'company-1'
+    });
+
+    for (const scenario of scenarios) {
+      const issue = issues.find((entry) => entry.title === scenario.title);
+      assert.equal(issue?.status, 'in_progress');
+      assert.equal(issue?.assigneeAgentId, 'agent-1');
+      assert.match(
+        statusTransitionComments.find((comment) => comment.issueId === issue?.id)?.body ?? '',
+        /from `in review` to `in progress`/
+      );
+      assert.match(
+        statusTransitionComments.find((comment) => comment.issueId === issue?.id)?.body ?? '',
+        scenario.expectedReason
+      );
+    }
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -13957,7 +14280,7 @@ test('worker routes sync-driven review handoffs to execution-policy assignees an
                   hasNextPage: false,
                   endCursor: null
                 },
-                nodes: [{ isResolved: false }]
+                nodes: [{ isResolved: true }]
               }
             }
           }
@@ -13968,6 +14291,8 @@ test('worker routes sync-driven review handoffs to execution-policy assignees an
         return graphqlResponse({
           repository: {
             pullRequest: {
+              mergeable: 'MERGEABLE',
+              mergeStateStatus: 'CLEAN',
               statusCheckRollup: {
                 contexts: {
                   pageInfo: {
@@ -13991,6 +14316,8 @@ test('worker routes sync-driven review handoffs to execution-policy assignees an
         return graphqlResponse({
           repository: {
             pullRequest: {
+              mergeable: 'MERGEABLE',
+              mergeStateStatus: 'BEHIND',
               statusCheckRollup: {
                 contexts: {
                   pageInfo: {
@@ -14001,7 +14328,7 @@ test('worker routes sync-driven review handoffs to execution-policy assignees an
                     {
                       __typename: 'CheckRun',
                       status: 'COMPLETED',
-                      conclusion: 'FAILURE'
+                      conclusion: 'SUCCESS'
                     }
                   ]
                 }
@@ -14479,6 +14806,8 @@ test('worker routes execution-policy review handoffs to saved reviewers, executo
         return graphqlResponse({
           repository: {
             pullRequest: {
+              mergeable: 'MERGEABLE',
+              mergeStateStatus: 'CLEAN',
               statusCheckRollup: {
                 contexts: {
                   pageInfo: {
@@ -14502,6 +14831,8 @@ test('worker routes execution-policy review handoffs to saved reviewers, executo
         return graphqlResponse({
           repository: {
             pullRequest: {
+              mergeable: 'MERGEABLE',
+              mergeStateStatus: 'CLEAN',
               statusCheckRollup: {
                 contexts: {
                   pageInfo: {
@@ -14775,6 +15106,8 @@ test('worker handles linked pull requests from other repositories', async () => 
         return graphqlResponse({
           repository: {
             pullRequest: {
+              mergeable: 'MERGEABLE',
+              mergeStateStatus: 'CLEAN',
               statusCheckRollup: {
                 contexts: {
                   pageInfo: {
@@ -15890,6 +16223,8 @@ test('worker preserves execution-policy pending review state when the local Pape
               nodes: [
                 {
                   number: 430,
+                  mergeable: 'MERGEABLE',
+                  mergeStateStatus: 'CLEAN',
                   reviewThreads: {
                     pageInfo: {
                       hasNextPage: false,
@@ -15965,6 +16300,8 @@ test('worker preserves execution-policy pending review state when the local Pape
         return graphqlResponse({
           repository: {
             pullRequest: {
+              mergeable: 'MERGEABLE',
+              mergeStateStatus: 'CLEAN',
               statusCheckRollup: {
                 contexts: {
                   pageInfo: {

@@ -12380,7 +12380,7 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
                     />
                     <p className="ghsync__hint">
                       The assignee that resumes work when GitHub Sync sends an issue back to active execution, such as failing CI,
-                      unresolved review threads, or a trusted new GitHub comment.
+                      non-mergeable linked pull requests, unresolved review threads, or a trusted new GitHub comment.
                     </p>
                   </div>
 

@@ -96,8 +96,9 @@ The plugin MUST persist repository mappings, company-scoped advanced issue defau
 - If a Paperclip issue that came from an open GitHub issue without a linked PR is later moved out of `backlog`, the sync flow SHOULD preserve that Paperclip status until another open-issue GitHub rule applies.
 - If that Paperclip issue is currently `done` or `cancelled` while the linked GitHub issue is open with no linked PR, the sync flow MUST move it to `todo` instead of `backlog` so it re-enters the active queue.
 - An open GitHub issue with a linked PR that still has unfinished CI jobs MUST map to Paperclip `in_progress`.
-- An open GitHub issue with a linked PR that has red CI jobs or unresolved review threads MUST map to Paperclip `todo`, unless the worker can route the issue back to an executor through execution-policy or configured handoff data, in which case it MUST map to `in_progress`.
-- An open GitHub issue with a linked PR that has green CI and all review threads resolved MUST map to Paperclip `in_review`.
+- An open GitHub issue with a linked PR that has red CI jobs, an action-required GitHub merge state such as `CONFLICTING`, `DIRTY`, `BEHIND`, `BLOCKED`, `DRAFT`, or `UNSTABLE`, or unresolved review threads MUST map to Paperclip `todo`, unless the worker can route the issue back to an executor through execution-policy or configured handoff data, in which case it MUST map to `in_progress`.
+- An open GitHub issue with a linked PR that has green CI, a review-ready GitHub merge state such as `CLEAN` or `HAS_HOOKS`, and all review threads resolved MUST map to Paperclip `in_review`.
+- An open GitHub issue with a linked PR in GitHub merge state `UNKNOWN` MUST NOT be treated as review-ready; when no failing CI or unresolved review-thread rule applies, the worker SHOULD keep the issue in active execution until GitHub resolves mergeability.
 - Linked pull requests MAY live in a different GitHub repository than the linked issue, and the worker MUST evaluate CI, review-thread state, stored link metadata, and rendered GitHub deep links against each pull request's actual repository instead of assuming the issue repository.
 - A closed GitHub issue completed as finished work MUST map to Paperclip `done`.
 - A closed GitHub issue closed as not planned or duplicate MUST map to Paperclip `cancelled`.
