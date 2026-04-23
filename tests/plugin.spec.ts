@@ -6233,7 +6233,21 @@ test('worker issue.githubDetails returns issue-scoped GitHub detail payloads', a
       githubIssueState: 'closed',
       githubIssueStateReason: 'completed',
       commentsCount: 4,
-      linkedPullRequestNumbers: [2020, 2021],
+      linkedPullRequestNumbers: [2021, 2020, 2021],
+      linkedPullRequests: [
+        {
+          number: 2021,
+          repositoryUrl: 'https://github.com/paperclipai/zeta-repo'
+        },
+        {
+          number: 2020,
+          repositoryUrl: ' paperclipai/alpha-repo '
+        },
+        {
+          number: 2021,
+          repositoryUrl: 'paperclipai/zeta-repo'
+        }
+      ],
       labels: [],
       syncedAt: '2026-04-10T09:00:00.000Z'
     }
@@ -6251,6 +6265,10 @@ test('worker issue.githubDetails returns issue-scoped GitHub detail payloads', a
     paperclipIssueId: string;
     githubIssueNumber: number;
     linkedPullRequestNumbers: number[];
+    linkedPullRequests?: Array<{
+      number: number;
+      repositoryUrl: string;
+    }>;
     creator?: {
       name: string;
       handle: string;
@@ -6268,6 +6286,16 @@ test('worker issue.githubDetails returns issue-scoped GitHub detail payloads', a
   assert.equal(secondDetails?.paperclipIssueId, secondIssue.id);
   assert.equal(secondDetails?.githubIssueNumber, 202);
   assert.deepEqual(secondDetails?.linkedPullRequestNumbers, [2020, 2021]);
+  assert.deepEqual(secondDetails?.linkedPullRequests, [
+    {
+      number: 2020,
+      repositoryUrl: 'https://github.com/paperclipai/alpha-repo'
+    },
+    {
+      number: 2021,
+      repositoryUrl: 'https://github.com/paperclipai/zeta-repo'
+    }
+  ]);
   assert.deepEqual(secondDetails?.creator, {
     name: 'octocat',
     handle: '@octocat',

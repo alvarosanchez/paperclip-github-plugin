@@ -638,12 +638,10 @@ interface GitHubPullRequestReference {
 }
 
 interface GitHubLinkedPullRequestRecord extends GitHubPullRequestReference {
-  number: number;
   state: 'OPEN' | 'CLOSED' | 'MERGED';
 }
 
 interface GitHubPullRequestStatusSnapshot extends GitHubPullRequestReference {
-  number: number;
   hasUnresolvedReviewThreads: boolean;
   ciState: GitHubPullRequestCiState;
 }
@@ -7763,6 +7761,15 @@ function normalizeLinkedPullRequestReferences(
       repositoryUrl
     });
   }
+
+  references.sort((left, right) => {
+    const repositoryUrlComparison = left.repositoryUrl.toLowerCase().localeCompare(right.repositoryUrl.toLowerCase());
+    if (repositoryUrlComparison !== 0) {
+      return repositoryUrlComparison;
+    }
+
+    return left.number - right.number;
+  });
 
   return references;
 }
