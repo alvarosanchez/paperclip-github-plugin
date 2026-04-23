@@ -10,12 +10,17 @@ import {
   type Agent,
   type Issue,
   type IssueComment,
+  type PluginWebhookInput,
   type ToolResult,
   type ToolRunContext
 } from '@paperclipai/plugin-sdk';
 
 import { getGitHubAgentToolDeclaration } from './github-agent-tools.ts';
 import { parseRepositoryReference, type ParsedRepositoryReference } from './github-repo.ts';
+import {
+  COMPANY_METRIC_WEBHOOK_AUTH_HEADER,
+  COMPANY_METRIC_WEBHOOK_ENDPOINT_KEY,
+} from './kpi-contract.ts';
 import { normalizePaperclipHealthResponse, requiresPaperclipBoardAccess } from './paperclip-health.ts';
 
 const SETTINGS_SCOPE = {
@@ -36,6 +41,11 @@ const SYNC_CANCELLATION_SCOPE = {
 const IMPORT_REGISTRY_SCOPE = {
   scopeKind: 'instance' as const,
   stateKey: 'paperclip-github-plugin-import-registry'
+};
+
+const COMPANY_KPI_SCOPE = {
+  scopeKind: 'instance' as const,
+  stateKey: 'paperclip-github-plugin-company-kpis'
 };
 
 const DEFAULT_SCHEDULE_FREQUENCY_MINUTES = 15;
@@ -66,6 +76,11 @@ const SYNC_PROGRESS_PERSIST_INTERVAL_MS = 250;
 const MAX_SYNC_FAILURE_LOG_ENTRIES = 25;
 const GITHUB_SECONDARY_RATE_LIMIT_FALLBACK_MS = 60_000;
 const IMPORTED_ISSUE_WAKEUP_CONCURRENCY = 4;
+const COMPANY_KPI_CHART_WINDOW_DAYS = 14;
+const COMPANY_KPI_COMPARISON_WINDOW_DAYS = 30;
+const MAX_COMPANY_BACKLOG_SNAPSHOTS = 180;
+const MAX_COMPANY_ACTIVITY_ROLLUPS = 365;
+const MAX_COMPANY_METRIC_EVENT_KEYS = 2_000;
 const MISSING_GITHUB_TOKEN_SYNC_MESSAGE = 'Configure a GitHub token before running sync.';
 const MISSING_GITHUB_TOKEN_SYNC_ACTION =
   'Open settings and save a GitHub token secret, or create $PAPERCLIP_HOME/plugins/github-sync/config.json (or ~/.paperclip/plugins/github-sync/config.json when PAPERCLIP_HOME is unset) with a "githubToken" value, and then run sync again.';
@@ -107,6 +122,8 @@ type CompanyAdvancedSettingsByCompanyId = Record<string, GitHubSyncAdvancedSetti
 type ProjectPullRequestFilter = 'all' | 'mergeable' | 'reviewable' | 'failing';
 type ProjectPullRequestUpToDateStatus = 'up_to_date' | 'can_update' | 'conflicts' | 'unknown';
 type ProjectPullRequestCopilotAction = 'fix_ci' | 'rebase' | 'address_review_feedback' | 'review';
+
+let pluginRuntimeContext: PluginSetupContext | null = null;
 
 interface CacheEntry<TValue> {
   expiresAt: number;
@@ -313,6 +330,7 @@ interface ImportedIssueRecord {
   paperclipIssueId: string;
   importedAt: string;
   lastSeenCommentCount?: number;
+  lastSeenGitHubState?: 'open' | 'closed';
   repositoryUrl?: string;
   paperclipProjectId?: string;
   companyId?: string;
@@ -424,6 +442,40 @@ interface GitHubSyncConfig {
   githubToken?: string;
   paperclipBoardApiTokenRefs?: PaperclipBoardApiTokenRefs;
   paperclipApiBaseUrl?: string;
+}
+
+type CompanyActivityMetricName =
+  | 'githubIssuesClosedCount'
+  | 'paperclipPullRequestsCreatedCount';
+
+interface CompanyBacklogSnapshot {
+  day: string;
+  capturedAt: string;
+  openIssueCount: number;
+  repositoryCount: number;
+}
+
+interface CompanyActivityRollup {
+  day: string;
+  updatedAt: string;
+  githubIssuesClosedCount: number;
+  paperclipPullRequestsCreatedCount: number;
+  paperclipPullRequestsMergedCount?: number;
+}
+
+interface CompanyMetricEventKeyRecord {
+  key: string;
+  recordedAt: string;
+}
+
+type CompanyBacklogSnapshotsByCompanyId = Record<string, CompanyBacklogSnapshot[]>;
+type CompanyActivityRollupsByCompanyId = Record<string, CompanyActivityRollup[]>;
+type CompanyMetricEventKeysByCompanyId = Record<string, CompanyMetricEventKeyRecord[]>;
+
+interface CompanyKpiState {
+  backlogSnapshotsByCompanyId?: CompanyBacklogSnapshotsByCompanyId;
+  activityRollupsByCompanyId?: CompanyActivityRollupsByCompanyId;
+  metricEventKeysByCompanyId?: CompanyMetricEventKeysByCompanyId;
 }
 
 type SyncStateByCompanyId = Record<string, SyncRunState>;
@@ -3629,6 +3681,199 @@ async function buildToolbarSyncState(
   };
 }
 
+function shiftIsoDay(day: string, offsetDays: number): string {
+  const parsed = new Date(`${day}T00:00:00.000Z`);
+  parsed.setUTCDate(parsed.getUTCDate() + offsetDays);
+  return parsed.toISOString().slice(0, 10);
+}
+
+function listIsoDayWindow(endDay: string, days: number): string[] {
+  return Array.from({ length: Math.max(0, days) }, (_, index) =>
+    shiftIsoDay(endDay, index - (days - 1))
+  );
+}
+
+function getBacklogValueOnOrBeforeDay(
+  snapshots: CompanyBacklogSnapshot[],
+  day: string
+): number | undefined {
+  let currentValue: number | undefined;
+
+  for (const snapshot of snapshots) {
+    if (snapshot.day > day) {
+      break;
+    }
+
+    currentValue = snapshot.openIssueCount;
+  }
+
+  return currentValue;
+}
+
+function buildBacklogHistorySeries(
+  snapshots: CompanyBacklogSnapshot[],
+  endDay: string,
+  days: number
+): Array<{ day: string; value: number }> {
+  const series: Array<{ day: string; value: number }> = [];
+  for (const day of listIsoDayWindow(endDay, days)) {
+    const value = getBacklogValueOnOrBeforeDay(snapshots, day);
+    if (value === undefined) {
+      continue;
+    }
+
+    series.push({
+      day,
+      value
+    });
+  }
+
+  return series;
+}
+
+function getCompanyActivityMetricValue(
+  rollup: CompanyActivityRollup,
+  metric: CompanyActivityMetricName
+): number {
+  return metric === 'githubIssuesClosedCount'
+    ? rollup.githubIssuesClosedCount
+    : rollup.paperclipPullRequestsCreatedCount;
+}
+
+function buildActivityHistorySeries(
+  rollups: CompanyActivityRollup[],
+  metric: CompanyActivityMetricName,
+  endDay: string,
+  days: number
+): Array<{ day: string; value: number }> {
+  const rollupsByDay = new Map(rollups.map((rollup) => [rollup.day, rollup] as const));
+  return listIsoDayWindow(endDay, days).map((day) => ({
+    day,
+    value: getCompanyActivityMetricValue(
+      rollupsByDay.get(day) ?? createEmptyCompanyActivityRollup(day, `${day}T00:00:00.000Z`),
+      metric
+    )
+  }));
+}
+
+function sumActivityMetricForWindow(
+  rollups: CompanyActivityRollup[],
+  metric: CompanyActivityMetricName,
+  endDay: string,
+  days: number
+): number {
+  return buildActivityHistorySeries(rollups, metric, endDay, days).reduce((sum, point) => sum + point.value, 0);
+}
+
+async function buildDashboardMetricsData(
+  ctx: PluginSetupContext,
+  input: Record<string, unknown>
+): Promise<Record<string, unknown>> {
+  const companyId = normalizeCompanyId(input.companyId);
+  if (!companyId) {
+    return {
+      status: 'company_required',
+      historyWindowDays: COMPANY_KPI_CHART_WINDOW_DAYS,
+      comparisonWindowDays: COMPANY_KPI_COMPARISON_WINDOW_DAYS,
+      notes: {
+        backlogHistoryAvailable: false,
+        activityHistoryAvailable: false
+      }
+    };
+  }
+
+  const settings = normalizeSettings(await ctx.state.get(SETTINGS_SCOPE));
+  const mappings = getSyncableMappingsForScope(settings.mappings, companyId);
+  const companyKpis = normalizeCompanyKpiState(await ctx.state.get(COMPANY_KPI_SCOPE));
+  const backlogSnapshots = getCompanyBacklogSnapshots(companyKpis, companyId);
+  const activityRollups = getCompanyActivityRollups(companyKpis, companyId);
+  const latestBacklogSnapshot = backlogSnapshots.at(-1);
+  const latestActivityRollup = activityRollups.at(-1);
+  const backlogEndDay = latestBacklogSnapshot?.day;
+  const activityEndDay = latestActivityRollup?.day;
+
+  return {
+    status: mappings.length > 0 ? 'ready' : 'no_mappings',
+    companyId,
+    mappedRepositoryCount: mappings.length,
+    historyWindowDays: COMPANY_KPI_CHART_WINDOW_DAYS,
+    comparisonWindowDays: COMPANY_KPI_COMPARISON_WINDOW_DAYS,
+    backlog: {
+      ...(latestBacklogSnapshot ? { lastCapturedAt: latestBacklogSnapshot.capturedAt } : {}),
+      ...(latestBacklogSnapshot ? { currentOpenIssueCount: latestBacklogSnapshot.openIssueCount } : {}),
+      ...(backlogEndDay
+        ? {
+            comparisonOpenIssueCount: getBacklogValueOnOrBeforeDay(
+              backlogSnapshots,
+              shiftIsoDay(backlogEndDay, -(COMPANY_KPI_COMPARISON_WINDOW_DAYS - 1))
+            )
+          }
+        : {}),
+      history: backlogEndDay
+        ? buildBacklogHistorySeries(backlogSnapshots, backlogEndDay, COMPANY_KPI_CHART_WINDOW_DAYS)
+        : []
+    },
+    githubIssuesClosed: {
+      ...(latestActivityRollup ? { lastRecordedAt: latestActivityRollup.updatedAt } : {}),
+      currentPeriodCount: activityEndDay
+        ? sumActivityMetricForWindow(
+            activityRollups,
+            'githubIssuesClosedCount',
+            activityEndDay,
+            COMPANY_KPI_COMPARISON_WINDOW_DAYS
+          )
+        : 0,
+      previousPeriodCount: activityEndDay
+        ? sumActivityMetricForWindow(
+            activityRollups,
+            'githubIssuesClosedCount',
+            shiftIsoDay(activityEndDay, -COMPANY_KPI_COMPARISON_WINDOW_DAYS),
+            COMPANY_KPI_COMPARISON_WINDOW_DAYS
+          )
+        : 0,
+      history: activityEndDay
+        ? buildActivityHistorySeries(
+            activityRollups,
+            'githubIssuesClosedCount',
+            activityEndDay,
+            COMPANY_KPI_CHART_WINDOW_DAYS
+          )
+        : []
+    },
+    paperclipPullRequestsCreated: {
+      ...(latestActivityRollup ? { lastRecordedAt: latestActivityRollup.updatedAt } : {}),
+      currentPeriodCount: activityEndDay
+        ? sumActivityMetricForWindow(
+            activityRollups,
+            'paperclipPullRequestsCreatedCount',
+            activityEndDay,
+            COMPANY_KPI_COMPARISON_WINDOW_DAYS
+          )
+        : 0,
+      previousPeriodCount: activityEndDay
+        ? sumActivityMetricForWindow(
+            activityRollups,
+            'paperclipPullRequestsCreatedCount',
+            shiftIsoDay(activityEndDay, -COMPANY_KPI_COMPARISON_WINDOW_DAYS),
+            COMPANY_KPI_COMPARISON_WINDOW_DAYS
+          )
+        : 0,
+      history: activityEndDay
+        ? buildActivityHistorySeries(
+            activityRollups,
+            'paperclipPullRequestsCreatedCount',
+            activityEndDay,
+            COMPANY_KPI_CHART_WINDOW_DAYS
+          )
+        : []
+    },
+    notes: {
+      backlogHistoryAvailable: backlogSnapshots.length > 0,
+      activityHistoryAvailable: activityRollups.length > 0
+    }
+  };
+}
+
 async function buildIssueGitHubDetails(
   ctx: PluginSetupContext,
   input: Record<string, unknown>
@@ -5164,6 +5409,251 @@ function normalizeSettings(value: unknown): GitHubSyncSettings {
   };
 }
 
+function getIsoDayString(value: unknown): string {
+  return coerceDate(value).toISOString().slice(0, 10);
+}
+
+function normalizeIsoDayString(value: unknown): string | undefined {
+  if (typeof value !== 'string' || !value.trim()) {
+    return undefined;
+  }
+
+  return getIsoDayString(value);
+}
+
+function normalizeCompanyBacklogSnapshot(value: unknown): CompanyBacklogSnapshot | null {
+  if (!value || typeof value !== 'object') {
+    return null;
+  }
+
+  const record = value as Record<string, unknown>;
+  const day = normalizeIsoDayString(record.day);
+  const capturedAt = typeof record.capturedAt === 'string' ? coerceDate(record.capturedAt).toISOString() : undefined;
+  const openIssueCount =
+    typeof record.openIssueCount === 'number' && record.openIssueCount >= 0
+      ? Math.floor(record.openIssueCount)
+      : NaN;
+  const repositoryCount =
+    typeof record.repositoryCount === 'number' && record.repositoryCount >= 0
+      ? Math.floor(record.repositoryCount)
+      : NaN;
+
+  if (!day || !capturedAt || Number.isNaN(openIssueCount) || Number.isNaN(repositoryCount)) {
+    return null;
+  }
+
+  return {
+    day,
+    capturedAt,
+    openIssueCount,
+    repositoryCount
+  };
+}
+
+function normalizeCompanyBacklogSnapshots(value: unknown): CompanyBacklogSnapshot[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  const snapshotsByDay = new Map<string, CompanyBacklogSnapshot>();
+  for (const entry of value) {
+    const snapshot = normalizeCompanyBacklogSnapshot(entry);
+    if (!snapshot) {
+      continue;
+    }
+
+    const existing = snapshotsByDay.get(snapshot.day);
+    if (!existing || existing.capturedAt.localeCompare(snapshot.capturedAt) <= 0) {
+      snapshotsByDay.set(snapshot.day, snapshot);
+    }
+  }
+
+  return [...snapshotsByDay.values()]
+    .sort((left, right) => left.day.localeCompare(right.day))
+    .slice(-MAX_COMPANY_BACKLOG_SNAPSHOTS);
+}
+
+function createEmptyCompanyActivityRollup(day: string, updatedAt: string): CompanyActivityRollup {
+  return {
+    day,
+    updatedAt,
+    githubIssuesClosedCount: 0,
+    paperclipPullRequestsCreatedCount: 0
+  };
+}
+
+function normalizeCompanyActivityRollup(value: unknown): CompanyActivityRollup | null {
+  if (!value || typeof value !== 'object') {
+    return null;
+  }
+
+  const record = value as Record<string, unknown>;
+  const day = normalizeIsoDayString(record.day);
+  const updatedAt = typeof record.updatedAt === 'string' ? coerceDate(record.updatedAt).toISOString() : undefined;
+  const githubIssuesClosedCount =
+    typeof record.githubIssuesClosedCount === 'number' && record.githubIssuesClosedCount >= 0
+      ? Math.floor(record.githubIssuesClosedCount)
+      : 0;
+  const paperclipPullRequestsCreatedCount =
+    typeof record.paperclipPullRequestsCreatedCount === 'number' && record.paperclipPullRequestsCreatedCount >= 0
+      ? Math.floor(record.paperclipPullRequestsCreatedCount)
+      : 0;
+  const paperclipPullRequestsMergedCount =
+    typeof record.paperclipPullRequestsMergedCount === 'number' && record.paperclipPullRequestsMergedCount >= 0
+      ? Math.floor(record.paperclipPullRequestsMergedCount)
+      : undefined;
+
+  if (!day || !updatedAt) {
+    return null;
+  }
+
+  return {
+    day,
+    updatedAt,
+    githubIssuesClosedCount,
+    paperclipPullRequestsCreatedCount,
+    ...(paperclipPullRequestsMergedCount !== undefined
+      ? { paperclipPullRequestsMergedCount }
+      : {})
+  };
+}
+
+function normalizeCompanyActivityRollups(value: unknown): CompanyActivityRollup[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  const rollupsByDay = new Map<string, CompanyActivityRollup>();
+  for (const entry of value) {
+    const rollup = normalizeCompanyActivityRollup(entry);
+    if (!rollup) {
+      continue;
+    }
+
+    const existing = rollupsByDay.get(rollup.day);
+    if (!existing || existing.updatedAt.localeCompare(rollup.updatedAt) <= 0) {
+      rollupsByDay.set(rollup.day, rollup);
+    }
+  }
+
+  return [...rollupsByDay.values()]
+    .sort((left, right) => left.day.localeCompare(right.day))
+    .slice(-MAX_COMPANY_ACTIVITY_ROLLUPS);
+}
+
+function normalizeCompanyMetricEventKeyRecord(value: unknown): CompanyMetricEventKeyRecord | null {
+  if (!value || typeof value !== 'object') {
+    return null;
+  }
+
+  const record = value as Record<string, unknown>;
+  const key = typeof record.key === 'string' && record.key.trim() ? record.key.trim() : '';
+  const recordedAt = typeof record.recordedAt === 'string' ? coerceDate(record.recordedAt).toISOString() : undefined;
+  if (!key || !recordedAt) {
+    return null;
+  }
+
+  return {
+    key,
+    recordedAt
+  };
+}
+
+function normalizeCompanyMetricEventKeyRecords(value: unknown): CompanyMetricEventKeyRecord[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  const entries = value
+    .map((entry) => normalizeCompanyMetricEventKeyRecord(entry))
+    .filter((entry): entry is CompanyMetricEventKeyRecord => entry !== null)
+    .sort((left, right) => left.recordedAt.localeCompare(right.recordedAt));
+  const keys = new Set<string>();
+  const deduped: CompanyMetricEventKeyRecord[] = [];
+
+  for (const entry of entries) {
+    if (keys.has(entry.key)) {
+      continue;
+    }
+
+    keys.add(entry.key);
+    deduped.push(entry);
+  }
+
+  return deduped.slice(-MAX_COMPANY_METRIC_EVENT_KEYS);
+}
+
+function normalizeCompanyBacklogSnapshotsByCompanyId(value: unknown): CompanyBacklogSnapshotsByCompanyId | undefined {
+  if (!value || typeof value !== 'object') {
+    return undefined;
+  }
+
+  const entries = Object.entries(value as Record<string, unknown>)
+    .map(([companyId, snapshots]) => {
+      const normalizedCompanyId = normalizeCompanyId(companyId);
+      const normalizedSnapshots = normalizeCompanyBacklogSnapshots(snapshots);
+      return normalizedCompanyId && normalizedSnapshots.length > 0
+        ? [normalizedCompanyId, normalizedSnapshots] as const
+        : null;
+    })
+    .filter((entry): entry is readonly [string, CompanyBacklogSnapshot[]] => entry !== null);
+
+  return entries.length > 0 ? Object.fromEntries(entries) : undefined;
+}
+
+function normalizeCompanyActivityRollupsByCompanyId(value: unknown): CompanyActivityRollupsByCompanyId | undefined {
+  if (!value || typeof value !== 'object') {
+    return undefined;
+  }
+
+  const entries = Object.entries(value as Record<string, unknown>)
+    .map(([companyId, rollups]) => {
+      const normalizedCompanyId = normalizeCompanyId(companyId);
+      const normalizedRollups = normalizeCompanyActivityRollups(rollups);
+      return normalizedCompanyId && normalizedRollups.length > 0
+        ? [normalizedCompanyId, normalizedRollups] as const
+        : null;
+    })
+    .filter((entry): entry is readonly [string, CompanyActivityRollup[]] => entry !== null);
+
+  return entries.length > 0 ? Object.fromEntries(entries) : undefined;
+}
+
+function normalizeCompanyMetricEventKeysByCompanyId(value: unknown): CompanyMetricEventKeysByCompanyId | undefined {
+  if (!value || typeof value !== 'object') {
+    return undefined;
+  }
+
+  const entries = Object.entries(value as Record<string, unknown>)
+    .map(([companyId, records]) => {
+      const normalizedCompanyId = normalizeCompanyId(companyId);
+      const normalizedRecords = normalizeCompanyMetricEventKeyRecords(records);
+      return normalizedCompanyId && normalizedRecords.length > 0
+        ? [normalizedCompanyId, normalizedRecords] as const
+        : null;
+    })
+    .filter((entry): entry is readonly [string, CompanyMetricEventKeyRecord[]] => entry !== null);
+
+  return entries.length > 0 ? Object.fromEntries(entries) : undefined;
+}
+
+function normalizeCompanyKpiState(value: unknown): CompanyKpiState {
+  if (!value || typeof value !== 'object') {
+    return {};
+  }
+
+  const record = value as Record<string, unknown>;
+  const backlogSnapshotsByCompanyId = normalizeCompanyBacklogSnapshotsByCompanyId(record.backlogSnapshotsByCompanyId);
+  const activityRollupsByCompanyId = normalizeCompanyActivityRollupsByCompanyId(record.activityRollupsByCompanyId);
+  const metricEventKeysByCompanyId = normalizeCompanyMetricEventKeysByCompanyId(record.metricEventKeysByCompanyId);
+
+  return {
+    ...(backlogSnapshotsByCompanyId ? { backlogSnapshotsByCompanyId } : {}),
+    ...(activityRollupsByCompanyId ? { activityRollupsByCompanyId } : {}),
+    ...(metricEventKeysByCompanyId ? { metricEventKeysByCompanyId } : {})
+  };
+}
+
 function getScopedSyncState(
   settings: Pick<GitHubSyncSettings, 'syncState' | 'syncStateByCompanyId'>,
   companyId?: string
@@ -5305,6 +5795,225 @@ function hasAnyScopedValue<T>(valueByCompanyId: Record<string, T> | undefined): 
   return Boolean(valueByCompanyId && Object.keys(valueByCompanyId).length > 0);
 }
 
+function getCompanyBacklogSnapshots(state: CompanyKpiState, companyId?: string): CompanyBacklogSnapshot[] {
+  const normalizedCompanyId = normalizeCompanyId(companyId);
+  if (!normalizedCompanyId) {
+    return [];
+  }
+
+  return normalizeCompanyBacklogSnapshots(state.backlogSnapshotsByCompanyId?.[normalizedCompanyId]);
+}
+
+function getCompanyActivityRollups(state: CompanyKpiState, companyId?: string): CompanyActivityRollup[] {
+  const normalizedCompanyId = normalizeCompanyId(companyId);
+  if (!normalizedCompanyId) {
+    return [];
+  }
+
+  return normalizeCompanyActivityRollups(state.activityRollupsByCompanyId?.[normalizedCompanyId]);
+}
+
+function upsertCompanyBacklogSnapshot(
+  state: CompanyKpiState,
+  companyId: string,
+  snapshot: CompanyBacklogSnapshot
+): CompanyKpiState {
+  const normalizedCompanyId = normalizeCompanyId(companyId);
+  if (!normalizedCompanyId) {
+    return state;
+  }
+
+  const nextSnapshots = [
+    ...getCompanyBacklogSnapshots(state, normalizedCompanyId).filter((entry) => entry.day !== snapshot.day),
+    snapshot
+  ]
+    .sort((left, right) => left.day.localeCompare(right.day))
+    .slice(-MAX_COMPANY_BACKLOG_SNAPSHOTS);
+
+  return {
+    ...state,
+    backlogSnapshotsByCompanyId: {
+      ...(state.backlogSnapshotsByCompanyId ?? {}),
+      [normalizedCompanyId]: nextSnapshots
+    }
+  };
+}
+
+function incrementCompanyActivityRollup(
+  state: CompanyKpiState,
+  params: {
+    companyId: string;
+    metric: CompanyActivityMetricName;
+    count?: number;
+    occurredAt?: string;
+  }
+): CompanyKpiState {
+  const normalizedCompanyId = normalizeCompanyId(params.companyId);
+  if (!normalizedCompanyId) {
+    return state;
+  }
+
+  const occurredAt = coerceDate(params.occurredAt ?? new Date()).toISOString();
+  const day = getIsoDayString(occurredAt);
+  const count = Math.max(1, Math.floor(params.count ?? 1));
+  const nextRollups = [...getCompanyActivityRollups(state, normalizedCompanyId)];
+  const existingIndex = nextRollups.findIndex((entry) => entry.day === day);
+  const existing = existingIndex >= 0 ? nextRollups[existingIndex] : createEmptyCompanyActivityRollup(day, occurredAt);
+  const updated: CompanyActivityRollup = {
+    ...existing,
+    updatedAt: occurredAt,
+    [params.metric]: existing[params.metric] + count
+  };
+
+  if (existingIndex >= 0) {
+    nextRollups.splice(existingIndex, 1, updated);
+  } else {
+    nextRollups.push(updated);
+  }
+
+  nextRollups.sort((left, right) => left.day.localeCompare(right.day));
+
+  return {
+    ...state,
+    activityRollupsByCompanyId: {
+      ...(state.activityRollupsByCompanyId ?? {}),
+      [normalizedCompanyId]: nextRollups.slice(-MAX_COMPANY_ACTIVITY_ROLLUPS)
+    }
+  };
+}
+
+function hasRecordedCompanyMetricEventKey(
+  state: CompanyKpiState,
+  companyId: string,
+  eventKey: string
+): boolean {
+  const normalizedCompanyId = normalizeCompanyId(companyId);
+  if (!normalizedCompanyId || !eventKey.trim()) {
+    return false;
+  }
+
+  return (state.metricEventKeysByCompanyId?.[normalizedCompanyId] ?? []).some((entry) => entry.key === eventKey);
+}
+
+function rememberCompanyMetricEventKey(
+  state: CompanyKpiState,
+  companyId: string,
+  eventKey: string,
+  recordedAt: string
+): CompanyKpiState {
+  const normalizedCompanyId = normalizeCompanyId(companyId);
+  const trimmedKey = eventKey.trim();
+  if (!normalizedCompanyId || !trimmedKey) {
+    return state;
+  }
+
+  const nextRecords = [
+    ...(state.metricEventKeysByCompanyId?.[normalizedCompanyId] ?? []).filter((entry) => entry.key !== trimmedKey),
+    {
+      key: trimmedKey,
+      recordedAt
+    }
+  ]
+    .sort((left, right) => left.recordedAt.localeCompare(right.recordedAt))
+    .slice(-MAX_COMPANY_METRIC_EVENT_KEYS);
+
+  return {
+    ...state,
+    metricEventKeysByCompanyId: {
+      ...(state.metricEventKeysByCompanyId ?? {}),
+      [normalizedCompanyId]: nextRecords
+    }
+  };
+}
+
+function buildCompanyMetricEventKey(params: {
+  metric: CompanyActivityMetricName;
+  eventKey?: string;
+  repositoryUrl?: string;
+  pullRequestNumber?: number;
+  pullRequestUrl?: string;
+}): string | undefined {
+  const pullRequestUrl = normalizeGitHubPullRequestHtmlUrl(params.pullRequestUrl);
+  if (pullRequestUrl) {
+    return `${params.metric}:${pullRequestUrl}`;
+  }
+
+  const repository = typeof params.repositoryUrl === 'string' ? parseRepositoryReference(params.repositoryUrl) : null;
+  const pullRequestNumber =
+    typeof params.pullRequestNumber === 'number' && params.pullRequestNumber >= 1
+      ? Math.floor(params.pullRequestNumber)
+      : undefined;
+  if (repository && pullRequestNumber) {
+    return `${params.metric}:${repository.url}/pull/${pullRequestNumber}`;
+  }
+
+  const explicitEventKey = normalizeOptionalString(params.eventKey);
+  if (explicitEventKey) {
+    return `${params.metric}:${explicitEventKey}`;
+  }
+
+  return undefined;
+}
+
+function recordCompanyActivityMetricEvent(
+  state: CompanyKpiState,
+  params: {
+    companyId: string;
+    metric: CompanyActivityMetricName;
+    count?: number;
+    occurredAt?: string;
+    eventKey?: string;
+    repositoryUrl?: string;
+    pullRequestNumber?: number;
+    pullRequestUrl?: string;
+  }
+): {
+  state: CompanyKpiState;
+  recorded: boolean;
+  eventKey?: string;
+} {
+  const normalizedCompanyId = normalizeCompanyId(params.companyId);
+  if (!normalizedCompanyId) {
+    return {
+      state,
+      recorded: false
+    };
+  }
+
+  const occurredAt = coerceDate(params.occurredAt ?? new Date()).toISOString();
+  const eventKey = buildCompanyMetricEventKey({
+    metric: params.metric,
+    eventKey: params.eventKey,
+    repositoryUrl: params.repositoryUrl,
+    pullRequestNumber: params.pullRequestNumber,
+    pullRequestUrl: params.pullRequestUrl
+  });
+
+  if (eventKey && hasRecordedCompanyMetricEventKey(state, normalizedCompanyId, eventKey)) {
+    return {
+      state,
+      recorded: false,
+      eventKey
+    };
+  }
+
+  let nextState = incrementCompanyActivityRollup(state, {
+    companyId: normalizedCompanyId,
+    metric: params.metric,
+    count: params.count,
+    occurredAt
+  });
+  if (eventKey) {
+    nextState = rememberCompanyMetricEventKey(nextState, normalizedCompanyId, eventKey, occurredAt);
+  }
+
+  return {
+    state: nextState,
+    recorded: true,
+    ...(eventKey ? { eventKey } : {})
+  };
+}
+
 function normalizeImportRegistry(value: unknown): ImportedIssueRecord[] {
   if (!Array.isArray(value)) {
     return [];
@@ -5338,6 +6047,10 @@ function normalizeImportRegistry(value: unknown): ImportedIssueRecord[] {
         typeof record.lastSeenCommentCount === 'number' && record.lastSeenCommentCount >= 0
           ? Math.floor(record.lastSeenCommentCount)
           : undefined;
+      const lastSeenGitHubState =
+        record.lastSeenGitHubState === 'open' || record.lastSeenGitHubState === 'closed'
+          ? record.lastSeenGitHubState
+          : undefined;
 
       if (!mappingId || Number.isNaN(githubIssueId) || !paperclipIssueId || !importedAt) {
         return null;
@@ -5352,7 +6065,8 @@ function normalizeImportRegistry(value: unknown): ImportedIssueRecord[] {
         ...(repositoryUrl ? { repositoryUrl } : {}),
         ...(paperclipProjectId ? { paperclipProjectId } : {}),
         ...(companyId ? { companyId } : {}),
-        ...(lastSeenCommentCount !== undefined ? { lastSeenCommentCount } : {})
+        ...(lastSeenCommentCount !== undefined ? { lastSeenCommentCount } : {}),
+        ...(lastSeenGitHubState ? { lastSeenGitHubState } : {})
       };
     })
     .filter((entry): entry is ImportedIssueRecord => entry !== null);
@@ -5429,6 +6143,7 @@ function buildImportedIssueRecord(
     paperclipIssueId,
     importedAt,
     lastSeenCommentCount: issue.commentsCount,
+    lastSeenGitHubState: issue.state,
     repositoryUrl: getNormalizedMappingRepositoryUrl(mapping),
     paperclipProjectId: mapping.paperclipProjectId,
     companyId: mapping.companyId
@@ -5443,6 +6158,7 @@ function refreshImportedIssueRecordForMapping(
   record.mappingId = mapping.id;
   record.githubIssueNumber = issue.number;
   record.lastSeenCommentCount ??= issue.commentsCount;
+  record.lastSeenGitHubState ??= issue.state;
   record.repositoryUrl = getNormalizedMappingRepositoryUrl(mapping);
   record.paperclipProjectId = mapping.paperclipProjectId;
   record.companyId = mapping.companyId;
@@ -7608,6 +8324,28 @@ function normalizeGitHubIssueHtmlUrl(value: string): string | undefined {
   return parseGitHubIssueHtmlUrl(value)?.issueUrl;
 }
 
+function normalizeGitHubPullRequestHtmlUrl(value?: string): string | undefined {
+  if (typeof value !== 'string' || !value.trim()) {
+    return undefined;
+  }
+
+  try {
+    const parsed = new URL(value);
+    if (parsed.protocol !== 'https:' || parsed.hostname !== 'github.com') {
+      return undefined;
+    }
+
+    const match = parsed.pathname.match(/^\/([^/]+)\/([^/]+)\/pull\/(\d+)\/?$/i);
+    if (!match) {
+      return undefined;
+    }
+
+    return `https://github.com/${match[1]}/${match[2]}/pull/${match[3]}`;
+  } catch {
+    return undefined;
+  }
+}
+
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
@@ -8467,6 +9205,10 @@ function getPaperclipIssueEndpoint(baseUrl: string, issueId: string): string {
 
 function getPaperclipHealthEndpoint(baseUrl: string): string {
   return new URL('/api/health', baseUrl).toString();
+}
+
+function getPaperclipCurrentAgentEndpoint(baseUrl: string): string {
+  return new URL('/api/agents/me', baseUrl).toString();
 }
 
 function getPaperclipAgentWakeupEndpoint(baseUrl: string, agentId: string): string {
@@ -10061,6 +10803,13 @@ async function synchronizePaperclipIssueStatuses(
   syncFailureContext: SyncFailureContext,
   failures: SyncProcessingFailure[],
   assertNotCancelled?: () => Promise<void>,
+  onGitHubIssueClosed?: (params: {
+    companyId: string;
+    githubIssueId: number;
+    githubIssueNumber: number;
+    repositoryUrl: string;
+    occurredAt: string;
+  }) => Promise<void>,
   onProgress?: (progress: {
     githubIssueId: number;
     completedIssueCount: number;
@@ -10176,6 +10925,7 @@ async function synchronizePaperclipIssueStatuses(
       );
 
       const snapshotLinkedPullRequestNumbers = snapshot?.linkedPullRequests.map((pullRequest) => pullRequest.number) ?? [];
+      const previousGitHubState = importedIssue.lastSeenGitHubState;
       if (!doIssueNumberListsMatch(snapshotLinkedPullRequestNumbers, warmedLinkedPullRequestNumbers)) {
         updateSyncFailureContext(syncFailureContext, {
           phase: 'syncing_description',
@@ -10220,6 +10970,20 @@ async function synchronizePaperclipIssueStatuses(
         },
         snapshotLinkedPullRequestNumbers
       );
+
+      if (
+        previousGitHubState === 'open'
+        && snapshot.state === 'closed'
+        && typeof onGitHubIssueClosed === 'function'
+      ) {
+        await onGitHubIssueClosed({
+          companyId: mapping.companyId,
+          githubIssueId: githubIssue.id,
+          githubIssueNumber: githubIssue.number,
+          repositoryUrl: repository.url,
+          occurredAt: new Date().toISOString()
+        });
+      }
 
       const previousCommentCount = importedIssue.lastSeenCommentCount;
       const hasNewComments = snapshot.commentCount > (previousCommentCount ?? snapshot.commentCount);
@@ -10283,6 +11047,7 @@ async function synchronizePaperclipIssueStatuses(
 
       importedIssue.githubIssueNumber = githubIssue.number;
       importedIssue.lastSeenCommentCount = snapshot.commentCount;
+      importedIssue.lastSeenGitHubState = snapshot.state;
 
       if (paperclipIssue.status === nextStatus) {
         if (shouldWakeImportedAssignee) {
@@ -10692,6 +11457,335 @@ async function executeGitHubTool(
   } catch (error) {
     return buildToolErrorResult(error);
   }
+}
+
+function normalizeCompanyActivityMetricInputValue(value: unknown): CompanyActivityMetricName | undefined {
+  switch (value) {
+    case 'pull_request_created':
+      return 'paperclipPullRequestsCreatedCount';
+    default:
+      return undefined;
+  }
+}
+
+async function persistCompanyActivityMetricEvent(
+  ctx: PluginSetupContext,
+  params: {
+    companyId?: string;
+    metric: CompanyActivityMetricName;
+    count?: number;
+    occurredAt?: string;
+    eventKey?: string;
+    repositoryUrl?: string;
+    pullRequestNumber?: number;
+    pullRequestUrl?: string;
+  },
+  options: {
+    throwOnPersistFailure?: boolean;
+  } = {}
+): Promise<{
+  recorded: boolean;
+  eventKey?: string;
+}> {
+  const normalizedCompanyId = normalizeCompanyId(params.companyId);
+  if (!normalizedCompanyId) {
+    return {
+      recorded: false
+    };
+  }
+
+  const currentState = normalizeCompanyKpiState(await ctx.state.get(COMPANY_KPI_SCOPE));
+  const result = recordCompanyActivityMetricEvent(currentState, {
+    companyId: normalizedCompanyId,
+    metric: params.metric,
+    count: params.count,
+    occurredAt: params.occurredAt,
+    eventKey: params.eventKey,
+    repositoryUrl: params.repositoryUrl,
+    pullRequestNumber: params.pullRequestNumber,
+    pullRequestUrl: params.pullRequestUrl
+  });
+  if (!result.recorded) {
+    return {
+      recorded: false,
+      ...(result.eventKey ? { eventKey: result.eventKey } : {})
+    };
+  }
+
+  try {
+    await ctx.state.set(COMPANY_KPI_SCOPE, result.state);
+  } catch (error) {
+    if (options.throwOnPersistFailure) {
+      throw error;
+    }
+
+    ctx.logger.warn('GitHub Sync could not persist a company activity metric event.', {
+      companyId: normalizedCompanyId,
+      metric: params.metric,
+      repositoryUrl: params.repositoryUrl,
+      pullRequestNumber: params.pullRequestNumber,
+      error: getErrorMessage(error)
+    });
+    return {
+      recorded: false,
+      ...(result.eventKey ? { eventKey: result.eventKey } : {})
+    };
+  }
+
+  return {
+    recorded: true,
+    ...(result.eventKey ? { eventKey: result.eventKey } : {})
+  };
+}
+
+function parseWebhookPayloadRecord(input: PluginWebhookInput): Record<string, unknown> {
+  if (input.parsedBody && typeof input.parsedBody === 'object' && !Array.isArray(input.parsedBody)) {
+    return input.parsedBody as Record<string, unknown>;
+  }
+
+  const rawBody = input.rawBody.trim();
+  if (!rawBody) {
+    throw new Error('Webhook body must be a JSON object.');
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(rawBody);
+  } catch {
+    throw new Error('Webhook body must be valid JSON.');
+  }
+
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error('Webhook body must be a JSON object.');
+  }
+
+  return parsed as Record<string, unknown>;
+}
+
+async function resolveCompanyIdForCompanyMetricEvent(
+  ctx: PluginSetupContext,
+  params: {
+    companyId?: unknown;
+    repositoryUrl?: string;
+  }
+): Promise<string | undefined> {
+  const requestedCompanyId = normalizeCompanyId(params.companyId);
+  if (requestedCompanyId) {
+    return requestedCompanyId;
+  }
+
+  if (!params.repositoryUrl) {
+    return undefined;
+  }
+
+  const settings = normalizeSettings(await ctx.state.get(SETTINGS_SCOPE));
+  const matchingCompanyIds = [
+    ...new Set(
+      settings.mappings
+        .filter((mapping) => getNormalizedMappingRepositoryUrl(mapping) === params.repositoryUrl)
+        .map((mapping) => normalizeCompanyId(mapping.companyId))
+        .filter((companyId): companyId is string => Boolean(companyId))
+    )
+  ];
+
+  return matchingCompanyIds.length === 1 ? matchingCompanyIds[0] : undefined;
+}
+
+function getWebhookHeaderValue(
+  headers: PluginWebhookInput['headers'],
+  name: string
+): string | undefined {
+  const normalizedName = name.trim().toLowerCase();
+
+  for (const [headerName, headerValue] of Object.entries(headers)) {
+    if (headerName.trim().toLowerCase() !== normalizedName) {
+      continue;
+    }
+
+    if (typeof headerValue === 'string') {
+      const trimmedValue = headerValue.trim();
+      return trimmedValue || undefined;
+    }
+
+    if (!Array.isArray(headerValue)) {
+      continue;
+    }
+
+    for (const entry of headerValue) {
+      if (typeof entry !== 'string') {
+        continue;
+      }
+
+      const trimmedValue = entry.trim();
+      if (trimmedValue) {
+        return trimmedValue;
+      }
+    }
+  }
+
+  return undefined;
+}
+
+function normalizeCompanyMetricWebhookBearerToken(value: string | undefined): string | undefined {
+  if (!value) {
+    return undefined;
+  }
+
+  const trimmedValue = value.trim();
+  if (!trimmedValue) {
+    return undefined;
+  }
+
+  const bearerMatch = trimmedValue.match(/^Bearer\s+(.+)$/i);
+  if (!bearerMatch) {
+    return undefined;
+  }
+
+  const token = bearerMatch[1]?.trim();
+  return token || undefined;
+}
+
+function normalizePaperclipCurrentAgentRecord(value: unknown): { id: string; companyId: string } | null {
+  if (!value || typeof value !== 'object') {
+    return null;
+  }
+
+  const record = value as Record<string, unknown>;
+  const id = normalizeOptionalString(record.id);
+  const companyId = normalizeCompanyId(record.companyId);
+
+  return id && companyId
+    ? {
+        id,
+        companyId
+      }
+    : null;
+}
+
+async function readCompanyMetricWebhookCurrentAgent(
+  paperclipApiBaseUrl: string,
+  bearerToken: string
+): Promise<{ id: string; companyId: string }> {
+  const response = await fetchPaperclipApi(getPaperclipCurrentAgentEndpoint(paperclipApiBaseUrl), {
+    method: 'GET',
+    headers: {
+      accept: 'application/json',
+      authorization: `Bearer ${bearerToken}`
+    }
+  });
+
+  const payloadResult = await readPaperclipApiJsonResponse<unknown>(response, {
+    operationLabel: 'current agent'
+  });
+  if (payloadResult.failure) {
+    if (payloadResult.failure.requiresAuthentication) {
+      throw new Error('Company KPI webhook Authorization must be a valid PAPERCLIP_API_KEY bearer token.');
+    }
+
+    const detail = payloadResult.failure.errorMessage
+      ? ` ${payloadResult.failure.errorMessage}`
+      : '';
+    throw new Error(`Could not validate the KPI webhook Paperclip API key.${detail}`);
+  }
+
+  const agent = normalizePaperclipCurrentAgentRecord(payloadResult.data);
+  if (!agent) {
+    throw new Error('Paperclip did not return a usable current agent record while validating the KPI webhook caller.');
+  }
+
+  return agent;
+}
+
+async function assertCompanyMetricWebhookAuthenticated(
+  ctx: PluginSetupContext,
+  input: PluginWebhookInput,
+  companyId: string
+): Promise<void> {
+  const rawAuthorization = getWebhookHeaderValue(input.headers, COMPANY_METRIC_WEBHOOK_AUTH_HEADER);
+  const bearerToken = normalizeCompanyMetricWebhookBearerToken(rawAuthorization);
+  if (!bearerToken) {
+    throw new Error(
+      `Missing or invalid ${COMPANY_METRIC_WEBHOOK_AUTH_HEADER} header. Use Bearer <PAPERCLIP_API_KEY>.`
+    );
+  }
+
+  const settings = normalizeSettings(await ctx.state.get(SETTINGS_SCOPE));
+  const config = await getResolvedConfig(ctx);
+  const paperclipApiBaseUrl = getConfiguredPaperclipApiBaseUrl(settings, config, companyId);
+  if (!paperclipApiBaseUrl) {
+    throw new Error(
+      'A trusted Paperclip API origin is required to validate PAPERCLIP_API_KEY. Set PAPERCLIP_API_URL or save the Paperclip host origin before sending KPI webhook events.'
+    );
+  }
+
+  const currentAgent = await readCompanyMetricWebhookCurrentAgent(paperclipApiBaseUrl, bearerToken);
+  if (normalizeCompanyId(currentAgent.companyId) !== companyId) {
+    throw new Error('Company KPI webhook Paperclip API key belongs to a different company.');
+  }
+}
+async function handleCompanyMetricWebhook(
+  ctx: PluginSetupContext,
+  input: PluginWebhookInput
+): Promise<void> {
+  if (input.endpointKey !== COMPANY_METRIC_WEBHOOK_ENDPOINT_KEY) {
+    throw new Error(`Unsupported webhook endpoint: ${input.endpointKey}.`);
+  }
+
+  const payload = parseWebhookPayloadRecord(input);
+  const repositoryInput = normalizeOptionalString(payload.repository);
+  const repository = repositoryInput ? parseRepositoryReference(repositoryInput) : null;
+  if (repositoryInput && !repository) {
+    throw new Error('repository must be owner/repo or https://github.com/owner/repo.');
+  }
+
+  const companyId = await resolveCompanyIdForCompanyMetricEvent(ctx, {
+    companyId: payload.companyId,
+    repositoryUrl: repository?.url
+  });
+  if (!companyId) {
+    throw new Error('companyId is required unless repository maps to exactly one company.');
+  }
+
+  await assertCompanyMetricWebhookAuthenticated(ctx, input, companyId);
+
+  const metric = normalizeCompanyActivityMetricInputValue(payload.metric);
+  if (!metric) {
+    throw new Error('metric must be "pull_request_created".');
+  }
+
+  const pullRequestNumber = normalizeToolPositiveInteger(payload.pullRequestNumber);
+  const pullRequestUrl = normalizeGitHubPullRequestHtmlUrl(normalizeOptionalString(payload.pullRequestUrl));
+  const recordedMetric = await persistCompanyActivityMetricEvent(
+    ctx,
+    {
+      companyId,
+      metric,
+      count: normalizeToolPositiveInteger(payload.count),
+      occurredAt: normalizeOptionalString(payload.occurredAt),
+      eventKey: normalizeOptionalString(payload.eventKey),
+      repositoryUrl: repository?.url,
+      pullRequestNumber,
+      pullRequestUrl
+    },
+    {
+      throwOnPersistFailure: true
+    }
+  );
+
+  ctx.logger.info(
+    recordedMetric.recorded
+      ? 'GitHub Sync recorded a company KPI webhook event.'
+      : 'GitHub Sync ignored a duplicate company KPI webhook event.',
+    {
+      endpointKey: input.endpointKey,
+      companyId,
+      metric,
+      repositoryUrl: repository?.url,
+      pullRequestNumber,
+      pullRequestUrl,
+      requestId: input.requestId
+    }
+  );
 }
 
 async function createGitHubToolOctokit(ctx: PluginSetupContext, companyId?: string): Promise<Octokit> {
@@ -14576,6 +15670,8 @@ async function performSync(
   const config = await getResolvedConfig(ctx);
   const settings = materializeScopedSettings(baseSettings, config, targetCompanyId);
   const importRegistry = normalizeImportRegistry(await ctx.state.get(IMPORT_REGISTRY_SCOPE));
+  let companyKpiState = normalizeCompanyKpiState(await ctx.state.get(COMPANY_KPI_SCOPE));
+  let companyKpiStateDirty = false;
   const token = typeof options.resolvedToken === 'string'
     ? options.resolvedToken
     : await resolveGithubToken(ctx, { companyId: targetCompanyId });
@@ -14674,6 +15770,21 @@ async function performSync(
     progress: currentProgress
   });
 
+  async function flushCompanyKpiState(): Promise<void> {
+    if (!companyKpiStateDirty) {
+      return;
+    }
+
+    try {
+      await ctx.state.set(COMPANY_KPI_SCOPE, companyKpiState);
+      companyKpiStateDirty = false;
+    } catch (error) {
+      ctx.logger.warn('GitHub Sync could not persist company KPI state.', {
+        error: getErrorMessage(error)
+      });
+    }
+  }
+
   async function throwIfSyncCancelled(): Promise<void> {
     const cancellationRequest = await getSyncCancellationRequest(ctx);
     if (!cancellationRequest) {
@@ -14732,6 +15843,59 @@ async function performSync(
 
     completedTrackedIssueKeys.add(key);
     completedTrackedIssueCount += 1;
+  }
+
+  function recordCompanyBacklogSnapshotsFromPlans(repositoryPlans: RepositorySyncPlan[]): void {
+    if (options.target?.kind === 'project' || options.target?.kind === 'issue') {
+      return;
+    }
+
+    const expectedMappingsByCompanyId = new Map<string, number>();
+    for (const mapping of mappings) {
+      const companyId = normalizeCompanyId(mapping.companyId);
+      if (!companyId) {
+        continue;
+      }
+
+      expectedMappingsByCompanyId.set(companyId, (expectedMappingsByCompanyId.get(companyId) ?? 0) + 1);
+    }
+
+    const planBacklogByCompanyId = new Map<string, {
+      repositoryCount: number;
+      openIssueCount: number;
+    }>();
+    for (const plan of repositoryPlans) {
+      const companyId = normalizeCompanyId(plan.mapping.companyId);
+      if (!companyId) {
+        continue;
+      }
+
+      const current = planBacklogByCompanyId.get(companyId) ?? {
+        repositoryCount: 0,
+        openIssueCount: 0
+      };
+      current.repositoryCount += 1;
+      current.openIssueCount += plan.issues.length;
+      planBacklogByCompanyId.set(companyId, current);
+    }
+
+    const capturedAt = new Date().toISOString();
+    const day = getIsoDayString(capturedAt);
+
+    for (const [companyId, expectedRepositoryCount] of expectedMappingsByCompanyId.entries()) {
+      const planned = planBacklogByCompanyId.get(companyId);
+      if (!planned || planned.repositoryCount !== expectedRepositoryCount) {
+        continue;
+      }
+
+      companyKpiState = upsertCompanyBacklogSnapshot(companyKpiState, companyId, {
+        day,
+        capturedAt,
+        openIssueCount: planned.openIssueCount,
+        repositoryCount: planned.repositoryCount
+      });
+      companyKpiStateDirty = true;
+    }
   }
 
   const repositoryPlans: RepositorySyncPlan[] = [];
@@ -14844,6 +16008,8 @@ async function performSync(
         continue;
       }
     }
+
+    recordCompanyBacklogSnapshotsFromPlans(repositoryPlans);
 
     if (repositoryPlans.length > 0) {
       const firstPlan = repositoryPlans[0];
@@ -15056,6 +16222,17 @@ async function performSync(
           failureContext,
           recoverableFailures,
           throwIfSyncCancelled,
+          async (params) => {
+            const recorded = recordCompanyActivityMetricEvent(companyKpiState, {
+              companyId: params.companyId,
+              metric: 'githubIssuesClosedCount',
+              eventKey: `${params.repositoryUrl}/issues/${params.githubIssueNumber}:${getIsoDayString(params.occurredAt)}`,
+              repositoryUrl: params.repositoryUrl,
+              occurredAt: params.occurredAt
+            });
+            companyKpiState = recorded.state;
+            companyKpiStateDirty = companyKpiStateDirty || recorded.recorded;
+          },
           async (progress) => {
             markTrackedIssueProcessed(mapping, progress.githubIssueId);
             currentProgress = {
@@ -15165,6 +16342,8 @@ async function performSync(
     await saveSettingsSyncState(ctx, currentSettings, next.syncState, targetCompanyId);
     await ctx.state.set(IMPORT_REGISTRY_SCOPE, nextRegistry);
     return materializeScopedSettings(next, config, targetCompanyId);
+  } finally {
+    await flushCompanyKpiState();
   }
 }
 
@@ -15628,6 +16807,20 @@ function registerGitHubAgentTools(ctx: PluginSetupContext): void {
           'X-GitHub-Api-Version': GITHUB_API_VERSION
         }
       });
+
+      await persistCompanyActivityMetricEvent(
+        ctx,
+        {
+          companyId: runCtx.companyId,
+          metric: 'paperclipPullRequestsCreatedCount',
+          repositoryUrl: repository.url,
+          pullRequestNumber: response.data.number,
+          pullRequestUrl: response.data.html_url ?? undefined
+        },
+        {
+          throwOnPersistFailure: false
+        }
+      );
 
       return buildToolSuccessResult(
         `Created pull request #${response.data.number} in ${formatRepositoryLabel(repository)}.`,
@@ -16175,6 +17368,8 @@ export function shouldStartWorkerHost(moduleUrl: string, entry = process.argv[1]
 
 const plugin = definePlugin({
   async setup(ctx) {
+    pluginRuntimeContext = ctx;
+
     ctx.data.register('settings.registration', async (input) => {
       const record = input && typeof input === 'object' ? input as Record<string, unknown> : {};
       const requestedCompanyId = normalizeCompanyId(record.companyId);
@@ -16218,6 +17413,11 @@ const plugin = definePlugin({
         ...(savedBoardTokenRef ? { paperclipBoardAccessConfigSyncRef: savedBoardTokenRef } : {}),
         paperclipBoardAccessNeedsConfigSync: Boolean(savedBoardTokenRef && !configuredBoardTokenRef)
       };
+    });
+
+    ctx.data.register('dashboard.metrics', async (input) => {
+      const record = input && typeof input === 'object' ? input as Record<string, unknown> : {};
+      return buildDashboardMetricsData(ctx, record);
     });
 
     ctx.data.register('sync.toolbarState', async (input) => {
@@ -16652,6 +17852,16 @@ const plugin = definePlugin({
         await startSync(ctx, trigger, target ? { target } : {});
       }
     });
+  },
+  async onWebhook(input) {
+    if (!pluginRuntimeContext) {
+      throw new Error('GitHub Sync worker is not ready to handle webhooks yet.');
+    }
+
+    await handleCompanyMetricWebhook(pluginRuntimeContext, input);
+  },
+  async onShutdown() {
+    pluginRuntimeContext = null;
   }
 });
 

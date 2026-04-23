@@ -9,6 +9,11 @@ import type { Agent, Project } from '@paperclipai/plugin-sdk';
 import { createTestHarness } from '@paperclipai/plugin-sdk/testing';
 
 import manifest from '../src/manifest.ts';
+import {
+  COMPANY_METRIC_WEBHOOK_AUTH_HEADER,
+  COMPANY_METRIC_WEBHOOK_ENDPOINT_KEY,
+  GITHUB_SYNC_PLUGIN_ID
+} from '../src/kpi-contract.ts';
 import { requiresPaperclipBoardAccess } from '../src/paperclip-health.ts';
 import { normalizeCompanyAssigneeOptionsResponse } from '../src/ui/assignees.ts';
 import { fetchJson, fetchPaperclipHealth, resolveCliAuthPollUrl } from '../src/ui/http.ts';
@@ -18,6 +23,10 @@ import {
   discoverExistingProjectSyncCandidates,
   filterExistingProjectSyncCandidates
 } from '../src/ui/project-bindings.ts';
+
+const TEST_GITHUB_TOKEN = 'ghp_test_token';
+const TEST_PAPERCLIP_API_KEY = 'paperclip_test_agent_jwt';
+const TEST_PAPERCLIP_API_URL = 'https://paperclip.example.test';
 
 let plugin!: typeof import('../src/worker.ts').default;
 let workerImportSerial = 0;
@@ -275,7 +284,7 @@ async function createGitHubAgentToolHarness() {
   const harness = createTestHarness({
     manifest,
     config: {
-      githubToken: 'ghp_test_token'
+      githubToken: TEST_GITHUB_TOKEN
     }
   });
   await plugin.definition.setup(harness.ctx);
@@ -302,7 +311,7 @@ async function createProjectPullRequestsHarness() {
   const harness = createTestHarness({
     manifest,
     config: {
-      githubToken: 'ghp_test_token'
+      githubToken: TEST_GITHUB_TOKEN
     }
   });
   await plugin.definition.setup(harness.ctx);
@@ -322,6 +331,46 @@ async function createProjectPullRequestsHarness() {
   });
 
   return harness;
+}
+
+function setRuntimePaperclipApiBaseUrl(value = TEST_PAPERCLIP_API_URL): () => void {
+  const previousValue = process.env.PAPERCLIP_API_URL;
+  process.env.PAPERCLIP_API_URL = value;
+  return () => {
+    if (previousValue === undefined) {
+      delete process.env.PAPERCLIP_API_URL;
+      return;
+    }
+
+    process.env.PAPERCLIP_API_URL = previousValue;
+  };
+}
+
+async function postCompanyMetricWebhook(
+  payload: Record<string, unknown>,
+  options: {
+    apiKey?: string;
+    authorization?: string;
+    omitAuthorizationHeader?: boolean;
+  } = {}
+): Promise<void> {
+  assert.equal(typeof plugin.definition.onWebhook, 'function');
+  const rawBody = JSON.stringify(payload);
+  const headers: Record<string, string> = {};
+
+  if (!options.omitAuthorizationHeader) {
+    headers[COMPANY_METRIC_WEBHOOK_AUTH_HEADER] =
+      options.authorization
+      ?? `Bearer ${options.apiKey ?? TEST_PAPERCLIP_API_KEY}`;
+  }
+
+  await plugin.definition.onWebhook?.({
+    endpointKey: COMPANY_METRIC_WEBHOOK_ENDPOINT_KEY,
+    headers,
+    rawBody,
+    parsedBody: payload,
+    requestId: `test-webhook-${Math.random().toString(36).slice(2, 10)}`
+  } as Parameters<NonNullable<typeof plugin.definition.onWebhook>>[0]);
 }
 
 function createProjectFixture(params: {
@@ -1223,8 +1272,9 @@ test('fetchJson reports HTML API responses without throwing a raw JSON parse err
   }
 });
 
-test('manifest declares the GitHub agent tools and capability', () => {
+test('manifest declares the GitHub agent tools, webhook, and capabilities', () => {
   assert.ok(manifest.capabilities.includes('agent.tools.register'));
+  assert.ok(manifest.capabilities.includes('webhooks.receive'));
   assert.ok(Array.isArray(manifest.tools));
   assert.deepEqual(
     manifest.tools?.map((tool) => tool.name),
@@ -1247,6 +1297,10 @@ test('manifest declares the GitHub agent tools and capability', () => {
       'list_organization_projects',
       'add_pull_request_to_project'
     ]
+  );
+  assert.deepEqual(
+    manifest.webhooks?.map((webhook) => webhook.endpointKey),
+    [COMPANY_METRIC_WEBHOOK_ENDPOINT_KEY]
   );
   assert.match(
     manifest.tools?.find((tool) => tool.name === 'add_issue_comment')?.description ?? '',
@@ -1475,6 +1529,532 @@ test('create_pull_request appends the required AI footer to the pull request bod
     assert.match(createdBody, /^This closes the sync gap\./);
     assert.match(createdBody, /---\n###### ✨ This pull request description was AI-generated using gpt-5\.4/);
     assert.match((result.data as { pullRequest: { body: string } }).pullRequest.body, /gpt-5\.4/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('create_pull_request auto-records Paperclip PR metrics and webhook attribution dedupes duplicate PR events', async () => {
+  const harness = await createGitHubAgentToolHarness();
+  const originalFetch = globalThis.fetch;
+  const restorePaperclipApiBaseUrl = setRuntimePaperclipApiBaseUrl();
+
+  globalThis.fetch = async (input, init) => {
+    const url = new URL(getRequestUrl(input));
+    if (url.origin === TEST_PAPERCLIP_API_URL && url.pathname === '/api/agents/me') {
+      assert.equal(
+        getRequestHeader(input, init, COMPANY_METRIC_WEBHOOK_AUTH_HEADER),
+        `Bearer ${TEST_PAPERCLIP_API_KEY}`
+      );
+      return jsonResponse({
+        id: 'agent-1',
+        companyId: 'company-1',
+        name: 'Test agent'
+      });
+    }
+
+    if (url.pathname === '/repos/paperclipai/example-repo/pulls') {
+      const requestBody = getJsonRequestBody(init);
+      return jsonResponse({
+        number: 21,
+        title: typeof requestBody?.title === 'string' ? requestBody.title : 'Fix the importer',
+        body: typeof requestBody?.body === 'string' ? requestBody.body : '',
+        html_url: 'https://github.com/paperclipai/example-repo/pull/21',
+        state: 'open',
+        draft: false,
+        head: {
+          ref: 'feature/fix-importer'
+        },
+        base: {
+          ref: 'main'
+        }
+      }, 201);
+    }
+
+    throw new Error(`Unexpected GitHub request: ${url.toString()}`);
+  };
+
+  try {
+    const createResult = await harness.executeTool('create_pull_request', {
+      head: 'feature/fix-importer',
+      base: 'main',
+      title: 'Fix the importer'
+    }, {
+      companyId: 'company-1',
+      projectId: 'project-1'
+    });
+
+    assert.ok(!createResult.error);
+
+    await postCompanyMetricWebhook({
+      metric: 'pull_request_created',
+      repository: 'paperclipai/example-repo',
+      pullRequestNumber: 21
+    });
+
+    const metricsData = await harness.getData<{
+      paperclipPullRequestsCreated: {
+        currentPeriodCount: number;
+      };
+    }>('dashboard.metrics', {
+      companyId: 'company-1'
+    });
+
+    assert.equal(metricsData.paperclipPullRequestsCreated.currentPeriodCount, 1);
+
+    const metricState = harness.getState({
+      scopeKind: 'instance',
+      stateKey: 'paperclip-github-plugin-company-kpis'
+    }) as {
+      activityRollupsByCompanyId?: Record<string, Array<{
+        paperclipPullRequestsCreatedCount?: number;
+      }>>;
+    };
+    const companyRollups = metricState.activityRollupsByCompanyId?.['company-1'] ?? [];
+    assert.equal(companyRollups[companyRollups.length - 1]?.paperclipPullRequestsCreatedCount, 1);
+  } finally {
+    restorePaperclipApiBaseUrl();
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('company metric webhook rejects unsupported metrics', async () => {
+  await createGitHubAgentToolHarness();
+  const originalFetch = globalThis.fetch;
+  const restorePaperclipApiBaseUrl = setRuntimePaperclipApiBaseUrl();
+
+  globalThis.fetch = async (input, init) => {
+    const url = new URL(getRequestUrl(input));
+    if (url.origin === TEST_PAPERCLIP_API_URL && url.pathname === '/api/agents/me') {
+      assert.equal(
+        getRequestHeader(input, init, COMPANY_METRIC_WEBHOOK_AUTH_HEADER),
+        `Bearer ${TEST_PAPERCLIP_API_KEY}`
+      );
+      return jsonResponse({
+        id: 'agent-1',
+        companyId: 'company-1',
+        name: 'Test agent'
+      });
+    }
+
+    throw new Error(`Unexpected fetch request: ${url.toString()}`);
+  };
+
+  try {
+    await assert.rejects(
+      postCompanyMetricWebhook({
+        metric: 'pull_request_merged',
+        repository: 'paperclipai/example-repo',
+        pullRequestNumber: 21
+      }),
+      /metric must be "pull_request_created"\./
+    );
+  } finally {
+    restorePaperclipApiBaseUrl();
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('company metric webhook rejects missing authentication headers', async () => {
+  await createGitHubAgentToolHarness();
+
+  await assert.rejects(
+    postCompanyMetricWebhook(
+      {
+        metric: 'pull_request_created',
+        repository: 'paperclipai/example-repo',
+        pullRequestNumber: 21
+      },
+      {
+        omitAuthorizationHeader: true
+      }
+    ),
+    /authorization/
+  );
+});
+
+test('company metric webhook rejects invalid Paperclip API keys', async () => {
+  await createGitHubAgentToolHarness();
+  const originalFetch = globalThis.fetch;
+  const restorePaperclipApiBaseUrl = setRuntimePaperclipApiBaseUrl();
+
+  globalThis.fetch = async (input, init) => {
+    const url = new URL(getRequestUrl(input));
+    if (url.origin === TEST_PAPERCLIP_API_URL && url.pathname === '/api/agents/me') {
+      assert.equal(
+        getRequestHeader(input, init, COMPANY_METRIC_WEBHOOK_AUTH_HEADER),
+        'Bearer invalid-test-token'
+      );
+      return jsonResponse({ error: 'Agent authentication required' }, 401);
+    }
+
+    throw new Error(`Unexpected fetch request: ${url.toString()}`);
+  };
+
+  try {
+    await assert.rejects(
+      postCompanyMetricWebhook(
+        {
+          metric: 'pull_request_created',
+          repository: 'paperclipai/example-repo',
+          pullRequestNumber: 21
+        },
+        {
+          apiKey: 'invalid-test-token'
+        }
+      ),
+      /valid PAPERCLIP_API_KEY bearer token/i
+    );
+  } finally {
+    restorePaperclipApiBaseUrl();
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('company metric webhook rejects Paperclip API keys for a different company', async () => {
+  await createGitHubAgentToolHarness();
+  const originalFetch = globalThis.fetch;
+  const restorePaperclipApiBaseUrl = setRuntimePaperclipApiBaseUrl();
+
+  globalThis.fetch = async (input, init) => {
+    const url = new URL(getRequestUrl(input));
+    if (url.origin === TEST_PAPERCLIP_API_URL && url.pathname === '/api/agents/me') {
+      assert.equal(
+        getRequestHeader(input, init, COMPANY_METRIC_WEBHOOK_AUTH_HEADER),
+        `Bearer ${TEST_PAPERCLIP_API_KEY}`
+      );
+      return jsonResponse({
+        id: 'agent-2',
+        companyId: 'company-2',
+        name: 'Wrong company agent'
+      });
+    }
+
+    throw new Error(`Unexpected fetch request: ${url.toString()}`);
+  };
+
+  try {
+    await assert.rejects(
+      postCompanyMetricWebhook({
+        metric: 'pull_request_created',
+        repository: 'paperclipai/example-repo',
+        pullRequestNumber: 21
+      }),
+      /belongs to a different company/i
+    );
+  } finally {
+    restorePaperclipApiBaseUrl();
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('dashboard.metrics summarizes backlog and Paperclip PR history from persisted company KPI state', async () => {
+  const harness = await createGitHubAgentToolHarness();
+
+  await harness.ctx.state.set(
+    {
+      scopeKind: 'instance',
+      stateKey: 'paperclip-github-plugin-company-kpis'
+    },
+    {
+      backlogSnapshotsByCompanyId: {
+        'company-1': [
+          {
+            day: '2026-04-01',
+            capturedAt: '2026-04-01T09:00:00.000Z',
+            openIssueCount: 10,
+            repositoryCount: 1
+          },
+          {
+            day: '2026-04-30',
+            capturedAt: '2026-04-30T09:00:00.000Z',
+            openIssueCount: 6,
+            repositoryCount: 1
+          }
+        ]
+      },
+      activityRollupsByCompanyId: {
+        'company-1': [
+          {
+            day: '2026-03-12',
+            updatedAt: '2026-03-12T08:00:00.000Z',
+            githubIssuesClosedCount: 2,
+            paperclipPullRequestsCreatedCount: 1,
+            paperclipPullRequestsMergedCount: 1
+          },
+          {
+            day: '2026-04-10',
+            updatedAt: '2026-04-10T08:00:00.000Z',
+            githubIssuesClosedCount: 3,
+            paperclipPullRequestsCreatedCount: 2,
+            paperclipPullRequestsMergedCount: 1
+          },
+          {
+            day: '2026-04-30',
+            updatedAt: '2026-04-30T08:00:00.000Z',
+            githubIssuesClosedCount: 1,
+            paperclipPullRequestsCreatedCount: 1,
+            paperclipPullRequestsMergedCount: 1
+          }
+        ]
+      }
+    }
+  );
+
+  const metricsData = await harness.getData<{
+    status: string;
+    backlog: {
+      currentOpenIssueCount?: number;
+      comparisonOpenIssueCount?: number;
+      history: Array<{ day: string; value: number }>;
+    };
+    githubIssuesClosed: {
+      currentPeriodCount: number;
+      previousPeriodCount: number;
+    };
+    paperclipPullRequestsCreated: {
+      currentPeriodCount: number;
+      previousPeriodCount: number;
+    };
+    notes: {
+      backlogHistoryAvailable: boolean;
+      activityHistoryAvailable: boolean;
+    };
+  }>('dashboard.metrics', {
+    companyId: 'company-1'
+  });
+
+  assert.equal(metricsData.status, 'ready');
+  assert.equal(metricsData.backlog.currentOpenIssueCount, 6);
+  assert.equal(metricsData.backlog.comparisonOpenIssueCount, 10);
+  assert.equal(metricsData.backlog.history[metricsData.backlog.history.length - 1]?.value, 6);
+  assert.equal(metricsData.githubIssuesClosed.currentPeriodCount, 4);
+  assert.equal(metricsData.githubIssuesClosed.previousPeriodCount, 2);
+  assert.equal(metricsData.paperclipPullRequestsCreated.currentPeriodCount, 3);
+  assert.equal(metricsData.paperclipPullRequestsCreated.previousPeriodCount, 1);
+  assert.equal(metricsData.notes.backlogHistoryAvailable, true);
+  assert.equal(metricsData.notes.activityHistoryAvailable, true);
+  assert.equal(Object.prototype.hasOwnProperty.call(metricsData, 'paperclipPullRequestsMerged'), false);
+});
+
+test('sync.runNow records backlog snapshots and closed-issue KPI activity for the dashboard', async () => {
+  const harness = createTestHarness({
+    manifest,
+    config: {
+      githubTokenRef: 'github-secret-ref'
+    }
+  });
+  await plugin.definition.setup(harness.ctx);
+
+  await harness.performAction('settings.saveRegistration', {
+    mappings: [
+      {
+        id: 'mapping-a',
+        repositoryUrl: 'paperclipai/example-repo',
+        paperclipProjectName: 'Engineering',
+        paperclipProjectId: 'project-1',
+        companyId: 'company-1'
+      }
+    ],
+    syncState: {
+      status: 'idle'
+    }
+  });
+
+  const previouslyOpenImportedIssue = await harness.ctx.issues.create({
+    companyId: 'company-1',
+    projectId: 'project-1',
+    title: 'Close me from GitHub'
+  });
+
+  await harness.ctx.state.set(
+    {
+      scopeKind: 'instance',
+      stateKey: 'paperclip-github-plugin-import-registry'
+    },
+    [
+      {
+        mappingId: 'mapping-a',
+        githubIssueId: 5101,
+        githubIssueNumber: 51,
+        paperclipIssueId: previouslyOpenImportedIssue.id,
+        importedAt: '2026-04-09T09:00:00.000Z',
+        lastSeenCommentCount: 0,
+        lastSeenGitHubState: 'open'
+      }
+    ]
+  );
+
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input, init) => {
+    const url = new URL(getRequestUrl(input));
+
+    if (url.pathname === '/repos/paperclipai/example-repo/issues' && url.searchParams.get('state') === 'all') {
+      return jsonResponse([
+        {
+          id: 5100,
+          number: 50,
+          title: 'Still open',
+          body: 'Keep tracking this issue.',
+          html_url: 'https://github.com/paperclipai/example-repo/issues/50',
+          state: 'open',
+          comments: 0
+        },
+        {
+          id: 5101,
+          number: 51,
+          title: 'Close me from GitHub',
+          body: 'This issue was finished on GitHub.',
+          html_url: 'https://github.com/paperclipai/example-repo/issues/51',
+          state: 'closed',
+          state_reason: 'completed',
+          comments: 0
+        }
+      ]);
+    }
+
+    if (url.pathname === '/graphql') {
+      const { query, variables } = getGraphqlRequest(init);
+      const issueNumber = typeof variables.issueNumber === 'number' ? variables.issueNumber : undefined;
+
+      if (query.includes('query GitHubIssueParentRelationships')) {
+        return graphqlIssueParentRelationshipsResponse([
+          {
+            issueNumber: 50
+          },
+          {
+            issueNumber: 51
+          }
+        ]);
+      }
+
+      if (query.includes('query GitHubRepositoryOpenIssueLinkedPullRequests')) {
+        return graphqlResponse({
+          repository: {
+            issues: {
+              pageInfo: {
+                hasNextPage: false,
+                endCursor: null
+              },
+              nodes: [
+                {
+                  number: 50,
+                  closedByPullRequestsReferences: {
+                    pageInfo: {
+                      hasNextPage: false,
+                      endCursor: null
+                    },
+                    nodes: []
+                  }
+                }
+              ]
+            }
+          }
+        });
+      }
+
+      if (query.includes('query GitHubIssueStatusSnapshot') && issueNumber === 50) {
+        return graphqlResponse({
+          repository: {
+            issue: {
+              number: 50,
+              state: 'OPEN',
+              stateReason: null,
+              comments: {
+                totalCount: 0
+              },
+              closedByPullRequestsReferences: {
+                pageInfo: {
+                  hasNextPage: false,
+                  endCursor: null
+                },
+                nodes: []
+              }
+            }
+          }
+        });
+      }
+
+      if (query.includes('query GitHubIssueStatusSnapshot') && issueNumber === 51) {
+        return graphqlResponse({
+          repository: {
+            issue: {
+              number: 51,
+              state: 'CLOSED',
+              stateReason: 'COMPLETED',
+              comments: {
+                totalCount: 0
+              },
+              closedByPullRequestsReferences: {
+                pageInfo: {
+                  hasNextPage: false,
+                  endCursor: null
+                },
+                nodes: []
+              }
+            }
+          }
+        });
+      }
+    }
+
+    throw new Error(`Unexpected GitHub request: ${url.toString()}`);
+  };
+
+  try {
+    const sync = await harness.performAction('sync.runNow', {
+      waitForCompletion: true
+    }) as {
+      syncState: {
+        status: string;
+        syncedIssuesCount?: number;
+      };
+    };
+
+    assert.equal(sync.syncState.status, 'success');
+    assert.equal(sync.syncState.syncedIssuesCount, 2);
+
+    const companyKpis = harness.getState({
+      scopeKind: 'instance',
+      stateKey: 'paperclip-github-plugin-company-kpis'
+    }) as {
+      backlogSnapshotsByCompanyId?: Record<string, Array<{ openIssueCount?: number; repositoryCount?: number }>>;
+      activityRollupsByCompanyId?: Record<string, Array<{ githubIssuesClosedCount?: number }>>;
+    };
+
+    const backlogSnapshots = companyKpis.backlogSnapshotsByCompanyId?.['company-1'] ?? [];
+    const activityRollups = companyKpis.activityRollupsByCompanyId?.['company-1'] ?? [];
+    assert.equal(backlogSnapshots.at(-1)?.openIssueCount, 1);
+    assert.equal(backlogSnapshots.at(-1)?.repositoryCount, 1);
+    assert.equal(activityRollups.at(-1)?.githubIssuesClosedCount, 1);
+
+    const importRegistry = harness.getState({
+      scopeKind: 'instance',
+      stateKey: 'paperclip-github-plugin-import-registry'
+    }) as Array<{ githubIssueId?: number; lastSeenGitHubState?: string }>;
+    assert.equal(importRegistry.find((entry) => entry.githubIssueId === 5101)?.lastSeenGitHubState, 'closed');
+
+    const metricsData = await harness.getData<{
+      status: string;
+      backlog: {
+        currentOpenIssueCount?: number;
+      };
+      githubIssuesClosed: {
+        currentPeriodCount: number;
+      };
+      notes: {
+        backlogHistoryAvailable: boolean;
+        activityHistoryAvailable: boolean;
+      };
+    }>('dashboard.metrics', {
+      companyId: 'company-1'
+    });
+
+    assert.equal(metricsData.status, 'ready');
+    assert.equal(metricsData.backlog.currentOpenIssueCount, 1);
+    assert.equal(metricsData.githubIssuesClosed.currentPeriodCount, 1);
+    assert.equal(metricsData.notes.backlogHistoryAvailable, true);
+    assert.equal(metricsData.notes.activityHistoryAvailable, true);
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -2626,8 +3206,13 @@ test('normalizePluginConfig canonicalizes the trusted Paperclip API origin and d
   );
 });
 
-test('manifest exposes GitHub Sync page, sidebar, dashboard, and settings UI metadata, config schema, and job', () => {
-  assert.equal(manifest.id, 'paperclip-github-plugin');
+test('manifest exposes GitHub Sync page, sidebar, dashboard widgets, and settings UI metadata, config schema, and job', async () => {
+  const uiModule = await importFreshUiModule() as {
+    GitHubSyncDashboardWidget?: unknown;
+    GitHubSyncKpiDashboardWidget?: unknown;
+  };
+
+  assert.equal(manifest.id, GITHUB_SYNC_PLUGIN_ID);
   assert.equal(manifest.apiVersion, 1);
   assert.equal(manifest.entrypoints.worker, './dist/worker.js');
   assert.equal(manifest.jobs?.[0]?.jobKey, 'sync.github-issues');
@@ -2647,7 +3232,9 @@ test('manifest exposes GitHub Sync page, sidebar, dashboard, and settings UI met
   const pullRequestsPageSlot = manifest.ui?.slots?.find((slot) => slot.id === 'paperclip-github-plugin-project-pull-requests-page');
   const projectSidebarItemSlot = manifest.ui?.slots?.find((slot) => slot.id === 'paperclip-github-plugin-project-pull-requests-sidebar-item');
   const settingsSlot = manifest.ui?.slots?.find((slot) => slot.type === 'settingsPage');
-  const dashboardSlot = manifest.ui?.slots?.find((slot) => slot.type === 'dashboardWidget');
+  const dashboardSlots = manifest.ui?.slots?.filter((slot) => slot.type === 'dashboardWidget') ?? [];
+  const syncDashboardSlot = dashboardSlots.find((slot) => slot.id === 'paperclip-github-plugin-dashboard-widget');
+  const kpiDashboardSlot = dashboardSlots.find((slot) => slot.id === 'paperclip-github-plugin-kpi-dashboard-widget');
   const issueDetailSlot = manifest.ui?.slots?.find((slot) => slot.id === 'paperclip-github-plugin-issue-detail-tab');
   const commentAnnotationSlot = manifest.ui?.slots?.find((slot) => slot.type === 'commentAnnotation');
   const globalToolbarSlot = manifest.ui?.slots?.find((slot) => slot.type === 'globalToolbarButton');
@@ -2655,7 +3242,9 @@ test('manifest exposes GitHub Sync page, sidebar, dashboard, and settings UI met
   assert.ok(pullRequestsPageSlot);
   assert.ok(projectSidebarItemSlot);
   assert.ok(settingsSlot);
-  assert.ok(dashboardSlot);
+  assert.equal(dashboardSlots.length, 2);
+  assert.ok(syncDashboardSlot);
+  assert.ok(kpiDashboardSlot);
   assert.ok(issueDetailSlot);
   assert.ok(commentAnnotationSlot);
   assert.ok(globalToolbarSlot);
@@ -2668,7 +3257,10 @@ test('manifest exposes GitHub Sync page, sidebar, dashboard, and settings UI met
   assert.deepEqual(projectSidebarItemSlot?.entityTypes, ['project']);
   assert.equal(projectSidebarItemSlot?.order, 40);
   assert.equal(settingsSlot?.exportName, 'GitHubSyncSettingsPage');
-  assert.equal(dashboardSlot?.exportName, 'GitHubSyncDashboardWidget');
+  assert.equal(syncDashboardSlot?.exportName, 'GitHubSyncDashboardWidget');
+  assert.equal(kpiDashboardSlot?.exportName, 'GitHubSyncKpiDashboardWidget');
+  assert.equal(typeof uiModule.GitHubSyncDashboardWidget, 'function');
+  assert.equal(typeof uiModule.GitHubSyncKpiDashboardWidget, 'function');
   assert.equal(issueDetailSlot?.type, 'taskDetailView');
   assert.equal(issueDetailSlot?.exportName, 'GitHubSyncIssueTaskDetailView');
   assert.equal(commentAnnotationSlot?.exportName, 'GitHubSyncCommentAnnotation');

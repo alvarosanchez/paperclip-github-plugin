@@ -273,6 +273,40 @@ interface GitHubSyncSettings {
   updatedAt?: string;
 }
 
+interface DashboardMetricHistoryPoint {
+  day: string;
+  value: number;
+}
+
+interface DashboardBacklogMetricData {
+  lastCapturedAt?: string;
+  currentOpenIssueCount?: number;
+  comparisonOpenIssueCount?: number;
+  history: DashboardMetricHistoryPoint[];
+}
+
+interface DashboardPeriodMetricData {
+  lastRecordedAt?: string;
+  currentPeriodCount: number;
+  previousPeriodCount: number;
+  history: DashboardMetricHistoryPoint[];
+}
+
+interface DashboardMetricsData {
+  status: 'company_required' | 'no_mappings' | 'ready';
+  companyId?: string;
+  mappedRepositoryCount?: number;
+  historyWindowDays: number;
+  comparisonWindowDays: number;
+  backlog: DashboardBacklogMetricData;
+  githubIssuesClosed: DashboardPeriodMetricData;
+  paperclipPullRequestsCreated: DashboardPeriodMetricData;
+  notes: {
+    backlogHistoryAvailable: boolean;
+    activityHistoryAvailable: boolean;
+  };
+}
+
 interface GitHubSyncAssigneePrincipal {
   kind: 'agent' | 'user';
   id: string;
@@ -744,6 +778,29 @@ const EMPTY_SETTINGS: GitHubSyncSettings = {
   scheduleFrequencyMinutes: DEFAULT_SCHEDULE_FREQUENCY_MINUTES,
   advancedSettings: DEFAULT_ADVANCED_SETTINGS,
   availableAssignees: []
+};
+
+const EMPTY_DASHBOARD_METRICS: DashboardMetricsData = {
+  status: 'company_required',
+  historyWindowDays: 14,
+  comparisonWindowDays: 30,
+  backlog: {
+    history: []
+  },
+  githubIssuesClosed: {
+    currentPeriodCount: 0,
+    previousPeriodCount: 0,
+    history: []
+  },
+  paperclipPullRequestsCreated: {
+    currentPeriodCount: 0,
+    previousPeriodCount: 0,
+    history: []
+  },
+  notes: {
+    backlogHistoryAvailable: false,
+    activityHistoryAvailable: false
+  }
 };
 
 function createIdleSyncState(): SyncRunState {
@@ -4021,7 +4078,7 @@ const WIDGET_STYLES = `
 .ghsync-widget__stats {
   display: grid;
   gap: 12px;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
   border-top: 1px solid var(--ghsync-border-soft);
   padding-top: 14px;
 }
@@ -4034,37 +4091,115 @@ const WIDGET_STYLES = `
 
 .ghsync-widget__stat {
   display: grid;
-  gap: 6px;
-  padding: 12px;
+  gap: 10px;
+  padding: 14px;
   border: 1px solid var(--ghsync-border-soft);
   border-radius: 10px;
   background: var(--ghsync-surfaceAlt);
 }
 
-.ghsync-widget__stat--emphasized {
-  border-color: var(--ghsync-danger-border);
-  background: var(--ghsync-dangerBg);
+.ghsync-widget__stat--success {
+  border-color: var(--ghsync-success-border);
 }
 
-.ghsync-widget__stat span {
+.ghsync-widget__stat--warning {
+  border-color: var(--ghsync-warning-border);
+}
+
+.ghsync-widget__stat--info {
+  border-color: var(--ghsync-info-border);
+}
+
+.ghsync-widget__stat-top {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.ghsync-widget__stat-value {
+  display: grid;
+  gap: 6px;
+}
+
+.ghsync-widget__stat-label {
   display: block;
   font-size: 12px;
   font-weight: 600;
   color: var(--ghsync-title);
 }
 
-.ghsync-widget__stat strong {
+.ghsync-widget__stat-value strong {
   display: block;
   font-size: 24px;
   line-height: 1;
   color: var(--ghsync-title);
 }
 
-.ghsync-widget__stat p {
+.ghsync-widget__stat-change {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--ghsync-muted);
+}
+
+.ghsync-widget__stat-change--success {
+  color: var(--ghsync-success-text);
+}
+
+.ghsync-widget__stat-change--warning {
+  color: var(--ghsync-warning-text);
+}
+
+.ghsync-widget__stat-change--info {
+  color: var(--ghsync-info-text);
+}
+
+.ghsync-widget__stat-note {
   margin: 0;
   color: var(--ghsync-muted);
   font-size: 11px;
   line-height: 1.5;
+}
+
+.ghsync-widget__trend {
+  color: var(--ghsync-muted);
+}
+
+.ghsync-widget__trend svg {
+  display: block;
+  width: 100%;
+  height: 32px;
+}
+
+.ghsync-widget__trend--success {
+  color: var(--ghsync-success-text);
+}
+
+.ghsync-widget__trend--warning {
+  color: var(--ghsync-warning-text);
+}
+
+.ghsync-widget__trend--info {
+  color: var(--ghsync-info-text);
+}
+
+.ghsync-widget__trend-line {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.ghsync-widget__trend-area {
+  fill: currentColor;
+  opacity: 0.12;
+}
+
+.ghsync-widget__trend-bar {
+  fill: currentColor;
+  opacity: 0.9;
 }
 
 .ghsync-widget__summary {
@@ -4309,18 +4444,12 @@ const WIDGET_STYLES = `
 @media (max-width: 720px) {
   .ghsync-widget__stats {
     grid-template-columns: minmax(0, 1fr);
-    gap: 12px;
   }
 
   .ghsync-widget__top,
   .ghsync-widget__actions {
     flex-direction: column;
     align-items: stretch;
-  }
-
-  .ghsync-widget__stat {
-    padding-left: 0;
-    border-left: 0;
   }
 
   .ghsync-widget__button-row {
@@ -7313,6 +7442,86 @@ function getSyncMetricCards(params: {
   ];
 }
 
+function getSyncMetricCardTone(card: {
+  key: string;
+  value: number;
+  emphasized?: boolean;
+}): Tone {
+  if (card.key === 'errored') {
+    return card.emphasized ? 'warning' : 'success';
+  }
+
+  return card.value > 0 ? 'success' : 'info';
+}
+
+function getKpiDashboardSummary(params: {
+  hasCompanyContext: boolean;
+  metrics: DashboardMetricsData;
+  syncState: SyncRunState;
+  syncIssue?: SyncConfigurationIssue | null;
+}): { label: string; tone: Tone; title: string; body: string } {
+  if (!params.hasCompanyContext) {
+    return {
+      label: 'Company required',
+      tone: 'warning',
+      title: 'Open a company dashboard',
+      body: 'Compare backlog, issue closure, and Paperclip PR creation over time.'
+    };
+  }
+
+  if (params.syncIssue === 'missing_token') {
+    return {
+      label: 'Setup required',
+      tone: 'warning',
+      title: 'Finish setup',
+      body: 'Save a GitHub token to start KPI tracking.'
+    };
+  }
+
+  if (params.syncIssue === 'missing_board_access') {
+    return {
+      label: 'Board access required',
+      tone: 'warning',
+      title: 'Connect Paperclip board access',
+      body: 'This deployment needs board access before KPI history can refresh.'
+    };
+  }
+
+  if (params.metrics.status === 'no_mappings') {
+    return {
+      label: 'Setup required',
+      tone: 'warning',
+      title: 'Map a repository',
+      body: 'Add at least one repository, then run a full sync.'
+    };
+  }
+
+  if (params.syncState.status === 'running') {
+    return {
+      label: 'Syncing',
+      tone: 'info',
+      title: 'KPI history is updating',
+      body: 'Backlog and activity history refresh during sync.'
+    };
+  }
+
+  if (!params.metrics.notes.backlogHistoryAvailable && !params.metrics.notes.activityHistoryAvailable) {
+    return {
+      label: 'Waiting on first sync',
+      tone: 'info',
+      title: 'Run the first full sync',
+      body: 'The first sync seeds backlog and issue history.'
+    };
+  }
+
+  return {
+    label: 'Ready',
+    tone: params.syncState.status === 'success' ? 'success' : 'info',
+    title: 'Company delivery KPIs',
+    body: 'Track backlog, issue closure, and Paperclip PR creation against recent history.'
+  };
+}
+
 function getDashboardSummary(params: {
   syncIssue: SyncConfigurationIssue | null;
   hasCompanyContext: boolean;
@@ -7406,6 +7615,236 @@ function getDashboardSummary(params: {
     title: 'Ready for first sync',
     body: `Your repository mapping is in place. Automatic sync runs ${cadence}.`
   };
+}
+
+interface DashboardKpiCardModel {
+  key: string;
+  title: string;
+  valueLabel: string;
+  changeLabel: string;
+  note: string;
+  tone: Tone;
+  chartKind: 'line' | 'bars';
+  history: number[];
+  available: boolean;
+}
+
+function formatWidgetMetricValue(value: number | undefined): string {
+  return typeof value === 'number' ? String(value) : '—';
+}
+
+function getPeriodDeltaTone(current: number, previous: number): Tone {
+  if (current > previous) {
+    return 'success';
+  }
+
+  if (current < previous) {
+    return 'warning';
+  }
+
+  return 'neutral';
+}
+
+function getBacklogDeltaTone(current: number, previous: number): Tone {
+  if (current < previous) {
+    return 'success';
+  }
+
+  if (current > previous) {
+    return 'warning';
+  }
+
+  return 'neutral';
+}
+
+function describePeriodChange(current: number, previous: number, comparisonWindowDays: number): string {
+  if (current > previous) {
+    return `+${current - previous} vs previous ${comparisonWindowDays} days`;
+  }
+
+  if (current < previous) {
+    return `-${previous - current} vs previous ${comparisonWindowDays} days`;
+  }
+
+  return `No change vs previous ${comparisonWindowDays} days`;
+}
+
+function describeBacklogChange(current: number | undefined, previous: number | undefined, comparisonWindowDays: number): string {
+  if (current === undefined || previous === undefined) {
+    return 'Need more sync history to compare backlog.';
+  }
+
+  if (current < previous) {
+    return `-${previous - current} open issues vs ${comparisonWindowDays} days ago`;
+  }
+
+  if (current > previous) {
+    return `+${current - previous} open issues vs ${comparisonWindowDays} days ago`;
+  }
+
+  return `No change vs ${comparisonWindowDays} days ago`;
+}
+
+function buildDashboardKpiCards(params: {
+  metrics: DashboardMetricsData;
+  hasCompanyContext: boolean;
+}): DashboardKpiCardModel[] {
+  const { metrics, hasCompanyContext } = params;
+  const genericContextNote = !hasCompanyContext
+    ? 'Open in a company dashboard.'
+    : metrics.status === 'no_mappings'
+      ? 'Add a repository mapping.'
+      : null;
+
+  const backlogAvailable =
+    hasCompanyContext
+    && metrics.status === 'ready'
+    && metrics.notes.backlogHistoryAvailable
+    && typeof metrics.backlog.currentOpenIssueCount === 'number';
+  const backlogCurrent = metrics.backlog.currentOpenIssueCount;
+  const backlogComparison = metrics.backlog.comparisonOpenIssueCount;
+  const closedIssuesAvailable = hasCompanyContext && metrics.status === 'ready' && metrics.notes.activityHistoryAvailable;
+  const createdAvailable = closedIssuesAvailable;
+
+  return [
+    {
+      key: 'backlog',
+      title: 'Open GitHub backlog',
+      valueLabel: formatWidgetMetricValue(backlogCurrent),
+      changeLabel: describeBacklogChange(backlogCurrent, backlogComparison, metrics.comparisonWindowDays),
+      note:
+        genericContextNote
+        ?? (backlogAvailable
+          ? metrics.backlog.lastCapturedAt
+            ? `Snapshot ${formatDate(metrics.backlog.lastCapturedAt, metrics.backlog.lastCapturedAt)}.`
+            : 'Latest sync snapshot.'
+          : 'Run a full sync to seed backlog history.'),
+      tone:
+        backlogAvailable && backlogComparison !== undefined && backlogCurrent !== undefined
+          ? getBacklogDeltaTone(backlogCurrent, backlogComparison)
+          : 'neutral',
+      chartKind: 'line',
+      history: metrics.backlog.history.map((point) => point.value),
+      available: backlogAvailable
+    },
+    {
+      key: 'closed-issues',
+      title: 'GitHub issues closed',
+      valueLabel: String(metrics.githubIssuesClosed.currentPeriodCount),
+      changeLabel: describePeriodChange(
+        metrics.githubIssuesClosed.currentPeriodCount,
+        metrics.githubIssuesClosed.previousPeriodCount,
+        metrics.comparisonWindowDays
+      ),
+      note:
+        genericContextNote
+        ?? (closedIssuesAvailable
+          ? metrics.githubIssuesClosed.lastRecordedAt
+            ? `Through ${formatDate(metrics.githubIssuesClosed.lastRecordedAt, metrics.githubIssuesClosed.lastRecordedAt)}.`
+            : 'From sync-detected closures.'
+          : 'Appears after sync records closures.'),
+      tone: getPeriodDeltaTone(
+        metrics.githubIssuesClosed.currentPeriodCount,
+        metrics.githubIssuesClosed.previousPeriodCount
+      ),
+      chartKind: 'bars',
+      history: metrics.githubIssuesClosed.history.map((point) => point.value),
+      available: closedIssuesAvailable
+    },
+    {
+      key: 'created-prs',
+      title: 'Paperclip PRs created',
+      valueLabel: String(metrics.paperclipPullRequestsCreated.currentPeriodCount),
+      changeLabel: describePeriodChange(
+        metrics.paperclipPullRequestsCreated.currentPeriodCount,
+        metrics.paperclipPullRequestsCreated.previousPeriodCount,
+        metrics.comparisonWindowDays
+      ),
+      note:
+        genericContextNote
+        ?? (createdAvailable
+          ? metrics.paperclipPullRequestsCreated.lastRecordedAt
+            ? `Through ${formatDate(metrics.paperclipPullRequestsCreated.lastRecordedAt, metrics.paperclipPullRequestsCreated.lastRecordedAt)}.`
+            : 'From Paperclip-attributed PR events.'
+          : 'Appears after Paperclip records PR creation.'),
+      tone: getPeriodDeltaTone(
+        metrics.paperclipPullRequestsCreated.currentPeriodCount,
+        metrics.paperclipPullRequestsCreated.previousPeriodCount
+      ),
+      chartKind: 'bars',
+      history: metrics.paperclipPullRequestsCreated.history.map((point) => point.value),
+      available: createdAvailable
+    }
+  ];
+}
+
+function buildLineChartPath(values: number[], width: number, height: number): string {
+  if (values.length === 0) {
+    return '';
+  }
+
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  const range = max - min || 1;
+
+  return values.map((value, index) => {
+    const x = values.length === 1 ? width / 2 : (index / (values.length - 1)) * width;
+    const y = height - ((value - min) / range) * (height - 6) - 3;
+    return `${index === 0 ? 'M' : 'L'} ${x.toFixed(2)} ${y.toFixed(2)}`;
+  }).join(' ');
+}
+
+function buildLineChartArea(values: number[], width: number, height: number): string {
+  const linePath = buildLineChartPath(values, width, height);
+  if (!linePath || values.length === 0) {
+    return '';
+  }
+
+  const firstX = values.length === 1 ? width / 2 : 0;
+  const lastX = values.length === 1 ? width / 2 : width;
+  return `${linePath} L ${lastX.toFixed(2)} ${height} L ${firstX.toFixed(2)} ${height} Z`;
+}
+
+function DashboardTrendGraphic(props: {
+  values: number[];
+  tone: Tone;
+  kind: 'line' | 'bars';
+}): React.JSX.Element {
+  const values = props.values.length > 0 ? props.values : [0];
+  const width = 112;
+  const height = 32;
+  const max = Math.max(...values, 0, 1);
+  const linePath = props.kind === 'line' ? buildLineChartPath(values, width, height) : '';
+  const areaPath = props.kind === 'line' ? buildLineChartArea(values, width, height) : '';
+
+  return (
+    <div className={`ghsync-widget__trend ghsync-widget__trend--${props.tone}`} aria-hidden="true">
+      <svg viewBox={`0 0 ${width} ${height}`} focusable="false">
+        {props.kind === 'line' ? (
+          <>
+            {areaPath ? <path d={areaPath} className="ghsync-widget__trend-area" /> : null}
+            {linePath ? <path d={linePath} className="ghsync-widget__trend-line" /> : null}
+          </>
+        ) : values.map((value, index) => {
+          const barWidth = width / values.length;
+          const x = index * barWidth + 1;
+          const barHeight = Math.max(3, (value / max) * (height - 4));
+          const y = height - barHeight - 1;
+          return (
+            <rect
+              key={`${index}-${value}`}
+              x={x}
+              y={y}
+              width={Math.max(2, barWidth - 3)}
+              height={barHeight}
+              rx={2}
+              className="ghsync-widget__trend-bar"
+            />
+          );
+        })}
+      </svg>
+    </div>
+  );
 }
 
 function buildThemeVars(theme: ThemePalette, themeMode: ThemeMode): React.CSSProperties {
@@ -12731,15 +13170,36 @@ export function GitHubSyncDashboardWidget(): React.JSX.Element {
     runningSync,
     scheduleFrequencyMinutes
   });
-  const syncProgress = getRunningSyncProgressModel(displaySyncState);
   const syncMetricCards = getSyncMetricCards({
     totalSyncedIssuesCount: current.totalSyncedIssuesCount,
     erroredIssuesCount: displaySyncState.erroredIssuesCount,
     syncState: displaySyncState,
     savedMappingCount
   });
+  const syncProgress = getRunningSyncProgressModel(displaySyncState);
   const lastSync = formatDate(displaySyncState.checkedAt, 'Never');
   const armSyncCompletionToast = useSyncCompletionToast(displaySyncState, toast);
+  const widgetStatusSummary =
+    showInitialLoadingState
+      ? 'Fetching the latest GitHub sync state from the worker.'
+      : syncProgress
+        ? [
+            syncProgress.issueProgressLabel,
+            syncProgress.currentIssueLabel ?? syncProgress.repositoryPosition
+          ].filter((value): value is string => Boolean(value))
+            .join(' · ')
+      : syncSetupIssue === 'missing_token'
+        ? 'Open settings to validate GitHub access.'
+        : syncSetupIssue === 'missing_mapping'
+          ? 'Open settings and add a repository. The Paperclip project will be created if it does not exist.'
+          : syncSetupIssue === 'missing_board_access'
+            ? hasCompanyContext
+              ? 'Open settings and connect Paperclip board access before running sync.'
+              : 'Open plugin settings inside a company to connect required Paperclip board access.'
+            : displaySyncState.message
+              ?? (displaySyncState.checkedAt
+                ? `Last checked ${lastSync}.`
+                : `Automatic sync runs ${scheduleDescription}.`);
 
   useEffect(() => {
     if (settings.data) {
@@ -12775,19 +13235,19 @@ export function GitHubSyncDashboardWidget(): React.JSX.Element {
       return;
     }
 
-    const refreshSettings = () => {
+    const intervalId = globalThis.setInterval(() => {
       try {
         settings.refresh();
       } catch {
         return;
       }
-    };
-
-    const intervalId = globalThis.setInterval(() => {
-      refreshSettings();
     }, SYNC_POLL_INTERVAL_MS);
 
-    refreshSettings();
+    try {
+      settings.refresh();
+    } catch {
+      // Ignore refresh failures during background polling.
+    }
 
     return () => {
       globalThis.clearInterval(intervalId);
@@ -12795,7 +13255,11 @@ export function GitHubSyncDashboardWidget(): React.JSX.Element {
   }, [displaySyncState.status, settings.refresh]);
 
   useEffect(() => {
-    const refreshSettings = () => {
+    if (typeof window === 'undefined' || typeof document === 'undefined') {
+      return;
+    }
+
+    const refreshWidgetData = () => {
       try {
         settings.refresh();
       } catch {
@@ -12803,19 +13267,15 @@ export function GitHubSyncDashboardWidget(): React.JSX.Element {
       }
     };
 
-    if (typeof window === 'undefined' || typeof document === 'undefined') {
-      return;
-    }
-
     const handleSettingsUpdated = () => {
-      refreshSettings();
+      refreshWidgetData();
     };
     const handleWindowFocus = () => {
-      refreshSettings();
+      refreshWidgetData();
     };
     const handleVisibilityChange = () => {
       if (document.visibilityState === 'visible') {
-        refreshSettings();
+        refreshWidgetData();
       }
     };
 
@@ -12854,8 +13314,7 @@ export function GitHubSyncDashboardWidget(): React.JSX.Element {
       });
       armSyncCompletionToast(nextSyncState);
       notifyGitHubSyncSettingsChanged();
-
-      await settings.refresh();
+      await Promise.resolve().then(() => settings.refresh());
     } catch (error) {
       const message = getActionErrorMessage(error, 'Unable to run GitHub sync.');
       setManualSyncRequestError(message);
@@ -12866,7 +13325,7 @@ export function GitHubSyncDashboardWidget(): React.JSX.Element {
       });
 
       try {
-        await settings.refresh();
+        await Promise.resolve().then(() => settings.refresh());
       } catch {
         return;
       }
@@ -12893,7 +13352,7 @@ export function GitHubSyncDashboardWidget(): React.JSX.Element {
       });
       armSyncCompletionToast(nextSyncState);
       notifyGitHubSyncSettingsChanged();
-      await settings.refresh();
+      await Promise.resolve().then(() => settings.refresh());
     } catch (error) {
       const message = getActionErrorMessage(error, 'Unable to cancel GitHub sync.');
       setManualSyncRequestError(message);
@@ -12934,24 +13393,37 @@ export function GitHubSyncDashboardWidget(): React.JSX.Element {
         {settings.error ? <div className="ghsync-widget__message">{settings.error.message}</div> : null}
 
         <div className="ghsync-widget__stats">
-          {syncMetricCards.map((metric) => (
-            <div
-              key={metric.key}
-              className={`ghsync-widget__stat${metric.emphasized ? ' ghsync-widget__stat--emphasized' : ''}`}
-            >
-              <strong>
-                {showInitialLoadingState ? <LoadingSpinner size="sm" label={`Loading ${metric.label.toLowerCase()}`} /> : metric.value}
-              </strong>
-              <span>{metric.label}</span>
-              <p>{showInitialLoadingState ? 'Loading current sync data.' : metric.description}</p>
-            </div>
-          ))}
+          {syncMetricCards.map((card) => {
+            const tone = getSyncMetricCardTone(card);
+            return (
+              <div
+                key={card.key}
+                className={`ghsync-widget__stat ghsync-widget__stat--${tone}`}
+              >
+                <div className="ghsync-widget__stat-top">
+                  <div className="ghsync-widget__stat-value">
+                    <span className="ghsync-widget__stat-label">{card.label}</span>
+                    <strong>
+                      {showInitialLoadingState
+                        ? <LoadingSpinner size="sm" label={`Loading ${card.label.toLowerCase()}`} />
+                        : String(card.value)}
+                    </strong>
+                  </div>
+                </div>
+                <p className={`ghsync-widget__stat-change ghsync-widget__stat-change--${tone}`}>
+                  {showInitialLoadingState ? 'Loading sync summary.' : card.description}
+                </p>
+              </div>
+            );
+          })}
         </div>
 
-        <SyncProgressPanel
-          syncState={displaySyncState}
-          compact
-        />
+        {syncInFlight ? (
+          <SyncProgressPanel
+            syncState={displaySyncState}
+            compact
+          />
+        ) : null}
 
         <div className="ghsync-widget__summary">
           <strong>
@@ -12963,34 +13435,16 @@ export function GitHubSyncDashboardWidget(): React.JSX.Element {
                   ? 'Latest result'
                   : 'Next step'}
           </strong>
-          <span>
-            {showInitialLoadingState
-              ? 'Fetching the latest GitHub sync state from the worker.'
-              : syncProgress
-                ? [
-                    syncProgress.issueProgressLabel,
-                    syncProgress.currentIssueLabel ?? syncProgress.repositoryPosition
-                  ].filter((value): value is string => Boolean(value))
-                    .join(' · ')
-              : syncSetupIssue === 'missing_token'
-                ? 'Open settings to validate GitHub access.'
-                : syncSetupIssue === 'missing_mapping'
-                  ? 'Open settings and add a repository. The Paperclip project will be created if it does not exist.'
-                  : syncSetupIssue === 'missing_board_access'
-                    ? hasCompanyContext
-                      ? 'Open settings and connect Paperclip board access before running sync.'
-                      : 'Open plugin settings inside a company to connect required Paperclip board access.'
-                    : displaySyncState.checkedAt
-                      ? `Last checked ${lastSync}.`
-                      : 'Everything is configured. Run the first sync when you are ready.'}
-          </span>
+          <span>{widgetStatusSummary}</span>
         </div>
 
-        <SyncDiagnosticsPanel
-          syncState={displaySyncState}
-          requestError={manualSyncRequestError}
-          compact
-        />
+        {manualSyncRequestError || displaySyncState.status === 'error' || Boolean(displaySyncState.recentFailures?.length) ? (
+          <SyncDiagnosticsPanel
+            syncState={displaySyncState}
+            requestError={manualSyncRequestError}
+            compact
+          />
+        ) : null}
 
         <div className="ghsync-widget__actions">
           <div className="ghsync-widget__button-row">
@@ -13017,6 +13471,281 @@ export function GitHubSyncDashboardWidget(): React.JSX.Element {
                 />
               </button>
             ) : null}
+          </div>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+export function GitHubSyncKpiDashboardWidget(): React.JSX.Element {
+  const hostContext = useHostContext();
+  const settings = usePluginData<GitHubSyncSettings>(
+    'settings.registration',
+    hostContext.companyId ? { companyId: hostContext.companyId } : {}
+  );
+  const dashboardMetrics = usePluginData<DashboardMetricsData>(
+    'dashboard.metrics',
+    hostContext.companyId ? { companyId: hostContext.companyId } : {}
+  );
+  const [settingsHref, setSettingsHref] = useState(SETTINGS_INDEX_HREF);
+  const [cachedSettings, setCachedSettings] = useState<GitHubSyncSettings | null>(null);
+  const [cachedDashboardMetrics, setCachedDashboardMetrics] = useState<DashboardMetricsData | null>(null);
+  const themeMode = useResolvedThemeMode();
+  const boardAccessRequirement = usePaperclipBoardAccessRequirement();
+
+  const theme = themeMode === 'light' ? LIGHT_PALETTE : DARK_PALETTE;
+  const themeVars = buildThemeVars(theme, themeMode);
+  const current = settings.data ?? cachedSettings ?? EMPTY_SETTINGS;
+  const currentDashboardMetrics = dashboardMetrics.data ?? cachedDashboardMetrics ?? EMPTY_DASHBOARD_METRICS;
+  const showInitialLoadingState = settings.loading && !settings.data && !cachedSettings;
+  const syncState = current.syncState ?? EMPTY_SETTINGS.syncState;
+  const tokenValid = Boolean(current.githubTokenConfigured);
+  const hasCompanyContext = Boolean(hostContext.companyId);
+  const showInitialKpiLoadingState = hasCompanyContext && dashboardMetrics.loading && !dashboardMetrics.data && !cachedDashboardMetrics;
+  const boardAccessConfigured = Boolean(current.paperclipBoardAccessConfigured);
+  const boardAccessRequired = boardAccessRequirement.required;
+  const boardAccessReady = !boardAccessRequired || (hasCompanyContext && boardAccessConfigured);
+  const savedMappingCount = getComparableMappings(current.mappings ?? []).length;
+  const syncSetupIssue = getSyncSetupIssue({
+    tokenStatus: tokenValid ? 'valid' : 'required',
+    savedMappingCount,
+    boardAccessRequired,
+    boardAccessConfigured,
+    hasCompanyContext
+  });
+  const displaySyncState = getDisplaySyncState(syncState, {
+    hasToken: tokenValid,
+    hasMappings: savedMappingCount > 0,
+    hasBoardAccess: boardAccessReady
+  });
+  const syncPersistedRunning = displaySyncState.status === 'running';
+  const scheduleDescription = formatScheduleFrequency(normalizeScheduleFrequencyMinutes(current.scheduleFrequencyMinutes));
+  const kpiSummary = getKpiDashboardSummary({
+    hasCompanyContext,
+    metrics: currentDashboardMetrics,
+    syncState: displaySyncState,
+    syncIssue: syncSetupIssue
+  });
+  const kpiCards = buildDashboardKpiCards({
+    metrics: currentDashboardMetrics,
+    hasCompanyContext
+  });
+  const syncProgress = getRunningSyncProgressModel(displaySyncState);
+  const lastSync = formatDate(displaySyncState.checkedAt, 'Never');
+  const widgetStatusSummary =
+    showInitialLoadingState
+      ? 'Loading KPI status.'
+      : syncProgress
+        ? [
+            syncProgress.issueProgressLabel,
+            syncProgress.currentIssueLabel ?? syncProgress.repositoryPosition
+          ].filter((value): value is string => Boolean(value))
+            .join(' · ')
+      : syncSetupIssue === 'missing_token'
+        ? 'Finish setup to refresh KPI history.'
+        : syncSetupIssue === 'missing_board_access'
+          ? 'Connect board access to refresh KPI history.'
+      : !hasCompanyContext
+        ? 'Open in a company dashboard.'
+        : currentDashboardMetrics.status === 'no_mappings'
+          ? 'Add a mapped repository.'
+          : !currentDashboardMetrics.notes.backlogHistoryAvailable && !currentDashboardMetrics.notes.activityHistoryAvailable
+            ? 'Run a full sync to seed KPI history.'
+            : [
+                currentDashboardMetrics.backlog.lastCapturedAt
+                  ? `Backlog ${formatDate(currentDashboardMetrics.backlog.lastCapturedAt, currentDashboardMetrics.backlog.lastCapturedAt)}`
+                  : null,
+                currentDashboardMetrics.githubIssuesClosed.lastRecordedAt
+                  ? `Activity ${formatDate(currentDashboardMetrics.githubIssuesClosed.lastRecordedAt, currentDashboardMetrics.githubIssuesClosed.lastRecordedAt)}`
+                  : null
+              ].filter((value): value is string => Boolean(value))
+                .join(' · ')
+              || (displaySyncState.checkedAt
+                ? `Last sync ${lastSync}`
+                : `Auto-sync ${scheduleDescription}`);
+
+  useEffect(() => {
+    if (settings.data) {
+      setCachedSettings(settings.data);
+    }
+  }, [settings.data]);
+
+  useEffect(() => {
+    if (dashboardMetrics.data) {
+      setCachedDashboardMetrics(dashboardMetrics.data);
+    }
+  }, [dashboardMetrics.data]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadSettingsHref(): Promise<void> {
+      try {
+        const plugins = await fetchJson<unknown>('/api/plugins');
+        if (!cancelled) {
+          setSettingsHref(resolvePluginSettingsHref(plugins));
+        }
+      } catch {
+        if (!cancelled) {
+          setSettingsHref(SETTINGS_INDEX_HREF);
+        }
+      }
+    }
+
+    void loadSettingsHref();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (displaySyncState.status !== 'running') {
+      return;
+    }
+
+    const refreshWidgetData = () => {
+      try {
+        settings.refresh();
+      } catch {
+        // Keep going so KPI reads still refresh.
+      }
+
+      try {
+        dashboardMetrics.refresh();
+      } catch {
+        return;
+      }
+    };
+
+    const intervalId = globalThis.setInterval(() => {
+      refreshWidgetData();
+    }, SYNC_POLL_INTERVAL_MS);
+
+    refreshWidgetData();
+
+    return () => {
+      globalThis.clearInterval(intervalId);
+    };
+  }, [dashboardMetrics.refresh, displaySyncState.status, settings.refresh]);
+
+  useEffect(() => {
+    const refreshWidgetData = () => {
+      try {
+        settings.refresh();
+      } catch {
+        // Keep going so KPI reads still refresh.
+      }
+
+      try {
+        dashboardMetrics.refresh();
+      } catch {
+        return;
+      }
+    };
+
+    if (typeof window === 'undefined' || typeof document === 'undefined') {
+      return;
+    }
+
+    const handleSettingsUpdated = () => {
+      refreshWidgetData();
+    };
+    const handleWindowFocus = () => {
+      refreshWidgetData();
+    };
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        refreshWidgetData();
+      }
+    };
+
+    window.addEventListener(GITHUB_SYNC_SETTINGS_UPDATED_EVENT, handleSettingsUpdated);
+    window.addEventListener('focus', handleWindowFocus);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+
+    return () => {
+      window.removeEventListener(GITHUB_SYNC_SETTINGS_UPDATED_EVENT, handleSettingsUpdated);
+      window.removeEventListener('focus', handleWindowFocus);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
+  }, [dashboardMetrics.refresh, settings.refresh]);
+
+  return (
+    <section className="ghsync-widget" style={themeVars}>
+      <style>{WIDGET_STYLES}</style>
+
+      <div className="ghsync-widget__card">
+        <div className="ghsync-widget__top">
+          <div>
+            <div className="ghsync-widget__eyebrow">GitHub KPIs</div>
+            <h3>{kpiSummary.title}</h3>
+            <p>{kpiSummary.body}</p>
+            <div className="ghsync-widget__meta">
+              <span>{savedMappingCount} {savedMappingCount === 1 ? 'repository' : 'repositories'}</span>
+              <span className="ghsync-widget__meta-dot" aria-hidden="true" />
+              <span>Auto-sync {scheduleDescription}</span>
+              <span className="ghsync-widget__meta-dot" aria-hidden="true" />
+              <span>Last sync {lastSync}</span>
+            </div>
+          </div>
+          <span className={`ghsync__badge ${getToneClass(kpiSummary.tone)}`}>
+            <span className="ghsync__badge-dot" aria-hidden="true" />
+            {kpiSummary.label}
+          </span>
+        </div>
+
+        {settings.error ? <div className="ghsync-widget__message">{settings.error.message}</div> : null}
+        {dashboardMetrics.error ? <div className="ghsync-widget__message">{dashboardMetrics.error.message}</div> : null}
+
+        <div className="ghsync-widget__stats">
+          {kpiCards.map((card) => (
+            <div
+              key={card.key}
+              className={`ghsync-widget__stat ghsync-widget__stat--${card.tone}`}
+            >
+              <div className="ghsync-widget__stat-top">
+                <div className="ghsync-widget__stat-value">
+                  <span className="ghsync-widget__stat-label">{card.title}</span>
+                  <strong>
+                    {showInitialKpiLoadingState
+                      ? <LoadingSpinner size="sm" label={`Loading ${card.title.toLowerCase()}`} />
+                      : card.valueLabel}
+                  </strong>
+                </div>
+                <DashboardTrendGraphic
+                  values={card.history}
+                  tone={card.tone}
+                  kind={card.chartKind}
+                />
+              </div>
+              <p className={`ghsync-widget__stat-change ghsync-widget__stat-change--${card.tone}`}>
+                {showInitialKpiLoadingState ? 'Loading KPI history.' : card.changeLabel}
+              </p>
+              <p className="ghsync-widget__stat-note">
+                {showInitialKpiLoadingState ? 'Fetching the latest company KPI data.' : card.note}
+              </p>
+            </div>
+          ))}
+        </div>
+
+        <div className="ghsync-widget__summary">
+          <strong>{showInitialLoadingState ? 'Status' : syncPersistedRunning ? 'Live sync' : 'Latest snapshot'}</strong>
+          <span>{widgetStatusSummary}</span>
+        </div>
+
+        <div className="ghsync-widget__actions">
+          <div className="ghsync-widget__button-row">
+            <a
+              href={settingsHref}
+              className={getPluginActionClassName({
+                variant: 'secondary',
+                extraClassName: 'ghsync-widget__link'
+              })}
+            >
+              Open settings
+            </a>
           </div>
         </div>
       </div>

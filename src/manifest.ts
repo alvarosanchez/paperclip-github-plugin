@@ -2,6 +2,7 @@ import { createRequire } from 'node:module';
 import type { PaperclipPluginManifestV1 } from '@paperclipai/plugin-sdk';
 
 import { GITHUB_AGENT_TOOLS } from './github-agent-tools.ts';
+import { COMPANY_METRIC_WEBHOOK_ENDPOINT_KEY, GITHUB_SYNC_PLUGIN_ID } from './kpi-contract.ts';
 
 const require = createRequire(import.meta.url);
 const packageJson = require('../package.json') as { version?: unknown };
@@ -14,7 +15,7 @@ const MANIFEST_VERSION =
   || '0.0.0-dev';
 
 export const manifest: PaperclipPluginManifestV1 = {
-  id: 'paperclip-github-plugin',
+  id: GITHUB_SYNC_PLUGIN_ID,
   apiVersion: 1,
   version: MANIFEST_VERSION,
   displayName: 'GitHub Sync',
@@ -39,6 +40,7 @@ export const manifest: PaperclipPluginManifestV1 = {
     'issue.comments.create',
     'agents.read',
     'jobs.schedule',
+    'webhooks.receive',
     'http.outbound',
     'secrets.read-ref',
     'agent.tools.register'
@@ -74,6 +76,13 @@ export const manifest: PaperclipPluginManifestV1 = {
       schedule: SCHEDULE_TICK_CRON
     }
   ],
+  webhooks: [
+    {
+      endpointKey: COMPANY_METRIC_WEBHOOK_ENDPOINT_KEY,
+      displayName: 'Record Company KPI Event',
+      description: 'Record Paperclip-attributed pull request activity from agent flows that use gh or other non-plugin GitHub clients.'
+    }
+  ],
   tools: GITHUB_AGENT_TOOLS,
   entrypoints: {
     worker: './dist/worker.js',
@@ -101,6 +110,12 @@ export const manifest: PaperclipPluginManifestV1 = {
         id: 'paperclip-github-plugin-dashboard-widget',
         displayName: 'GitHub Sync',
         exportName: 'GitHubSyncDashboardWidget'
+      },
+      {
+        type: 'dashboardWidget',
+        id: 'paperclip-github-plugin-kpi-dashboard-widget',
+        displayName: 'GitHub KPIs',
+        exportName: 'GitHubSyncKpiDashboardWidget'
       },
       {
         type: 'taskDetailView',

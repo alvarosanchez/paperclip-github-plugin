@@ -52,6 +52,7 @@ The settings page MUST allow saving mappings and triggering a manual sync.
 The plugin MUST persist repository mappings, company-scoped advanced issue defaults, and sync state in plugin state.
 - The worker MUST expose at least one data endpoint for reading the current settings and sync status.
 - The worker MUST expose action endpoints for saving mappings and triggering a manual sync.
+- The worker MUST expose a company-scoped dashboard KPI read model that returns backlog history, GitHub issue-closure activity, and Paperclip-attributed pull request activity for the dashboard widget.
 - The worker SHOULD expose project-scoped pull request read models and actions for mapped repositories, including a lightweight queue read, a lightweight open-count read for sidebar badges, an on-demand detail read, and row-level actions for linking a Paperclip issue, updating a behind-but-clean branch, posting Copilot requests, merging, closing, and commenting.
 - The worker SHOULD keep the default pull request queue read lightweight, use a lighter repo-wide metrics read for the summary cards, keep a separate cached full-summary path for filtered views, and invalidate those caches after pull request mutations.
 - When resolving a Paperclip issue for a pull request, the worker SHOULD first match GitHub issues referenced in `closingIssuesReferences` to imported Paperclip issues and only fall back to pull-request-created issue links when no closing-issue match exists.
@@ -61,7 +62,12 @@ The plugin MUST persist repository mappings, company-scoped advanced issue defau
 - The plugin MUST declare a scheduled job that ticks every minute and only performs a scheduled sync when the saved frequency is due.
 - The plugin MUST expose agent tools for the GitHub issue and pull request workflow around synced work, including repository-item search, issue reads and updates, issue comment reads and writes, pull request creation and updates, pull request file and CI inspection, review-thread reads and replies, review-thread resolution changes, pull request reviewer requests, organization-level GitHub Project search/listing, and associating pull requests with organization-level GitHub Projects.
 - Agent tools that send non-empty freeform GitHub body content, such as issue bodies, pull request descriptions, comments, or review-thread replies, MUST append a GitHub-flavored Markdown footer that uses a horizontal rule plus a compact heading to disclose that a Paperclip AI agent created the message. When the caller provides an `llmModel`, that footer MUST also include which LLM was used.
+- The plugin MUST expose a worker-owned webhook endpoint for recording Paperclip-attributed pull request metric events, and `create_pull_request` MUST automatically record a pull-request-created metric event when it succeeds.
+- That webhook MUST accept `pull_request_created`, SHOULD allow `companyId` to be inferred when `repository` maps to exactly one company, and MUST deduplicate repeated events using a stable pull-request identity or an explicit event key.
+- That webhook MUST require `Authorization: Bearer <PAPERCLIP_API_KEY>`, MUST validate that agent-scoped Paperclip token via `GET /api/agents/me` on the trusted Paperclip API origin, and MUST reject missing, invalid, expired, or cross-company tokens before it persists any KPI state.
 - The sync flow MUST fetch open GitHub issues from every configured repository.
+- Full company and global sync runs MUST persist a company backlog snapshot using the current open GitHub issue count for each fully planned company mapping.
+- When sync observes an already-imported GitHub issue move from open to closed, it MUST record a company-scoped closed-issues KPI event exactly once for that transition.
 - The sync flow MUST ignore GitHub issues whose author username matches a configured ignored username for that mapping company.
 - The sync flow MUST create one top-level Paperclip issue per imported GitHub issue when the target mapping has a resolved Paperclip project identifier.
 - When the Paperclip runtime exposes plugin issue creation, the sync flow SHOULD prefer `ctx.issues.create(...)` for imported issue creation and reserve direct Paperclip REST issue calls for repair or update paths so imported issues are not attributed to the connected board user.
@@ -118,7 +124,8 @@ The plugin MUST persist repository mappings, company-scoped advanced issue defau
 ## Host integration requirements
 
 - The plugin MUST register successfully in Paperclip.
-- The plugin MUST expose a dashboard widget contribution.
+- The plugin MUST expose a dashboard widget contribution for sync readiness and setup.
+- The plugin MUST expose a separate dashboard KPI widget contribution.
 - The plugin MUST expose a settings page contribution.
 - The plugin SHOULD expose an issue detail contribution for GitHub metadata.
 - The issue detail contribution SHOULD hide itself when the current Paperclip issue has no linked GitHub issue instead of rendering an unlinked empty-state placeholder.
@@ -148,7 +155,8 @@ The plugin MUST persist repository mappings, company-scoped advanced issue defau
 - When a pull request is not yet linked to a Paperclip issue, the project Pull Requests page SHOULD offer an inline create-issue action and wait for the returned Paperclip identifier before rendering the issue link or opening its drawer.
 - The settings page SHOULD audit the saved GitHub token against the mapped repositories in the active company and SHOULD warn when required pull-request-action permissions are missing or GitHub cannot verify them yet.
 - The plugin SHOULD expose manual sync buttons in the global toolbar and on mapped project/issue surfaces when the host renders those slot types.
-- The dashboard widget MUST summarize the current GitHub sync readiness and link to setup.
+- The sync dashboard widget MUST summarize the current GitHub sync readiness and link to setup.
+- The separate KPI dashboard widget MUST show company KPI cards for open GitHub backlog, GitHub issues closed, and Paperclip pull requests created, including recent trend history and comparison against earlier periods when data exists.
 - When the latest sync run records issue-level failures, the settings page SHOULD expose a saved failure log with per-failure repository, issue, phase, raw error, and suggested next-step details, and compact surfaces SHOULD still surface at least the latest saved failure snapshot.
 - The settings page MUST render inside the real Paperclip host.
 - The plugin MUST include end-to-end automation that boots a disposable Paperclip instance, installs the plugin, and verifies the settings page renders.

@@ -15,10 +15,13 @@ const stateRoot = persistentStateRoot ?? await mkdtemp(join(tmpdir(), 'paperclip
 const paperclipHome = join(stateRoot, 'paperclip-home');
 const dataDir = join(stateRoot, 'paperclip-data');
 const instanceId = 'paperclip-github-plugin-manual';
+const seededCompanyName = 'Dummy Company';
 const seededProjectName = 'Paperclip Github Plugin';
 const seededRepositoryUrl = 'https://github.com/alvarosanchez/paperclip-github-plugin';
+const seededMappingId = 'manual-review-seeded-mapping';
 const seededAgentName = 'CEO';
 const seededAgentModel = 'gpt-5.4';
+const githubSyncPluginKey = 'paperclip-github-plugin';
 const seedAgentBypassApprovalsAndSandbox = process.env.PAPERCLIP_E2E_CEO_BYPASS_APPROVALS_AND_SANDBOX === 'true';
 const requestedPort = process.env.PAPERCLIP_E2E_PORT ? Number(process.env.PAPERCLIP_E2E_PORT) : 3100;
 const requestedDbPort = process.env.PAPERCLIP_E2E_DB_PORT ? Number(process.env.PAPERCLIP_E2E_DB_PORT) : 54329;
@@ -38,8 +41,8 @@ let serverProcess;
 let cleanedUp = false;
 let shutdownRequested = false;
 let shutdownResolver;
-const shutdownPromise = new Promise((resolve) => {
-  shutdownResolver = resolve;
+const shutdownPromise = new Promise((resolvePromise) => {
+  shutdownResolver = resolvePromise;
 });
 let baseUrl;
 let serverPort;
@@ -54,12 +57,17 @@ function getPaperclipCommandArgs(args) {
 }
 
 function runCommand(command, args, options = {}) {
+  const {
+    quiet = false,
+    ...spawnOptions
+  } = options;
+
   return new Promise((resolvePromise, rejectPromise) => {
     const child = spawn(command, args, {
       cwd: pluginRoot,
       env,
       stdio: ['ignore', 'pipe', 'pipe'],
-      ...options
+      ...spawnOptions
     });
 
     let stdout = '';
@@ -68,13 +76,17 @@ function runCommand(command, args, options = {}) {
     child.stdout?.on('data', (chunk) => {
       const text = chunk.toString();
       stdout += text;
-      process.stdout.write(text);
+      if (!quiet) {
+        process.stdout.write(text);
+      }
     });
 
     child.stderr?.on('data', (chunk) => {
       const text = chunk.toString();
       stderr += text;
-      process.stderr.write(text);
+      if (!quiet) {
+        process.stderr.write(text);
+      }
     });
 
     child.on('error', rejectPromise);
@@ -133,14 +145,17 @@ async function readConfiguredBaseUrl(configPath) {
 }
 
 async function fetchJson(url, init = {}) {
-  const response = await fetch(url, {
-    headers: {
-      'content-type': 'application/json',
-      ...(init.headers ?? {})
-    },
-    ...init
-  });
+  const headers = new Headers(init.headers);
+  headers.set('accept', 'application/json');
 
+  if (typeof init.body === 'string' && !headers.has('content-type')) {
+    headers.set('content-type', 'application/json');
+  }
+
+  const response = await fetch(url, {
+    ...init,
+    headers
+  });
   const text = await response.text();
   const body = text ? JSON.parse(text) : null;
 
@@ -240,7 +255,7 @@ async function waitForReady(url, timeoutMs) {
         return;
       }
     } catch {
-      // keep polling until timeout
+      // Keep polling until timeout.
     }
 
     await new Promise((resolvePromise) => setTimeout(resolvePromise, 1000));
@@ -249,63 +264,51 @@ async function waitForReady(url, timeoutMs) {
   throw new Error(`Timed out waiting for Paperclip at ${healthUrl}`);
 }
 
+function findNamedRecord(entries, name) {
+  if (!Array.isArray(entries)) {
+    return null;
+  }
+
+  const normalizedName = name.trim().toLowerCase();
+  return entries.find((entry) =>
+    entry
+    && typeof entry === 'object'
+    && typeof entry.name === 'string'
+    && entry.name.trim().toLowerCase() === normalizedName
+  ) ?? null;
+}
+
 async function ensureCompanySeeded() {
   const companiesUrl = new URL('/api/companies', baseUrl).toString();
   const existingCompanies = await fetchJson(companiesUrl);
-  if (Array.isArray(existingCompanies) && existingCompanies.length > 0) {
-    log(`Found ${existingCompanies.length} existing companies; onboarding should be skipped.`);
-    return existingCompanies[0];
+  const existingCompany = findNamedRecord(existingCompanies, seededCompanyName);
+  if (existingCompany) {
+    log(`Found existing seeded company ${seededCompanyName}; reusing it.`);
+    return existingCompany;
   }
 
   const createdCompany = await fetchJson(companiesUrl, {
     method: 'POST',
     body: JSON.stringify({
-      name: 'Dummy Company',
-      description: 'Seed company for manual paperclip-github-plugin verification.'
+      name: seededCompanyName,
+      description: 'Seed company for GitHub Sync manual review.'
     })
   });
 
-  log(`Seeded company ${createdCompany?.name ?? 'Dummy Company'}.`);
+  log(`Seeded company ${createdCompany?.name ?? seededCompanyName}.`);
   return createdCompany;
-}
-
-async function ensurePluginInstalled(configPath) {
-  try {
-    await runCommand(
-      'npx',
-      getPaperclipCommandArgs(['plugin', 'install', '--local', pluginRoot, '--data-dir', dataDir, '--config', configPath])
-    );
-    log('Installed local paperclip-github-plugin plugin.');
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    if (message.includes('Plugin already installed: paperclip-github-plugin')) {
-      log('Plugin already installed in the disposable instance; continuing.');
-      return;
-    }
-
-    throw error;
-  }
 }
 
 async function ensureSeedProjectMapped(company) {
   const companyId = typeof company?.id === 'string' ? company.id : '';
   if (!companyId) {
-    throw new Error('A seeded company id is required before creating the manual verification project.');
+    throw new Error('A seeded company id is required before creating the review project.');
   }
 
-  const projects = await fetchJson(new URL(`/api/companies/${companyId}/projects`, baseUrl).toString());
-  const existingProject =
-    Array.isArray(projects)
-      ? projects.find((entry) =>
-          entry
-          && typeof entry === 'object'
-          && typeof entry.id === 'string'
-          && typeof entry.name === 'string'
-          && entry.name.trim().toLowerCase() === seededProjectName.toLowerCase()
-        )
-      : null;
-
-  const project = existingProject ?? await fetchJson(new URL(`/api/companies/${companyId}/projects`, baseUrl).toString(), {
+  const companyProjectsUrl = new URL(`/api/companies/${companyId}/projects`, baseUrl).toString();
+  const projects = await fetchJson(companyProjectsUrl);
+  const existingProject = findNamedRecord(projects, seededProjectName);
+  const project = existingProject ?? await fetchJson(companyProjectsUrl, {
     method: 'POST',
     body: JSON.stringify({
       name: seededProjectName,
@@ -314,20 +317,22 @@ async function ensureSeedProjectMapped(company) {
   });
   const projectId = typeof project?.id === 'string' ? project.id : '';
   if (!projectId) {
-    throw new Error('Paperclip did not return a usable project id for the manual verification seed project.');
+    throw new Error('Paperclip did not return a usable project record for the seeded review project.');
   }
 
-  const workspaces = await fetchJson(new URL(`/api/projects/${projectId}/workspaces`, baseUrl).toString());
+  const projectWorkspacesUrl = new URL(`/api/projects/${projectId}/workspaces`, baseUrl).toString();
+  const workspaces = await fetchJson(projectWorkspacesUrl);
+  const normalizedSeededRepositoryUrl = seededRepositoryUrl.replace(/\.git$/i, '');
   const alreadyMapped =
     Array.isArray(workspaces)
       && workspaces.some((entry) =>
         entry
         && typeof entry === 'object'
         && typeof entry.repoUrl === 'string'
-        && entry.repoUrl.trim().replace(/\.git$/, '') === seededRepositoryUrl
+        && entry.repoUrl.trim().replace(/\.git$/i, '') === normalizedSeededRepositoryUrl
       );
   if (!alreadyMapped) {
-    await fetchJson(new URL(`/api/projects/${projectId}/workspaces`, baseUrl).toString(), {
+    await fetchJson(projectWorkspacesUrl, {
       method: 'POST',
       body: JSON.stringify({
         repoUrl: seededRepositoryUrl,
@@ -338,26 +343,21 @@ async function ensureSeedProjectMapped(company) {
   }
 
   log(`Seeded project ${seededProjectName} mapped to ${seededRepositoryUrl}.`);
+  return {
+    id: projectId,
+    name: seededProjectName
+  };
 }
 
 async function ensureSeedAgent(company) {
   const companyId = typeof company?.id === 'string' ? company.id : '';
   if (!companyId) {
-    throw new Error('A seeded company id is required before creating the manual verification agent.');
+    throw new Error('A seeded company id is required before creating the review agent.');
   }
 
   const companyAgentsUrl = new URL(`/api/companies/${companyId}/agents`, baseUrl).toString();
   const existingAgents = await fetchJson(companyAgentsUrl);
-  const existingAgent =
-    Array.isArray(existingAgents)
-      ? existingAgents.find((entry) =>
-          entry
-          && typeof entry === 'object'
-          && typeof entry.id === 'string'
-          && typeof entry.name === 'string'
-          && entry.name.trim().toLowerCase() === seededAgentName.toLowerCase()
-        )
-      : null;
+  const existingAgent = findNamedRecord(existingAgents, seededAgentName);
 
   const agentPayload = {
     name: seededAgentName,
@@ -371,20 +371,127 @@ async function ensureSeedAgent(company) {
     }
   };
 
-  if (existingAgent) {
+  if (existingAgent && typeof existingAgent.id === 'string') {
     await fetchJson(new URL(`/api/agents/${existingAgent.id}`, baseUrl).toString(), {
       method: 'PATCH',
       body: JSON.stringify(agentPayload)
     });
     log(`Updated seeded agent ${seededAgentName} to use Codex ${seededAgentModel}${seedAgentBypassApprovalsAndSandbox ? ' with bypass enabled' : ''}.`);
-    return;
+    return {
+      id: existingAgent.id,
+      name: seededAgentName
+    };
   }
 
-  await fetchJson(companyAgentsUrl, {
+  const createdAgent = await fetchJson(companyAgentsUrl, {
     method: 'POST',
     body: JSON.stringify(agentPayload)
   });
   log(`Seeded agent ${seededAgentName} using Codex ${seededAgentModel}${seedAgentBypassApprovalsAndSandbox ? ' with bypass enabled' : ''}.`);
+  return {
+    id: typeof createdAgent?.id === 'string' ? createdAgent.id : '',
+    name: seededAgentName
+  };
+}
+
+async function ensurePluginInstalled(configPath) {
+  try {
+    await runCommand(
+      'npx',
+      getPaperclipCommandArgs(['plugin', 'install', '--local', pluginRoot, '--data-dir', dataDir, '--config', configPath])
+    );
+    log('Installed local paperclip-github-plugin plugin.');
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (message.includes('Plugin already installed: paperclip-github-plugin')) {
+      log('Plugin already installed in the manual instance; continuing.');
+      return;
+    }
+
+    throw error;
+  }
+}
+
+async function resolveInstalledPluginRecord() {
+  const plugins = await fetchJson(new URL('/api/plugins', baseUrl).toString());
+  const record =
+    Array.isArray(plugins)
+      ? plugins.find((entry) =>
+          entry
+          && typeof entry === 'object'
+          && (
+            entry.pluginKey === githubSyncPluginKey
+            || entry.packageName === githubSyncPluginKey
+          )
+        )
+      : null;
+
+  if (!record || typeof record.id !== 'string') {
+    throw new Error('Could not resolve the installed GitHub Sync plugin record.');
+  }
+
+  return {
+    id: record.id,
+    pluginKey: typeof record.pluginKey === 'string' ? record.pluginKey : githubSyncPluginKey
+  };
+}
+
+function buildPluginActionUrl(pluginId, actionKey) {
+  return new URL(`/api/plugins/${encodeURIComponent(pluginId)}/actions/${encodeURIComponent(actionKey)}`, baseUrl).toString();
+}
+
+async function performPluginAction(pluginId, actionKey, companyId, params) {
+  const response = await fetchJson(buildPluginActionUrl(pluginId, actionKey), {
+    method: 'POST',
+    body: JSON.stringify({
+      ...(companyId ? { companyId } : {}),
+      params
+    })
+  });
+
+  return response?.data ?? null;
+}
+
+async function seedPluginRegistration(pluginId, company, project, agent) {
+  const companyId = typeof company?.id === 'string' ? company.id : '';
+  const projectId = typeof project?.id === 'string' ? project.id : '';
+  const agentId = typeof agent?.id === 'string' ? agent.id : '';
+  if (!companyId || !projectId) {
+    throw new Error('A seeded company and project are required before saving plugin review settings.');
+  }
+
+  await performPluginAction(pluginId, 'settings.saveRegistration', companyId, {
+    companyId,
+    mappings: [
+      {
+        id: seededMappingId,
+        repositoryUrl: seededRepositoryUrl,
+        paperclipProjectName: seededProjectName,
+        paperclipProjectId: projectId
+      }
+    ],
+    advancedSettings: {
+      ...(agentId ? { defaultAssigneeAgentId: agentId } : {}),
+      ...(agentId ? { executorAssigneeAgentId: agentId } : {}),
+      defaultStatus: 'backlog',
+      ignoredIssueAuthorUsernames: ['renovate']
+    }
+  });
+
+  log('Saved plugin settings for the seeded review company.');
+}
+
+async function tryOpenUrl(url) {
+  try {
+    await runCommand('open', [url], {
+      quiet: true,
+      stdio: 'ignore'
+    });
+    return true;
+  } catch (error) {
+    log(`Could not open the browser automatically: ${error instanceof Error ? error.message : String(error)}`);
+    return false;
+  }
 }
 
 async function waitForServerExit(timeoutMs) {
@@ -431,28 +538,6 @@ async function cleanup() {
 
   if (!persistentStateRoot) {
     await rm(stateRoot, { recursive: true, force: true });
-  }
-}
-
-async function resolvePluginSettingsUrl() {
-  const { chromium } = await import('playwright');
-  const browser = await chromium.launch({ headless: true });
-  const page = await browser.newPage();
-
-  try {
-    const settingsIndexUrl = new URL('/instance/settings/plugins', baseUrl).toString();
-    await page.goto(settingsIndexUrl, { waitUntil: 'load', timeout: 120000 });
-
-    const pluginLink = page.getByRole('link', { name: 'GitHub Sync' }).first();
-    await pluginLink.waitFor({ timeout: 120000 });
-    const href = await pluginLink.getAttribute('href');
-    if (!href) {
-      throw new Error('Could not resolve plugin settings detail href for manual verification.');
-    }
-
-    return new URL(href, baseUrl).toString();
-  } finally {
-    await browser.close();
   }
 }
 
@@ -506,17 +591,30 @@ async function main() {
   log(`Paperclip server is ready at ${baseUrl}.`);
 
   const company = await ensureCompanySeeded();
-  await ensureSeedProjectMapped(company);
-  await ensureSeedAgent(company);
+  const project = await ensureSeedProjectMapped(company);
+  const agent = await ensureSeedAgent(company);
   await ensurePluginInstalled(configPath);
+  const installedPlugin = await resolveInstalledPluginRecord();
+  const companyId = typeof company?.id === 'string' ? company.id : '';
+  if (!companyId) {
+    throw new Error('Paperclip did not return a usable company id for the review instance.');
+  }
 
-  const manualUrl = await resolvePluginSettingsUrl();
-  await runCommand('open', [manualUrl], { stdio: 'ignore' });
+  await seedPluginRegistration(installedPlugin.id, company, project, agent);
+
+  const companyDashboardUrl = new URL(`/companies/${companyId}/dashboard`, baseUrl).toString();
+  const pluginSettingsUrl = new URL(`/instance/settings/plugins/${installedPlugin.id}`, baseUrl).toString();
+  const opened = await tryOpenUrl(companyDashboardUrl);
 
   console.log('');
-  console.log('Manual verification instance is ready.');
-  console.log(`Open: ${manualUrl}`);
-  console.log(`Company: ${company?.name ?? 'Dummy Company'}`);
+  console.log('Manual KPI widget review instance is ready.');
+  console.log(`Dashboard: ${companyDashboardUrl}`);
+  console.log(`Plugin settings: ${pluginSettingsUrl}`);
+  console.log(`Company: ${company?.name ?? seededCompanyName}`);
+  console.log(`Project: ${project.name}`);
+  console.log(`Agent: ${agent.name}`);
+  console.log(`Mapped repository: ${seededRepositoryUrl}`);
+  console.log('KPI history has not been seeded. Run a sync to populate backlog and activity metrics.');
   console.log(`State dir: ${stateRoot}`);
   console.log(`Logs dir: ${join(dataDir, 'logs')}`);
   if (persistentStateRoot) {
@@ -524,7 +622,11 @@ async function main() {
   } else {
     console.log('State preservation: disabled; this disposable instance will be deleted on exit.');
   }
-  console.log('The URL has been opened in your default browser.');
+  if (opened) {
+    console.log('The company dashboard has been opened in your default browser.');
+  } else {
+    console.log('Open the dashboard URL above in your browser.');
+  }
   console.log('Press Ctrl+C when you are done inspecting the instance.');
   console.log('');
 

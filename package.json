@@ -37,7 +37,7 @@
     "test": "node --test tests/build-script.spec.mjs && tsx --test tests/plugin.spec.ts",
     "test:e2e": "pnpm build && pnpm exec playwright install chromium && node ./scripts/e2e/run-paperclip-smoke.mjs",
     "typecheck": "tsc --noEmit",
-    "verify:manual": "pnpm build && pnpm exec playwright install chromium && node ./scripts/e2e/manual-paperclip-verify.mjs"
+    "verify:manual": "pnpm build && node ./scripts/e2e/manual-paperclip-verify.mjs"
   },
   "dependencies": {
     "@octokit/rest": "^22.0.1",
