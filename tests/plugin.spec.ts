@@ -14066,7 +14066,7 @@ test('worker routes sync-driven review handoffs to execution-policy assignees an
   }
 });
 
-test('worker routes reviewer, approver, and executor fallback handoffs to a board user without waking agents', async () => {
+test('worker routes execution-policy review handoffs to saved reviewers, executor fallback to saved executors, and healthy PR waits to an unassigned in_review state without waking agents', async () => {
   const harness = createTestHarness({
     manifest,
     config: {
@@ -14117,6 +14117,11 @@ test('worker routes reviewer, approver, and executor fallback handoffs to a boar
     projectId: 'project-1',
     title: 'Needs executor fallback'
   });
+  const healthyWaitIssue = await harness.ctx.issues.create({
+    companyId: 'company-1',
+    projectId: 'project-1',
+    title: 'Healthy PR waits on maintainers'
+  });
 
   await originalUpdate(
     reviewIssue.id,
@@ -14163,6 +14168,14 @@ test('worker routes reviewer, approver, and executor fallback handoffs to a boar
     } as never,
     'company-1'
   );
+  await originalUpdate(
+    healthyWaitIssue.id,
+    {
+      status: 'todo',
+      assigneeAgentId: 'agent-previous-owner'
+    } as never,
+    'company-1'
+  );
 
   await harness.ctx.state.set(
     {
@@ -14197,6 +14210,17 @@ test('worker routes reviewer, approver, and executor fallback handoffs to a boar
         githubIssueId: 10301,
         githubIssueNumber: 103,
         paperclipIssueId: executorIssue.id,
+        importedAt: '2026-04-09T09:00:00.000Z',
+        lastSeenCommentCount: 0,
+        repositoryUrl: 'https://github.com/paperclipai/example-repo',
+        paperclipProjectId: 'project-1',
+        companyId: 'company-1'
+      },
+      {
+        mappingId: 'mapping-a',
+        githubIssueId: 10401,
+        githubIssueNumber: 104,
+        paperclipIssueId: healthyWaitIssue.id,
         importedAt: '2026-04-09T09:00:00.000Z',
         lastSeenCommentCount: 0,
         repositoryUrl: 'https://github.com/paperclipai/example-repo',
@@ -14292,6 +14316,15 @@ test('worker routes reviewer, approver, and executor fallback handoffs to a boar
           title: 'Needs executor fallback',
           body: null,
           html_url: 'https://github.com/paperclipai/example-repo/issues/103',
+          state: 'open',
+          comments: 0
+        },
+        {
+          id: 10401,
+          number: 104,
+          title: 'Healthy PR waits on maintainers',
+          body: null,
+          html_url: 'https://github.com/paperclipai/example-repo/issues/104',
           state: 'open',
           comments: 0
         }
@@ -14399,7 +14432,34 @@ test('worker routes reviewer, approver, and executor fallback handoffs to a boar
         });
       }
 
-      if (query.includes('query GitHubPullRequestReviewThreads') && (pullRequestNumber === 1010 || pullRequestNumber === 1020 || pullRequestNumber === 1030)) {
+      if (query.includes('query GitHubIssueStatusSnapshot') && issueNumber === 104) {
+        return graphqlResponse({
+          repository: {
+            issue: {
+              number: 104,
+              state: 'OPEN',
+              stateReason: null,
+              comments: {
+                totalCount: 0
+              },
+              closedByPullRequestsReferences: {
+                pageInfo: {
+                  hasNextPage: false,
+                  endCursor: null
+                },
+                nodes: [
+                  {
+                    number: 1040,
+                    state: 'OPEN'
+                  }
+                ]
+              }
+            }
+          }
+        });
+      }
+
+      if (query.includes('query GitHubPullRequestReviewThreads') && (pullRequestNumber === 1010 || pullRequestNumber === 1020 || pullRequestNumber === 1030 || pullRequestNumber === 1040)) {
         return graphqlResponse({
           repository: {
             pullRequest: {
@@ -14415,7 +14475,7 @@ test('worker routes reviewer, approver, and executor fallback handoffs to a boar
         });
       }
 
-      if (query.includes('query GitHubPullRequestCiContexts') && (pullRequestNumber === 1010 || pullRequestNumber === 1020)) {
+      if (query.includes('query GitHubPullRequestCiContexts') && (pullRequestNumber === 1010 || pullRequestNumber === 1020 || pullRequestNumber === 1040)) {
         return graphqlResponse({
           repository: {
             pullRequest: {
@@ -14497,10 +14557,19 @@ test('worker routes reviewer, approver, and executor fallback handoffs to a boar
         && request.body?.assigneeUserId === 'user-executor'
       )
     );
+    assert.ok(
+      statusPatchRequests.some((request) =>
+        request.issueId === healthyWaitIssue.id
+        && request.body?.status === 'in_review'
+        && request.body?.assigneeAgentId === null
+        && request.body?.assigneeUserId === null
+      )
+    );
 
     const updatedReviewIssue = await originalGet(reviewIssue.id, 'company-1');
     const updatedApprovalIssue = await originalGet(approvalIssue.id, 'company-1');
     const updatedExecutorIssue = await originalGet(executorIssue.id, 'company-1');
+    const updatedHealthyWaitIssue = await originalGet(healthyWaitIssue.id, 'company-1');
 
     assert.equal(updatedReviewIssue?.status, 'in_review');
     assert.equal(updatedReviewIssue?.assigneeUserId, 'user-reviewer');
@@ -14508,6 +14577,9 @@ test('worker routes reviewer, approver, and executor fallback handoffs to a boar
     assert.equal(updatedApprovalIssue?.assigneeUserId, 'user-approver');
     assert.equal(updatedExecutorIssue?.status, 'in_progress');
     assert.equal(updatedExecutorIssue?.assigneeUserId, 'user-executor');
+    assert.equal(updatedHealthyWaitIssue?.status, 'in_review');
+    assert.equal(updatedHealthyWaitIssue?.assigneeAgentId ?? null, null);
+    assert.equal(updatedHealthyWaitIssue?.assigneeUserId ?? null, null);
   } finally {
     globalThis.fetch = originalFetch;
   }

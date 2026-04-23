@@ -6518,8 +6518,13 @@ function resolvePaperclipIssueReviewAssignee(
     };
   }
 
+  const reviewStageType = nextStage?.type ?? currentStageType;
+  if (!reviewStageType && !syncContext.executionPolicy) {
+    return null;
+  }
+
   const approverOverride = getConfiguredAdvancedAssigneePrincipal(advancedSettings, 'approver');
-  if (nextStage?.type === 'approval' && approverOverride) {
+  if (reviewStageType === 'approval' && approverOverride) {
     return {
       principal: approverOverride,
       role: 'approver'
@@ -6527,7 +6532,7 @@ function resolvePaperclipIssueReviewAssignee(
   }
 
   const reviewerOverride = getConfiguredAdvancedAssigneePrincipal(advancedSettings, 'reviewer');
-  if (reviewerOverride) {
+  if (reviewStageType !== 'approval' && reviewerOverride) {
     return {
       principal: reviewerOverride,
       role: 'reviewer'
@@ -9798,6 +9803,7 @@ async function updatePaperclipIssueState(
     syncContext: PaperclipIssueSyncContext;
     nextStatus: PaperclipIssueStatus;
     nextAssignee?: PaperclipIssueAssigneePrincipal | null;
+    clearAssignee?: boolean;
     transitionComment: string;
     transitionCommentAnnotation?: StoredStatusTransitionCommentAnnotation;
     paperclipApiBaseUrl?: string;
@@ -9810,6 +9816,7 @@ async function updatePaperclipIssueState(
     syncContext,
     nextStatus,
     nextAssignee,
+    clearAssignee,
     transitionComment,
     transitionCommentAnnotation,
     paperclipApiBaseUrl
@@ -9835,6 +9842,9 @@ async function updatePaperclipIssueState(
       issuePatch.assigneeAgentId = null;
       issuePatch.assigneeUserId = nextAssignee.id;
     }
+  } else if (clearAssignee) {
+    issuePatch.assigneeAgentId = null;
+    issuePatch.assigneeUserId = null;
   }
 
   if (paperclipApiBaseUrl) {
@@ -10458,6 +10468,10 @@ async function synchronizePaperclipIssueStatuses(
         syncContext: paperclipIssueSyncContext,
         advancedSettings
       });
+      const shouldClearTransitionAssignee =
+        nextStatus === 'in_review'
+        && nextTransitionAssignee === null
+        && paperclipIssueSyncContext.assignee !== null;
       const nextAssigneeChanged = nextTransitionAssignee
         ? !doesPaperclipIssueAssigneeMatch(paperclipIssueSyncContext.assignee, nextTransitionAssignee.principal)
         : false;
@@ -10476,6 +10490,24 @@ async function synchronizePaperclipIssueStatuses(
       importedIssue.lastSeenCommentCount = snapshot.commentCount;
 
       if (paperclipIssue.status === nextStatus) {
+        if (shouldClearTransitionAssignee) {
+          updateSyncFailureContext(syncFailureContext, {
+            phase: 'updating_paperclip_status',
+            repositoryUrl: repository.url,
+            githubIssueNumber: githubIssue.number
+          });
+          await updatePaperclipIssueState(ctx, {
+            companyId: mapping.companyId,
+            issueId: importedIssue.paperclipIssueId,
+            currentStatus: paperclipIssue.status,
+            syncContext: paperclipIssueSyncContext,
+            nextStatus,
+            clearAssignee: true,
+            transitionComment: '',
+            paperclipApiBaseUrl
+          });
+        }
+
         if (shouldWakeImportedAssignee) {
           queuedIssueWakeups.push({
             assigneeAgentId: paperclipIssueSyncContext.assignee?.kind === 'agent' ? paperclipIssueSyncContext.assignee.id : null,
@@ -10509,6 +10541,7 @@ async function synchronizePaperclipIssueStatuses(
         syncContext: paperclipIssueSyncContext,
         nextStatus,
         ...(nextTransitionAssignee ? { nextAssignee: nextTransitionAssignee.principal } : {}),
+        ...(shouldClearTransitionAssignee ? { clearAssignee: true } : {}),
         transitionComment: transitionComment.body,
         transitionCommentAnnotation: transitionComment.annotation,
         paperclipApiBaseUrl
