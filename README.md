@@ -62,7 +62,7 @@ If a company already has a Paperclip project bound to a GitHub repository worksp
 
 ### Status sync with delivery context
 
-The plugin does more than mirror issue text. It looks at linked pull requests, CI, review threads, and trusted new GitHub comments so imported Paperclip issues can reflect where the work actually is.
+The plugin does more than mirror issue text. It looks at linked pull requests, mergeability, CI, review threads, and trusted new GitHub comments so imported Paperclip issues can reflect where the work actually is. When GitHub links an issue to a pull request in another repository, GitHub Sync now follows that pull request's actual repository for status checks, review-thread state, and deep links instead of assuming the issue repository. When sync closes an imported issue as `done` or `cancelled`, it also clears any pending Paperclip review or approval execution state so the host accepts the terminal transition cleanly.
 
 ### Company KPI dashboard
 
@@ -74,9 +74,11 @@ That webhook path matters on authenticated Paperclip deployments today because a
 
 ### Project pull request command center
 
-Each mapped project can expose a **Pull Requests** entry in the sidebar that opens a live GitHub queue page for that repository. The sidebar badge uses a lightweight total-count read, while the queue keeps the default view fast by loading only the current 10-row page, uses a repo-wide metrics read for the summary cards, reuses that cached metrics scan to keep filtered views fast by fetching only the visible filtered rows, keeps repo-scoped count, metrics, and per-PR review/check insight caches warm for repeat visits, lets operators explicitly bust those caches with Refresh when they want a live reread, shows total, mergeable, reviewable, and failing cards that filter the table, includes an **Up to date** column that distinguishes current branches, clean update candidates, conflict cases, and unknown freshness when GitHub cannot confirm the comparison, shows the PR target branch with a highlighted default-branch badge, keeps the list sorted by most recently updated first, paginates larger repositories, keeps a compact bottom detail pane with markdown-and-HTML-rendered conversation plus an inline comment composer, supports deterministic **Update branch** actions for clean behind-base pull requests, adds Copilot quick actions that post `@copilot` requests for **Fix CI**, **Rebase**, and **Address review feedback**, requests Copilot through GitHub’s native reviewer flow for **Review**, keeps comment, review, quick approve/request-changes, re-run CI, merge, and close actions available, lets the review modal submit comment-only, approve, or request-changes reviews, hides any pull request action whose required GitHub permission is not verified for the saved token, and opens linked Paperclip issues in a plugin-provided right drawer so operators can stay on the queue page.
+Each mapped project can expose a **Pull Requests** entry in the sidebar that opens a live GitHub queue page for that repository. The sidebar badge uses a lightweight total-count read, while the queue keeps the default view fast by loading only the current 10-row page, uses a repo-wide metrics read for the summary cards, reuses that cached metrics scan to keep filtered views fast by fetching only the visible filtered rows, keeps repo-scoped count, metrics, and per-PR review/check insight caches warm for repeat visits, lets operators explicitly bust those caches with Refresh when they want a live reread, shows total, mergeable, reviewable, and failing cards that filter the table, only treats a pull request as mergeable when it targets the current default branch with green checks, at least one approval, no outstanding change requests, and no unresolved review threads, includes an **Up to date** column that distinguishes current branches, clean update candidates, conflict cases, and unknown freshness when GitHub cannot confirm the comparison, shows the PR target branch with a highlighted default-branch badge, keeps the list sorted by most recently updated first, paginates larger repositories, keeps a compact bottom detail pane with markdown-and-HTML-rendered conversation plus an inline comment composer, supports deterministic **Update branch** actions for clean behind-base pull requests, adds Copilot quick actions that post `@copilot` requests for **Fix CI**, **Rebase**, and **Address review feedback**, requests Copilot through GitHub’s native reviewer flow for **Review**, keeps comment, review, quick approve/request-changes, re-run CI, merge, and close actions available, lets the review modal submit comment-only, approve, or request-changes reviews, hides any pull request action whose required GitHub permission is not verified for the saved token, and opens linked Paperclip issues in a plugin-provided right drawer so operators can stay on the queue page.
 
 Paperclip issue linkage on the queue prefers the GitHub issue that the pull request closes, so imported GitHub issues and delivery work stay connected in the same project view. If a pull request has no closing-issue-backed link yet, the queue falls back to the Paperclip issue created directly from that pull request and updates the table immediately when that create action returns.
+
+The issue detail panel and sync-created comment annotations also preserve cross-repository linked pull requests, showing those PRs with their real repository path so operators land in the right place on GitHub.
 
 ### Agent workflows built in
 
@@ -145,8 +147,8 @@ When the local Paperclip API is available, the plugin also syncs labels by name,
 | Open issue with no linked pull request, created by a repository maintainer | `todo` on first import |
 | Open issue with no linked pull request | Configured default status, which defaults to `backlog` |
 | Open issue with a linked pull request and unfinished CI | `in_progress` |
-| Open issue with failing CI or unresolved review threads | `todo`, or `in_progress` when GitHub Sync can hand the work back to an executor |
-| Open issue with green CI and all review threads resolved | `in_review` |
+| Open issue with failing CI, a non-mergeable linked pull request, or unresolved review threads | `todo`, or `in_progress` when GitHub Sync can hand the work back to an executor |
+| Open issue with green CI, a merge-ready linked pull request, and all review threads resolved | `in_review` |
 | Closed issue completed as finished work | `done` |
 | Closed issue closed as `not_planned` or `duplicate` | `cancelled` |
 
@@ -155,12 +157,13 @@ Additional behavior:
 - Open issues with no linked pull request that are created by a verified repository maintainer/admin bypass the default imported status and start in `todo`.
 - When Paperclip board access is connected for a company, the advanced assignee dropdowns list both company agents and `Me` for the connected board user.
 - Newly imported issues that finish sync in `todo` and are assigned to an agent enqueue an assignee wakeup so the agent can pick them up promptly.
-- When sync moves work into `in_review`, GitHub Sync first follows the Paperclip issue execution policy's current reviewer or approver when that stage is visible on the issue. If Paperclip does not expose that participant yet, the plugin falls back to the configured reviewer or approver handoff assignee.
+- For linked pull requests, GitHub Sync treats merge-conflict, behind-branch, blocked, draft, and unstable merge states as executor work, while merge-ready states such as `CLEAN` and `HAS_HOOKS` can move work into `in_review` when CI and review threads are also clear.
+- When sync moves work into `in_review`, GitHub Sync first follows the Paperclip issue execution policy's current reviewer or approver when that stage is visible on the issue. If Paperclip exposes an internal review or approval stage but not yet the participant, the plugin falls back to the configured reviewer or approver handoff assignee. If the transition is only a healthy linked-PR wait with no visible internal review or approval stage, GitHub Sync leaves the issue unassigned so it can wait on normal maintainer review without waking an internal owner.
 - When sync moves work back into active execution, GitHub Sync first follows the Paperclip issue execution policy `returnAssignee` when it is available. Otherwise it falls back to the configured executor handoff assignee and then to the default imported assignee.
 - Sync-driven handoffs to agent assignees best-effort enqueue an explicit wakeup so the next reviewer, approver, or executor can pick the issue up even when their agent is not running heartbeats.
 - Open imported issues that are already in `backlog` stay in `backlog` until someone changes them in Paperclip.
 - If an imported issue is `done` or `cancelled` and GitHub shows it open again with no linked pull request, sync moves it to `todo` so agents can pick it up again.
-- Trusted new GitHub comments from the original issue author or a verified maintainer/admin can move an open imported issue back into active work, using `in_progress` when GitHub Sync can route the issue to an executor and otherwise `todo`.
+- Trusted new GitHub comments from the original issue author or a verified maintainer/admin can move an open imported issue back into active work, whether the new comment lands on the source issue, in a linked pull request's top-level comment stream, or in a linked pull request review thread; GitHub Sync uses `in_progress` when it can route the issue to an executor and otherwise `todo`.
 - When the sync changes a Paperclip issue status, it adds a Paperclip comment explaining what changed and why.
 
 ## Security and authentication

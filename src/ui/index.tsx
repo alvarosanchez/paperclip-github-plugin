@@ -334,6 +334,10 @@ interface GitHubIssueDetailsData {
   githubIssueStateReason?: 'completed' | 'not_planned' | 'duplicate';
   commentsCount?: number;
   linkedPullRequestNumbers: number[];
+  linkedPullRequests?: Array<{
+    number: number;
+    repositoryUrl: string;
+  }>;
   labels?: Array<{
     name: string;
     color?: string;
@@ -6204,13 +6208,33 @@ function resolvePreviewPullRequestReviewable(
     unresolvedCopilotThreads === 0;
 }
 
+function resolvePreviewPullRequestTargetsDefaultBranch(
+  record: Pick<PreviewPullRequestRecord, 'baseBranch'>,
+  options?: {
+    defaultBranchName?: string;
+  }
+): boolean {
+  const baseBranch = record.baseBranch.trim();
+  const defaultBranchName = options?.defaultBranchName?.trim();
+
+  return Boolean(baseBranch && defaultBranchName && baseBranch === defaultBranchName);
+}
+
 function resolvePreviewPullRequestMergeable(
-  record: Pick<PreviewPullRequestRecord, 'checksStatus' | 'reviewApprovals' | 'unresolvedReviewThreads' | 'githubMergeable'>
+  record: Pick<
+    PreviewPullRequestRecord,
+    'checksStatus' | 'reviewApprovals' | 'reviewChangesRequested' | 'unresolvedReviewThreads' | 'githubMergeable' | 'baseBranch'
+  >,
+  options?: {
+    defaultBranchName?: string;
+  }
 ): boolean {
   return record.githubMergeable === true &&
     record.checksStatus === 'passed' &&
     record.reviewApprovals > 0 &&
-    record.unresolvedReviewThreads === 0;
+    record.reviewChangesRequested === 0 &&
+    record.unresolvedReviewThreads === 0 &&
+    resolvePreviewPullRequestTargetsDefaultBranch(record, options);
 }
 
 function matchesPreviewPullRequestFilter(
@@ -7950,6 +7974,46 @@ function formatSyncFailureRepository(repositoryUrl?: string): string | null {
   return repositoryUrl.trim();
 }
 
+function getLinkedPullRequestsForIssueDetails(
+  issueDetails: GitHubIssueDetailsData
+): Array<{
+  number: number;
+  repositoryUrl: string;
+}> {
+  if (issueDetails.linkedPullRequests && issueDetails.linkedPullRequests.length > 0) {
+    return issueDetails.linkedPullRequests;
+  }
+
+  return issueDetails.linkedPullRequestNumbers.map((pullRequestNumber) => ({
+    number: pullRequestNumber,
+    repositoryUrl: issueDetails.repositoryUrl
+  }));
+}
+
+function formatIssueDetailLinkedPullRequestLabel(
+  pullRequest: {
+    number: number;
+    repositoryUrl: string;
+  },
+  issueRepositoryUrl: string
+): string {
+  const pullRequestRepository = parseRepositoryReference(pullRequest.repositoryUrl);
+  if (!pullRequestRepository) {
+    return `PR #${pullRequest.number}`;
+  }
+
+  const issueRepository = parseRepositoryReference(issueRepositoryUrl);
+  if (
+    issueRepository &&
+    issueRepository.owner.toLowerCase() === pullRequestRepository.owner.toLowerCase() &&
+    issueRepository.repo.toLowerCase() === pullRequestRepository.repo.toLowerCase()
+  ) {
+    return `PR #${pullRequest.number}`;
+  }
+
+  return `${pullRequestRepository.owner}/${pullRequestRepository.repo}#${pullRequest.number}`;
+}
+
 function getSyncFailureLogEntries(syncState: SyncRunState): SyncFailureLogEntry[] {
   if (syncState.recentFailures?.length) {
     return syncState.recentFailures.filter((entry) => typeof entry.message === 'string' && entry.message.trim());
@@ -9364,7 +9428,9 @@ export function GitHubSyncProjectPullRequestsPage(): React.JSX.Element {
         return {
           ...nextRecord,
           reviewable: resolvePreviewPullRequestReviewable(nextRecord),
-          mergeable: resolvePreviewPullRequestMergeable(nextRecord)
+          mergeable: resolvePreviewPullRequestMergeable(nextRecord, {
+            defaultBranchName: pageData.defaultBranchName
+          })
         };
       });
       if (options?.closeModal) {
@@ -9434,7 +9500,9 @@ export function GitHubSyncProjectPullRequestsPage(): React.JSX.Element {
         return {
           ...nextRecord,
           reviewable: resolvePreviewPullRequestReviewable(nextRecord),
-          mergeable: resolvePreviewPullRequestMergeable(nextRecord)
+          mergeable: resolvePreviewPullRequestMergeable(nextRecord, {
+            defaultBranchName: pageData.defaultBranchName
+          })
         };
       });
       closeRerunCiModal();
@@ -10474,7 +10542,7 @@ export function GitHubSyncProjectPullRequestsPage(): React.JSX.Element {
                     <div className="ghsync-prs-meta__row">
                       <span className="ghsync-prs-meta__label">Mergeability</span>
                       <div className="ghsync-prs-meta__value">
-                        {selectedPullRequest.mergeable ? 'Mergeable now' : 'Blocked until checks and review feedback settle'}
+                        {selectedPullRequest.mergeable ? 'Mergeable now' : 'Blocked by checks, review feedback, or target branch rules'}
                       </div>
                     </div>
                   </div>
@@ -12751,7 +12819,7 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
                     />
                     <p className="ghsync__hint">
                       The assignee that resumes work when GitHub Sync sends an issue back to active execution, such as failing CI,
-                      unresolved review threads, or a trusted new GitHub comment.
+                      non-mergeable linked pull requests, unresolved review threads, or a trusted new GitHub comment.
                     </p>
                   </div>
 
@@ -14460,6 +14528,8 @@ function GitHubSyncIssueDetailTabContent(props: {
     return null;
   }
 
+  const linkedPullRequests = issueDetails ? getLinkedPullRequestsForIssueDetails(issueDetails) : [];
+
   return (
     <section className="ghsync-issue-detail" style={props.themeVars}>
       <style>{EXTENSION_SURFACE_STYLES}</style>
@@ -14535,7 +14605,7 @@ function GitHubSyncIssueDetailTabContent(props: {
             </div>
             <div className="ghsync-extension-metric">
               <span>Linked PRs</span>
-              <strong>{issueDetails.linkedPullRequestNumbers.length}</strong>
+              <strong>{linkedPullRequests.length}</strong>
             </div>
             <div className="ghsync-extension-metric">
               <span>Last synced</span>
@@ -14543,14 +14613,14 @@ function GitHubSyncIssueDetailTabContent(props: {
             </div>
           </div>
 
-          {issueDetails.linkedPullRequestNumbers.length > 0 ? (
+          {linkedPullRequests.length > 0 ? (
             <div className="ghsync-issue-detail__section">
               <div className="ghsync-issue-detail__section-heading">Linked pull requests</div>
               <div className="ghsync-extension-links">
-                {issueDetails.linkedPullRequestNumbers.map((pullRequestNumber: number) => (
+                {linkedPullRequests.map((pullRequest) => (
                   <a
-                    key={pullRequestNumber}
-                    href={`${issueDetails.repositoryUrl}/pull/${pullRequestNumber}`}
+                    key={`${pullRequest.repositoryUrl}:${pullRequest.number}`}
+                    href={`${pullRequest.repositoryUrl}/pull/${pullRequest.number}`}
                     target="_blank"
                     rel="noreferrer"
                     className={getPluginActionClassName({
@@ -14559,7 +14629,9 @@ function GitHubSyncIssueDetailTabContent(props: {
                       extraClassName: 'ghsync-extension-link'
                     })}
                   >
-                    <GitHubButtonLabel label={`PR #${pullRequestNumber}`} />
+                    <GitHubButtonLabel
+                      label={formatIssueDetailLinkedPullRequestLabel(pullRequest, issueDetails.repositoryUrl)}
+                    />
                   </a>
                 ))}
               </div>
