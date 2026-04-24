@@ -313,6 +313,7 @@ interface ImportedIssueRecord {
   paperclipIssueId: string;
   importedAt: string;
   lastSeenCommentCount?: number;
+  linkedPullRequestCommentCounts?: GitHubPullRequestCommentCountRecord[];
   repositoryUrl?: string;
   paperclipProjectId?: string;
   companyId?: string;
@@ -921,6 +922,11 @@ interface GitHubIssueCommentRecord {
   authorAvatarUrl?: string;
   createdAt?: string;
   updatedAt?: string;
+}
+
+interface GitHubPullRequestCommentCountRecord extends GitHubPullRequestReference {
+  topLevelCommentCount: number;
+  reviewCommentCount: number;
 }
 
 interface GitHubReviewThreadCommentRecord {
@@ -5390,6 +5396,9 @@ function normalizeImportRegistry(value: unknown): ImportedIssueRecord[] {
         typeof record.lastSeenCommentCount === 'number' && record.lastSeenCommentCount >= 0
           ? Math.floor(record.lastSeenCommentCount)
           : undefined;
+      const linkedPullRequestCommentCounts = normalizeGitHubPullRequestCommentCountRecords(
+        record.linkedPullRequestCommentCounts
+      );
 
       if (!mappingId || Number.isNaN(githubIssueId) || !paperclipIssueId || !importedAt) {
         return null;
@@ -5404,7 +5413,8 @@ function normalizeImportRegistry(value: unknown): ImportedIssueRecord[] {
         ...(repositoryUrl ? { repositoryUrl } : {}),
         ...(paperclipProjectId ? { paperclipProjectId } : {}),
         ...(companyId ? { companyId } : {}),
-        ...(lastSeenCommentCount !== undefined ? { lastSeenCommentCount } : {})
+        ...(lastSeenCommentCount !== undefined ? { lastSeenCommentCount } : {}),
+        ...(linkedPullRequestCommentCounts.length > 0 ? { linkedPullRequestCommentCounts } : {})
       };
     })
     .filter((entry): entry is ImportedIssueRecord => entry !== null);
@@ -5481,6 +5491,7 @@ function buildImportedIssueRecord(
     paperclipIssueId,
     importedAt,
     lastSeenCommentCount: issue.commentsCount,
+    linkedPullRequestCommentCounts: [],
     repositoryUrl: getNormalizedMappingRepositoryUrl(mapping),
     paperclipProjectId: mapping.paperclipProjectId,
     companyId: mapping.companyId
@@ -6756,11 +6767,10 @@ function buildSyncFallbackExecutionStatePatch(params: {
 
 function describeGitHubStatusTransitionReason(params: {
   snapshot: GitHubIssueStatusSnapshot;
-  previousCommentCount?: number;
   hasTrustedNewComment?: boolean;
   maintainerAuthoredImportedIssue?: boolean;
 }): string {
-  const { snapshot, previousCommentCount, hasTrustedNewComment, maintainerAuthoredImportedIssue } = params;
+  const { snapshot, hasTrustedNewComment, maintainerAuthoredImportedIssue } = params;
 
   if (snapshot.state === 'closed') {
     switch (snapshot.stateReason) {
@@ -6773,8 +6783,7 @@ function describeGitHubStatusTransitionReason(params: {
     }
   }
 
-  const baselineCommentCount = previousCommentCount ?? snapshot.commentCount;
-  if (snapshot.commentCount > baselineCommentCount && hasTrustedNewComment) {
+  if (hasTrustedNewComment) {
     return 'a new GitHub comment from the issue author or a repository maintainer was added';
   }
 
@@ -6834,7 +6843,6 @@ function buildPaperclipIssueStatusTransitionComment(params: {
   nextStatus: PaperclipIssueStatus;
   repository: ParsedRepositoryReference;
   snapshot: GitHubIssueStatusSnapshot;
-  previousCommentCount?: number;
   hasTrustedNewComment?: boolean;
   maintainerAuthoredImportedIssue?: boolean;
 }): {
@@ -6846,13 +6854,11 @@ function buildPaperclipIssueStatusTransitionComment(params: {
     nextStatus,
     repository,
     snapshot,
-    previousCommentCount,
     hasTrustedNewComment,
     maintainerAuthoredImportedIssue
   } = params;
   const reason = describeGitHubStatusTransitionReason({
     snapshot,
-    previousCommentCount,
     hasTrustedNewComment,
     maintainerAuthoredImportedIssue
   });
@@ -6872,7 +6878,6 @@ function buildPaperclipIssueStatusTransitionComment(params: {
 function resolvePaperclipIssueStatus(params: {
   currentStatus: PaperclipIssueStatus;
   snapshot: GitHubIssueStatusSnapshot;
-  previousCommentCount?: number;
   hasTrustedNewComment?: boolean;
   wasImportedThisRun: boolean;
   defaultImportedStatus: PaperclipIssueStatus;
@@ -6882,7 +6887,6 @@ function resolvePaperclipIssueStatus(params: {
   const {
     currentStatus,
     snapshot,
-    previousCommentCount,
     hasTrustedNewComment,
     wasImportedThisRun,
     defaultImportedStatus,
@@ -6901,8 +6905,7 @@ function resolvePaperclipIssueStatus(params: {
     return 'backlog';
   }
 
-  const baselineCommentCount = previousCommentCount ?? snapshot.commentCount;
-  if (snapshot.commentCount > baselineCommentCount && hasTrustedNewComment) {
+  if (hasTrustedNewComment) {
     return hasExecutorHandoffTarget ? 'in_progress' : 'todo';
   }
 
@@ -7666,37 +7669,82 @@ async function listNewGitHubIssueCommentsSinceCount(
   return comments;
 }
 
-async function hasTrustedNewGitHubIssueComment(params: {
+async function listNewGitHubPullRequestReviewCommentsSinceCount(
+  octokit: Octokit,
+  repository: ParsedRepositoryReference,
+  pullRequestNumber: number,
+  previousCommentCount: number,
+  currentCommentCount: number
+): Promise<GitHubIssueCommentRecord[]> {
+  const normalizedPreviousCommentCount = Math.max(0, Math.floor(previousCommentCount));
+  const normalizedCurrentCommentCount = Math.max(0, Math.floor(currentCommentCount));
+  if (normalizedCurrentCommentCount <= normalizedPreviousCommentCount) {
+    return [];
+  }
+
+  const newCommentCount = normalizedCurrentCommentCount - normalizedPreviousCommentCount;
+  const comments: GitHubIssueCommentRecord[] = [];
+  const perPage = 100;
+  let page = Math.floor(normalizedPreviousCommentCount / perPage) + 1;
+  let remainingOffset = normalizedPreviousCommentCount % perPage;
+
+  while (comments.length < newCommentCount) {
+    const response = await octokit.rest.pulls.listReviewComments({
+      owner: repository.owner,
+      repo: repository.repo,
+      pull_number: pullRequestNumber,
+      page,
+      per_page: perPage,
+      headers: {
+        accept: 'application/vnd.github+json',
+        'X-GitHub-Api-Version': GITHUB_API_VERSION
+      }
+    });
+
+    if (response.data.length === 0) {
+      break;
+    }
+
+    for (const comment of response.data.slice(remainingOffset)) {
+      comments.push({
+        id: comment.id,
+        body: typeof comment.body === 'string' ? stripNullBytes(comment.body) : '',
+        url: comment.html_url ?? undefined,
+        authorLogin: normalizeGitHubUserLogin(comment.user?.login),
+        ...(normalizeGitHubLowercaseString(comment.author_association)
+          ? { authorAssociation: normalizeGitHubLowercaseString(comment.author_association) }
+          : {}),
+        createdAt: comment.created_at ?? undefined,
+        updatedAt: comment.updated_at ?? undefined
+      });
+
+      if (comments.length >= newCommentCount) {
+        break;
+      }
+    }
+
+    if (response.data.length < perPage) {
+      break;
+    }
+
+    page += 1;
+    remainingOffset = 0;
+  }
+
+  return comments;
+}
+
+async function hasTrustedGitHubCommentRecords(params: {
   octokit: Octokit;
   repository: ParsedRepositoryReference;
-  githubIssue: GitHubIssueRecord;
-  previousCommentCount?: number;
-  currentCommentCount: number;
+  comments: GitHubIssueCommentRecord[];
+  originalPosterLogin?: string;
   maintainerCache: Map<string, boolean>;
 }): Promise<boolean> {
-  const normalizedPreviousCommentCount =
-    typeof params.previousCommentCount === 'number' && params.previousCommentCount >= 0
-      ? Math.floor(params.previousCommentCount)
-      : params.currentCommentCount;
-  const normalizedCurrentCommentCount = Math.max(0, Math.floor(params.currentCommentCount));
-  if (normalizedCurrentCommentCount <= normalizedPreviousCommentCount) {
-    return false;
-  }
-
-  const newComments = await listNewGitHubIssueCommentsSinceCount(
-    params.octokit,
-    params.repository,
-    params.githubIssue.number,
-    normalizedPreviousCommentCount,
-    normalizedCurrentCommentCount
-  );
-  if (newComments.length === 0) {
-    return false;
-  }
-
-  const originalPosterLogin = normalizeGitHubUserLogin(params.githubIssue.authorLogin);
+  const originalPosterLogin = normalizeGitHubUserLogin(params.originalPosterLogin);
   const unseenAuthors = new Set<string>();
-  for (const comment of newComments) {
+
+  for (const comment of params.comments) {
     const authorLogin = normalizeGitHubUserLogin(comment.authorLogin);
     if (!authorLogin) {
       continue;
@@ -7730,6 +7778,168 @@ async function hasTrustedNewGitHubIssueComment(params: {
       params.maintainerCache
     )) {
       return true;
+    }
+  }
+
+  return false;
+}
+
+async function hasTrustedNewGitHubIssueComment(params: {
+  octokit: Octokit;
+  repository: ParsedRepositoryReference;
+  githubIssue: GitHubIssueRecord;
+  previousCommentCount?: number;
+  currentCommentCount: number;
+  maintainerCache: Map<string, boolean>;
+}): Promise<boolean> {
+  const normalizedPreviousCommentCount =
+    typeof params.previousCommentCount === 'number' && params.previousCommentCount >= 0
+      ? Math.floor(params.previousCommentCount)
+      : params.currentCommentCount;
+  const normalizedCurrentCommentCount = Math.max(0, Math.floor(params.currentCommentCount));
+  if (normalizedCurrentCommentCount <= normalizedPreviousCommentCount) {
+    return false;
+  }
+
+  const newComments = await listNewGitHubIssueCommentsSinceCount(
+    params.octokit,
+    params.repository,
+    params.githubIssue.number,
+    normalizedPreviousCommentCount,
+    normalizedCurrentCommentCount
+  );
+  if (newComments.length === 0) {
+    return false;
+  }
+
+  return hasTrustedGitHubCommentRecords({
+    octokit: params.octokit,
+    repository: params.repository,
+    comments: newComments,
+    originalPosterLogin: params.githubIssue.authorLogin,
+    maintainerCache: params.maintainerCache
+  });
+}
+
+async function getGitHubPullRequestCommentCountRecord(
+  octokit: Octokit,
+  repository: ParsedRepositoryReference,
+  pullRequestNumber: number,
+  cache: Map<string, GitHubPullRequestCommentCountRecord>
+): Promise<GitHubPullRequestCommentCountRecord> {
+  const pullRequestReference = {
+    number: pullRequestNumber,
+    repositoryUrl: repository.url
+  } satisfies GitHubPullRequestReference;
+  const cacheKey = buildGitHubPullRequestReferenceKey(pullRequestReference);
+  const cachedRecord = cache.get(cacheKey);
+  if (cachedRecord) {
+    return cachedRecord;
+  }
+
+  const response = await octokit.rest.pulls.get({
+    owner: repository.owner,
+    repo: repository.repo,
+    pull_number: pullRequestNumber,
+    headers: {
+      'X-GitHub-Api-Version': GITHUB_API_VERSION
+    }
+  });
+  const record = {
+    ...pullRequestReference,
+    topLevelCommentCount:
+      typeof response.data.comments === 'number' && response.data.comments >= 0
+        ? Math.floor(response.data.comments)
+        : 0,
+    reviewCommentCount:
+      typeof response.data.review_comments === 'number' && response.data.review_comments >= 0
+        ? Math.floor(response.data.review_comments)
+        : 0
+  } satisfies GitHubPullRequestCommentCountRecord;
+  cache.set(cacheKey, record);
+  return record;
+}
+
+async function listGitHubPullRequestCommentCountRecords(
+  octokit: Octokit,
+  linkedPullRequests: GitHubPullRequestReference[],
+  cache: Map<string, GitHubPullRequestCommentCountRecord>
+): Promise<GitHubPullRequestCommentCountRecord[]> {
+  const commentCounts: GitHubPullRequestCommentCountRecord[] = [];
+
+  for (const pullRequest of linkedPullRequests) {
+    commentCounts.push(
+      await getGitHubPullRequestCommentCountRecord(
+        octokit,
+        requireRepositoryReference(pullRequest.repositoryUrl),
+        pullRequest.number,
+        cache
+      )
+    );
+  }
+
+  return normalizeGitHubPullRequestCommentCountRecords(commentCounts);
+}
+
+async function hasTrustedNewLinkedPullRequestComments(params: {
+  octokit: Octokit;
+  githubIssue: GitHubIssueRecord;
+  previousCommentCounts?: GitHubPullRequestCommentCountRecord[];
+  currentCommentCounts: GitHubPullRequestCommentCountRecord[];
+  maintainerCache: Map<string, boolean>;
+}): Promise<boolean> {
+  if ((params.currentCommentCounts?.length ?? 0) === 0 || (params.previousCommentCounts?.length ?? 0) === 0) {
+    return false;
+  }
+
+  const previousCommentCountsByKey = new Map(
+    (params.previousCommentCounts ?? []).map((record) => [buildGitHubPullRequestReferenceKey(record), record])
+  );
+
+  for (const currentCommentCount of params.currentCommentCounts) {
+    const previousCommentCount = previousCommentCountsByKey.get(buildGitHubPullRequestReferenceKey(currentCommentCount));
+    if (!previousCommentCount) {
+      continue;
+    }
+
+    const pullRequestRepository = requireRepositoryReference(currentCommentCount.repositoryUrl);
+
+    if (currentCommentCount.topLevelCommentCount > previousCommentCount.topLevelCommentCount) {
+      const newTopLevelComments = await listNewGitHubIssueCommentsSinceCount(
+        params.octokit,
+        pullRequestRepository,
+        currentCommentCount.number,
+        previousCommentCount.topLevelCommentCount,
+        currentCommentCount.topLevelCommentCount
+      );
+      if (await hasTrustedGitHubCommentRecords({
+        octokit: params.octokit,
+        repository: pullRequestRepository,
+        comments: newTopLevelComments,
+        originalPosterLogin: params.githubIssue.authorLogin,
+        maintainerCache: params.maintainerCache
+      })) {
+        return true;
+      }
+    }
+
+    if (currentCommentCount.reviewCommentCount > previousCommentCount.reviewCommentCount) {
+      const newReviewComments = await listNewGitHubPullRequestReviewCommentsSinceCount(
+        params.octokit,
+        pullRequestRepository,
+        currentCommentCount.number,
+        previousCommentCount.reviewCommentCount,
+        currentCommentCount.reviewCommentCount
+      );
+      if (await hasTrustedGitHubCommentRecords({
+        octokit: params.octokit,
+        repository: pullRequestRepository,
+        comments: newReviewComments,
+        originalPosterLogin: params.githubIssue.authorLogin,
+        maintainerCache: params.maintainerCache
+      })) {
+        return true;
+      }
     }
   }
 
@@ -7921,6 +8131,65 @@ function normalizeLinkedPullRequestNumbers(values: number[]): number[] {
 
 function buildGitHubPullRequestReferenceKey(pullRequest: Pick<GitHubPullRequestReference, 'number' | 'repositoryUrl'>): string {
   return `${getNormalizedMappingRepositoryUrl({ repositoryUrl: pullRequest.repositoryUrl }).toLowerCase()}#${Math.max(1, Math.floor(pullRequest.number))}`;
+}
+
+function normalizeGitHubPullRequestCommentCountRecords(value: unknown): GitHubPullRequestCommentCountRecord[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  const recordsByKey = new Map<string, GitHubPullRequestCommentCountRecord>();
+  for (const entry of value) {
+    if (!entry || typeof entry !== 'object') {
+      continue;
+    }
+
+    const record = entry as Record<string, unknown>;
+    const pullRequestNumber =
+      typeof record.number === 'number' && Number.isInteger(record.number) && record.number > 0
+        ? Math.floor(record.number)
+        : undefined;
+    const repositoryUrl =
+      typeof record.repositoryUrl === 'string' && record.repositoryUrl.trim()
+        ? getNormalizedMappingRepositoryUrl({
+            repositoryUrl: record.repositoryUrl
+          })
+        : undefined;
+    const topLevelCommentCount =
+      typeof record.topLevelCommentCount === 'number' && record.topLevelCommentCount >= 0
+        ? Math.floor(record.topLevelCommentCount)
+        : undefined;
+    const reviewCommentCount =
+      typeof record.reviewCommentCount === 'number' && record.reviewCommentCount >= 0
+        ? Math.floor(record.reviewCommentCount)
+        : undefined;
+
+    if (
+      pullRequestNumber === undefined
+      || !repositoryUrl
+      || topLevelCommentCount === undefined
+      || reviewCommentCount === undefined
+    ) {
+      continue;
+    }
+
+    const normalizedRecord = {
+      number: pullRequestNumber,
+      repositoryUrl,
+      topLevelCommentCount,
+      reviewCommentCount
+    } satisfies GitHubPullRequestCommentCountRecord;
+    recordsByKey.set(buildGitHubPullRequestReferenceKey(normalizedRecord), normalizedRecord);
+  }
+
+  return [...recordsByKey.values()].sort((left, right) => {
+    const repositoryComparison = left.repositoryUrl.toLowerCase().localeCompare(right.repositoryUrl.toLowerCase());
+    if (repositoryComparison !== 0) {
+      return repositoryComparison;
+    }
+
+    return left.number - right.number;
+  });
 }
 
 function normalizeLinkedPullRequestReferences(
@@ -10482,6 +10751,7 @@ async function synchronizePaperclipIssueStatuses(
     previousStatus?: PaperclipIssueStatus;
     nextStatus?: PaperclipIssueStatus;
   }> = [];
+  const pullRequestCommentCountCache = new Map<string, GitHubPullRequestCommentCountRecord>();
 
   for (const importedIssue of importedIssues) {
       if (assertNotCancelled) {
@@ -10606,9 +10876,9 @@ async function synchronizePaperclipIssueStatuses(
       );
 
       const previousCommentCount = importedIssue.lastSeenCommentCount;
-      const hasNewComments = snapshot.commentCount > (previousCommentCount ?? snapshot.commentCount);
-      const hasTrustedNewComment =
-        paperclipIssue.status === 'backlog' || !hasNewComments
+      const hasNewIssueComments = snapshot.commentCount > (previousCommentCount ?? snapshot.commentCount);
+      const hasTrustedNewIssueComment =
+        paperclipIssue.status === 'backlog' || !hasNewIssueComments
           ? false
           : await hasTrustedNewGitHubIssueComment({
               octokit,
@@ -10618,6 +10888,33 @@ async function synchronizePaperclipIssueStatuses(
               currentCommentCount: snapshot.commentCount,
               maintainerCache: repositoryMaintainerCache
             });
+      let currentLinkedPullRequestCommentCounts = snapshot.linkedPullRequests.length === 0
+        ? []
+        : importedIssue.linkedPullRequestCommentCounts ?? [];
+      if (snapshot.linkedPullRequests.length > 0) {
+        try {
+          currentLinkedPullRequestCommentCounts = await listGitHubPullRequestCommentCountRecords(
+            octokit,
+            snapshot.linkedPullRequests,
+            pullRequestCommentCountCache
+          );
+        } catch (error) {
+          if (isGitHubRateLimitError(error)) {
+            throw error;
+          }
+        }
+      }
+      const hasTrustedNewLinkedPullRequestComment =
+        paperclipIssue.status === 'backlog' || currentLinkedPullRequestCommentCounts.length === 0
+          ? false
+          : await hasTrustedNewLinkedPullRequestComments({
+              octokit,
+              githubIssue,
+              previousCommentCounts: importedIssue.linkedPullRequestCommentCounts,
+              currentCommentCounts: currentLinkedPullRequestCommentCounts,
+              maintainerCache: repositoryMaintainerCache
+            });
+      const hasTrustedNewComment = hasTrustedNewIssueComment || hasTrustedNewLinkedPullRequestComment;
       const wasImportedThisRun = createdIssueIds.has(importedIssue.githubIssueId);
       const maintainerAuthoredImportedIssue =
         wasImportedThisRun &&
@@ -10639,7 +10936,6 @@ async function synchronizePaperclipIssueStatuses(
       const nextStatus = resolvePaperclipIssueStatus({
         currentStatus: paperclipIssue.status,
         snapshot,
-        previousCommentCount,
         hasTrustedNewComment,
         wasImportedThisRun,
         defaultImportedStatus: advancedSettings.defaultStatus,
@@ -10671,6 +10967,7 @@ async function synchronizePaperclipIssueStatuses(
 
       importedIssue.githubIssueNumber = githubIssue.number;
       importedIssue.lastSeenCommentCount = snapshot.commentCount;
+      importedIssue.linkedPullRequestCommentCounts = currentLinkedPullRequestCommentCounts;
 
       if (paperclipIssue.status === nextStatus) {
         if (shouldClearTransitionAssignee) {
@@ -10707,7 +11004,6 @@ async function synchronizePaperclipIssueStatuses(
         nextStatus,
         repository,
         snapshot,
-        previousCommentCount,
         hasTrustedNewComment,
         maintainerAuthoredImportedIssue
       });

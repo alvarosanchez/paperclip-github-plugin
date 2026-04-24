@@ -17409,6 +17409,478 @@ test('worker only resets imported issues to todo for new comments from the issue
   }
 });
 
+test('worker resets imported issues to todo for trusted new top-level comments on linked pull requests', async () => {
+  const harness = createTestHarness({
+    manifest,
+    config: {
+      githubTokenRef: 'github-secret-ref'
+    }
+  });
+  await plugin.definition.setup(harness.ctx);
+
+  await harness.performAction('settings.saveRegistration', {
+    mappings: [
+      {
+        id: 'mapping-a',
+        repositoryUrl: 'paperclipai/example-repo',
+        paperclipProjectName: 'Engineering',
+        paperclipProjectId: 'project-1',
+        companyId: 'company-1'
+      }
+    ],
+    syncState: {
+      status: 'idle'
+    }
+  });
+
+  const originalUpdate = harness.ctx.issues.update;
+  const originalCreateComment = harness.ctx.issues.createComment;
+
+  const importedIssue = await harness.ctx.issues.create({
+    companyId: 'company-1',
+    projectId: 'project-1',
+    title: 'Maintainer PR comment can wake'
+  });
+  await originalUpdate(importedIssue.id, { status: 'in_review' }, 'company-1');
+
+  await harness.ctx.state.set(
+    {
+      scopeKind: 'instance',
+      stateKey: 'paperclip-github-plugin-import-registry'
+    },
+    [
+      {
+        mappingId: 'mapping-a',
+        githubIssueId: 4501,
+        githubIssueNumber: 45,
+        paperclipIssueId: importedIssue.id,
+        importedAt: '2026-04-09T09:00:00.000Z',
+        lastSeenCommentCount: 0,
+        linkedPullRequestCommentCounts: [
+          {
+            number: 450,
+            repositoryUrl: 'https://github.com/paperclipai/example-repo',
+            topLevelCommentCount: 0,
+            reviewCommentCount: 0
+          }
+        ],
+        repositoryUrl: 'https://github.com/paperclipai/example-repo',
+        paperclipProjectId: 'project-1',
+        companyId: 'company-1'
+      }
+    ]
+  );
+
+  const transitionComments: Array<{ issueId: string; body: string }> = [];
+  harness.ctx.issues.createComment = async (issueId, body, companyId) => {
+    transitionComments.push({ issueId, body });
+    return originalCreateComment(issueId, body, companyId);
+  };
+
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input, init) => {
+    const rawUrl = getRequestUrl(input);
+    const url = new URL(rawUrl);
+
+    if (url.pathname === '/repos/paperclipai/example-repo/issues' && ['all', 'open'].includes(url.searchParams.get('state') ?? '')) {
+      return jsonResponse([
+        {
+          id: 4501,
+          number: 45,
+          title: 'Maintainer PR comment can wake',
+          body: null,
+          html_url: 'https://github.com/paperclipai/example-repo/issues/45',
+          user: {
+            login: 'external-reporter'
+          },
+          state: 'open',
+          comments: 0
+        }
+      ]);
+    }
+
+    if (url.pathname === '/repos/paperclipai/example-repo/issues/450/comments') {
+      return jsonResponse([
+        {
+          id: 45001,
+          body: 'Please address this follow-up before merging.',
+          created_at: '2026-04-10T10:00:00Z',
+          user: {
+            login: 'repo-maintainer'
+          }
+        }
+      ]);
+    }
+
+    if (url.pathname === '/repos/paperclipai/example-repo/pulls/450') {
+      return jsonResponse({
+        number: 450,
+        comments: 1,
+        review_comments: 0
+      });
+    }
+
+    if (url.pathname === '/repos/paperclipai/example-repo/collaborators/repo-maintainer/permission') {
+      return jsonResponse({
+        permission: 'admin',
+        role_name: 'maintain',
+        user: {
+          login: 'repo-maintainer'
+        }
+      });
+    }
+
+    if (url.pathname === '/graphql') {
+      const { query, variables } = getGraphqlRequest(init);
+      const issueNumber = typeof variables.issueNumber === 'number' ? variables.issueNumber : undefined;
+      const pullRequestNumber =
+        typeof variables.pullRequestNumber === 'number' ? variables.pullRequestNumber : undefined;
+
+      if (query.includes('query GitHubRepositoryOpenIssueLinkedPullRequests')) {
+        return jsonResponse({
+          message: 'Bulk linked pull request preload failed'
+        }, 500);
+      }
+
+      if (query.includes('query GitHubIssueParentRelationships')) {
+        return graphqlIssueParentRelationshipsResponse([
+          {
+            issueNumber: 45
+          }
+        ]);
+      }
+
+      if (query.includes('query GitHubIssueStatusSnapshot') && issueNumber === 45) {
+        return graphqlResponse({
+          repository: {
+            issue: {
+              number: 45,
+              state: 'OPEN',
+              stateReason: null,
+              comments: {
+                totalCount: 0
+              },
+              closedByPullRequestsReferences: {
+                pageInfo: {
+                  hasNextPage: false,
+                  endCursor: null
+                },
+                nodes: [
+                  {
+                    number: 450,
+                    state: 'OPEN'
+                  }
+                ]
+              }
+            }
+          }
+        });
+      }
+
+      if (query.includes('query GitHubPullRequestReviewThreads') && pullRequestNumber === 450) {
+        return graphqlResponse({
+          repository: {
+            pullRequest: {
+              reviewThreads: {
+                pageInfo: {
+                  hasNextPage: false,
+                  endCursor: null
+                },
+                nodes: [
+                  {
+                    isResolved: true
+                  }
+                ]
+              }
+            }
+          }
+        });
+      }
+
+      if (query.includes('query GitHubPullRequestCiContexts') && pullRequestNumber === 450) {
+        return graphqlResponse({
+          repository: {
+            pullRequest: {
+              statusCheckRollup: {
+                contexts: {
+                  pageInfo: {
+                    hasNextPage: false,
+                    endCursor: null
+                  },
+                  nodes: [
+                    {
+                      __typename: 'CheckRun',
+                      status: 'COMPLETED',
+                      conclusion: 'SUCCESS'
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        });
+      }
+    }
+
+    throw new Error(`Unexpected GitHub request: ${url.toString()}`);
+  };
+
+  try {
+    const sync = await harness.performAction('sync.runNow', {
+      waitForCompletion: true
+    }) as {
+      syncState: { status: string };
+    };
+
+    assert.equal(sync.syncState.status, 'success');
+    assert.equal((await harness.ctx.issues.get(importedIssue.id, 'company-1'))?.status, 'todo');
+    assert.equal(transitionComments.length, 1);
+    assert.equal(transitionComments[0]?.issueId, importedIssue.id);
+    assert.match(
+      transitionComments[0]?.body ?? '',
+      /a new GitHub comment from the issue author or a repository maintainer was added/
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('worker resets imported issues to todo for trusted new review-thread comments on linked pull requests', async () => {
+  const harness = createTestHarness({
+    manifest,
+    config: {
+      githubTokenRef: 'github-secret-ref'
+    }
+  });
+  await plugin.definition.setup(harness.ctx);
+
+  await harness.performAction('settings.saveRegistration', {
+    mappings: [
+      {
+        id: 'mapping-a',
+        repositoryUrl: 'paperclipai/example-repo',
+        paperclipProjectName: 'Engineering',
+        paperclipProjectId: 'project-1',
+        companyId: 'company-1'
+      }
+    ],
+    syncState: {
+      status: 'idle'
+    }
+  });
+
+  const originalUpdate = harness.ctx.issues.update;
+  const originalCreateComment = harness.ctx.issues.createComment;
+
+  const importedIssue = await harness.ctx.issues.create({
+    companyId: 'company-1',
+    projectId: 'project-1',
+    title: 'Maintainer review-thread comment can wake'
+  });
+  await originalUpdate(importedIssue.id, { status: 'in_review' }, 'company-1');
+
+  await harness.ctx.state.set(
+    {
+      scopeKind: 'instance',
+      stateKey: 'paperclip-github-plugin-import-registry'
+    },
+    [
+      {
+        mappingId: 'mapping-a',
+        githubIssueId: 4601,
+        githubIssueNumber: 46,
+        paperclipIssueId: importedIssue.id,
+        importedAt: '2026-04-09T09:00:00.000Z',
+        lastSeenCommentCount: 0,
+        linkedPullRequestCommentCounts: [
+          {
+            number: 460,
+            repositoryUrl: 'https://github.com/paperclipai/example-repo',
+            topLevelCommentCount: 0,
+            reviewCommentCount: 0
+          }
+        ],
+        repositoryUrl: 'https://github.com/paperclipai/example-repo',
+        paperclipProjectId: 'project-1',
+        companyId: 'company-1'
+      }
+    ]
+  );
+
+  const transitionComments: Array<{ issueId: string; body: string }> = [];
+  harness.ctx.issues.createComment = async (issueId, body, companyId) => {
+    transitionComments.push({ issueId, body });
+    return originalCreateComment(issueId, body, companyId);
+  };
+
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input, init) => {
+    const rawUrl = getRequestUrl(input);
+    const url = new URL(rawUrl);
+
+    if (url.pathname === '/repos/paperclipai/example-repo/issues' && ['all', 'open'].includes(url.searchParams.get('state') ?? '')) {
+      return jsonResponse([
+        {
+          id: 4601,
+          number: 46,
+          title: 'Maintainer review-thread comment can wake',
+          body: null,
+          html_url: 'https://github.com/paperclipai/example-repo/issues/46',
+          user: {
+            login: 'external-reporter'
+          },
+          state: 'open',
+          comments: 0
+        }
+      ]);
+    }
+
+    if (url.pathname === '/repos/paperclipai/example-repo/pulls/460/comments') {
+      return jsonResponse([
+        {
+          id: 46001,
+          body: 'Please update this branch with the requested fix.',
+          created_at: '2026-04-10T10:00:00Z',
+          user: {
+            login: 'repo-maintainer'
+          }
+        }
+      ]);
+    }
+
+    if (url.pathname === '/repos/paperclipai/example-repo/pulls/460') {
+      return jsonResponse({
+        number: 460,
+        comments: 0,
+        review_comments: 1
+      });
+    }
+
+    if (url.pathname === '/repos/paperclipai/example-repo/collaborators/repo-maintainer/permission') {
+      return jsonResponse({
+        permission: 'admin',
+        role_name: 'maintain',
+        user: {
+          login: 'repo-maintainer'
+        }
+      });
+    }
+
+    if (url.pathname === '/graphql') {
+      const { query, variables } = getGraphqlRequest(init);
+      const issueNumber = typeof variables.issueNumber === 'number' ? variables.issueNumber : undefined;
+      const pullRequestNumber =
+        typeof variables.pullRequestNumber === 'number' ? variables.pullRequestNumber : undefined;
+
+      if (query.includes('query GitHubRepositoryOpenIssueLinkedPullRequests')) {
+        return jsonResponse({
+          message: 'Bulk linked pull request preload failed'
+        }, 500);
+      }
+
+      if (query.includes('query GitHubIssueParentRelationships')) {
+        return graphqlIssueParentRelationshipsResponse([
+          {
+            issueNumber: 46
+          }
+        ]);
+      }
+
+      if (query.includes('query GitHubIssueStatusSnapshot') && issueNumber === 46) {
+        return graphqlResponse({
+          repository: {
+            issue: {
+              number: 46,
+              state: 'OPEN',
+              stateReason: null,
+              comments: {
+                totalCount: 0
+              },
+              closedByPullRequestsReferences: {
+                pageInfo: {
+                  hasNextPage: false,
+                  endCursor: null
+                },
+                nodes: [
+                  {
+                    number: 460,
+                    state: 'OPEN'
+                  }
+                ]
+              }
+            }
+          }
+        });
+      }
+
+      if (query.includes('query GitHubPullRequestReviewThreads') && pullRequestNumber === 460) {
+        return graphqlResponse({
+          repository: {
+            pullRequest: {
+              reviewThreads: {
+                pageInfo: {
+                  hasNextPage: false,
+                  endCursor: null
+                },
+                nodes: [
+                  {
+                    isResolved: true
+                  }
+                ]
+              }
+            }
+          }
+        });
+      }
+
+      if (query.includes('query GitHubPullRequestCiContexts') && pullRequestNumber === 460) {
+        return graphqlResponse({
+          repository: {
+            pullRequest: {
+              statusCheckRollup: {
+                contexts: {
+                  pageInfo: {
+                    hasNextPage: false,
+                    endCursor: null
+                  },
+                  nodes: [
+                    {
+                      __typename: 'CheckRun',
+                      status: 'COMPLETED',
+                      conclusion: 'SUCCESS'
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        });
+      }
+    }
+
+    throw new Error(`Unexpected GitHub request: ${url.toString()}`);
+  };
+
+  try {
+    const sync = await harness.performAction('sync.runNow', {
+      waitForCompletion: true
+    }) as {
+      syncState: { status: string };
+    };
+
+    assert.equal(sync.syncState.status, 'success');
+    assert.equal((await harness.ctx.issues.get(importedIssue.id, 'company-1'))?.status, 'todo');
+    assert.equal(transitionComments.length, 1);
+    assert.equal(transitionComments[0]?.issueId, importedIssue.id);
+    assert.match(
+      transitionComments[0]?.body ?? '',
+      /a new GitHub comment from the issue author or a repository maintainer was added/
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test('worker stores repository and issue diagnostics when a sync fails mid-run', async () => {
   const harness = createTestHarness({
     manifest,
