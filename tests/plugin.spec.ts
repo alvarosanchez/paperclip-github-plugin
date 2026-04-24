@@ -1673,6 +1673,42 @@ test('company metric webhook rejects missing authentication headers', async () =
   );
 });
 
+test('company metric webhook rejects events without a dedupe identity', async () => {
+  await createGitHubAgentToolHarness();
+  const originalFetch = globalThis.fetch;
+  const restorePaperclipApiBaseUrl = setRuntimePaperclipApiBaseUrl();
+
+  globalThis.fetch = async (input, init) => {
+    const url = new URL(getRequestUrl(input));
+    if (url.origin === TEST_PAPERCLIP_API_URL && url.pathname === '/api/agents/me') {
+      assert.equal(
+        getRequestHeader(input, init, COMPANY_METRIC_WEBHOOK_AUTH_HEADER),
+        `Bearer ${TEST_PAPERCLIP_API_KEY}`
+      );
+      return jsonResponse({
+        id: 'agent-1',
+        companyId: 'company-1',
+        name: 'Test agent'
+      });
+    }
+
+    throw new Error(`Unexpected fetch request: ${url.toString()}`);
+  };
+
+  try {
+    await assert.rejects(
+      postCompanyMetricWebhook({
+        companyId: 'company-1',
+        metric: 'pull_request_created'
+      }),
+      /requires pullRequestUrl, repository plus pullRequestNumber, or eventKey/i
+    );
+  } finally {
+    restorePaperclipApiBaseUrl();
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test('company metric webhook rejects invalid Paperclip API keys', async () => {
   await createGitHubAgentToolHarness();
   const originalFetch = globalThis.fetch;
@@ -1835,6 +1871,80 @@ test('dashboard.metrics summarizes backlog and Paperclip PR history from persist
   assert.equal(metricsData.notes.backlogHistoryAvailable, true);
   assert.equal(metricsData.notes.activityHistoryAvailable, true);
   assert.equal(Object.prototype.hasOwnProperty.call(metricsData, 'paperclipPullRequestsMerged'), false);
+});
+
+test('dashboard.metrics ignores persisted KPI entries with invalid timestamps', async () => {
+  const harness = await createGitHubAgentToolHarness();
+
+  await harness.ctx.state.set(
+    {
+      scopeKind: 'instance',
+      stateKey: 'paperclip-github-plugin-company-kpis'
+    },
+    {
+      backlogSnapshotsByCompanyId: {
+        'company-1': [
+          {
+            day: '2026-04-01',
+            capturedAt: '2026-04-01T09:00:00.000Z',
+            openIssueCount: 6,
+            repositoryCount: 1
+          },
+          {
+            day: 'not-a-day',
+            capturedAt: '2026-04-24T09:00:00.000Z',
+            openIssueCount: 999,
+            repositoryCount: 1
+          },
+          {
+            day: '2026-04-24',
+            capturedAt: 'not-a-date',
+            openIssueCount: 999,
+            repositoryCount: 1
+          }
+        ]
+      },
+      activityRollupsByCompanyId: {
+        'company-1': [
+          {
+            day: '2026-04-12',
+            updatedAt: '2026-04-12T08:00:00.000Z',
+            githubIssuesClosedCount: 2,
+            paperclipPullRequestsCreatedCount: 1
+          },
+          {
+            day: '2026-04-20',
+            updatedAt: 'not-a-date',
+            githubIssuesClosedCount: 99,
+            paperclipPullRequestsCreatedCount: 99
+          }
+        ]
+      }
+    }
+  );
+
+  const metricsData = await harness.getData<{
+    status: string;
+    backlog: {
+      currentOpenIssueCount?: number;
+      history: Array<{ day: string; value: number }>;
+    };
+    githubIssuesClosed: {
+      currentPeriodCount: number;
+    };
+    paperclipPullRequestsCreated: {
+      currentPeriodCount: number;
+    };
+  }>('dashboard.metrics', {
+    companyId: 'company-1'
+  });
+
+  assert.equal(metricsData.status, 'ready');
+  assert.equal(metricsData.backlog.currentOpenIssueCount, 6);
+  assert.equal(metricsData.backlog.history[metricsData.backlog.history.length - 1]?.value, 6);
+  assert.ok(metricsData.backlog.history.every((entry) => entry.value !== 999));
+  assert.equal(metricsData.githubIssuesClosed.currentPeriodCount, 2);
+  assert.equal(metricsData.paperclipPullRequestsCreated.currentPeriodCount, 1);
 });
 
 test('sync.runNow records backlog snapshots and closed-issue KPI activity for the dashboard', async () => {
@@ -2055,6 +2165,42 @@ test('sync.runNow records backlog snapshots and closed-issue KPI activity for th
     assert.equal(metricsData.githubIssuesClosed.currentPeriodCount, 1);
     assert.equal(metricsData.notes.backlogHistoryAvailable, true);
     assert.equal(metricsData.notes.activityHistoryAvailable, true);
+
+    await harness.ctx.state.set(
+      {
+        scopeKind: 'instance',
+        stateKey: 'paperclip-github-plugin-import-registry'
+      },
+      importRegistry.map((entry) =>
+        entry.githubIssueId === 5101
+          ? {
+              ...entry,
+              lastSeenGitHubState: 'open'
+            }
+          : entry
+      )
+    );
+
+    await delay(5);
+
+    const secondSync = await harness.performAction('sync.runNow', {
+      waitForCompletion: true
+    }) as {
+      syncState: {
+        status: string;
+      };
+    };
+
+    assert.equal(secondSync.syncState.status, 'success');
+
+    const updatedCompanyKpis = harness.getState({
+      scopeKind: 'instance',
+      stateKey: 'paperclip-github-plugin-company-kpis'
+    }) as {
+      activityRollupsByCompanyId?: Record<string, Array<{ githubIssuesClosedCount?: number }>>;
+    };
+
+    assert.equal(updatedCompanyKpis.activityRollupsByCompanyId?.['company-1']?.at(-1)?.githubIssuesClosedCount, 2);
   } finally {
     globalThis.fetch = originalFetch;
   }

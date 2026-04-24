@@ -70,7 +70,7 @@ GitHub Sync exposes a dedicated KPI dashboard widget alongside the operational s
 
 Because GitHub alone cannot tell which pull requests came from a Paperclip company, the plugin uses explicit Paperclip attribution for delivery activity. `create_pull_request` automatically records a Paperclip-created PR event, and agents that use `gh` or another non-plugin GitHub client can post pull-request-created events to the plugin webhook so the KPI history stays specific to Paperclip work.
 
-That webhook path matters on authenticated Paperclip deployments today because a current host bug blocks agents from calling plugin tools unless the instance runs in `local_trusted` mode. Those agents can still use `gh` with the propagated `GITHUB_TOKEN`, then call the plugin-owned webhook from the shell after they create a PR. KPI webhook requests are HMAC-signed with that same company GitHub token, so anonymous POSTs are rejected.
+That webhook path matters on authenticated Paperclip deployments today because a current host bug blocks agents from calling plugin tools unless the instance runs in `local_trusted` mode. Those agents can still use `gh` with the propagated `GITHUB_TOKEN`, then call the plugin-owned webhook from the shell after they create a PR. KPI webhook requests instead authenticate with `Authorization: Bearer <PAPERCLIP_API_KEY>`, which the deployment validates through `GET /api/agents/me`, so anonymous POSTs are rejected.
 
 ### Project pull request command center
 

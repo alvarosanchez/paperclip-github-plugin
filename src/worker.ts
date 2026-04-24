@@ -5413,12 +5413,35 @@ function getIsoDayString(value: unknown): string {
   return coerceDate(value).toISOString().slice(0, 10);
 }
 
+function parseDateValue(value: unknown): Date | undefined {
+  if (value instanceof Date && !Number.isNaN(value.getTime())) {
+    return value;
+  }
+
+  if (typeof value === 'string' || typeof value === 'number') {
+    const parsed = new Date(value);
+    if (!Number.isNaN(parsed.getTime())) {
+      return parsed;
+    }
+  }
+
+  return undefined;
+}
+
 function normalizeIsoDayString(value: unknown): string | undefined {
   if (typeof value !== 'string' || !value.trim()) {
     return undefined;
   }
 
-  return getIsoDayString(value);
+  return parseDateValue(value.trim())?.toISOString().slice(0, 10);
+}
+
+function normalizeIsoTimestampString(value: unknown): string | undefined {
+  if (typeof value !== 'string' || !value.trim()) {
+    return undefined;
+  }
+
+  return parseDateValue(value.trim())?.toISOString();
 }
 
 function normalizeCompanyBacklogSnapshot(value: unknown): CompanyBacklogSnapshot | null {
@@ -5428,7 +5451,7 @@ function normalizeCompanyBacklogSnapshot(value: unknown): CompanyBacklogSnapshot
 
   const record = value as Record<string, unknown>;
   const day = normalizeIsoDayString(record.day);
-  const capturedAt = typeof record.capturedAt === 'string' ? coerceDate(record.capturedAt).toISOString() : undefined;
+  const capturedAt = normalizeIsoTimestampString(record.capturedAt);
   const openIssueCount =
     typeof record.openIssueCount === 'number' && record.openIssueCount >= 0
       ? Math.floor(record.openIssueCount)
@@ -5489,7 +5512,7 @@ function normalizeCompanyActivityRollup(value: unknown): CompanyActivityRollup |
 
   const record = value as Record<string, unknown>;
   const day = normalizeIsoDayString(record.day);
-  const updatedAt = typeof record.updatedAt === 'string' ? coerceDate(record.updatedAt).toISOString() : undefined;
+  const updatedAt = normalizeIsoTimestampString(record.updatedAt);
   const githubIssuesClosedCount =
     typeof record.githubIssuesClosedCount === 'number' && record.githubIssuesClosedCount >= 0
       ? Math.floor(record.githubIssuesClosedCount)
@@ -9116,18 +9139,7 @@ async function upsertStatusTransitionCommentAnnotation(
 }
 
 function coerceDate(value: unknown): Date {
-  if (value instanceof Date && !Number.isNaN(value.getTime())) {
-    return value;
-  }
-
-  if (typeof value === 'string' || typeof value === 'number') {
-    const parsed = new Date(value);
-    if (!Number.isNaN(parsed.getTime())) {
-      return parsed;
-    }
-  }
-
-  return new Date();
+  return parseDateValue(value) ?? new Date();
 }
 
 function parsePaperclipIssueLabel(value: unknown, expectedCompanyId?: string): PaperclipIssueLabel | null {
@@ -11755,6 +11767,20 @@ async function handleCompanyMetricWebhook(
 
   const pullRequestNumber = normalizeToolPositiveInteger(payload.pullRequestNumber);
   const pullRequestUrl = normalizeGitHubPullRequestHtmlUrl(normalizeOptionalString(payload.pullRequestUrl));
+  const eventKey = normalizeOptionalString(payload.eventKey);
+  const dedupeKey = buildCompanyMetricEventKey({
+    metric,
+    eventKey,
+    repositoryUrl: repository?.url,
+    pullRequestNumber,
+    pullRequestUrl
+  });
+  if (!dedupeKey) {
+    throw new Error(
+      'Company KPI webhook requires pullRequestUrl, repository plus pullRequestNumber, or eventKey so duplicate deliveries can be ignored.'
+    );
+  }
+
   const recordedMetric = await persistCompanyActivityMetricEvent(
     ctx,
     {
@@ -11762,7 +11788,7 @@ async function handleCompanyMetricWebhook(
       metric,
       count: normalizeToolPositiveInteger(payload.count),
       occurredAt: normalizeOptionalString(payload.occurredAt),
-      eventKey: normalizeOptionalString(payload.eventKey),
+      eventKey,
       repositoryUrl: repository?.url,
       pullRequestNumber,
       pullRequestUrl
@@ -16226,7 +16252,7 @@ async function performSync(
             const recorded = recordCompanyActivityMetricEvent(companyKpiState, {
               companyId: params.companyId,
               metric: 'githubIssuesClosedCount',
-              eventKey: `${params.repositoryUrl}/issues/${params.githubIssueNumber}:${getIsoDayString(params.occurredAt)}`,
+              eventKey: `${params.repositoryUrl}/issues/${params.githubIssueNumber}:${coerceDate(params.occurredAt).toISOString()}`,
               repositoryUrl: params.repositoryUrl,
               occurredAt: params.occurredAt
             });
