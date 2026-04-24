@@ -6767,7 +6767,6 @@ function buildSyncFallbackExecutionStatePatch(params: {
 
 function describeGitHubStatusTransitionReason(params: {
   snapshot: GitHubIssueStatusSnapshot;
-  previousCommentCount?: number;
   hasTrustedNewComment?: boolean;
   maintainerAuthoredImportedIssue?: boolean;
 }): string {
@@ -6844,7 +6843,6 @@ function buildPaperclipIssueStatusTransitionComment(params: {
   nextStatus: PaperclipIssueStatus;
   repository: ParsedRepositoryReference;
   snapshot: GitHubIssueStatusSnapshot;
-  previousCommentCount?: number;
   hasTrustedNewComment?: boolean;
   maintainerAuthoredImportedIssue?: boolean;
 }): {
@@ -6856,13 +6854,11 @@ function buildPaperclipIssueStatusTransitionComment(params: {
     nextStatus,
     repository,
     snapshot,
-    previousCommentCount,
     hasTrustedNewComment,
     maintainerAuthoredImportedIssue
   } = params;
   const reason = describeGitHubStatusTransitionReason({
     snapshot,
-    previousCommentCount,
     hasTrustedNewComment,
     maintainerAuthoredImportedIssue
   });
@@ -6882,7 +6878,6 @@ function buildPaperclipIssueStatusTransitionComment(params: {
 function resolvePaperclipIssueStatus(params: {
   currentStatus: PaperclipIssueStatus;
   snapshot: GitHubIssueStatusSnapshot;
-  previousCommentCount?: number;
   hasTrustedNewComment?: boolean;
   wasImportedThisRun: boolean;
   defaultImportedStatus: PaperclipIssueStatus;
@@ -8188,7 +8183,7 @@ function normalizeGitHubPullRequestCommentCountRecords(value: unknown): GitHubPu
   }
 
   return [...recordsByKey.values()].sort((left, right) => {
-    const repositoryComparison = left.repositoryUrl.localeCompare(right.repositoryUrl);
+    const repositoryComparison = left.repositoryUrl.toLowerCase().localeCompare(right.repositoryUrl.toLowerCase());
     if (repositoryComparison !== 0) {
       return repositoryComparison;
     }
@@ -10941,7 +10936,6 @@ async function synchronizePaperclipIssueStatuses(
       const nextStatus = resolvePaperclipIssueStatus({
         currentStatus: paperclipIssue.status,
         snapshot,
-        previousCommentCount,
         hasTrustedNewComment,
         wasImportedThisRun,
         defaultImportedStatus: advancedSettings.defaultStatus,
@@ -11010,7 +11004,6 @@ async function synchronizePaperclipIssueStatuses(
         nextStatus,
         repository,
         snapshot,
-        previousCommentCount,
         hasTrustedNewComment,
         maintainerAuthoredImportedIssue
       });
