@@ -9666,10 +9666,6 @@ function doesGitHubPullRequestLinkRecordMatchMapping(
   record: GitHubPullRequestLinkRecord,
   mapping: RepositoryMapping
 ): boolean {
-  if (record.data.githubPullRequestState !== 'open') {
-    return false;
-  }
-
   if (record.data.repositoryUrl !== getNormalizedMappingRepositoryUrl(mapping)) {
     return false;
   }
@@ -9711,7 +9707,9 @@ async function listGitHubPullRequestIssueLinksForMapping(
   mapping: RepositoryMapping,
   target?: ResolvedSyncTarget
 ): Promise<GitHubPullRequestLinkRecord[]> {
-  const records = await listGitHubPullRequestLinkRecords(ctx);
+  const records = await listGitHubPullRequestLinkRecords(ctx, {
+    ...(target?.kind === 'issue' && target.issueId ? { paperclipIssueId: target.issueId } : {})
+  });
   const recordsByKey = new Map<string, GitHubPullRequestLinkRecord>();
 
   for (const record of records) {
@@ -11992,6 +11990,7 @@ async function synchronizePaperclipPullRequestIssueStatuses(
 }> {
   if (
     !mapping.companyId ||
+    !mapping.paperclipProjectId ||
     !ctx.issues ||
     typeof ctx.issues.get !== 'function' ||
     typeof ctx.issues.update !== 'function'
@@ -12003,6 +12002,8 @@ async function synchronizePaperclipPullRequestIssueStatuses(
 
   let updatedStatusesCount = 0;
   let completedIssueCount = 0;
+  const mappingCompanyId = mapping.companyId;
+  const mappingProjectId = mapping.paperclipProjectId;
   const totalIssueCount = pullRequestLinks.length;
   const queuedIssueWakeups: Array<{
     assigneeAgentId?: string | null;
@@ -12025,6 +12026,40 @@ async function synchronizePaperclipPullRequestIssueStatuses(
         repositoryUrl: pullRequestRepository.url,
         githubIssueNumber: undefined
       });
+      const pullRequestResponse = await octokit.rest.pulls.get({
+        owner: pullRequestRepository.owner,
+        repo: pullRequestRepository.repo,
+        pull_number: pullRequestLink.data.githubPullRequestNumber,
+        headers: {
+          'X-GitHub-Api-Version': GITHUB_API_VERSION
+        }
+      });
+      const livePullRequestState = getPullRequestApiState({
+        state: pullRequestResponse.data.state,
+        merged: pullRequestResponse.data.merged
+      }) === 'open'
+        ? 'open'
+        : 'closed';
+      if (
+        livePullRequestState !== pullRequestLink.data.githubPullRequestState
+        || pullRequestResponse.data.html_url !== pullRequestLink.data.githubPullRequestUrl
+        || pullRequestResponse.data.title !== pullRequestLink.data.title
+      ) {
+        await upsertGitHubPullRequestLinkRecord(ctx, {
+          companyId: pullRequestLink.data.companyId ?? mappingCompanyId,
+          projectId: pullRequestLink.data.paperclipProjectId ?? mappingProjectId,
+          issueId: pullRequestLink.paperclipIssueId,
+          repositoryUrl: pullRequestRepository.url,
+          pullRequestNumber: pullRequestLink.data.githubPullRequestNumber,
+          pullRequestUrl: pullRequestResponse.data.html_url ?? pullRequestLink.data.githubPullRequestUrl,
+          pullRequestTitle: pullRequestResponse.data.title || pullRequestLink.data.title || `Pull request #${pullRequestLink.data.githubPullRequestNumber}`,
+          pullRequestState: livePullRequestState
+        });
+      }
+      if (livePullRequestState !== 'open') {
+        continue;
+      }
+
       const pullRequest = await getGitHubPullRequestStatusSnapshot(
         octokit,
         pullRequestRepository,

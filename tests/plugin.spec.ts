@@ -5397,6 +5397,24 @@ test('sync.runNow monitors Paperclip issues created from pull requests without c
       projectId: 'project-1',
       pullRequestNumber: 42
     });
+    await harness.ctx.entities.upsert({
+      entityType: 'paperclip-github-plugin.pull-request-link',
+      scopeKind: 'issue',
+      scopeId: created.paperclipIssueId,
+      externalId: 'https://github.com/paperclipai/example-repo/pull/42',
+      title: 'GitHub pull request #42',
+      status: 'closed',
+      data: {
+        companyId: 'company-1',
+        paperclipProjectId: 'project-1',
+        repositoryUrl: 'https://github.com/paperclipai/example-repo',
+        githubPullRequestNumber: 42,
+        githubPullRequestUrl: 'https://github.com/paperclipai/example-repo/pull/42',
+        githubPullRequestState: 'closed',
+        title: 'Fix orphan PR workflow',
+        syncedAt: '2026-04-27T09:30:00.000Z'
+      }
+    });
     await harness.ctx.issues.update(created.paperclipIssueId, { status: 'in_review' }, 'company-1');
 
     const sync = await harness.performAction('sync.runNow', {
@@ -5413,6 +5431,16 @@ test('sync.runNow monitors Paperclip issues created from pull requests without c
     assert.equal(statusTransitionComments.length, 1);
     assert.match(statusTransitionComments[0]?.body ?? '', /from `in review` to `todo`/);
     assert.match(statusTransitionComments[0]?.body ?? '', /unresolved review threads/);
+
+    const pullRequestLinks = await harness.ctx.entities.list({
+      entityType: 'paperclip-github-plugin.pull-request-link',
+      scopeKind: 'issue',
+      scopeId: created.paperclipIssueId
+    });
+    const refreshedLink = pullRequestLinks.find((entry) =>
+      entry.externalId === 'https://github.com/paperclipai/example-repo/pull/42'
+    );
+    assert.equal((refreshedLink?.data as { githubPullRequestState?: unknown } | undefined)?.githubPullRequestState, 'open');
   } finally {
     harness.ctx.issues.createComment = originalCreateComment;
     globalThis.fetch = originalFetch;
