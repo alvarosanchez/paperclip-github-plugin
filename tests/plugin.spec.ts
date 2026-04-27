@@ -5278,6 +5278,175 @@ test('project.pullRequests.createIssue creates and then reuses the linked Paperc
   }
 });
 
+test('sync.runNow monitors Paperclip issues created from pull requests without closing GitHub issues', async () => {
+  const harness = await createProjectPullRequestsHarness();
+  const originalFetch = globalThis.fetch;
+  const originalCreateComment = harness.ctx.issues.createComment;
+  const statusTransitionComments: Array<{ issueId: string; body: string }> = [];
+
+  harness.ctx.issues.createComment = async (issueId, body, companyId) => {
+    statusTransitionComments.push({ issueId, body });
+    return originalCreateComment(issueId, body, companyId);
+  };
+
+  globalThis.fetch = async (input, init) => {
+    const requestUrl = getRequestUrl(input);
+    const requestPathname = getDecodedRequestPathname(input);
+
+    if (requestPathname === '/repos/paperclipai/example-repo/pulls/42') {
+      return jsonResponse({
+        number: 42,
+        title: 'Fix orphan PR workflow',
+        body: 'This PR was created before a GitHub issue existed.',
+        html_url: 'https://github.com/paperclipai/example-repo/pull/42',
+        state: 'open',
+        merged: false
+      });
+    }
+
+    if (requestPathname === '/repos/paperclipai/example-repo/issues') {
+      return jsonResponse([]);
+    }
+
+    if (requestPathname === '/graphql') {
+      const { query, variables } = getGraphqlRequest(init);
+      const pullRequestNumber =
+        typeof variables.pullRequestNumber === 'number' ? variables.pullRequestNumber : undefined;
+
+      if (query.includes('query GitHubRepositoryOpenIssueLinkedPullRequests')) {
+        return graphqlResponse({
+          repository: {
+            issues: {
+              pageInfo: {
+                hasNextPage: false,
+                endCursor: null
+              },
+              nodes: []
+            }
+          }
+        });
+      }
+
+      if (query.includes('query GitHubPullRequestReviewThreads') && pullRequestNumber === 42) {
+        return graphqlResponse({
+          repository: {
+            pullRequest: {
+              reviewThreads: {
+                pageInfo: {
+                  hasNextPage: false,
+                  endCursor: null
+                },
+                nodes: [
+                  {
+                    id: 'PRRT_orphan_42',
+                    isResolved: false,
+                    comments: {
+                      totalCount: 1,
+                      nodes: [
+                        {
+                          id: 'PRRC_orphan_42',
+                          body: 'Please address this before merging.',
+                          author: {
+                            login: 'reviewer'
+                          }
+                        }
+                      ]
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        });
+      }
+
+      if (query.includes('query GitHubPullRequestCiContexts') && pullRequestNumber === 42) {
+        return graphqlResponse({
+          repository: {
+            pullRequest: {
+              mergeable: 'MERGEABLE',
+              mergeStateStatus: 'CLEAN',
+              statusCheckRollup: {
+                contexts: {
+                  pageInfo: {
+                    hasNextPage: false,
+                    endCursor: null
+                  },
+                  nodes: [
+                    {
+                      __typename: 'StatusContext',
+                      state: 'SUCCESS'
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        });
+      }
+    }
+
+    throw new Error(`Unexpected fetch during pull-request issue sync test: ${requestUrl}`);
+  };
+
+  try {
+    const created = await harness.performAction<{
+      paperclipIssueId: string;
+    }>('project.pullRequests.createIssue', {
+      companyId: 'company-1',
+      projectId: 'project-1',
+      pullRequestNumber: 42
+    });
+    await harness.ctx.entities.upsert({
+      entityType: 'paperclip-github-plugin.pull-request-link',
+      scopeKind: 'issue',
+      scopeId: created.paperclipIssueId,
+      externalId: 'https://github.com/paperclipai/example-repo/pull/42',
+      title: 'GitHub pull request #42',
+      status: 'closed',
+      data: {
+        companyId: 'company-1',
+        paperclipProjectId: 'project-1',
+        repositoryUrl: 'https://github.com/paperclipai/example-repo',
+        githubPullRequestNumber: 42,
+        githubPullRequestUrl: 'https://github.com/paperclipai/example-repo/pull/42',
+        githubPullRequestState: 'closed',
+        title: 'Fix orphan PR workflow',
+        syncedAt: '2026-04-27T09:30:00.000Z'
+      }
+    });
+    await harness.ctx.issues.update(created.paperclipIssueId, { status: 'in_review' }, 'company-1');
+
+    const sync = await harness.performAction('sync.runNow', {
+      waitForCompletion: true
+    }) as {
+      syncState: { status: string; syncedIssuesCount?: number };
+    };
+
+    assert.equal(sync.syncState.status, 'success');
+    assert.equal(sync.syncState.syncedIssuesCount, 1);
+
+    const updatedIssue = await harness.ctx.issues.get(created.paperclipIssueId, 'company-1');
+    assert.equal(updatedIssue?.status, 'todo');
+    assert.equal(statusTransitionComments.length, 1);
+    assert.match(statusTransitionComments[0]?.body ?? '', /from `in review` to `todo`/);
+    assert.match(statusTransitionComments[0]?.body ?? '', /unresolved review threads/);
+
+    const pullRequestLinks = await harness.ctx.entities.list({
+      entityType: 'paperclip-github-plugin.pull-request-link',
+      scopeKind: 'issue',
+      scopeId: created.paperclipIssueId
+    });
+    const refreshedLink = pullRequestLinks.find((entry) =>
+      entry.externalId === 'https://github.com/paperclipai/example-repo/pull/42'
+    );
+    assert.equal((refreshedLink?.data as { githubPullRequestState?: unknown } | undefined)?.githubPullRequestState, 'open');
+  } finally {
+    harness.ctx.issues.createComment = originalCreateComment;
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test('project.pullRequests.updateBranch requests a GitHub branch update for behind clean pull requests', async () => {
   const harness = await createProjectPullRequestsHarness();
   const originalFetch = globalThis.fetch;

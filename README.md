@@ -78,6 +78,8 @@ Each mapped project can expose a **Pull Requests** entry in the sidebar that ope
 
 Paperclip issue linkage on the queue prefers the GitHub issue that the pull request closes, so imported GitHub issues and delivery work stay connected in the same project view. If a pull request has no closing-issue-backed link yet, the queue falls back to the Paperclip issue created directly from that pull request and updates the table immediately when that create action returns.
 
+Those pull-request-created Paperclip issues also stay in the scheduled/manual sync loop even when the pull request does not close a GitHub issue. GitHub Sync checks their CI, merge state, and review threads so new failures or unresolved feedback move the Paperclip issue back into active work.
+
 The issue detail panel and sync-created comment annotations also preserve cross-repository linked pull requests, showing those PRs with their real repository path so operators land in the right place on GitHub.
 
 ### Agent workflows built in

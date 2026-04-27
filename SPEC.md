@@ -89,6 +89,7 @@ The plugin MUST persist repository mappings, company-scoped advanced issue defau
 - If the plugin-owned import registry is stale or missing, repeated sync runs MUST repair deduplication by reusing an existing imported Paperclip issue in the mapped project when durable GitHub link metadata or, for legacy issues, the description source link matches the GitHub issue URL.
 - The worker SHOULD persist pull request to Paperclip issue links in a plugin-owned entity so project-scoped queue and detail surfaces can reuse durable links without reparsing issue descriptions.
 - Repeated sync runs MUST continue reconciling imported Paperclip issue statuses against the latest GitHub state.
+- Repeated sync runs MUST also monitor open pull requests that were linked to Paperclip issues through the project Pull Requests page when those pull requests do not close a synced GitHub issue, and MUST reconcile those Paperclip issue statuses from the pull request CI, merge, and review-thread state.
 - When the local Paperclip host API is available, sync-driven Paperclip status transitions SHOULD go through the same issue-update path Paperclip UI uses so timeline activity is recorded for agents and humans.
 - Repeated sync runs MUST continue reconciling imported Paperclip issue labels against the latest mapped GitHub labels, including removing labels that were removed on GitHub.
 - An open GitHub issue without a linked PR that was created by a repository maintainer/admin MUST map to Paperclip `todo` when it is first imported.
