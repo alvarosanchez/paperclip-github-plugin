@@ -2,11 +2,14 @@ import { createRequire } from 'node:module';
 import type { PaperclipPluginManifestV1 } from '@paperclipai/plugin-sdk';
 
 import { GITHUB_AGENT_TOOLS } from './github-agent-tools.ts';
-import { COMPANY_METRIC_WEBHOOK_ENDPOINT_KEY, GITHUB_SYNC_PLUGIN_ID } from './kpi-contract.ts';
+import {
+  COMPANY_METRIC_API_ROUTE_KEY,
+  COMPANY_METRIC_API_ROUTE_PATH,
+  GITHUB_SYNC_PLUGIN_ID
+} from './kpi-contract.ts';
 
 const require = createRequire(import.meta.url);
 const packageJson = require('../package.json') as { version?: unknown };
-const DASHBOARD_WIDGET_CAPABILITY = 'ui.dashboardWidget.register' as unknown as PaperclipPluginManifestV1['capabilities'][number];
 const SCHEDULE_TICK_CRON = '* * * * *';
 const MANIFEST_VERSION =
   process.env.PLUGIN_VERSION?.trim()
@@ -18,6 +21,7 @@ export const manifest: PaperclipPluginManifestV1 = {
   id: GITHUB_SYNC_PLUGIN_ID,
   apiVersion: 1,
   version: MANIFEST_VERSION,
+  minimumHostVersion: '2026.427.0',
   displayName: 'GitHub Sync',
   description: 'Synchronize GitHub issues into Paperclip projects.',
   author: 'Álvaro Sánchez-Mariscal',
@@ -25,7 +29,7 @@ export const manifest: PaperclipPluginManifestV1 = {
   capabilities: [
     'ui.sidebar.register',
     'ui.page.register',
-    DASHBOARD_WIDGET_CAPABILITY,
+    'ui.dashboardWidget.register',
     'ui.detailTab.register',
     'ui.commentAnnotation.register',
     'ui.action.register',
@@ -36,11 +40,12 @@ export const manifest: PaperclipPluginManifestV1 = {
     'issues.read',
     'issues.create',
     'issues.update',
+    'issues.wakeup',
     'issue.comments.read',
     'issue.comments.create',
     'agents.read',
     'jobs.schedule',
-    'webhooks.receive',
+    'api.routes.register',
     'http.outbound',
     'secrets.read-ref',
     'agent.tools.register'
@@ -76,11 +81,13 @@ export const manifest: PaperclipPluginManifestV1 = {
       schedule: SCHEDULE_TICK_CRON
     }
   ],
-  webhooks: [
+  apiRoutes: [
     {
-      endpointKey: COMPANY_METRIC_WEBHOOK_ENDPOINT_KEY,
-      displayName: 'Record Company KPI Event',
-      description: 'Record Paperclip-attributed pull request activity from agent flows that use gh or other non-plugin GitHub clients.'
+      routeKey: COMPANY_METRIC_API_ROUTE_KEY,
+      method: 'POST',
+      path: COMPANY_METRIC_API_ROUTE_PATH,
+      auth: 'agent',
+      capability: 'api.routes.register'
     }
   ],
   tools: GITHUB_AGENT_TOOLS,

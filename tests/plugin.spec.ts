@@ -10,8 +10,8 @@ import { createTestHarness } from '@paperclipai/plugin-sdk/testing';
 
 import manifest from '../src/manifest.ts';
 import {
-  COMPANY_METRIC_WEBHOOK_AUTH_HEADER,
-  COMPANY_METRIC_WEBHOOK_ENDPOINT_KEY,
+  COMPANY_METRIC_API_ROUTE_KEY,
+  COMPANY_METRIC_API_ROUTE_PATH,
   GITHUB_SYNC_PLUGIN_ID
 } from '../src/kpi-contract.ts';
 import { requiresPaperclipBoardAccess } from '../src/paperclip-health.ts';
@@ -25,8 +25,6 @@ import {
 } from '../src/ui/project-bindings.ts';
 
 const TEST_GITHUB_TOKEN = 'ghp_test_token';
-const TEST_PAPERCLIP_API_KEY = 'paperclip_test_agent_jwt';
-const TEST_PAPERCLIP_API_URL = 'https://paperclip.example.test';
 
 let plugin!: typeof import('../src/worker.ts').default;
 let workerImportSerial = 0;
@@ -333,44 +331,36 @@ async function createProjectPullRequestsHarness() {
   return harness;
 }
 
-function setRuntimePaperclipApiBaseUrl(value = TEST_PAPERCLIP_API_URL): () => void {
-  const previousValue = process.env.PAPERCLIP_API_URL;
-  process.env.PAPERCLIP_API_URL = value;
-  return () => {
-    if (previousValue === undefined) {
-      delete process.env.PAPERCLIP_API_URL;
-      return;
-    }
-
-    process.env.PAPERCLIP_API_URL = previousValue;
-  };
-}
-
-async function postCompanyMetricWebhook(
+async function postCompanyMetricApiRoute(
   payload: Record<string, unknown>,
   options: {
-    apiKey?: string;
-    authorization?: string;
-    omitAuthorizationHeader?: boolean;
+    companyId?: string;
+    actorType?: 'agent' | 'user';
   } = {}
-): Promise<void> {
-  assert.equal(typeof plugin.definition.onWebhook, 'function');
-  const rawBody = JSON.stringify(payload);
-  const headers: Record<string, string> = {};
-
-  if (!options.omitAuthorizationHeader) {
-    headers[COMPANY_METRIC_WEBHOOK_AUTH_HEADER] =
-      options.authorization
-      ?? `Bearer ${options.apiKey ?? TEST_PAPERCLIP_API_KEY}`;
+): Promise<Awaited<ReturnType<NonNullable<typeof plugin.definition.onApiRequest>>>> {
+  const onApiRequest = plugin.definition.onApiRequest;
+  if (typeof onApiRequest !== 'function') {
+    throw new Error('Plugin API route handler is not registered.');
   }
+  const actorType = options.actorType ?? 'agent';
 
-  await plugin.definition.onWebhook?.({
-    endpointKey: COMPANY_METRIC_WEBHOOK_ENDPOINT_KEY,
-    headers,
-    rawBody,
-    parsedBody: payload,
-    requestId: `test-webhook-${Math.random().toString(36).slice(2, 10)}`
-  } as Parameters<NonNullable<typeof plugin.definition.onWebhook>>[0]);
+  return await onApiRequest({
+    routeKey: COMPANY_METRIC_API_ROUTE_KEY,
+    method: 'POST',
+    path: COMPANY_METRIC_API_ROUTE_PATH,
+    params: {},
+    query: {},
+    body: payload,
+    companyId: options.companyId ?? 'company-1',
+    actor: {
+      actorType,
+      actorId: actorType === 'agent' ? 'agent-1' : 'user-1',
+      agentId: actorType === 'agent' ? 'agent-1' : null,
+      userId: actorType === 'user' ? 'user-1' : null,
+      runId: actorType === 'agent' ? 'run-1' : null
+    },
+    headers: {}
+  } as Parameters<NonNullable<typeof plugin.definition.onApiRequest>>[0]);
 }
 
 function createProjectFixture(params: {
@@ -1272,9 +1262,9 @@ test('fetchJson reports HTML API responses without throwing a raw JSON parse err
   }
 });
 
-test('manifest declares the GitHub agent tools, webhook, and capabilities', () => {
+test('manifest declares the GitHub agent tools, KPI API route, and capabilities', () => {
   assert.ok(manifest.capabilities.includes('agent.tools.register'));
-  assert.ok(manifest.capabilities.includes('webhooks.receive'));
+  assert.ok(manifest.capabilities.includes('api.routes.register'));
   assert.ok(Array.isArray(manifest.tools));
   assert.deepEqual(
     manifest.tools?.map((tool) => tool.name),
@@ -1299,8 +1289,24 @@ test('manifest declares the GitHub agent tools, webhook, and capabilities', () =
     ]
   );
   assert.deepEqual(
-    manifest.webhooks?.map((webhook) => webhook.endpointKey),
-    [COMPANY_METRIC_WEBHOOK_ENDPOINT_KEY]
+    manifest.apiRoutes?.map((route) => ({
+      routeKey: route.routeKey,
+      method: route.method,
+      path: route.path,
+      auth: route.auth,
+      capability: route.capability,
+      companyResolution: route.companyResolution ?? null
+    })),
+    [
+      {
+        routeKey: COMPANY_METRIC_API_ROUTE_KEY,
+        method: 'POST',
+        path: COMPANY_METRIC_API_ROUTE_PATH,
+        auth: 'agent',
+        capability: 'api.routes.register',
+        companyResolution: null
+      }
+    ]
   );
   assert.match(
     manifest.tools?.find((tool) => tool.name === 'add_issue_comment')?.description ?? '',
@@ -1534,25 +1540,12 @@ test('create_pull_request appends the required AI footer to the pull request bod
   }
 });
 
-test('create_pull_request auto-records Paperclip PR metrics and webhook attribution dedupes duplicate PR events', async () => {
+test('create_pull_request auto-records Paperclip PR metrics and API route attribution dedupes duplicate PR events', async () => {
   const harness = await createGitHubAgentToolHarness();
   const originalFetch = globalThis.fetch;
-  const restorePaperclipApiBaseUrl = setRuntimePaperclipApiBaseUrl();
 
   globalThis.fetch = async (input, init) => {
     const url = new URL(getRequestUrl(input));
-    if (url.origin === TEST_PAPERCLIP_API_URL && url.pathname === '/api/agents/me') {
-      assert.equal(
-        getRequestHeader(input, init, COMPANY_METRIC_WEBHOOK_AUTH_HEADER),
-        `Bearer ${TEST_PAPERCLIP_API_KEY}`
-      );
-      return jsonResponse({
-        id: 'agent-1',
-        companyId: 'company-1',
-        name: 'Test agent'
-      });
-    }
-
     if (url.pathname === '/repos/paperclipai/example-repo/pulls') {
       const requestBody = getJsonRequestBody(init);
       return jsonResponse({
@@ -1586,10 +1579,17 @@ test('create_pull_request auto-records Paperclip PR metrics and webhook attribut
 
     assert.ok(!createResult.error);
 
-    await postCompanyMetricWebhook({
+    const duplicateRouteResponse = await postCompanyMetricApiRoute({
       metric: 'pull_request_created',
       repository: 'paperclipai/example-repo',
       pullRequestNumber: 21
+    });
+    assert.equal(duplicateRouteResponse.status, 200);
+    assert.deepEqual(duplicateRouteResponse.body, {
+      status: 'duplicate',
+      recorded: false,
+      companyId: 'company-1',
+      metric: 'pull_request_created'
     });
 
     const metricsData = await harness.getData<{
@@ -1613,175 +1613,93 @@ test('create_pull_request auto-records Paperclip PR metrics and webhook attribut
     const companyRollups = metricState.activityRollupsByCompanyId?.['company-1'] ?? [];
     assert.equal(companyRollups[companyRollups.length - 1]?.paperclipPullRequestsCreatedCount, 1);
   } finally {
-    restorePaperclipApiBaseUrl();
     globalThis.fetch = originalFetch;
   }
 });
 
-test('company metric webhook rejects unsupported metrics', async () => {
-  await createGitHubAgentToolHarness();
-  const originalFetch = globalThis.fetch;
-  const restorePaperclipApiBaseUrl = setRuntimePaperclipApiBaseUrl();
+test('company metric API route records Paperclip PR metrics from agent-authenticated gh flows', async () => {
+  const harness = await createGitHubAgentToolHarness();
 
-  globalThis.fetch = async (input, init) => {
-    const url = new URL(getRequestUrl(input));
-    if (url.origin === TEST_PAPERCLIP_API_URL && url.pathname === '/api/agents/me') {
-      assert.equal(
-        getRequestHeader(input, init, COMPANY_METRIC_WEBHOOK_AUTH_HEADER),
-        `Bearer ${TEST_PAPERCLIP_API_KEY}`
-      );
-      return jsonResponse({
-        id: 'agent-1',
-        companyId: 'company-1',
-        name: 'Test agent'
-      });
-    }
+  const routeResponse = await postCompanyMetricApiRoute({
+    metric: 'pull_request_created',
+    repository: 'paperclipai/example-repo',
+    pullRequestNumber: 22
+  });
 
-    throw new Error(`Unexpected fetch request: ${url.toString()}`);
-  };
+  assert.equal(routeResponse.status, 201);
+  assert.deepEqual(routeResponse.body, {
+    status: 'recorded',
+    recorded: true,
+    companyId: 'company-1',
+    metric: 'pull_request_created'
+  });
 
-  try {
-    await assert.rejects(
-      postCompanyMetricWebhook({
-        metric: 'pull_request_merged',
-        repository: 'paperclipai/example-repo',
-        pullRequestNumber: 21
-      }),
-      /metric must be "pull_request_created"\./
-    );
-  } finally {
-    restorePaperclipApiBaseUrl();
-    globalThis.fetch = originalFetch;
-  }
+  const metricsData = await harness.getData<{
+    paperclipPullRequestsCreated: {
+      currentPeriodCount: number;
+    };
+  }>('dashboard.metrics', {
+    companyId: 'company-1'
+  });
+
+  assert.equal(metricsData.paperclipPullRequestsCreated.currentPeriodCount, 1);
 });
 
-test('company metric webhook rejects missing authentication headers', async () => {
+test('company metric API route rejects unsupported metrics', async () => {
   await createGitHubAgentToolHarness();
 
   await assert.rejects(
-    postCompanyMetricWebhook(
+    postCompanyMetricApiRoute({
+      metric: 'pull_request_merged',
+      repository: 'paperclipai/example-repo',
+      pullRequestNumber: 21
+    }),
+    /metric must be "pull_request_created"\./
+  );
+});
+
+test('company metric API route rejects events without a dedupe identity', async () => {
+  await createGitHubAgentToolHarness();
+
+  await assert.rejects(
+    postCompanyMetricApiRoute({
+      companyId: 'company-1',
+      metric: 'pull_request_created'
+    }),
+    /require pullRequestUrl, repository plus pullRequestNumber, or eventKey/i
+  );
+});
+
+test('company metric API route rejects body company ids that differ from the authenticated agent company', async () => {
+  await createGitHubAgentToolHarness();
+
+  await assert.rejects(
+    postCompanyMetricApiRoute({
+      companyId: 'company-2',
+      metric: 'pull_request_created',
+      repository: 'paperclipai/example-repo',
+      pullRequestNumber: 21
+    }),
+    /companyId must match the authenticated Paperclip agent company/i
+  );
+});
+
+test('company metric API route rejects non-agent worker dispatch defensively', async () => {
+  await createGitHubAgentToolHarness();
+
+  await assert.rejects(
+    postCompanyMetricApiRoute(
       {
         metric: 'pull_request_created',
         repository: 'paperclipai/example-repo',
         pullRequestNumber: 21
       },
       {
-        omitAuthorizationHeader: true
+        actorType: 'user'
       }
     ),
-    /authorization/
+    /authenticated Paperclip agent/i
   );
-});
-
-test('company metric webhook rejects events without a dedupe identity', async () => {
-  await createGitHubAgentToolHarness();
-  const originalFetch = globalThis.fetch;
-  const restorePaperclipApiBaseUrl = setRuntimePaperclipApiBaseUrl();
-
-  globalThis.fetch = async (input, init) => {
-    const url = new URL(getRequestUrl(input));
-    if (url.origin === TEST_PAPERCLIP_API_URL && url.pathname === '/api/agents/me') {
-      assert.equal(
-        getRequestHeader(input, init, COMPANY_METRIC_WEBHOOK_AUTH_HEADER),
-        `Bearer ${TEST_PAPERCLIP_API_KEY}`
-      );
-      return jsonResponse({
-        id: 'agent-1',
-        companyId: 'company-1',
-        name: 'Test agent'
-      });
-    }
-
-    throw new Error(`Unexpected fetch request: ${url.toString()}`);
-  };
-
-  try {
-    await assert.rejects(
-      postCompanyMetricWebhook({
-        companyId: 'company-1',
-        metric: 'pull_request_created'
-      }),
-      /requires pullRequestUrl, repository plus pullRequestNumber, or eventKey/i
-    );
-  } finally {
-    restorePaperclipApiBaseUrl();
-    globalThis.fetch = originalFetch;
-  }
-});
-
-test('company metric webhook rejects invalid Paperclip API keys', async () => {
-  await createGitHubAgentToolHarness();
-  const originalFetch = globalThis.fetch;
-  const restorePaperclipApiBaseUrl = setRuntimePaperclipApiBaseUrl();
-
-  globalThis.fetch = async (input, init) => {
-    const url = new URL(getRequestUrl(input));
-    if (url.origin === TEST_PAPERCLIP_API_URL && url.pathname === '/api/agents/me') {
-      assert.equal(
-        getRequestHeader(input, init, COMPANY_METRIC_WEBHOOK_AUTH_HEADER),
-        'Bearer invalid-test-token'
-      );
-      return jsonResponse({ error: 'Agent authentication required' }, 401);
-    }
-
-    throw new Error(`Unexpected fetch request: ${url.toString()}`);
-  };
-
-  try {
-    await assert.rejects(
-      postCompanyMetricWebhook(
-        {
-          metric: 'pull_request_created',
-          repository: 'paperclipai/example-repo',
-          pullRequestNumber: 21
-        },
-        {
-          apiKey: 'invalid-test-token'
-        }
-      ),
-      /valid PAPERCLIP_API_KEY bearer token/i
-    );
-  } finally {
-    restorePaperclipApiBaseUrl();
-    globalThis.fetch = originalFetch;
-  }
-});
-
-test('company metric webhook rejects Paperclip API keys for a different company', async () => {
-  await createGitHubAgentToolHarness();
-  const originalFetch = globalThis.fetch;
-  const restorePaperclipApiBaseUrl = setRuntimePaperclipApiBaseUrl();
-
-  globalThis.fetch = async (input, init) => {
-    const url = new URL(getRequestUrl(input));
-    if (url.origin === TEST_PAPERCLIP_API_URL && url.pathname === '/api/agents/me') {
-      assert.equal(
-        getRequestHeader(input, init, COMPANY_METRIC_WEBHOOK_AUTH_HEADER),
-        `Bearer ${TEST_PAPERCLIP_API_KEY}`
-      );
-      return jsonResponse({
-        id: 'agent-2',
-        companyId: 'company-2',
-        name: 'Wrong company agent'
-      });
-    }
-
-    throw new Error(`Unexpected fetch request: ${url.toString()}`);
-  };
-
-  try {
-    await assert.rejects(
-      postCompanyMetricWebhook({
-        metric: 'pull_request_created',
-        repository: 'paperclipai/example-repo',
-        pullRequestNumber: 21
-      }),
-      /belongs to a different company/i
-    );
-  } finally {
-    restorePaperclipApiBaseUrl();
-    globalThis.fetch = originalFetch;
-  }
 });
 
 test('dashboard.metrics summarizes backlog and Paperclip PR history from persisted company KPI state', async () => {
@@ -3360,6 +3278,7 @@ test('manifest exposes GitHub Sync page, sidebar, dashboard widgets, and setting
 
   assert.equal(manifest.id, GITHUB_SYNC_PLUGIN_ID);
   assert.equal(manifest.apiVersion, 1);
+  assert.equal(manifest.minimumHostVersion, '2026.427.0');
   assert.equal(manifest.entrypoints.worker, './dist/worker.js');
   assert.equal(manifest.jobs?.[0]?.jobKey, 'sync.github-issues');
   assert.equal(manifest.jobs?.[0]?.schedule, '* * * * *');
@@ -3370,6 +3289,7 @@ test('manifest exposes GitHub Sync page, sidebar, dashboard widgets, and setting
   assert.ok(manifest.capabilities.includes('ui.action.register'));
   assert.ok(manifest.capabilities.includes('issues.read'));
   assert.ok(manifest.capabilities.includes('issues.update'));
+  assert.ok(manifest.capabilities.includes('issues.wakeup'));
   assert.ok(manifest.capabilities.includes('issue.comments.read'));
   assert.ok(manifest.capabilities.includes('issue.comments.create'));
   assert.ok(manifest.capabilities.includes('agents.read'));
@@ -5269,6 +5189,8 @@ test('project.pullRequests.createIssue creates and then reuses the linked Paperc
 
     assert.ok(createdIssue);
     assert.equal(createdIssue?.projectId, 'project-1');
+    assert.equal(createdIssue?.originKind, 'plugin:paperclip-github-plugin:github-pull-request');
+    assert.equal(createdIssue?.originId, 'https://github.com/paperclipai/example-repo/pull/42');
     assert.match(createdIssue?.description ?? '', /Imported from GitHub pull request \[#42\]/);
     assert.equal(firstResult.alreadyLinked, false);
     assert.equal(secondResult.alreadyLinked, true);
@@ -10165,30 +10087,22 @@ test('worker wakes the assignee when a newly imported maintainer-authored issue 
     }
   });
 
-  const wakeupRequests: Array<{ path: string; body: Record<string, unknown> | null }> = [];
+  const originalRequestWakeup = harness.ctx.issues.requestWakeup.bind(harness.ctx.issues);
+  const wakeupRequests: Array<{
+    issueId: string;
+    companyId: string;
+    options: Parameters<typeof harness.ctx.issues.requestWakeup>[2];
+  }> = [];
+  harness.ctx.issues.requestWakeup = async (issueId, companyId, options) => {
+    wakeupRequests.push({ issueId, companyId, options });
+    return originalRequestWakeup(issueId, companyId, options);
+  };
   const originalFetch = globalThis.fetch;
 
   globalThis.fetch = async (input, init) => {
     const rawUrl = getRequestUrl(input);
     const url = new URL(rawUrl);
     const method = (init?.method ?? 'GET').toUpperCase();
-
-    if (
-      url.origin === 'http://127.0.0.1:63675'
-      && url.pathname === '/api/agents/agent-1/wakeup'
-      && method === 'POST'
-    ) {
-      wakeupRequests.push({
-        path: url.pathname,
-        body: getJsonRequestBody(init)
-      });
-
-      return jsonResponse({
-        id: 'run-1',
-        agentId: 'agent-1',
-        status: 'queued'
-      });
-    }
 
     if (url.pathname === '/repos/paperclipai/example-repo/issues' && ['all', 'open'].includes(url.searchParams.get('state') ?? '')) {
       return jsonResponse([
@@ -10270,15 +10184,16 @@ test('worker wakes the assignee when a newly imported maintainer-authored issue 
     assert.ok(importedIssue);
     assert.equal(importedIssue?.status, 'todo');
     assert.equal(importedIssue?.assigneeAgentId, 'agent-1');
+    assert.equal(importedIssue?.originKind, 'plugin:paperclip-github-plugin:github-issue');
+    assert.equal(importedIssue?.originId, 'https://github.com/paperclipai/example-repo/issues/29');
     assert.equal(wakeupRequests.length, 1);
-    assert.deepEqual(wakeupRequests[0]?.body?.source, 'assignment');
-    assert.deepEqual(wakeupRequests[0]?.body?.triggerDetail, 'system');
-    assert.match(String(wakeupRequests[0]?.body?.reason ?? ''), /imported/i);
-    assert.deepEqual(wakeupRequests[0]?.body?.payload, {
-      issueId: importedIssue?.id,
-      mutation: 'import'
-    });
+    assert.equal(wakeupRequests[0]?.issueId, importedIssue?.id);
+    assert.equal(wakeupRequests[0]?.companyId, 'company-1');
+    assert.match(String(wakeupRequests[0]?.options?.reason ?? ''), /imported/i);
+    assert.equal(wakeupRequests[0]?.options?.contextSource, 'github-sync.import');
+    assert.match(String(wakeupRequests[0]?.options?.idempotencyKey ?? ''), /^github-sync:import:/);
   } finally {
+    harness.ctx.issues.requestWakeup = originalRequestWakeup;
     globalThis.fetch = originalFetch;
   }
 });
@@ -10315,33 +10230,26 @@ test('worker batches imported-issue assignee wakeups with a small concurrency li
   });
 
   const originalFetch = globalThis.fetch;
+  const originalRequestWakeup = harness.ctx.issues.requestWakeup.bind(harness.ctx.issues);
   let inFlightWakeups = 0;
   let maxInFlightWakeups = 0;
   let wakeupCount = 0;
+
+  harness.ctx.issues.requestWakeup = async (issueId, companyId, options) => {
+    wakeupCount += 1;
+    inFlightWakeups += 1;
+    maxInFlightWakeups = Math.max(maxInFlightWakeups, inFlightWakeups);
+
+    await delay(20);
+
+    inFlightWakeups -= 1;
+    return originalRequestWakeup(issueId, companyId, options);
+  };
 
   globalThis.fetch = async (input, init) => {
     const rawUrl = getRequestUrl(input);
     const url = new URL(rawUrl);
     const method = (init?.method ?? 'GET').toUpperCase();
-
-    if (
-      url.origin === 'http://127.0.0.1:63675'
-      && url.pathname === '/api/agents/agent-1/wakeup'
-      && method === 'POST'
-    ) {
-      wakeupCount += 1;
-      inFlightWakeups += 1;
-      maxInFlightWakeups = Math.max(maxInFlightWakeups, inFlightWakeups);
-
-      await delay(20);
-
-      inFlightWakeups -= 1;
-      return jsonResponse({
-        id: `run-${wakeupCount}`,
-        agentId: 'agent-1',
-        status: 'queued'
-      });
-    }
 
     if (url.pathname === '/repos/paperclipai/example-repo/issues' && ['all', 'open'].includes(url.searchParams.get('state') ?? '')) {
       return jsonResponse([
@@ -10440,6 +10348,7 @@ test('worker batches imported-issue assignee wakeups with a small concurrency li
     assert.ok(maxInFlightWakeups > 1);
     assert.ok(maxInFlightWakeups <= 4);
   } finally {
+    harness.ctx.issues.requestWakeup = originalRequestWakeup;
     globalThis.fetch = originalFetch;
   }
 });
@@ -15018,7 +14927,16 @@ test('worker routes sync-driven review handoffs to execution-policy assignees an
   };
 
   const statusPatchRequests: Array<{ issueId: string; body: Record<string, unknown> | null }> = [];
-  const wakeRequests: Array<{ agentId: string; body: Record<string, unknown> | null }> = [];
+  const originalRequestWakeup = harness.ctx.issues.requestWakeup.bind(harness.ctx.issues);
+  const wakeRequests: Array<{
+    issueId: string;
+    companyId: string;
+    options: Parameters<typeof harness.ctx.issues.requestWakeup>[2];
+  }> = [];
+  harness.ctx.issues.requestWakeup = async (issueId, companyId, options) => {
+    wakeRequests.push({ issueId, companyId, options });
+    return originalRequestWakeup(issueId, companyId, options);
+  };
   const originalFetch = globalThis.fetch;
 
   globalThis.fetch = async (input, init) => {
@@ -15055,25 +14973,6 @@ test('worker routes sync-driven review handoffs to execution-policy assignees an
         status: body?.status ?? null,
         assigneeAgentId: body?.assigneeAgentId ?? null,
         assigneeUserId: body?.assigneeUserId ?? null
-      });
-    }
-
-    if (
-      url.origin === 'http://127.0.0.1:63675'
-      && method === 'POST'
-      && url.pathname.startsWith('/api/agents/')
-      && url.pathname.endsWith('/wakeup')
-    ) {
-      const agentId = url.pathname.split('/')[3] ?? '';
-      wakeRequests.push({
-        agentId,
-        body: getJsonRequestBody(init)
-      });
-
-      return jsonResponse({
-        id: `run-${wakeRequests.length}`,
-        agentId,
-        status: 'queued'
       });
     }
 
@@ -15282,29 +15181,15 @@ test('worker routes sync-driven review handoffs to execution-policy assignees an
     assert.equal(statusOnlyPatchRequests.find((request) => request.issueId === changesRequestedIssue.id)?.body?.status, 'in_progress');
     assert.equal(statusOnlyPatchRequests.find((request) => request.issueId === changesRequestedIssue.id)?.body?.assigneeAgentId, 'agent-1');
     assert.deepEqual(
-      wakeRequests.map((request) => request.agentId).sort((left, right) => left.localeCompare(right)),
-      ['agent-1', 'agent-3']
+      wakeRequests.map((request) => request.issueId).sort((left, right) => left.localeCompare(right)),
+      [changesRequestedIssue.id, reviewReadyIssue.id].sort((left, right) => left.localeCompare(right))
     );
-    assert.deepEqual(
-      wakeRequests.find((request) => request.agentId === 'agent-3')?.body?.payload,
-      {
-        issueId: reviewReadyIssue.id,
-        mutation: 'status_transition',
-        previousStatus: 'todo',
-        nextStatus: 'in_review'
-      }
-    );
-    assert.deepEqual(
-      wakeRequests.find((request) => request.agentId === 'agent-1')?.body?.payload,
-      {
-        issueId: changesRequestedIssue.id,
-        mutation: 'status_transition',
-        previousStatus: 'in_review',
-        nextStatus: 'in_progress'
-      }
-    );
+    assert.ok(wakeRequests.every((request) => request.companyId === 'company-1'));
+    assert.ok(wakeRequests.every((request) => request.options?.contextSource === 'github-sync.status_transition'));
+    assert.ok(wakeRequests.every((request) => String(request.options?.reason ?? '').includes('moved an assigned issue')));
   } finally {
     harness.ctx.issues.get = originalGet;
+    harness.ctx.issues.requestWakeup = originalRequestWakeup;
     globalThis.fetch = originalFetch;
   }
 });
@@ -17039,7 +16924,16 @@ test('worker preserves execution-policy pending review state when the local Pape
   };
 
   const patchRequests: Array<{ issueId: string; body: Record<string, unknown> | null }> = [];
-  const wakeRequests: Array<{ agentId: string; body: Record<string, unknown> | null }> = [];
+  const originalRequestWakeup = harness.ctx.issues.requestWakeup.bind(harness.ctx.issues);
+  const wakeRequests: Array<{
+    issueId: string;
+    companyId: string;
+    options: Parameters<typeof harness.ctx.issues.requestWakeup>[2];
+  }> = [];
+  harness.ctx.issues.requestWakeup = async (issueId, companyId, options) => {
+    wakeRequests.push({ issueId, companyId, options });
+    return originalRequestWakeup(issueId, companyId, options);
+  };
   const loginPage = '<!doctype html><html><body><h1>Sign in</h1></body></html>';
   const originalFetch = globalThis.fetch;
 
@@ -17053,21 +16947,6 @@ test('worker preserves execution-policy pending review state when the local Pape
         body: getJsonRequestBody(init)
       });
       return htmlResponse(loginPage);
-    }
-
-    if (
-      url.pathname === '/api/agents/agent-2/wakeup'
-      && (init?.method ?? 'GET').toUpperCase() === 'POST'
-    ) {
-      wakeRequests.push({
-        agentId: 'agent-2',
-        body: getJsonRequestBody(init)
-      });
-      return jsonResponse({
-        id: 'run-review-fallback',
-        agentId: 'agent-2',
-        status: 'queued'
-      });
     }
 
     if (url.pathname === '/repos/paperclipai/example-repo/issues' && ['all', 'open'].includes(url.searchParams.get('state') ?? '')) {
@@ -17268,7 +17147,9 @@ test('worker preserves execution-policy pending review state when the local Pape
       lastDecisionOutcome: null
     });
     assert.equal(wakeRequests.length, 1);
-    assert.equal(wakeRequests[0]?.agentId, 'agent-2');
+    assert.equal(wakeRequests[0]?.issueId, importedIssue.id);
+    assert.equal(wakeRequests[0]?.companyId, 'company-1');
+    assert.equal(wakeRequests[0]?.options?.contextSource, 'github-sync.status_transition');
 
     const updatedIssue = await harness.ctx.issues.get(importedIssue.id, 'company-1') as Record<string, any> | null;
     assert.equal(updatedIssue?.status, 'in_review');
@@ -17285,6 +17166,7 @@ test('worker preserves execution-policy pending review state when the local Pape
       lastDecisionOutcome: null
     });
   } finally {
+    harness.ctx.issues.requestWakeup = originalRequestWakeup;
     globalThis.fetch = originalFetch;
   }
 });
@@ -17407,7 +17289,16 @@ test('worker preserves execution-policy changes-requested state when the local P
   };
 
   const patchRequests: Array<{ issueId: string; body: Record<string, unknown> | null }> = [];
-  const wakeRequests: Array<{ agentId: string; body: Record<string, unknown> | null }> = [];
+  const originalRequestWakeup = harness.ctx.issues.requestWakeup.bind(harness.ctx.issues);
+  const wakeRequests: Array<{
+    issueId: string;
+    companyId: string;
+    options: Parameters<typeof harness.ctx.issues.requestWakeup>[2];
+  }> = [];
+  harness.ctx.issues.requestWakeup = async (issueId, companyId, options) => {
+    wakeRequests.push({ issueId, companyId, options });
+    return originalRequestWakeup(issueId, companyId, options);
+  };
   const loginPage = '<!doctype html><html><body><h1>Sign in</h1></body></html>';
   const originalFetch = globalThis.fetch;
 
@@ -17421,21 +17312,6 @@ test('worker preserves execution-policy changes-requested state when the local P
         body: getJsonRequestBody(init)
       });
       return htmlResponse(loginPage);
-    }
-
-    if (
-      url.pathname === '/api/agents/agent-1/wakeup'
-      && (init?.method ?? 'GET').toUpperCase() === 'POST'
-    ) {
-      wakeRequests.push({
-        agentId: 'agent-1',
-        body: getJsonRequestBody(init)
-      });
-      return jsonResponse({
-        id: 'run-changes-fallback',
-        agentId: 'agent-1',
-        status: 'queued'
-      });
     }
 
     if (url.pathname === '/repos/paperclipai/example-repo/issues' && ['all', 'open'].includes(url.searchParams.get('state') ?? '')) {
@@ -17632,7 +17508,9 @@ test('worker preserves execution-policy changes-requested state when the local P
       lastDecisionOutcome: 'changes_requested'
     });
     assert.equal(wakeRequests.length, 1);
-    assert.equal(wakeRequests[0]?.agentId, 'agent-1');
+    assert.equal(wakeRequests[0]?.issueId, importedIssue.id);
+    assert.equal(wakeRequests[0]?.companyId, 'company-1');
+    assert.equal(wakeRequests[0]?.options?.contextSource, 'github-sync.status_transition');
 
     const updatedIssue = await harness.ctx.issues.get(importedIssue.id, 'company-1') as Record<string, any> | null;
     assert.equal(updatedIssue?.status, 'in_progress');
@@ -17649,6 +17527,7 @@ test('worker preserves execution-policy changes-requested state when the local P
       lastDecisionOutcome: 'changes_requested'
     });
   } finally {
+    harness.ctx.issues.requestWakeup = originalRequestWakeup;
     globalThis.fetch = originalFetch;
   }
 });

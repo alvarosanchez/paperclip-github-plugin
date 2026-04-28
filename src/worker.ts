@@ -10,7 +10,8 @@ import {
   type Agent,
   type Issue,
   type IssueComment,
-  type PluginWebhookInput,
+  type PluginApiRequestInput,
+  type PluginApiResponse,
   type ToolResult,
   type ToolRunContext
 } from '@paperclipai/plugin-sdk';
@@ -18,10 +19,13 @@ import {
 import { getGitHubAgentToolDeclaration } from './github-agent-tools.ts';
 import { parseRepositoryReference, type ParsedRepositoryReference } from './github-repo.ts';
 import {
-  COMPANY_METRIC_WEBHOOK_AUTH_HEADER,
-  COMPANY_METRIC_WEBHOOK_ENDPOINT_KEY,
+  COMPANY_METRIC_API_ROUTE_KEY,
+  GITHUB_SYNC_PLUGIN_ID,
 } from './kpi-contract.ts';
 import { normalizePaperclipHealthResponse, requiresPaperclipBoardAccess } from './paperclip-health.ts';
+
+const GITHUB_ISSUE_ORIGIN_KIND = `plugin:${GITHUB_SYNC_PLUGIN_ID}:github-issue` as const;
+const GITHUB_PULL_REQUEST_ORIGIN_KIND = `plugin:${GITHUB_SYNC_PLUGIN_ID}:github-pull-request` as const;
 
 const SETTINGS_SCOPE = {
   scopeKind: 'instance' as const,
@@ -9978,10 +9982,6 @@ function getPaperclipHealthEndpoint(baseUrl: string): string {
   return new URL('/api/health', baseUrl).toString();
 }
 
-function getPaperclipCurrentAgentEndpoint(baseUrl: string): string {
-  return new URL('/api/agents/me', baseUrl).toString();
-}
-
 function getPaperclipAgentWakeupEndpoint(baseUrl: string, agentId: string): string {
   return new URL(`/api/agents/${agentId}/wakeup`, baseUrl).toString();
 }
@@ -10063,7 +10063,43 @@ async function wakePaperclipIssueAssignee(
     nextStatus?: PaperclipIssueStatus;
   }
 ): Promise<void> {
-  if (!params.assigneeAgentId || !params.paperclipApiBaseUrl) {
+  if (!params.assigneeAgentId) {
+    return;
+  }
+
+  if (ctx.issues && typeof ctx.issues.requestWakeup === 'function' && params.companyId) {
+    try {
+      await ctx.issues.requestWakeup(params.paperclipIssueId, params.companyId, {
+        reason: params.reason,
+        contextSource: `github-sync.${params.mutation}`,
+        ...(params.mutation === 'import'
+          ? { idempotencyKey: ['github-sync', params.mutation, params.paperclipIssueId].join(':') }
+          : {})
+      });
+      return;
+    } catch (error) {
+      if (!params.paperclipApiBaseUrl) {
+        ctx.logger.warn('GitHub sync could not wake the assignee for a Paperclip issue through the SDK.', {
+          issueId: params.paperclipIssueId,
+          agentId: params.assigneeAgentId,
+          companyId: params.companyId,
+          mutation: params.mutation,
+          error: error instanceof Error ? error.message : String(error)
+        });
+        return;
+      }
+
+      ctx.logger.warn('GitHub sync could not wake the assignee through the SDK. Falling back to the local Paperclip API.', {
+        issueId: params.paperclipIssueId,
+        agentId: params.assigneeAgentId,
+        companyId: params.companyId,
+        mutation: params.mutation,
+        error: error instanceof Error ? error.message : String(error)
+      });
+    }
+  }
+
+  if (!params.paperclipApiBaseUrl) {
     return;
   }
 
@@ -11391,6 +11427,8 @@ async function createPaperclipIssue(
     projectId: mapping.paperclipProjectId,
     title,
     ...(description ? { description } : {}),
+    originKind: GITHUB_ISSUE_ORIGIN_KIND,
+    originId: normalizeGitHubIssueHtmlUrl(issue.htmlUrl) ?? issue.htmlUrl,
     ...(defaultAssignee?.kind === 'agent'
       ? { assigneeAgentId: defaultAssignee.id }
       : defaultAssignee?.kind === 'user'
@@ -12590,215 +12628,47 @@ async function persistCompanyActivityMetricEvent(
   };
 }
 
-function parseWebhookPayloadRecord(input: PluginWebhookInput): Record<string, unknown> {
-  if (input.parsedBody && typeof input.parsedBody === 'object' && !Array.isArray(input.parsedBody)) {
-    return input.parsedBody as Record<string, unknown>;
+function parseCompanyMetricApiRouteBody(input: PluginApiRequestInput): Record<string, unknown> {
+  if (!input.body || typeof input.body !== 'object' || Array.isArray(input.body)) {
+    throw new Error('Company KPI route body must be a JSON object.');
   }
 
-  const rawBody = input.rawBody.trim();
-  if (!rawBody) {
-    throw new Error('Webhook body must be a JSON object.');
-  }
-
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(rawBody);
-  } catch {
-    throw new Error('Webhook body must be valid JSON.');
-  }
-
-  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-    throw new Error('Webhook body must be a JSON object.');
-  }
-
-  return parsed as Record<string, unknown>;
+  return input.body as Record<string, unknown>;
 }
 
-async function resolveCompanyIdForCompanyMetricEvent(
+async function handleCompanyMetricApiRoute(
   ctx: PluginSetupContext,
-  params: {
-    companyId?: unknown;
-    repositoryUrl?: string;
-  }
-): Promise<string | undefined> {
-  const requestedCompanyId = normalizeCompanyId(params.companyId);
-  if (requestedCompanyId) {
-    return requestedCompanyId;
-  }
-
-  if (!params.repositoryUrl) {
-    return undefined;
-  }
-
-  const settings = normalizeSettings(await ctx.state.get(SETTINGS_SCOPE));
-  const matchingCompanyIds = [
-    ...new Set(
-      settings.mappings
-        .filter((mapping) => getNormalizedMappingRepositoryUrl(mapping) === params.repositoryUrl)
-        .map((mapping) => normalizeCompanyId(mapping.companyId))
-        .filter((companyId): companyId is string => Boolean(companyId))
-    )
-  ];
-
-  return matchingCompanyIds.length === 1 ? matchingCompanyIds[0] : undefined;
-}
-
-function getWebhookHeaderValue(
-  headers: PluginWebhookInput['headers'],
-  name: string
-): string | undefined {
-  const normalizedName = name.trim().toLowerCase();
-
-  for (const [headerName, headerValue] of Object.entries(headers)) {
-    if (headerName.trim().toLowerCase() !== normalizedName) {
-      continue;
-    }
-
-    if (typeof headerValue === 'string') {
-      const trimmedValue = headerValue.trim();
-      return trimmedValue || undefined;
-    }
-
-    if (!Array.isArray(headerValue)) {
-      continue;
-    }
-
-    for (const entry of headerValue) {
-      if (typeof entry !== 'string') {
-        continue;
+  input: PluginApiRequestInput
+): Promise<PluginApiResponse> {
+  if (input.routeKey !== COMPANY_METRIC_API_ROUTE_KEY) {
+    return {
+      status: 404,
+      body: {
+        error: `Unsupported plugin API route: ${input.routeKey}.`
       }
-
-      const trimmedValue = entry.trim();
-      if (trimmedValue) {
-        return trimmedValue;
-      }
-    }
+    };
   }
 
-  return undefined;
-}
-
-function normalizeCompanyMetricWebhookBearerToken(value: string | undefined): string | undefined {
-  if (!value) {
-    return undefined;
+  if (input.actor.actorType !== 'agent') {
+    throw new Error('Company KPI metric events must be recorded by an authenticated Paperclip agent.');
   }
 
-  const trimmedValue = value.trim();
-  if (!trimmedValue) {
-    return undefined;
+  const companyId = normalizeCompanyId(input.companyId);
+  if (!companyId) {
+    throw new Error('Company KPI metric events require the host to provide the authenticated agent company.');
   }
 
-  const bearerMatch = trimmedValue.match(/^Bearer\s+(.+)$/i);
-  if (!bearerMatch) {
-    return undefined;
+  const payload = parseCompanyMetricApiRouteBody(input);
+  const requestedCompanyId = normalizeCompanyId(payload.companyId);
+  if (requestedCompanyId && requestedCompanyId !== companyId) {
+    throw new Error('companyId must match the authenticated Paperclip agent company.');
   }
 
-  const token = bearerMatch[1]?.trim();
-  return token || undefined;
-}
-
-function normalizePaperclipCurrentAgentRecord(value: unknown): { id: string; companyId: string } | null {
-  if (!value || typeof value !== 'object') {
-    return null;
-  }
-
-  const record = value as Record<string, unknown>;
-  const id = normalizeOptionalString(record.id);
-  const companyId = normalizeCompanyId(record.companyId);
-
-  return id && companyId
-    ? {
-        id,
-        companyId
-      }
-    : null;
-}
-
-async function readCompanyMetricWebhookCurrentAgent(
-  paperclipApiBaseUrl: string,
-  bearerToken: string
-): Promise<{ id: string; companyId: string }> {
-  const response = await fetchPaperclipApi(getPaperclipCurrentAgentEndpoint(paperclipApiBaseUrl), {
-    method: 'GET',
-    headers: {
-      accept: 'application/json',
-      authorization: `Bearer ${bearerToken}`
-    }
-  });
-
-  const payloadResult = await readPaperclipApiJsonResponse<unknown>(response, {
-    operationLabel: 'current agent'
-  });
-  if (payloadResult.failure) {
-    if (payloadResult.failure.requiresAuthentication) {
-      throw new Error('Company KPI webhook Authorization must be a valid PAPERCLIP_API_KEY bearer token.');
-    }
-
-    const detail = payloadResult.failure.errorMessage
-      ? ` ${payloadResult.failure.errorMessage}`
-      : '';
-    throw new Error(`Could not validate the KPI webhook Paperclip API key.${detail}`);
-  }
-
-  const agent = normalizePaperclipCurrentAgentRecord(payloadResult.data);
-  if (!agent) {
-    throw new Error('Paperclip did not return a usable current agent record while validating the KPI webhook caller.');
-  }
-
-  return agent;
-}
-
-async function assertCompanyMetricWebhookAuthenticated(
-  ctx: PluginSetupContext,
-  input: PluginWebhookInput,
-  companyId: string
-): Promise<void> {
-  const rawAuthorization = getWebhookHeaderValue(input.headers, COMPANY_METRIC_WEBHOOK_AUTH_HEADER);
-  const bearerToken = normalizeCompanyMetricWebhookBearerToken(rawAuthorization);
-  if (!bearerToken) {
-    throw new Error(
-      `Missing or invalid ${COMPANY_METRIC_WEBHOOK_AUTH_HEADER} header. Use Bearer <PAPERCLIP_API_KEY>.`
-    );
-  }
-
-  const settings = normalizeSettings(await ctx.state.get(SETTINGS_SCOPE));
-  const config = await getResolvedConfig(ctx);
-  const paperclipApiBaseUrl = getConfiguredPaperclipApiBaseUrl(settings, config, companyId);
-  if (!paperclipApiBaseUrl) {
-    throw new Error(
-      'A trusted Paperclip API origin is required to validate PAPERCLIP_API_KEY. Set PAPERCLIP_API_URL or save the Paperclip host origin before sending KPI webhook events.'
-    );
-  }
-
-  const currentAgent = await readCompanyMetricWebhookCurrentAgent(paperclipApiBaseUrl, bearerToken);
-  if (normalizeCompanyId(currentAgent.companyId) !== companyId) {
-    throw new Error('Company KPI webhook Paperclip API key belongs to a different company.');
-  }
-}
-async function handleCompanyMetricWebhook(
-  ctx: PluginSetupContext,
-  input: PluginWebhookInput
-): Promise<void> {
-  if (input.endpointKey !== COMPANY_METRIC_WEBHOOK_ENDPOINT_KEY) {
-    throw new Error(`Unsupported webhook endpoint: ${input.endpointKey}.`);
-  }
-
-  const payload = parseWebhookPayloadRecord(input);
   const repositoryInput = normalizeOptionalString(payload.repository);
   const repository = repositoryInput ? parseRepositoryReference(repositoryInput) : null;
   if (repositoryInput && !repository) {
     throw new Error('repository must be owner/repo or https://github.com/owner/repo.');
   }
-
-  const companyId = await resolveCompanyIdForCompanyMetricEvent(ctx, {
-    companyId: payload.companyId,
-    repositoryUrl: repository?.url
-  });
-  if (!companyId) {
-    throw new Error('companyId is required unless repository maps to exactly one company.');
-  }
-
-  await assertCompanyMetricWebhookAuthenticated(ctx, input, companyId);
 
   const metric = normalizeCompanyActivityMetricInputValue(payload.metric);
   if (!metric) {
@@ -12817,7 +12687,7 @@ async function handleCompanyMetricWebhook(
   });
   if (!dedupeKey) {
     throw new Error(
-      'Company KPI webhook requires pullRequestUrl, repository plus pullRequestNumber, or eventKey so duplicate deliveries can be ignored.'
+      'Company KPI metric events require pullRequestUrl, repository plus pullRequestNumber, or eventKey so duplicate deliveries can be ignored.'
     );
   }
 
@@ -12840,18 +12710,29 @@ async function handleCompanyMetricWebhook(
 
   ctx.logger.info(
     recordedMetric.recorded
-      ? 'GitHub Sync recorded a company KPI webhook event.'
-      : 'GitHub Sync ignored a duplicate company KPI webhook event.',
+      ? 'GitHub Sync recorded a company KPI API route event.'
+      : 'GitHub Sync ignored a duplicate company KPI API route event.',
     {
-      endpointKey: input.endpointKey,
+      routeKey: input.routeKey,
       companyId,
       metric,
       repositoryUrl: repository?.url,
       pullRequestNumber,
       pullRequestUrl,
-      requestId: input.requestId
+      agentId: input.actor.agentId ?? null,
+      runId: input.actor.runId ?? null
     }
   );
+
+  return {
+    status: recordedMetric.recorded ? 201 : 200,
+    body: {
+      status: recordedMetric.recorded ? 'recorded' : 'duplicate',
+      recorded: recordedMetric.recorded,
+      companyId,
+      metric: 'pull_request_created'
+    }
+  };
 }
 
 async function createGitHubToolOctokit(ctx: PluginSetupContext, companyId?: string): Promise<Octokit> {
@@ -16038,6 +15919,8 @@ async function createProjectPullRequestPaperclipIssue(
     companyId: scope.companyId,
     projectId: scope.projectId,
     title: requestedTitle,
+    originKind: GITHUB_PULL_REQUEST_ORIGIN_KIND,
+    originId: pullRequestUrl,
     description: buildPaperclipIssueDescriptionFromPullRequest({
       repository: scope.repository,
       pullRequestNumber,
@@ -19159,12 +19042,12 @@ const plugin = definePlugin({
       }
     });
   },
-  async onWebhook(input) {
+  async onApiRequest(input) {
     if (!pluginRuntimeContext) {
-      throw new Error('GitHub Sync worker is not ready to handle webhooks yet.');
+      throw new Error('GitHub Sync worker is not ready to handle API routes yet.');
     }
 
-    await handleCompanyMetricWebhook(pluginRuntimeContext, input);
+    return handleCompanyMetricApiRoute(pluginRuntimeContext, input);
   },
   async onShutdown() {
     pluginRuntimeContext = null;
