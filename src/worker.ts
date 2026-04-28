@@ -7384,11 +7384,16 @@ function resolvePaperclipIssueExecutorAssignee(
 }
 
 function resolveSyncTransitionAssignee(params: {
+  currentStatus: PaperclipIssueStatus;
   nextStatus: PaperclipIssueStatus;
   syncContext: PaperclipIssueSyncContext;
   advancedSettings: GitHubSyncAdvancedSettings;
 }): SyncTransitionAssigneeResolution | null {
-  const { nextStatus, syncContext, advancedSettings } = params;
+  const { currentStatus, nextStatus, syncContext, advancedSettings } = params;
+
+  if (isHealthyMaintainerWaitTransition({ currentStatus, nextStatus, syncContext })) {
+    return null;
+  }
 
   if (nextStatus === 'in_review') {
     return resolvePaperclipIssueReviewAssignee(syncContext, advancedSettings);
@@ -7399,6 +7404,19 @@ function resolveSyncTransitionAssignee(params: {
   }
 
   return null;
+}
+
+function isHealthyMaintainerWaitTransition(params: {
+  currentStatus: PaperclipIssueStatus;
+  nextStatus: PaperclipIssueStatus;
+  syncContext: PaperclipIssueSyncContext;
+}): boolean {
+  const { currentStatus, nextStatus, syncContext } = params;
+
+  return nextStatus === 'in_review'
+    && (currentStatus === 'done' || currentStatus === 'in_review')
+    && syncContext.executionState === null
+    && syncContext.executionPolicy !== null;
 }
 
 function doesPaperclipIssueAssigneeMatch(
@@ -11158,6 +11176,7 @@ async function updatePaperclipIssueState(
     nextStatus: PaperclipIssueStatus;
     nextAssignee?: PaperclipIssueAssigneePrincipal | null;
     clearAssignee?: boolean;
+    clearExecutionPolicy?: boolean;
     transitionComment: string;
     transitionCommentAnnotation?: StoredStatusTransitionCommentAnnotation;
     paperclipApiBaseUrl?: string;
@@ -11171,6 +11190,7 @@ async function updatePaperclipIssueState(
     nextStatus,
     nextAssignee,
     clearAssignee,
+    clearExecutionPolicy,
     transitionComment,
     transitionCommentAnnotation,
     paperclipApiBaseUrl
@@ -11185,7 +11205,8 @@ async function updatePaperclipIssueState(
   });
   const issuePatch: Record<string, unknown> = {
     status: nextStatus,
-    ...(syncExecutionStatePatch === null ? { executionState: null } : {})
+    ...(syncExecutionStatePatch === null ? { executionState: null } : {}),
+    ...(clearExecutionPolicy ? { executionPolicy: null, executionState: null } : {})
   };
 
   if (nextAssignee) {
@@ -11868,14 +11889,20 @@ async function synchronizePaperclipIssueStatuses(
         maintainerAuthoredImportedIssue,
         hasExecutorHandoffTarget: Boolean(executorTransitionAssignee)
       });
+      const shouldPreserveMaintainerWaitRouting = isHealthyMaintainerWaitTransition({
+        currentStatus: paperclipIssue.status,
+        nextStatus,
+        syncContext: paperclipIssueSyncContext
+      });
       const nextTransitionAssignee = resolveSyncTransitionAssignee({
+        currentStatus: paperclipIssue.status,
         nextStatus,
         syncContext: paperclipIssueSyncContext,
         advancedSettings
       });
       const shouldClearTransitionAssignee =
         nextStatus === 'in_review'
-        && nextTransitionAssignee === null
+        && (nextTransitionAssignee === null || shouldPreserveMaintainerWaitRouting)
         && paperclipIssueSyncContext.assignee !== null;
       const nextAssigneeChanged = nextTransitionAssignee
         ? !doesPaperclipIssueAssigneeMatch(paperclipIssueSyncContext.assignee, nextTransitionAssignee.principal)
@@ -11910,6 +11937,7 @@ async function synchronizePaperclipIssueStatuses(
             syncContext: paperclipIssueSyncContext,
             nextStatus,
             clearAssignee: true,
+            ...(shouldPreserveMaintainerWaitRouting ? { clearExecutionPolicy: true } : {}),
             transitionComment: '',
             paperclipApiBaseUrl
           });
@@ -11948,6 +11976,7 @@ async function synchronizePaperclipIssueStatuses(
         nextStatus,
         ...(nextTransitionAssignee ? { nextAssignee: nextTransitionAssignee.principal } : {}),
         ...(shouldClearTransitionAssignee ? { clearAssignee: true } : {}),
+        ...(shouldPreserveMaintainerWaitRouting ? { clearExecutionPolicy: true } : {}),
         transitionComment: transitionComment.body,
         transitionCommentAnnotation: transitionComment.annotation,
         paperclipApiBaseUrl
@@ -12119,14 +12148,20 @@ async function synchronizePaperclipPullRequestIssueStatuses(
         pullRequest,
         hasExecutorHandoffTarget: Boolean(executorTransitionAssignee)
       });
+      const shouldPreserveMaintainerWaitRouting = isHealthyMaintainerWaitTransition({
+        currentStatus: paperclipIssue.status,
+        nextStatus,
+        syncContext: paperclipIssueSyncContext
+      });
       const nextTransitionAssignee = resolveSyncTransitionAssignee({
+        currentStatus: paperclipIssue.status,
         nextStatus,
         syncContext: paperclipIssueSyncContext,
         advancedSettings
       });
       const shouldClearTransitionAssignee =
         nextStatus === 'in_review'
-        && nextTransitionAssignee === null
+        && (nextTransitionAssignee === null || shouldPreserveMaintainerWaitRouting)
         && paperclipIssueSyncContext.assignee !== null;
       const nextAssigneeChanged = nextTransitionAssignee
         ? !doesPaperclipIssueAssigneeMatch(paperclipIssueSyncContext.assignee, nextTransitionAssignee.principal)
@@ -12151,6 +12186,7 @@ async function synchronizePaperclipPullRequestIssueStatuses(
             syncContext: paperclipIssueSyncContext,
             nextStatus,
             clearAssignee: true,
+            ...(shouldPreserveMaintainerWaitRouting ? { clearExecutionPolicy: true } : {}),
             transitionComment: '',
             paperclipApiBaseUrl
           });
@@ -12177,6 +12213,7 @@ async function synchronizePaperclipPullRequestIssueStatuses(
         nextStatus,
         ...(nextTransitionAssignee ? { nextAssignee: nextTransitionAssignee.principal } : {}),
         ...(shouldClearTransitionAssignee ? { clearAssignee: true } : {}),
+        ...(shouldPreserveMaintainerWaitRouting ? { clearExecutionPolicy: true } : {}),
         transitionComment,
         paperclipApiBaseUrl
       });
@@ -18554,6 +18591,12 @@ export function shouldStartWorkerHost(moduleUrl: string, entry = process.argv[1]
     return resolve(entry) === resolve(modulePath);
   }
 }
+
+export const __testing = {
+  buildSyncFallbackExecutionStatePatch,
+  isHealthyMaintainerWaitTransition,
+  resolveSyncTransitionAssignee
+};
 
 const plugin = definePlugin({
   async setup(ctx) {
