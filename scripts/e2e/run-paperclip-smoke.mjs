@@ -507,6 +507,8 @@ async function main() {
   log('Installed local paperclip-github-plugin plugin.');
 
   const seededIssue = await ensureSeedIssueWithGitHubMetadata(company, seededProject);
+  const health = await fetchJson(new URL('/api/health', baseUrl).toString());
+  const isAuthenticatedDeployment = String(health?.deploymentMode ?? '').toLowerCase() === 'authenticated';
 
   const { chromium } = await import('playwright');
   const browser = await chromium.launch({ headless: true });
@@ -536,7 +538,12 @@ async function main() {
     await page.getByRole('heading', { name: 'GitHub Sync' }).waitFor({ timeout: 120000 });
     await page.getByText('GitHub Sync settings', { exact: true }).waitFor({ timeout: 120000 });
     await page.getByRole('heading', { name: 'GitHub access', exact: true }).waitFor({ timeout: 120000 });
-    await page.getByRole('heading', { name: 'Paperclip board access', exact: true }).waitFor({ timeout: 120000 });
+    const boardAccessHeading = page.getByRole('heading', { name: 'Paperclip board access', exact: true });
+    if (isAuthenticatedDeployment) {
+      await boardAccessHeading.waitFor({ timeout: 120000 });
+    } else if (await boardAccessHeading.count() > 0) {
+      throw new Error('Paperclip board access settings should stay hidden outside authenticated deployments.');
+    }
     await page.getByRole('heading', { name: 'Repositories', exact: true }).waitFor({ timeout: 120000 });
     await page.getByRole('heading', { name: 'Sync', exact: true }).waitFor({ timeout: 120000 });
 

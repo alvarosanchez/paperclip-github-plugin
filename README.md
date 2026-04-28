@@ -89,7 +89,7 @@ Paperclip agents can search GitHub for duplicates, read and update issues, post 
 ## Requirements
 
 - Node.js 20+
-- a Paperclip host on `2026.427.0` or newer with plugin installation enabled
+- a Paperclip host with plugin installation enabled. GitHub Sync is built and tested against Paperclip `2026.427.0`; the manifest relies on explicit capabilities instead of a strict host-version gate because current latest/development hosts can report `0.0.0` during plugin upgrade.
 - a GitHub token with API access to the repositories you want to sync
 
 ## Install from npm
@@ -248,6 +248,7 @@ Because the KPI attribution endpoint is a native plugin JSON route rather than a
 
 ## Troubleshooting
 
+- If an older GitHub Sync build fails upgrade with `requires host version 2026.427.0 or newer, but this server is running 0.0.0`, upgrade to a build that removes the strict manifest host-version gate. The host is reporting a development-version sentinel, so the plugin now relies on declared capabilities and runtime fallbacks instead.
 - If setup is reported as incomplete, confirm that a GitHub token has been saved or that `${PAPERCLIP_HOME:-~/.paperclip}/plugins/github-sync/config.json` contains `githubToken`, and make sure at least one mapping has a created Paperclip project.
 - If Paperclip says board access is required, open plugin settings inside the affected company and complete the Paperclip board access flow before retrying sync.
 - If GitHub Sync agent tools fail with `403 {"error":"Board access required"}` on `/api/plugins/tools` or `/api/plugins/tools/execute`, the current Paperclip host rejected the request before the plugin worker ran. Re-run from a board-authenticated session or agent run that has board access to the target company.

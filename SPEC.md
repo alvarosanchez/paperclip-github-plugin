@@ -129,7 +129,7 @@ The plugin MUST persist repository mappings, company-scoped advanced issue defau
 ## Host integration requirements
 
 - The plugin MUST register successfully in Paperclip.
-- The plugin manifest MUST declare `minimumHostVersion: "2026.427.0"` because it relies on the host-owned `issues.wakeup` capability and plugin-origin issue metadata added in that Paperclip release.
+- The plugin manifest MUST NOT declare a strict `minimumHostVersion` or `minimumPaperclipVersion` gate while current latest/development Paperclip hosts may report `0.0.0` during plugin upgrade. Required host surfaces MUST remain represented by manifest capabilities and guarded by worker fallbacks where possible, and the docs MUST still state the intended Paperclip `2026.427.0` support baseline.
 - The plugin MUST expose a dashboard widget contribution for sync readiness and setup.
 - The plugin MUST expose a separate dashboard KPI widget contribution.
 - The plugin MUST expose a settings page contribution.

@@ -21,7 +21,6 @@ export const manifest: PaperclipPluginManifestV1 = {
   id: GITHUB_SYNC_PLUGIN_ID,
   apiVersion: 1,
   version: MANIFEST_VERSION,
-  minimumHostVersion: '2026.427.0',
   displayName: 'GitHub Sync',
   description: 'Synchronize GitHub issues into Paperclip projects.',
   author: 'Álvaro Sánchez-Mariscal',

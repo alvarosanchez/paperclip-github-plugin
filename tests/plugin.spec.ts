@@ -321,6 +321,11 @@ test(
   }
 );
 
+test('manifest does not enforce a strict host version gate during upgrade', () => {
+  assert.equal('minimumHostVersion' in manifest, false);
+  assert.equal('minimumPaperclipVersion' in manifest, false);
+});
+
 test('shouldStartWorkerHost matches symlinked entrypoints to the real worker file', async () => {
   const workerModule = await importFreshWorkerModule();
   const tempDir = await mkdtemp(join(tmpdir(), 'paperclip-github-plugin-worker-path-'));
@@ -3359,7 +3364,7 @@ test('manifest exposes GitHub Sync page, sidebar, dashboard widgets, and setting
 
   assert.equal(manifest.id, GITHUB_SYNC_PLUGIN_ID);
   assert.equal(manifest.apiVersion, 1);
-  assert.equal(manifest.minimumHostVersion, '2026.427.0');
+  assert.equal('minimumHostVersion' in manifest, false);
   assert.equal(manifest.entrypoints.worker, './dist/worker.js');
   assert.equal(manifest.jobs?.[0]?.jobKey, 'sync.github-issues');
   assert.equal(manifest.jobs?.[0]?.schedule, '* * * * *');
