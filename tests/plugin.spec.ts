@@ -7983,6 +7983,276 @@ test('worker exposes toolbar sync state for global, project, and issue surfaces'
   assert.equal(issueState.label, 'Sync #77');
 });
 
+test('worker issue toolbar sync state supports Paperclip issues linked directly to GitHub pull requests', async () => {
+  const harness = await createProjectPullRequestsHarness();
+  const issue = await harness.ctx.issues.create({
+    companyId: 'company-1',
+    projectId: 'project-1',
+    title: 'Manual PR-linked issue',
+    description: 'This Paperclip issue is linked directly to a GitHub PR.'
+  });
+
+  await harness.ctx.entities.upsert({
+    entityType: 'paperclip-github-plugin.pull-request-link',
+    scopeKind: 'issue',
+    scopeId: issue.id,
+    externalId: 'https://github.com/paperclipai/example-repo/pull/89',
+    title: 'GitHub pull request #89',
+    status: 'open',
+    data: {
+      companyId: 'company-1',
+      paperclipProjectId: 'project-1',
+      repositoryUrl: 'https://github.com/paperclipai/example-repo',
+      githubPullRequestNumber: 89,
+      githubPullRequestUrl: 'https://github.com/paperclipai/example-repo/pull/89',
+      githubPullRequestState: 'open',
+      title: 'GitHub PR linked later',
+      syncedAt: '2026-04-27T09:30:00.000Z'
+    }
+  });
+
+  const toolbarState = await harness.getData<{
+    kind: string;
+    visible: boolean;
+    canRun: boolean;
+    label: string;
+    message?: string;
+  }>('sync.toolbarState', {
+    companyId: 'company-1',
+    entityType: 'issue',
+    entityId: issue.id
+  });
+
+  assert.equal(toolbarState.kind, 'issue');
+  assert.equal(toolbarState.visible, false);
+  assert.equal(toolbarState.canRun, true);
+  assert.equal(toolbarState.label, 'Sync PR #89');
+  assert.equal(toolbarState.message, 'Sync paperclipai/example-repo pull request #89.');
+});
+
+test('sync.runNow can target a Paperclip issue linked to a GitHub issue without listing the whole repository', async () => {
+  const harness = await createProjectPullRequestsHarness();
+  const originalFetch = globalThis.fetch;
+  const issue = await harness.ctx.issues.create({
+    companyId: 'company-1',
+    projectId: 'project-1',
+    title: 'Targeted manual issue link sync',
+    description: 'This Paperclip issue is linked directly to a GitHub issue.'
+  });
+
+  globalThis.fetch = async (input, init) => {
+    const requestUrl = getRequestUrl(input);
+    const requestPathname = getDecodedRequestPathname(input);
+
+    if (requestPathname === '/repos/paperclipai/example-repo/issues/88') {
+      return jsonResponse({
+        id: 8800,
+        number: 88,
+        title: 'GitHub issue linked later',
+        body: 'GitHub owns the delivery state.',
+        html_url: 'https://github.com/paperclipai/example-repo/issues/88',
+        state: 'open',
+        state_reason: null,
+        comments: 2,
+        user: {
+          login: 'octocat',
+          html_url: 'https://github.com/octocat',
+          avatar_url: 'https://avatars.githubusercontent.com/u/583231?v=4'
+        },
+        labels: []
+      });
+    }
+
+    if (requestPathname === '/graphql') {
+      const { query, variables } = getGraphqlRequest(init);
+      if (query.includes('query GitHubRepositoryOpenIssueLinkedPullRequests')) {
+        throw new Error('Issue-targeted sync should not load linked pull requests for the whole repository.');
+      }
+
+      if (query.includes('query GitHubIssueStatusSnapshot') && variables.issueNumber === 88) {
+        return graphqlResponse({
+          repository: {
+            issue: {
+              closedByPullRequestsReferences: {
+                pageInfo: {
+                  hasNextPage: false,
+                  endCursor: null
+                },
+                nodes: []
+              },
+              comments: {
+                pageInfo: {
+                  hasNextPage: false,
+                  endCursor: null
+                },
+                nodes: []
+              }
+            }
+          }
+        });
+      }
+    }
+
+    throw new Error(`Unexpected fetch during targeted manual GitHub issue sync test: ${requestUrl}`);
+  };
+
+  try {
+    await harness.performAction('issue.linkGitHubItem', {
+      companyId: 'company-1',
+      issueId: issue.id,
+      kind: 'issue',
+      reference: '88'
+    });
+
+    const sync = await harness.performAction('sync.runNow', {
+      companyId: 'company-1',
+      issueId: issue.id,
+      waitForCompletion: true
+    }) as {
+      syncState: { status: string; syncedIssuesCount?: number };
+    };
+
+    assert.equal(sync.syncState.status, 'success');
+    assert.equal(sync.syncState.syncedIssuesCount, 1);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('sync.runNow can target a Paperclip issue linked directly to a GitHub pull request', async () => {
+  const harness = await createProjectPullRequestsHarness();
+  const originalFetch = globalThis.fetch;
+  const originalCreateComment = harness.ctx.issues.createComment;
+  const statusTransitionComments: Array<{ issueId: string; body: string }> = [];
+  const issue = await harness.ctx.issues.create({
+    companyId: 'company-1',
+    projectId: 'project-1',
+    title: 'Targeted manual PR link sync',
+    description: 'This Paperclip issue is linked directly to a GitHub PR.'
+  });
+
+  harness.ctx.issues.createComment = async (issueId, body, companyId) => {
+    statusTransitionComments.push({ issueId, body });
+    return originalCreateComment(issueId, body, companyId);
+  };
+
+  await harness.ctx.entities.upsert({
+    entityType: 'paperclip-github-plugin.pull-request-link',
+    scopeKind: 'issue',
+    scopeId: issue.id,
+    externalId: 'https://github.com/paperclipai/example-repo/pull/89',
+    title: 'GitHub pull request #89',
+    status: 'open',
+    data: {
+      companyId: 'company-1',
+      paperclipProjectId: 'project-1',
+      repositoryUrl: 'https://github.com/paperclipai/example-repo',
+      githubPullRequestNumber: 89,
+      githubPullRequestUrl: 'https://github.com/paperclipai/example-repo/pull/89',
+      githubPullRequestState: 'open',
+      title: 'GitHub PR linked later',
+      syncedAt: '2026-04-27T09:30:00.000Z'
+    }
+  });
+  await harness.ctx.issues.update(issue.id, { status: 'in_review' }, 'company-1');
+
+  globalThis.fetch = async (input, init) => {
+    const requestUrl = getRequestUrl(input);
+    const requestPathname = getDecodedRequestPathname(input);
+
+    if (requestPathname === '/repos/paperclipai/example-repo/issues') {
+      throw new Error('PR-targeted sync should not list GitHub issues for the whole repository.');
+    }
+
+    if (requestPathname === '/repos/paperclipai/example-repo/pulls/89') {
+      return jsonResponse({
+        number: 89,
+        title: 'GitHub PR linked later',
+        body: 'GitHub owns PR readiness.',
+        html_url: 'https://github.com/paperclipai/example-repo/pull/89',
+        state: 'open',
+        merged: false
+      });
+    }
+
+    if (requestPathname === '/graphql') {
+      const { query, variables } = getGraphqlRequest(init);
+      const pullRequestNumber =
+        typeof variables.pullRequestNumber === 'number' ? variables.pullRequestNumber : undefined;
+
+      if (query.includes('query GitHubRepositoryOpenIssueLinkedPullRequests')) {
+        throw new Error('PR-targeted sync should not load linked pull requests for the whole repository.');
+      }
+
+      if (query.includes('query GitHubPullRequestReviewThreads') && pullRequestNumber === 89) {
+        return graphqlResponse({
+          repository: {
+            pullRequest: {
+              reviewThreads: {
+                pageInfo: {
+                  hasNextPage: false,
+                  endCursor: null
+                },
+                nodes: []
+              }
+            }
+          }
+        });
+      }
+
+      if (query.includes('query GitHubPullRequestCiContexts') && pullRequestNumber === 89) {
+        return graphqlResponse({
+          repository: {
+            pullRequest: {
+              mergeable: 'CONFLICTING',
+              mergeStateStatus: 'DIRTY',
+              statusCheckRollup: {
+                contexts: {
+                  pageInfo: {
+                    hasNextPage: false,
+                    endCursor: null
+                  },
+                  nodes: [
+                    {
+                      __typename: 'CheckRun',
+                      status: 'COMPLETED',
+                      conclusion: 'FAILURE'
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        });
+      }
+    }
+
+    throw new Error(`Unexpected fetch during targeted manual PR link sync test: ${requestUrl}`);
+  };
+
+  try {
+    const sync = await harness.performAction('sync.runNow', {
+      companyId: 'company-1',
+      issueId: issue.id,
+      waitForCompletion: true
+    }) as {
+      syncState: { status: string; syncedIssuesCount?: number };
+    };
+
+    assert.equal(sync.syncState.status, 'success');
+    assert.equal(sync.syncState.syncedIssuesCount, 1);
+
+    const updatedIssue = await harness.ctx.issues.get(issue.id, 'company-1');
+    assert.equal(updatedIssue?.status, 'todo');
+    assert.equal(statusTransitionComments.length, 1);
+    assert.match(statusTransitionComments[0]?.body ?? '', /from `in review` to `todo`/);
+    assert.match(statusTransitionComments[0]?.body ?? '', /failing CI/);
+  } finally {
+    harness.ctx.issues.createComment = originalCreateComment;
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test('worker scopes global toolbar sync state to the requested company', async () => {
   const harness = createTestHarness({
     manifest,
