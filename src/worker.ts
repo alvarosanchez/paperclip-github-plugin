@@ -423,6 +423,8 @@ interface ResolvedSyncTarget {
   githubIssueId?: number;
   githubIssueNumber?: number;
   githubIssueUrl?: string;
+  githubPullRequestNumber?: number;
+  githubPullRequestUrl?: string;
   displayLabel: string;
 }
 
@@ -3426,6 +3428,26 @@ async function resolvePaperclipIssueGitHubLink(
   return await hydrateRecoveredPaperclipIssueGitHubLink(ctx, issueId, fallbackLink) ?? fallbackLink;
 }
 
+async function resolvePaperclipIssueGitHubPullRequestLink(
+  ctx: PluginSetupContext,
+  issueId: string,
+  companyId: string
+): Promise<GitHubPullRequestLinkRecord | null> {
+  const links = await listGitHubPullRequestLinkRecords(ctx, {
+    paperclipIssueId: issueId
+  });
+
+  return links
+    .filter((record) => !record.data.companyId || record.data.companyId === companyId)
+    .sort((left, right) => {
+      const rightTimestamp = Date.parse(right.updatedAt ?? right.createdAt ?? '');
+      const leftTimestamp = Date.parse(left.updatedAt ?? left.createdAt ?? '');
+      const safeRightTimestamp = Number.isFinite(rightTimestamp) ? rightTimestamp : 0;
+      const safeLeftTimestamp = Number.isFinite(leftTimestamp) ? leftTimestamp : 0;
+      return safeRightTimestamp - safeLeftTimestamp;
+    })[0] ?? null;
+}
+
 async function hydrateRecoveredPaperclipIssueGitHubLink(
   ctx: PluginSetupContext,
   issueId: string,
@@ -3519,22 +3541,35 @@ async function resolveManualSyncTarget(
 
     const link = await resolvePaperclipIssueGitHubLink(ctx, input.issueId, companyId);
     if (!link) {
-      throw new Error('This Paperclip issue is not linked to a GitHub issue yet. Run a broader sync first.');
-    }
+      const pullRequestLink = await resolvePaperclipIssueGitHubPullRequestLink(ctx, input.issueId, companyId);
+      if (!pullRequestLink) {
+        throw new Error('This Paperclip issue is not linked to a GitHub issue or pull request yet. Run a broader sync first.');
+      }
 
-    const candidateMappings = getSyncableMappingsForTarget(settings.mappings, {
-      kind: 'issue',
-      companyId,
-      projectId: link.paperclipProjectId,
-      repositoryUrl: link.repositoryUrl,
-      issueId: input.issueId,
-      githubIssueId: link.githubIssueId,
-      githubIssueNumber: link.githubIssueNumber,
-      githubIssueUrl: link.githubIssueUrl,
-      displayLabel: `issue #${link.githubIssueNumber}`
-    });
-    if (candidateMappings.length === 0) {
-      throw new Error('No saved GitHub repository mapping matches this Paperclip issue.');
+      const candidateMappings = getSyncableMappingsForTarget(settings.mappings, {
+        kind: 'issue',
+        companyId,
+        projectId: pullRequestLink.data.paperclipProjectId,
+        repositoryUrl: pullRequestLink.data.repositoryUrl,
+        issueId: input.issueId,
+        githubPullRequestNumber: pullRequestLink.data.githubPullRequestNumber,
+        githubPullRequestUrl: pullRequestLink.data.githubPullRequestUrl,
+        displayLabel: `pull request #${pullRequestLink.data.githubPullRequestNumber}`
+      });
+      if (candidateMappings.length === 0) {
+        throw new Error('No saved GitHub repository mapping matches this Paperclip issue.');
+      }
+
+      return {
+        kind: 'issue',
+        companyId,
+        projectId: pullRequestLink.data.paperclipProjectId,
+        issueId: input.issueId,
+        repositoryUrl: pullRequestLink.data.repositoryUrl,
+        githubPullRequestNumber: pullRequestLink.data.githubPullRequestNumber,
+        githubPullRequestUrl: pullRequestLink.data.githubPullRequestUrl,
+        displayLabel: `pull request #${pullRequestLink.data.githubPullRequestNumber}`
+      };
     }
 
     return {
@@ -3702,17 +3737,42 @@ async function buildToolbarSyncState(
 
   if (entityType === 'issue' && entityId && companyId) {
     const link = await resolvePaperclipIssueGitHubLink(ctx, entityId, companyId);
-    const mappings = link
+    if (link) {
+      const mappings = getSyncableMappingsForTarget(settings.mappings, {
+        kind: 'issue',
+        companyId,
+        projectId: link.paperclipProjectId,
+        issueId: entityId,
+        repositoryUrl: link.repositoryUrl,
+        githubIssueId: link.githubIssueId,
+        githubIssueNumber: link.githubIssueNumber,
+        githubIssueUrl: link.githubIssueUrl,
+        displayLabel: `issue #${link.githubIssueNumber}`
+      });
+
+      return {
+        kind: 'issue',
+        visible: false,
+        canRun: githubTokenConfigured && mappings.length > 0,
+        label: `Sync #${link.githubIssueNumber}`,
+        message: `Sync ${link.repositoryUrl.replace(/^https:\/\/github\.com\//, '')} issue #${link.githubIssueNumber}.`,
+        syncState: settings.syncState,
+        githubTokenConfigured,
+        savedMappingCount
+      };
+    }
+
+    const pullRequestLink = await resolvePaperclipIssueGitHubPullRequestLink(ctx, entityId, companyId);
+    const mappings = pullRequestLink
       ? getSyncableMappingsForTarget(settings.mappings, {
           kind: 'issue',
           companyId,
-          projectId: link.paperclipProjectId,
+          projectId: pullRequestLink.data.paperclipProjectId,
           issueId: entityId,
-          repositoryUrl: link.repositoryUrl,
-          githubIssueId: link.githubIssueId,
-          githubIssueNumber: link.githubIssueNumber,
-          githubIssueUrl: link.githubIssueUrl,
-          displayLabel: `issue #${link.githubIssueNumber}`
+          repositoryUrl: pullRequestLink.data.repositoryUrl,
+          githubPullRequestNumber: pullRequestLink.data.githubPullRequestNumber,
+          githubPullRequestUrl: pullRequestLink.data.githubPullRequestUrl,
+          displayLabel: `pull request #${pullRequestLink.data.githubPullRequestNumber}`
         })
       : [];
 
@@ -3720,9 +3780,11 @@ async function buildToolbarSyncState(
       kind: 'issue',
       visible: false,
       canRun: githubTokenConfigured && mappings.length > 0,
-      label: link?.githubIssueNumber ? `Sync #${link.githubIssueNumber}` : 'Sync issue',
-      message: link
-        ? `Sync ${link.repositoryUrl.replace(/^https:\/\/github\.com\//, '')} issue #${link.githubIssueNumber}.`
+      label: pullRequestLink?.data.githubPullRequestNumber
+        ? `Sync PR #${pullRequestLink.data.githubPullRequestNumber}`
+        : 'Sync issue',
+      message: pullRequestLink
+        ? `Sync ${pullRequestLink.data.repositoryUrl.replace(/^https:\/\/github\.com\//, '')} pull request #${pullRequestLink.data.githubPullRequestNumber}.`
         : 'This Paperclip issue is not linked to GitHub yet.',
       syncState: settings.syncState,
       githubTokenConfigured,
@@ -11763,6 +11825,56 @@ async function listRepositoryIssues(
   return normalizedIssues;
 }
 
+async function listRepositoryIssuesForSyncTarget(
+  octokit: Octokit,
+  repository: ParsedRepositoryReference,
+  state: 'open' | 'all',
+  target: ResolvedSyncTarget | undefined,
+  options: {
+    onProgress?: (progress: {
+      loadedIssueCount: number;
+    }) => Promise<void>;
+  } = {}
+): Promise<GitHubIssueRecord[]> {
+  if (target?.kind !== 'issue') {
+    return listRepositoryIssues(octokit, repository, state, options);
+  }
+
+  if (target.githubIssueNumber === undefined) {
+    if (options.onProgress) {
+      await options.onProgress({
+        loadedIssueCount: 0
+      });
+    }
+
+    return [];
+  }
+
+  const response = await octokit.rest.issues.get({
+    owner: repository.owner,
+    repo: repository.repo,
+    issue_number: target.githubIssueNumber,
+    headers: {
+      accept: 'application/vnd.github+json',
+      'X-GitHub-Api-Version': GITHUB_API_VERSION
+    }
+  });
+  const issue = response.data as GitHubApiIssueRecord;
+  if ('pull_request' in issue) {
+    return [];
+  }
+
+  const normalizedIssue = normalizeGitHubIssueRecord(issue);
+  const issues = state === 'open' && normalizedIssue.state !== 'open' ? [] : [normalizedIssue];
+  if (options.onProgress) {
+    await options.onProgress({
+      loadedIssueCount: issues.length
+    });
+  }
+
+  return issues;
+}
+
 async function listRepositoryIssuesForImport(
   allIssues: GitHubIssueRecord[]
 ): Promise<GitHubIssueRecord[]> {
@@ -17572,10 +17684,11 @@ async function performSync(
         updateSyncFailureContext(failureContext, {
           phase: 'listing_github_issues'
         });
-        const allIssues = await listRepositoryIssues(
+        const allIssues = await listRepositoryIssuesForSyncTarget(
           octokit,
           repository,
           shouldLoadClosedIssues ? 'all' : 'open',
+          options.target,
           {
             onProgress: async (progress) => {
               currentProgress = {
@@ -17714,7 +17827,10 @@ async function performSync(
         await persistRunningProgress(true);
 
         try {
-          const warmedLinkedPullRequests = await loadLinkedPullRequestsForOpenIssues(octokit, repository);
+          const warmedLinkedPullRequests =
+            options.target?.kind === 'issue'
+              ? new Map<number, GitHubLinkedPullRequestRecord[]>()
+              : await loadLinkedPullRequestsForOpenIssues(octokit, repository);
           for (const [issueNumber, linkedPullRequests] of warmedLinkedPullRequests.entries()) {
             linkedPullRequestsByIssueNumber.set(issueNumber, linkedPullRequests);
           }
