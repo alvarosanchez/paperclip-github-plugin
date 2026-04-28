@@ -35,7 +35,7 @@ The plugin adds a full in-host workflow instead of a one-off import script:
 - saved sync diagnostics that let operators inspect the latest per-issue failures, raw errors, and suggested next steps
 - a project sidebar item that opens a live project-scoped Pull Requests page for the mapped repository and can show the open PR count through a lightweight badge read
 - manual sync actions from global, project, and issue surfaces
-- a GitHub detail tab on synced Paperclip issues that stays hidden for Paperclip issues with no linked GitHub issue and includes GitHub-marked action buttons plus the GitHub issue creator with avatar
+- a GitHub detail tab on synced Paperclip issues that includes GitHub-marked action buttons plus the GitHub issue creator with avatar, and lets operators manually link an unlinked Paperclip issue to a GitHub issue or pull request
 - GitHub link annotations on sync-generated status transition comments when the host supports comment annotations
 
 ## How it works
@@ -68,7 +68,7 @@ The plugin does more than mirror issue text. It looks at linked pull requests, m
 
 GitHub Sync exposes a dedicated KPI dashboard widget alongside the operational sync widget. During full company syncs, the worker snapshots the current open GitHub backlog and records when already-imported GitHub issues move from open to closed. The KPI widget turns that worker-owned state into backlog, issue-closure, and Paperclip PR-creation cards with recent history and comparisons against older periods.
 
-Because GitHub alone cannot tell which pull requests came from a Paperclip company, the plugin uses explicit Paperclip attribution for delivery activity. `create_pull_request` automatically records a Paperclip-created PR event, and agents that use `gh` or another non-plugin GitHub client can post pull-request-created events to the plugin API route so the KPI history stays specific to Paperclip work.
+Because GitHub alone cannot tell which pull requests came from a Paperclip company, the plugin uses explicit Paperclip attribution for delivery activity. `create_pull_request` automatically records a Paperclip-created PR event, and agents that use `gh` or another non-plugin GitHub client can post pull-request-created events to the plugin API route so the KPI history stays specific to Paperclip work. When either path includes the Paperclip issue id, GitHub Sync also records the pull request link so later sync runs can move that issue based on PR CI, merge state, and review activity.
 
 That API route path matters on authenticated Paperclip deployments today because a current host bug blocks agents from calling plugin tools unless the instance runs in `local_trusted` mode. Those agents can still use `gh` with the propagated `GITHUB_TOKEN`, then call the agent-authenticated plugin API route from the shell after they create a PR. The Paperclip host authenticates `Authorization: Bearer <PAPERCLIP_API_KEY>`, scopes the request to the calling agent's company, and rejects anonymous or non-agent calls before dispatching to the worker.
 
@@ -78,9 +78,15 @@ Each mapped project can expose a **Pull Requests** entry in the sidebar that ope
 
 Paperclip issue linkage on the queue prefers the GitHub issue that the pull request closes, so imported GitHub issues and delivery work stay connected in the same project view. If a pull request has no closing-issue-backed link yet, the queue falls back to the Paperclip issue created directly from that pull request and updates the table immediately when that create action returns.
 
-Those pull-request-created Paperclip issues also stay in the scheduled/manual sync loop even when the pull request does not close a GitHub issue. GitHub Sync checks their CI, merge state, and review threads so new failures or unresolved feedback move the Paperclip issue back into active work.
+Those pull-request-created Paperclip issues also stay in the scheduled/manual sync loop even when the pull request does not close a GitHub issue. GitHub Sync checks their CI, merge state, and review threads so new failures or unresolved feedback move the Paperclip issue back into active work. The same durable PR link is written when an agent creates a PR through the plugin tool with `paperclipIssueId`, when an authenticated agent records a `gh`-created PR through the agent API route with `paperclipIssueId`, or when an operator manually links an unlinked issue from the issue page.
 
 The issue detail panel and sync-created comment annotations also preserve cross-repository linked pull requests, showing those PRs with their real repository path so operators land in the right place on GitHub.
+
+### Manual GitHub links
+
+If a Paperclip issue was created locally or by an agent workflow before GitHub Sync saw the matching GitHub item, the issue detail surface shows a **Link GitHub item** action. The modal accepts either a GitHub issue number or full issue URL, or a pull request number or full pull request URL. Number-only entries use the issue's mapped Paperclip project repository; full URLs can point at any repository mapped to that project.
+
+Manual GitHub issue links are added to the same import registry and issue-link entity used by normal sync, so future syncs update the Paperclip issue from the GitHub issue. Manual pull request links are added to the PR-link entity used by the project Pull Requests page, so future syncs monitor PR status even when there is no closing GitHub issue.
 
 ### Agent workflows built in
 
@@ -219,6 +225,7 @@ Supported payload fields:
 - `repository` optional: `owner/repo` or `https://github.com/owner/repo`
 - `pullRequestNumber` optional
 - `pullRequestUrl` optional
+- `paperclipIssueId` optional: the Paperclip issue id that should be linked to the pull request for future PR-status sync
 - `occurredAt` optional ISO timestamp
 - `eventKey` optional custom dedupe key
 - `count` optional positive integer
@@ -232,7 +239,7 @@ The Paperclip host validates that bearer token and passes the authenticated agen
 Example:
 
 ```bash
-payload='{"metric":"pull_request_created","repository":"paperclipai/example-repo","pullRequestNumber":21}'
+payload='{"metric":"pull_request_created","repository":"paperclipai/example-repo","pullRequestNumber":21,"paperclipIssueId":"iss_123"}'
 
 curl -X POST "${PAPERCLIP_API_URL%/}/api/plugins/paperclip-github-plugin/api/company-metrics/events" \
   -H "content-type: application/json" \
@@ -240,7 +247,7 @@ curl -X POST "${PAPERCLIP_API_URL%/}/api/plugins/paperclip-github-plugin/api/com
   -d "${payload}"
 ```
 
-The worker deduplicates repeated PR events by preferring the pull request URL, then `repository + pullRequestNumber`, before falling back to the explicit `eventKey`.
+The worker deduplicates repeated PR events by preferring the pull request URL, then `repository + pullRequestNumber`, before falling back to the explicit `eventKey`. When `paperclipIssueId` is present, the worker verifies the live pull request and persists the same PR-link metadata used by scheduled/manual status syncs.
 
 Current host caveat: on authenticated Paperclip deployments, the Paperclip host currently guards `GET /api/plugins/tools` and `POST /api/plugins/tools/execute` with board authentication before dispatching to any plugin worker. If an agent run does not have board access for the target company, GitHub Sync tool discovery and execution fail with `403 {"error":"Board access required"}` before this plugin's worker code runs.
 

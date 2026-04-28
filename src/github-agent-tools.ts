@@ -255,6 +255,10 @@ export const GITHUB_AGENT_TOOLS: PluginToolDeclaration[] = [
       required: ['head', 'base', 'title'],
       properties: {
         repository: repositoryProperty,
+        paperclipIssueId: {
+          type: 'string',
+          description: 'Optional Paperclip issue id to link with the created pull request so GitHub Sync can monitor PR status for that issue.'
+        },
         head: {
           type: 'string',
           description: 'Head branch name or owner:branch.'

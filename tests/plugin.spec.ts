@@ -1703,6 +1703,162 @@ test('create_pull_request auto-records Paperclip PR metrics and API route attrib
   }
 });
 
+test('create_pull_request links the created pull request to the current Paperclip issue', async () => {
+  const harness = await createGitHubAgentToolHarness();
+  const originalFetch = globalThis.fetch;
+  const issue = await harness.ctx.issues.create({
+    companyId: 'company-1',
+    projectId: 'project-1',
+    title: 'Native Paperclip issue',
+    description: 'This issue did not come from GitHub.'
+  });
+
+  globalThis.fetch = async (input, init) => {
+    const url = new URL(getRequestUrl(input));
+    if (url.pathname === '/repos/paperclipai/example-repo/pulls') {
+      const requestBody = getJsonRequestBody(init);
+      return jsonResponse({
+        number: 23,
+        title: typeof requestBody?.title === 'string' ? requestBody.title : 'Fix native issue sync',
+        body: typeof requestBody?.body === 'string' ? requestBody.body : '',
+        html_url: 'https://github.com/paperclipai/example-repo/pull/23',
+        state: 'open',
+        draft: false,
+        head: {
+          ref: 'feature/native-paperclip-issue'
+        },
+        base: {
+          ref: 'main'
+        }
+      }, 201);
+    }
+
+    throw new Error(`Unexpected GitHub request: ${url.toString()}`);
+  };
+
+  try {
+    const createResult = await harness.executeTool('create_pull_request', {
+      paperclipIssueId: issue.id,
+      head: 'feature/native-paperclip-issue',
+      base: 'main',
+      title: 'Fix native issue sync'
+    }, {
+      companyId: 'company-1',
+      projectId: 'project-1'
+    });
+
+    assert.ok(!createResult.error);
+
+    const pullRequestLinks = await harness.ctx.entities.list({
+      entityType: 'paperclip-github-plugin.pull-request-link',
+      scopeKind: 'issue',
+      scopeId: issue.id
+    });
+    assert.equal(pullRequestLinks.length, 1);
+    assert.equal(pullRequestLinks[0]?.externalId, 'https://github.com/paperclipai/example-repo/pull/23');
+    assert.equal((pullRequestLinks[0]?.data as { githubPullRequestNumber?: unknown }).githubPullRequestNumber, 23);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('company metric API route links gh-created pull requests to supplied Paperclip issues', async () => {
+  const harness = await createGitHubAgentToolHarness();
+  const originalFetch = globalThis.fetch;
+  const issue = await harness.ctx.issues.create({
+    companyId: 'company-1',
+    projectId: 'project-1',
+    title: 'Authenticated gh-created PR issue',
+    description: 'Agents create the PR with gh and register it afterward.'
+  });
+
+  globalThis.fetch = async (input) => {
+    const url = new URL(getRequestUrl(input));
+    if (url.pathname === '/repos/paperclipai/example-repo/pulls/24') {
+      return jsonResponse({
+        number: 24,
+        title: 'Fix authenticated route sync',
+        body: 'Created with gh.',
+        html_url: 'https://github.com/paperclipai/example-repo/pull/24',
+        state: 'open',
+        merged: false
+      });
+    }
+
+    throw new Error(`Unexpected GitHub request: ${url.toString()}`);
+  };
+
+  try {
+    const routeResponse = await postCompanyMetricApiRoute({
+      metric: 'pull_request_created',
+      repository: 'paperclipai/example-repo',
+      pullRequestNumber: 24,
+      paperclipIssueId: issue.id
+    });
+
+    assert.equal(routeResponse.status, 201);
+
+    const pullRequestLinks = await harness.ctx.entities.list({
+      entityType: 'paperclip-github-plugin.pull-request-link',
+      scopeKind: 'issue',
+      scopeId: issue.id
+    });
+    assert.equal(pullRequestLinks.length, 1);
+    assert.equal(pullRequestLinks[0]?.externalId, 'https://github.com/paperclipai/example-repo/pull/24');
+    assert.equal((pullRequestLinks[0]?.data as { githubPullRequestState?: unknown }).githubPullRequestState, 'open');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('company metric API route resolves a gh-created pull request repository from the supplied Paperclip issue', async () => {
+  const harness = await createGitHubAgentToolHarness();
+  const originalFetch = globalThis.fetch;
+  const issue = await harness.ctx.issues.create({
+    companyId: 'company-1',
+    projectId: 'project-1',
+    title: 'Authenticated gh-created PR issue without repository',
+    description: 'Agents can register a gh-created PR from the current Paperclip issue context.'
+  });
+
+  globalThis.fetch = async (input) => {
+    const url = new URL(getRequestUrl(input));
+    if (url.pathname === '/repos/paperclipai/example-repo/pulls/25') {
+      return jsonResponse({
+        number: 25,
+        title: 'Infer repository from issue mapping',
+        body: 'Created with gh.',
+        html_url: 'https://github.com/paperclipai/example-repo/pull/25',
+        state: 'open',
+        merged: false
+      });
+    }
+
+    throw new Error(`Unexpected GitHub request: ${url.toString()}`);
+  };
+
+  try {
+    const routeResponse = await postCompanyMetricApiRoute({
+      metric: 'pull_request_created',
+      pullRequestNumber: 25,
+      paperclipIssueId: issue.id
+    });
+
+    assert.equal(routeResponse.status, 201);
+    assert.equal((routeResponse.body as { paperclipIssueId?: unknown }).paperclipIssueId, issue.id);
+
+    const pullRequestLinks = await harness.ctx.entities.list({
+      entityType: 'paperclip-github-plugin.pull-request-link',
+      scopeKind: 'issue',
+      scopeId: issue.id
+    });
+    assert.equal(pullRequestLinks.length, 1);
+    assert.equal(pullRequestLinks[0]?.externalId, 'https://github.com/paperclipai/example-repo/pull/25');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test('company metric API route records Paperclip PR metrics from agent-authenticated gh flows', async () => {
   const harness = await createGitHubAgentToolHarness();
 
@@ -3209,7 +3365,7 @@ test('fetchPaperclipHealth returns null when the Paperclip health endpoint is un
   }
 });
 
-test('resolveGitHubIssueDetailTabState hides unlinked issue detail views while preserving loading, error, and cached-detail states', async () => {
+test('resolveGitHubIssueDetailTabState keeps unlinked issue detail views available for manual linking', async () => {
   const uiModule = await importFreshUiModule() as {
     resolveGitHubIssueDetailTabState?: unknown;
   };
@@ -3221,14 +3377,26 @@ test('resolveGitHubIssueDetailTabState hides unlinked issue detail views while p
     detailsLoading?: boolean;
     detailsError?: boolean;
     issueDetails?: { paperclipIssueId?: string } | null;
-  }) => 'loading' | 'error' | 'hidden' | 'ready';
+    canLinkManually?: boolean;
+  }) => 'loading' | 'error' | 'hidden' | 'ready' | 'unlinked';
 
   assert.equal(
     resolveGitHubIssueDetailTabState({
       loadingIssueId: false,
       detailsLoading: false,
       detailsError: false,
-      issueDetails: null
+      issueDetails: null,
+      canLinkManually: true
+    }),
+    'unlinked'
+  );
+  assert.equal(
+    resolveGitHubIssueDetailTabState({
+      loadingIssueId: false,
+      detailsLoading: false,
+      detailsError: false,
+      issueDetails: null,
+      canLinkManually: false
     }),
     'hidden'
   );
@@ -5281,6 +5449,180 @@ test('project.pullRequests.createIssue creates and then reuses the linked Paperc
     assert.equal(firstResult.alreadyLinked, false);
     assert.equal(secondResult.alreadyLinked, true);
     assert.equal(secondResult.paperclipIssueId, firstResult.paperclipIssueId);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('issue.linkGitHubItem links a Paperclip issue to a GitHub issue and tracks it for sync', async () => {
+  const harness = await createProjectPullRequestsHarness();
+  const originalFetch = globalThis.fetch;
+  const issue = await harness.ctx.issues.create({
+    companyId: 'company-1',
+    projectId: 'project-1',
+    title: 'Manual issue link target',
+    description: 'Created in Paperclip first.'
+  });
+
+  globalThis.fetch = async (input, init) => {
+    const requestUrl = getRequestUrl(input);
+    const requestPathname = getDecodedRequestPathname(input);
+
+    if (requestPathname === '/repos/paperclipai/example-repo/issues/88') {
+      return jsonResponse({
+        id: 8800,
+        number: 88,
+        title: 'GitHub issue linked later',
+        body: 'GitHub owns the delivery state.',
+        html_url: 'https://github.com/paperclipai/example-repo/issues/88',
+        state: 'open',
+        state_reason: null,
+        comments: 2,
+        user: {
+          login: 'octocat',
+          html_url: 'https://github.com/octocat',
+          avatar_url: 'https://avatars.githubusercontent.com/u/583231?v=4'
+        },
+        labels: [
+          {
+            name: 'bug',
+            color: 'ff0000'
+          }
+        ]
+      });
+    }
+
+    if (requestPathname === '/graphql') {
+      const { query, variables } = getGraphqlRequest(init);
+      if (query.includes('query GitHubIssueStatusSnapshot') && variables.issueNumber === 88) {
+        return graphqlResponse({
+          repository: {
+            issue: {
+              closedByPullRequestsReferences: {
+                pageInfo: {
+                  hasNextPage: false,
+                  endCursor: null
+                },
+                nodes: []
+              },
+              comments: {
+                pageInfo: {
+                  hasNextPage: false,
+                  endCursor: null
+                },
+                nodes: []
+              }
+            }
+          }
+        });
+      }
+    }
+
+    throw new Error(`Unexpected fetch during manual GitHub issue link test: ${requestUrl}`);
+  };
+
+  try {
+    const result = await harness.performAction<{
+      kind: string;
+      githubIssueNumber?: number;
+      paperclipIssueId: string;
+    }>('issue.linkGitHubItem', {
+      companyId: 'company-1',
+      issueId: issue.id,
+      kind: 'issue',
+      reference: '88'
+    });
+
+    assert.equal(result.kind, 'issue');
+    assert.equal(result.githubIssueNumber, 88);
+    assert.equal(result.paperclipIssueId, issue.id);
+
+    const issueLinks = await harness.ctx.entities.list({
+      entityType: 'paperclip-github-plugin.issue-link',
+      scopeKind: 'issue',
+      scopeId: issue.id
+    });
+    assert.equal(issueLinks.length, 1);
+    assert.equal(issueLinks[0]?.externalId, 'https://github.com/paperclipai/example-repo/issues/88');
+
+    const importRegistry = harness.getState({
+      scopeKind: 'instance',
+      stateKey: 'paperclip-github-plugin-import-registry'
+    }) as Array<{
+      githubIssueId?: number;
+      githubIssueNumber?: number;
+      paperclipIssueId?: string;
+    }>;
+    assert.equal(importRegistry.length, 1);
+    assert.deepEqual(
+      {
+        githubIssueId: importRegistry[0]?.githubIssueId,
+        githubIssueNumber: importRegistry[0]?.githubIssueNumber,
+        paperclipIssueId: importRegistry[0]?.paperclipIssueId
+      },
+      {
+        githubIssueId: 8800,
+        githubIssueNumber: 88,
+        paperclipIssueId: issue.id
+      }
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('issue.linkGitHubItem links a Paperclip issue to a GitHub pull request for PR-status sync', async () => {
+  const harness = await createProjectPullRequestsHarness();
+  const originalFetch = globalThis.fetch;
+  const issue = await harness.ctx.issues.create({
+    companyId: 'company-1',
+    projectId: 'project-1',
+    title: 'Manual PR link target',
+    description: 'Created in Paperclip first.'
+  });
+
+  globalThis.fetch = async (input) => {
+    const requestUrl = getRequestUrl(input);
+    const requestPathname = getDecodedRequestPathname(input);
+
+    if (requestPathname === '/repos/paperclipai/example-repo/pulls/89') {
+      return jsonResponse({
+        number: 89,
+        title: 'GitHub PR linked later',
+        body: 'GitHub owns PR readiness.',
+        html_url: 'https://github.com/paperclipai/example-repo/pull/89',
+        state: 'open',
+        merged: false
+      });
+    }
+
+    throw new Error(`Unexpected fetch during manual GitHub PR link test: ${requestUrl}`);
+  };
+
+  try {
+    const result = await harness.performAction<{
+      kind: string;
+      githubPullRequestNumber?: number;
+      paperclipIssueId: string;
+    }>('issue.linkGitHubItem', {
+      companyId: 'company-1',
+      issueId: issue.id,
+      kind: 'pull_request',
+      reference: '89'
+    });
+
+    assert.equal(result.kind, 'pull_request');
+    assert.equal(result.githubPullRequestNumber, 89);
+    assert.equal(result.paperclipIssueId, issue.id);
+
+    const pullRequestLinks = await harness.ctx.entities.list({
+      entityType: 'paperclip-github-plugin.pull-request-link',
+      scopeKind: 'issue',
+      scopeId: issue.id
+    });
+    assert.equal(pullRequestLinks.length, 1);
+    assert.equal(pullRequestLinks[0]?.externalId, 'https://github.com/paperclipai/example-repo/pull/89');
+    assert.equal((pullRequestLinks[0]?.data as { githubPullRequestNumber?: unknown }).githubPullRequestNumber, 89);
   } finally {
     globalThis.fetch = originalFetch;
   }

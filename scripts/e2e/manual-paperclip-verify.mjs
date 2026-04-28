@@ -21,6 +21,7 @@ const seededRepositoryUrl = 'https://github.com/alvarosanchez/paperclip-github-p
 const seededMappingId = 'manual-review-seeded-mapping';
 const seededAgentName = 'CEO';
 const seededAgentModel = 'gpt-5.4';
+const seededAgentHireDecisionNote = 'Approved automatically for GitHub Sync manual verification seeding.';
 const githubSyncPluginKey = 'paperclip-github-plugin';
 const seedAgentBypassApprovalsAndSandbox = process.env.PAPERCLIP_E2E_CEO_BYPASS_APPROVALS_AND_SANDBOX === 'true';
 const requestedPort = process.env.PAPERCLIP_E2E_PORT ? Number(process.env.PAPERCLIP_E2E_PORT) : 3100;
@@ -47,6 +48,17 @@ const shutdownPromise = new Promise((resolvePromise) => {
 let baseUrl;
 let serverPort;
 let embeddedDbPort;
+
+class FetchJsonError extends Error {
+  constructor(response, bodyText, body) {
+    super(`Request failed: ${response.status} ${response.statusText} ${bodyText}`);
+    this.name = 'FetchJsonError';
+    this.status = response.status;
+    this.statusText = response.statusText;
+    this.bodyText = bodyText;
+    this.body = body;
+  }
+}
 
 function log(message) {
   console.log(`[paperclip-github-plugin:manual] ${message}`);
@@ -157,10 +169,19 @@ async function fetchJson(url, init = {}) {
     headers
   });
   const text = await response.text();
-  const body = text ? JSON.parse(text) : null;
+  let body = null;
+  if (text) {
+    try {
+      body = JSON.parse(text);
+    } catch (error) {
+      if (response.ok) {
+        throw new Error(`Expected JSON from ${url}, received: ${text.slice(0, 200)}`);
+      }
+    }
+  }
 
   if (!response.ok) {
-    throw new Error(`Request failed: ${response.status} ${response.statusText} ${text}`);
+    throw new FetchJsonError(response, text, body);
   }
 
   return body;
@@ -349,6 +370,106 @@ async function ensureSeedProjectMapped(company) {
   };
 }
 
+function isDirectAgentCreationApprovalConflict(error) {
+  if (!(error instanceof FetchJsonError) || error.status !== 409) {
+    return false;
+  }
+
+  const errorMessage =
+    typeof error.body?.error === 'string'
+      ? error.body.error
+      : error.bodyText;
+
+  return errorMessage.includes('Direct agent creation requires board approval')
+    || errorMessage.includes('/agent-hires');
+}
+
+async function findPendingHireApprovalForAgent(companyId, agentId) {
+  const approvals = await fetchJson(new URL(`/api/companies/${companyId}/approvals?status=pending`, baseUrl).toString());
+  if (!Array.isArray(approvals)) {
+    return null;
+  }
+
+  return approvals.find((approval) =>
+    approval
+    && typeof approval === 'object'
+    && approval.type === 'hire_agent'
+    && approval.status === 'pending'
+    && approval.payload
+    && typeof approval.payload === 'object'
+    && approval.payload.agentId === agentId
+  ) ?? null;
+}
+
+async function approveSeedAgentHire(companyId, agentId, approvalId) {
+  let resolvedApprovalId = typeof approvalId === 'string' && approvalId.trim()
+    ? approvalId.trim()
+    : null;
+
+  if (!resolvedApprovalId) {
+    const pendingApproval = await findPendingHireApprovalForAgent(companyId, agentId);
+    resolvedApprovalId = typeof pendingApproval?.id === 'string' ? pendingApproval.id : null;
+  }
+
+  if (resolvedApprovalId) {
+    await fetchJson(new URL(`/api/approvals/${resolvedApprovalId}/approve`, baseUrl).toString(), {
+      method: 'POST',
+      body: JSON.stringify({
+        decisionNote: seededAgentHireDecisionNote
+      })
+    });
+    log(`Approved seeded agent hire request for ${seededAgentName}.`);
+    return;
+  }
+
+  await fetchJson(new URL(`/api/agents/${agentId}/approve`, baseUrl).toString(), {
+    method: 'POST',
+    body: JSON.stringify({
+      decisionNote: seededAgentHireDecisionNote
+    })
+  });
+  log(`Approved pending seeded agent ${seededAgentName}.`);
+}
+
+async function approveSeedAgentIfPending(companyId, agent) {
+  const agentId = typeof agent?.id === 'string' ? agent.id : '';
+  if (!agentId || agent?.status !== 'pending_approval') {
+    return;
+  }
+
+  await approveSeedAgentHire(companyId, agentId, null);
+}
+
+async function createSeedAgent(companyId, companyAgentsUrl, agentPayload) {
+  try {
+    return await fetchJson(companyAgentsUrl, {
+      method: 'POST',
+      body: JSON.stringify(agentPayload)
+    });
+  } catch (error) {
+    if (!isDirectAgentCreationApprovalConflict(error)) {
+      throw error;
+    }
+  }
+
+  const hireResult = await fetchJson(new URL(`/api/companies/${companyId}/agent-hires`, baseUrl).toString(), {
+    method: 'POST',
+    body: JSON.stringify(agentPayload)
+  });
+  const createdAgent = hireResult?.agent ?? null;
+  const createdAgentId = typeof createdAgent?.id === 'string' ? createdAgent.id : '';
+  if (!createdAgentId) {
+    throw new Error('Paperclip did not return a usable agent record for the seeded review agent hire.');
+  }
+
+  const approvalId = typeof hireResult?.approval?.id === 'string' ? hireResult.approval.id : null;
+  if (createdAgent?.status === 'pending_approval' || approvalId) {
+    await approveSeedAgentHire(companyId, createdAgentId, approvalId);
+  }
+
+  return createdAgent;
+}
+
 async function ensureSeedAgent(company) {
   const companyId = typeof company?.id === 'string' ? company.id : '';
   if (!companyId) {
@@ -372,10 +493,11 @@ async function ensureSeedAgent(company) {
   };
 
   if (existingAgent && typeof existingAgent.id === 'string') {
-    await fetchJson(new URL(`/api/agents/${existingAgent.id}`, baseUrl).toString(), {
+    const updatedAgent = await fetchJson(new URL(`/api/agents/${existingAgent.id}`, baseUrl).toString(), {
       method: 'PATCH',
       body: JSON.stringify(agentPayload)
     });
+    await approveSeedAgentIfPending(companyId, updatedAgent ?? existingAgent);
     log(`Updated seeded agent ${seededAgentName} to use Codex ${seededAgentModel}${seedAgentBypassApprovalsAndSandbox ? ' with bypass enabled' : ''}.`);
     return {
       id: existingAgent.id,
@@ -383,10 +505,7 @@ async function ensureSeedAgent(company) {
     };
   }
 
-  const createdAgent = await fetchJson(companyAgentsUrl, {
-    method: 'POST',
-    body: JSON.stringify(agentPayload)
-  });
+  const createdAgent = await createSeedAgent(companyId, companyAgentsUrl, agentPayload);
   log(`Seeded agent ${seededAgentName} using Codex ${seededAgentModel}${seedAgentBypassApprovalsAndSandbox ? ' with bypass enabled' : ''}.`);
   return {
     id: typeof createdAgent?.id === 'string' ? createdAgent.id : '',

@@ -325,9 +325,14 @@ interface SyncToolbarStateData {
 
 interface GitHubIssueDetailsData {
   paperclipIssueId: string;
-  source: 'entity' | 'import_registry' | 'description';
-  githubIssueNumber: number;
-  githubIssueUrl: string;
+  kind?: 'issue' | 'pull_request';
+  source: 'entity' | 'import_registry' | 'description' | 'pull_request_entity';
+  githubIssueNumber?: number;
+  githubIssueUrl?: string;
+  githubPullRequestNumber?: number;
+  githubPullRequestUrl?: string;
+  githubPullRequestState?: 'open' | 'closed';
+  title?: string;
   repositoryUrl: string;
   creator?: PreviewPullRequestPerson;
   githubIssueState?: 'open' | 'closed';
@@ -345,7 +350,8 @@ interface GitHubIssueDetailsData {
   syncedAt?: string;
 }
 
-type GitHubIssueDetailTabState = 'loading' | 'error' | 'hidden' | 'ready';
+type GitHubIssueDetailTabState = 'loading' | 'error' | 'hidden' | 'ready' | 'unlinked';
+type ManualGitHubLinkKind = 'issue' | 'pull_request';
 
 interface IssueIdentifierResolutionData {
   issueId: string;
@@ -4695,6 +4701,113 @@ const EXTENSION_SURFACE_STYLES = `
 
   .ghsync-issue-detail__title h3 {
     margin: 0;
+  }
+
+  .ghsync__field {
+    display: grid;
+    gap: 8px;
+  }
+
+  .ghsync__field label {
+    color: var(--ghsync-title);
+    font-size: 12px;
+    font-weight: 600;
+  }
+
+  .ghsync__input {
+    width: 100%;
+    min-height: 40px;
+    border-radius: 8px;
+    border: 1px solid var(--ghsync-input-border);
+    background: var(--ghsync-input-bg);
+    color: var(--ghsync-input-text);
+    padding: 0 12px;
+    outline: none;
+  }
+
+  .ghsync__input::placeholder {
+    color: var(--ghsync-muted);
+  }
+
+  .ghsync__input:focus {
+    border-color: var(--ghsync-border);
+  }
+
+  .ghsync-link-modal-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 50;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+    background: rgba(10, 10, 12, 0.48);
+    backdrop-filter: blur(10px);
+  }
+
+  .ghsync-link-modal {
+    width: min(520px, 100%);
+    display: grid;
+    gap: 16px;
+    padding: 18px;
+    border-radius: 8px;
+    border: 1px solid var(--ghsync-border);
+    background: var(--ghsync-surface);
+    color: var(--ghsync-text);
+    box-shadow: 0 28px 80px rgba(2, 6, 23, 0.34);
+  }
+
+  .ghsync-prs-modal__header {
+    display: grid;
+    gap: 6px;
+  }
+
+  .ghsync-prs-modal__header h3 {
+    margin: 0;
+    color: var(--ghsync-title);
+    font-size: 18px;
+  }
+
+  .ghsync-prs-modal__header p {
+    margin: 0;
+    color: var(--ghsync-muted);
+    font-size: 12px;
+    line-height: 1.5;
+  }
+
+  .ghsync-prs-modal__actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+
+  .ghsync-link-kind {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 6px;
+    padding: 4px;
+    border-radius: 8px;
+    border: 1px solid var(--ghsync-border-soft);
+    background: var(--ghsync-surfaceAlt);
+  }
+
+  .ghsync-link-kind__button {
+    min-height: 34px;
+    border: 0;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--ghsync-muted);
+    font: inherit;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+
+  .ghsync-link-kind__button--active {
+    background: var(--ghsync-surface);
+    color: var(--ghsync-title);
+    box-shadow: inset 0 0 0 1px var(--ghsync-border);
   }
 
   ${SHARED_LOADING_STYLES}
@@ -14502,7 +14615,8 @@ function GitHubSyncIssueDetailTabContent(props: {
     loadingIssueId: props.loadingIssueId,
     detailsLoading: details.loading,
     detailsError: Boolean(details.error),
-    issueDetails
+    issueDetails,
+    canLinkManually: Boolean(props.companyId && props.issueId)
   });
   const issueSyncButton = useGitHubSyncButtonController({
     companyId: props.companyId,
@@ -14511,6 +14625,12 @@ function GitHubSyncIssueDetailTabContent(props: {
     resolvedIssueId: props.issueId,
     forceVisible: true
   });
+  const linkGitHubItem = usePluginAction('issue.linkGitHubItem');
+  const toast = usePluginToast();
+  const [manualLinkOpen, setManualLinkOpen] = useState(false);
+  const [manualLinkKind, setManualLinkKind] = useState<ManualGitHubLinkKind>('issue');
+  const [manualLinkReference, setManualLinkReference] = useState('');
+  const [manualLinkPending, setManualLinkPending] = useState(false);
 
   useEffect(() => {
     if (!props.companyId || !props.issueId) {
@@ -14529,6 +14649,59 @@ function GitHubSyncIssueDetailTabContent(props: {
   }
 
   const linkedPullRequests = issueDetails ? getLinkedPullRequestsForIssueDetails(issueDetails) : [];
+  const issueDetailsKind = issueDetails?.kind ?? 'issue';
+  const githubUrl = issueDetailsKind === 'pull_request' ? issueDetails?.githubPullRequestUrl : issueDetails?.githubIssueUrl;
+  const githubStateLabel = issueDetailsKind === 'pull_request'
+    ? issueDetails?.githubPullRequestState === 'closed'
+      ? 'Closed'
+      : 'Open'
+    : formatGitHubIssueState(issueDetails?.githubIssueState, issueDetails?.githubIssueStateReason);
+
+  function closeManualLinkModal(): void {
+    if (manualLinkPending) {
+      return;
+    }
+
+    setManualLinkOpen(false);
+    setManualLinkReference('');
+    setManualLinkKind('issue');
+  }
+
+  async function handleManualLinkSubmit(): Promise<void> {
+    if (!props.companyId || !props.issueId || !manualLinkReference.trim()) {
+      return;
+    }
+
+    setManualLinkPending(true);
+    try {
+      const result = await linkGitHubItem({
+        companyId: props.companyId,
+        issueId: props.issueId,
+        kind: manualLinkKind,
+        reference: manualLinkReference.trim()
+      }) as { kind?: string; githubIssueNumber?: number; githubPullRequestNumber?: number };
+
+      setManualLinkOpen(false);
+      setManualLinkReference('');
+      await details.refresh();
+      notifyGitHubSyncPullRequestsChanged();
+      toast({
+        title: 'GitHub link saved',
+        body: result.kind === 'pull_request'
+          ? `Linked pull request #${result.githubPullRequestNumber ?? manualLinkReference.trim()}.`
+          : `Linked issue #${result.githubIssueNumber ?? manualLinkReference.trim()}.`,
+        tone: 'success'
+      });
+    } catch (error) {
+      toast({
+        title: 'Unable to link GitHub item',
+        body: getActionErrorMessage(error, 'GitHub Sync could not save this link.'),
+        tone: 'error'
+      });
+    } finally {
+      setManualLinkPending(false);
+    }
+  }
 
   return (
     <section className="ghsync-issue-detail" style={props.themeVars}>
@@ -14536,13 +14709,41 @@ function GitHubSyncIssueDetailTabContent(props: {
 
       {detailTabState === 'loading' ? <p className="ghsync-extension-empty">Loading GitHub sync details…</p> : null}
       {detailTabState === 'error' && details.error ? <p className="ghsync-extension-empty">{details.error.message}</p> : null}
+      {detailTabState === 'unlinked' ? (
+        <div className="ghsync-issue-detail__intro">
+          <div className="ghsync-extension-heading">
+            <div className="ghsync-issue-detail__headline">
+              <h4>GitHub link</h4>
+              <p>No GitHub issue or pull request is linked to this Paperclip issue yet.</p>
+            </div>
+            <div className="ghsync-issue-detail__actions">
+              <button
+                type="button"
+                className={getPluginActionClassName({
+                  variant: 'secondary',
+                  size: 'sm',
+                  extraClassName: 'ghsync-extension-link'
+                })}
+                onClick={() => setManualLinkOpen(true)}
+              >
+                <GitHubButtonLabel label="Link GitHub item" />
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
 
       {detailTabState === 'ready' && issueDetails ? (
         <>
           <div className="ghsync-extension-heading">
             <div className="ghsync-issue-detail__headline">
-              <h4>Issue #{issueDetails.githubIssueNumber}</h4>
+              <h4>
+                {issueDetailsKind === 'pull_request'
+                  ? `Pull request #${issueDetails.githubPullRequestNumber ?? ''}`
+                  : `Issue #${issueDetails.githubIssueNumber ?? ''}`}
+              </h4>
               <p>{formatGitHubRepositoryLabel(issueDetails.repositoryUrl)}</p>
+              {issueDetailsKind === 'pull_request' && issueDetails.title ? <p>{issueDetails.title}</p> : null}
               {issueDetails.creator ? (
                 <div className="ghsync-issue-detail__creator-row">
                   <span className="ghsync-issue-detail__creator-label">Creator</span>
@@ -14579,29 +14780,31 @@ function GitHubSyncIssueDetailTabContent(props: {
                   />
                 </button>
               ) : null}
-              <a
-                href={issueDetails.githubIssueUrl}
-                target="_blank"
-                rel="noreferrer"
-                className={getPluginActionClassName({
-                  variant: 'secondary',
-                  size: 'sm',
-                  extraClassName: 'ghsync-extension-link'
-                })}
-              >
-                <GitHubButtonLabel label="Open on GitHub" />
-              </a>
+              {githubUrl ? (
+                <a
+                  href={githubUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                  className={getPluginActionClassName({
+                    variant: 'secondary',
+                    size: 'sm',
+                    extraClassName: 'ghsync-extension-link'
+                  })}
+                >
+                  <GitHubButtonLabel label="Open on GitHub" />
+                </a>
+              ) : null}
             </div>
           </div>
 
           <div className="ghsync-extension-grid">
             <div className="ghsync-extension-metric">
               <span>State</span>
-              <strong>{formatGitHubIssueState(issueDetails.githubIssueState, issueDetails.githubIssueStateReason)}</strong>
+              <strong>{githubStateLabel}</strong>
             </div>
             <div className="ghsync-extension-metric">
-              <span>Comments</span>
-              <strong>{issueDetails.commentsCount ?? 'Unknown'}</strong>
+              <span>Type</span>
+              <strong>{issueDetailsKind === 'pull_request' ? 'Pull request' : 'Issue'}</strong>
             </div>
             <div className="ghsync-extension-metric">
               <span>Linked PRs</span>
@@ -14638,7 +14841,7 @@ function GitHubSyncIssueDetailTabContent(props: {
             </div>
           ) : null}
 
-          {issueDetails.labels && issueDetails.labels.length > 0 ? (
+          {issueDetails.kind !== 'pull_request' && issueDetails.labels && issueDetails.labels.length > 0 ? (
             <div className="ghsync-issue-detail__section">
               <div className="ghsync-issue-detail__section-heading">Labels</div>
               <div className="ghsync-extension-labels">
@@ -14655,12 +14858,79 @@ function GitHubSyncIssueDetailTabContent(props: {
             </div>
           ) : null}
 
-          {issueDetails.source !== 'entity' ? (
+          {issueDetails.kind !== 'pull_request' && issueDetails.source !== 'entity' ? (
             <div className="ghsync-extension-note">
               GitHub Sync recovered this link from older sync metadata. Run sync once to refresh the creator, GitHub state, labels, and linked PRs in this panel.
             </div>
           ) : null}
         </>
+      ) : null}
+      {manualLinkOpen ? (
+        <div className="ghsync-link-modal-backdrop" onClick={closeManualLinkModal}>
+          <div
+            className="ghsync-link-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="ghsync-link-modal-title"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="ghsync-prs-modal__header">
+              <h3 id="ghsync-link-modal-title">Link GitHub item</h3>
+              <p>Enter a GitHub issue or pull request number from the mapped repository, or paste the full GitHub URL.</p>
+            </div>
+            <div className="ghsync-link-kind" role="group" aria-label="GitHub item type">
+              <button
+                type="button"
+                className={manualLinkKind === 'issue' ? 'ghsync-link-kind__button ghsync-link-kind__button--active' : 'ghsync-link-kind__button'}
+                onClick={() => setManualLinkKind('issue')}
+                disabled={manualLinkPending}
+              >
+                Issue
+              </button>
+              <button
+                type="button"
+                className={manualLinkKind === 'pull_request' ? 'ghsync-link-kind__button ghsync-link-kind__button--active' : 'ghsync-link-kind__button'}
+                onClick={() => setManualLinkKind('pull_request')}
+                disabled={manualLinkPending}
+              >
+                Pull request
+              </button>
+            </div>
+            <div className="ghsync__field">
+              <label htmlFor="ghsync-link-reference">
+                {manualLinkKind === 'pull_request' ? 'Pull request number or URL' : 'Issue number or URL'}
+              </label>
+              <input
+                id="ghsync-link-reference"
+                className="ghsync__input"
+                value={manualLinkReference}
+                onChange={(event) => setManualLinkReference(event.currentTarget.value)}
+                placeholder={manualLinkKind === 'pull_request'
+                  ? '89 or https://github.com/owner/repo/pull/89'
+                  : '88 or https://github.com/owner/repo/issues/88'}
+                disabled={manualLinkPending}
+              />
+            </div>
+            <div className="ghsync-prs-modal__actions">
+              <button
+                type="button"
+                className={getPluginActionClassName({ variant: 'secondary', size: 'sm' })}
+                onClick={closeManualLinkModal}
+                disabled={manualLinkPending}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className={getPluginActionClassName({ variant: 'primary', size: 'sm' })}
+                onClick={() => { void handleManualLinkSubmit(); }}
+                disabled={!manualLinkReference.trim() || manualLinkPending}
+              >
+                <LoadingButtonContent busy={manualLinkPending} label="Link" busyLabel="Linking" />
+              </button>
+            </div>
+          </div>
+        </div>
       ) : null}
     </section>
   );
@@ -14671,6 +14941,7 @@ export function resolveGitHubIssueDetailTabState(params: {
   detailsLoading?: boolean;
   detailsError?: boolean;
   issueDetails?: GitHubIssueDetailsData | null;
+  canLinkManually?: boolean;
 }): GitHubIssueDetailTabState {
   if (params.loadingIssueId || (params.detailsLoading && !params.issueDetails)) {
     return 'loading';
@@ -14682,6 +14953,10 @@ export function resolveGitHubIssueDetailTabState(params: {
 
   if (params.detailsError) {
     return 'error';
+  }
+
+  if (params.canLinkManually) {
+    return 'unlinked';
   }
 
   return 'hidden';

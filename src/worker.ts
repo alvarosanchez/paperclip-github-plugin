@@ -661,6 +661,14 @@ interface ParsedGitHubIssueReference {
   issueUrl: string;
 }
 
+interface ParsedGitHubPullRequestReference {
+  owner: string;
+  repo: string;
+  repositoryUrl: string;
+  pullRequestNumber: number;
+  pullRequestUrl: string;
+}
+
 interface GitHubApiIssueRecord {
   id: number;
   number: number;
@@ -3951,14 +3959,11 @@ async function buildIssueGitHubDetails(
   const link = await resolvePaperclipIssueGitHubLink(ctx, issueId, companyId, {
     linkRecords
   });
-  if (!link) {
-    return null;
-  }
-
-  const entityMatch = link.entityRecord;
-  if (entityMatch) {
+  if (link?.entityRecord) {
+    const entityMatch = link.entityRecord;
     return {
       paperclipIssueId: issueId,
+      kind: 'issue',
       source: 'entity',
       githubIssueNumber: entityMatch.data.githubIssueNumber,
       githubIssueUrl: entityMatch.data.githubIssueUrl,
@@ -3982,14 +3987,52 @@ async function buildIssueGitHubDetails(
     };
   }
 
+  if (link) {
+    return {
+      paperclipIssueId: issueId,
+      kind: 'issue',
+      source: link.source,
+      githubIssueNumber: link.githubIssueNumber,
+      githubIssueUrl: link.githubIssueUrl,
+      repositoryUrl: link.repositoryUrl,
+      linkedPullRequestNumbers: link.linkedPullRequestNumbers,
+      linkedPullRequests: link.linkedPullRequests
+    };
+  }
+
+  const pullRequestLinks = await listGitHubPullRequestLinkRecords(ctx, {
+    paperclipIssueId: issueId
+  });
+  const pullRequestLink = pullRequestLinks
+    .filter((record) => !record.data.companyId || record.data.companyId === companyId)
+    .sort((left, right) => {
+      const rightTimestamp = Date.parse(right.updatedAt ?? right.createdAt ?? '');
+      const leftTimestamp = Date.parse(left.updatedAt ?? left.createdAt ?? '');
+      const safeRightTimestamp = Number.isFinite(rightTimestamp) ? rightTimestamp : 0;
+      const safeLeftTimestamp = Number.isFinite(leftTimestamp) ? leftTimestamp : 0;
+      return safeRightTimestamp - safeLeftTimestamp;
+    })[0];
+  if (!pullRequestLink) {
+    return null;
+  }
+
   return {
     paperclipIssueId: issueId,
-    source: link.source,
-    githubIssueNumber: link.githubIssueNumber,
-    githubIssueUrl: link.githubIssueUrl,
-    repositoryUrl: link.repositoryUrl,
-    linkedPullRequestNumbers: link.linkedPullRequestNumbers,
-    linkedPullRequests: link.linkedPullRequests
+    kind: 'pull_request',
+    source: 'pull_request_entity',
+    repositoryUrl: pullRequestLink.data.repositoryUrl,
+    githubPullRequestNumber: pullRequestLink.data.githubPullRequestNumber,
+    githubPullRequestUrl: pullRequestLink.data.githubPullRequestUrl,
+    githubPullRequestState: pullRequestLink.data.githubPullRequestState,
+    title: pullRequestLink.data.title,
+    linkedPullRequestNumbers: [pullRequestLink.data.githubPullRequestNumber],
+    linkedPullRequests: [
+      {
+        number: pullRequestLink.data.githubPullRequestNumber,
+        repositoryUrl: pullRequestLink.data.repositoryUrl
+      }
+    ],
+    syncedAt: pullRequestLink.data.syncedAt
   };
 }
 
@@ -8854,26 +8897,37 @@ function normalizeGitHubIssueHtmlUrl(value: string): string | undefined {
   return parseGitHubIssueHtmlUrl(value)?.issueUrl;
 }
 
+function parseGitHubPullRequestHtmlUrl(value: string): ParsedGitHubPullRequestReference | undefined {
+  try {
+    const url = new URL(value.trim());
+    const hostname = url.hostname.trim().toLowerCase();
+    if (hostname !== 'github.com' && hostname !== 'www.github.com') {
+      return undefined;
+    }
+
+    const match = url.pathname.match(/^\/([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)\/pull\/(\d+)\/?$/);
+    if (!match) {
+      return undefined;
+    }
+
+    return {
+      owner: match[1],
+      repo: match[2],
+      repositoryUrl: `https://github.com/${match[1]}/${match[2]}`,
+      pullRequestNumber: Number(match[3]),
+      pullRequestUrl: `https://github.com/${match[1]}/${match[2]}/pull/${match[3]}`
+    };
+  } catch {
+    return undefined;
+  }
+}
+
 function normalizeGitHubPullRequestHtmlUrl(value?: string): string | undefined {
   if (typeof value !== 'string' || !value.trim()) {
     return undefined;
   }
 
-  try {
-    const parsed = new URL(value);
-    if (parsed.protocol !== 'https:' || parsed.hostname !== 'github.com') {
-      return undefined;
-    }
-
-    const match = parsed.pathname.match(/^\/([^/]+)\/([^/]+)\/pull\/(\d+)\/?$/i);
-    if (!match) {
-      return undefined;
-    }
-
-    return `https://github.com/${match[1]}/${match[2]}/pull/${match[3]}`;
-  } catch {
-    return undefined;
-  }
+  return parseGitHubPullRequestHtmlUrl(value)?.pullRequestUrl;
 }
 
 function escapeRegExp(value: string): string {
@@ -9894,6 +9948,365 @@ async function upsertGitHubPullRequestLinkRecord(
       syncedAt: new Date().toISOString()
     }
   });
+}
+
+function normalizeIssueGitHubLinkKind(value: unknown): 'issue' | 'pull_request' | null {
+  if (value === 'issue' || value === 'github_issue') {
+    return 'issue';
+  }
+
+  if (value === 'pull_request' || value === 'pr' || value === 'github_pull_request') {
+    return 'pull_request';
+  }
+
+  return null;
+}
+
+function getGitHubPullRequestStateForLink(value: {
+  state?: string | null;
+  merged?: boolean | null;
+}): 'open' | 'closed' {
+  return getPullRequestApiState(value) === 'open' ? 'open' : 'closed';
+}
+
+async function assertPaperclipIssueHasNoManualGitHubLink(
+  ctx: PluginSetupContext,
+  params: {
+    companyId: string;
+    issueId: string;
+  }
+): Promise<void> {
+  const existingIssueLink = await resolvePaperclipIssueGitHubLink(ctx, params.issueId, params.companyId);
+  if (existingIssueLink) {
+    throw new Error('This Paperclip issue is already linked to a GitHub issue.');
+  }
+
+  const existingPullRequestLinks = await listGitHubPullRequestLinkRecords(ctx, {
+    paperclipIssueId: params.issueId
+  });
+  const matchingPullRequestLink = existingPullRequestLinks.find((record) =>
+    !record.data.companyId || record.data.companyId === params.companyId
+  );
+  if (matchingPullRequestLink) {
+    throw new Error('This Paperclip issue is already linked to a GitHub pull request.');
+  }
+}
+
+async function resolveIssueGitHubLinkMapping(
+  ctx: PluginSetupContext,
+  params: {
+    companyId: string;
+    issueId: string;
+    repositoryUrl?: string;
+  }
+): Promise<{
+  issue: Issue;
+  projectId: string;
+  mapping: RepositoryMapping;
+  repository: ParsedRepositoryReference;
+}> {
+  const issue = await ctx.issues.get(params.issueId, params.companyId);
+  if (!issue) {
+    throw new Error('Paperclip issue was not found.');
+  }
+
+  const projectId = typeof issue.projectId === 'string' && issue.projectId.trim() ? issue.projectId.trim() : undefined;
+  if (!projectId) {
+    throw new Error('This Paperclip issue is not in a project that can be mapped to a GitHub repository.');
+  }
+
+  const settings = normalizeSettings(await ctx.state.get(SETTINGS_SCOPE));
+  const mappings = await resolveProjectScopedMappings(ctx, settings.mappings, {
+    companyId: params.companyId,
+    projectId
+  });
+
+  if (mappings.length === 0) {
+    throw new Error('This Paperclip issue project is not mapped to a GitHub repository.');
+  }
+
+  const requestedRepository = params.repositoryUrl ? parseRepositoryReference(params.repositoryUrl) : null;
+  if (params.repositoryUrl && !requestedRepository) {
+    throw new Error(`Invalid GitHub repository: ${params.repositoryUrl}. Use owner/repo or https://github.com/owner/repo.`);
+  }
+
+  const matchingMappings = requestedRepository
+    ? mappings.filter((mapping) =>
+        areRepositoriesEqual(requireRepositoryReference(mapping.repositoryUrl), requestedRepository)
+      )
+    : mappings;
+
+  if (matchingMappings.length === 0 && requestedRepository) {
+    throw new Error('The current Paperclip issue project is not mapped to the selected GitHub repository.');
+  }
+
+  if (matchingMappings.length > 1 && !requestedRepository) {
+    throw new Error('This Paperclip issue project has multiple GitHub repositories. Enter the full GitHub URL.');
+  }
+
+  const mapping = matchingMappings[0];
+  if (!mapping) {
+    throw new Error('This Paperclip issue project is not mapped to a GitHub repository.');
+  }
+
+  return {
+    issue,
+    projectId,
+    mapping,
+    repository: requestedRepository ?? requireRepositoryReference(mapping.repositoryUrl)
+  };
+}
+
+function resolveGitHubIssueLinkReference(input: {
+  kind: 'issue';
+  reference?: unknown;
+  repositoryUrl?: string;
+  issueNumber?: unknown;
+}): {
+  repositoryUrl?: string;
+  issueNumber: number;
+  issueUrl?: string;
+} {
+  const reference = normalizeOptionalString(input.reference);
+  if (reference) {
+    const parsedIssueUrl = parseGitHubIssueHtmlUrl(reference);
+    if (parsedIssueUrl) {
+      return {
+        repositoryUrl: parsedIssueUrl.repositoryUrl,
+        issueNumber: parsedIssueUrl.issueNumber,
+        issueUrl: parsedIssueUrl.issueUrl
+      };
+    }
+
+    if (parseGitHubPullRequestHtmlUrl(reference)) {
+      throw new Error('That reference is a GitHub pull request. Choose pull request instead.');
+    }
+
+    const referenceNumber = normalizePositiveIntegerReference(reference);
+    if (referenceNumber) {
+      return {
+        repositoryUrl: input.repositoryUrl,
+        issueNumber: referenceNumber
+      };
+    }
+  }
+
+  const explicitIssueNumber = normalizePositiveIntegerReference(input.issueNumber);
+  if (explicitIssueNumber) {
+    return {
+      repositoryUrl: input.repositoryUrl,
+      issueNumber: explicitIssueNumber
+    };
+  }
+
+  throw new Error('Enter a GitHub issue number or full GitHub issue URL.');
+}
+
+function resolveGitHubPullRequestLinkReference(input: {
+  reference?: unknown;
+  repositoryUrl?: string;
+  pullRequestNumber?: unknown;
+  pullRequestUrl?: unknown;
+}): {
+  repositoryUrl?: string;
+  pullRequestNumber: number;
+  pullRequestUrl?: string;
+} {
+  const explicitPullRequestUrl = normalizeGitHubPullRequestHtmlUrl(normalizeOptionalString(input.pullRequestUrl));
+  const parsedExplicitPullRequestUrl = explicitPullRequestUrl
+    ? parseGitHubPullRequestHtmlUrl(explicitPullRequestUrl)
+    : undefined;
+  const reference = normalizeOptionalString(input.reference);
+  const parsedReferenceUrl = reference ? parseGitHubPullRequestHtmlUrl(reference) : undefined;
+
+  if (reference && parseGitHubIssueHtmlUrl(reference)) {
+    throw new Error('That reference is a GitHub issue. Choose issue instead.');
+  }
+
+  const parsedUrl = parsedReferenceUrl ?? parsedExplicitPullRequestUrl;
+  const explicitPullRequestNumber = normalizePositiveIntegerReference(input.pullRequestNumber);
+  const referenceNumber = reference && !parsedReferenceUrl ? normalizePositiveIntegerReference(reference) : undefined;
+  const pullRequestNumber = parsedUrl?.pullRequestNumber ?? explicitPullRequestNumber ?? referenceNumber;
+  const repositoryUrl = parsedUrl?.repositoryUrl ?? input.repositoryUrl;
+
+  if (!pullRequestNumber) {
+    throw new Error('Enter a GitHub pull request number or full GitHub pull request URL.');
+  }
+
+  if (parsedUrl && explicitPullRequestNumber && explicitPullRequestNumber !== parsedUrl.pullRequestNumber) {
+    throw new Error('pullRequestNumber must match the supplied GitHub pull request URL.');
+  }
+
+  if (parsedUrl && input.repositoryUrl) {
+    const requestedRepository = parseRepositoryReference(input.repositoryUrl);
+    const urlRepository = parseRepositoryReference(parsedUrl.repositoryUrl);
+    if (requestedRepository && urlRepository && !areRepositoriesEqual(requestedRepository, urlRepository)) {
+      throw new Error('repository must match the supplied GitHub pull request URL.');
+    }
+  }
+
+  return {
+    repositoryUrl,
+    pullRequestNumber,
+    ...(parsedUrl?.pullRequestUrl ? { pullRequestUrl: parsedUrl.pullRequestUrl } : {})
+  };
+}
+
+async function linkPaperclipIssueToGitHubIssue(
+  ctx: PluginSetupContext,
+  params: {
+    companyId: string;
+    issueId: string;
+    reference?: unknown;
+    repositoryUrl?: string;
+    issueNumber?: unknown;
+    requireUnlinked?: boolean;
+  }
+): Promise<Record<string, unknown>> {
+  const companyId = normalizeCompanyId(params.companyId);
+  const issueId = normalizeOptionalString(params.issueId);
+  if (!companyId || !issueId) {
+    throw new Error('companyId and issueId are required.');
+  }
+
+  if (params.requireUnlinked) {
+    await assertPaperclipIssueHasNoManualGitHubLink(ctx, {
+      companyId,
+      issueId
+    });
+  }
+
+  const reference = resolveGitHubIssueLinkReference({
+    kind: 'issue',
+    reference: params.reference,
+    repositoryUrl: params.repositoryUrl,
+    issueNumber: params.issueNumber
+  });
+  const scope = await resolveIssueGitHubLinkMapping(ctx, {
+    companyId,
+    issueId,
+    repositoryUrl: reference.repositoryUrl
+  });
+  const octokit = await createGitHubToolOctokit(ctx, companyId);
+  const response = await octokit.rest.issues.get({
+    owner: scope.repository.owner,
+    repo: scope.repository.repo,
+    issue_number: reference.issueNumber,
+    headers: {
+      'X-GitHub-Api-Version': GITHUB_API_VERSION
+    }
+  });
+  const rawIssue = response.data as GitHubApiIssueRecord;
+  if (rawIssue.pull_request) {
+    throw new Error('That GitHub number is a pull request. Choose pull request instead.');
+  }
+
+  const githubIssue = normalizeGitHubIssueRecord(rawIssue);
+  const linkedPullRequests = await listLinkedPullRequestsForIssue(octokit, scope.repository, githubIssue.number);
+  await upsertGitHubIssueLinkRecord(ctx, scope.mapping, issueId, githubIssue, linkedPullRequests);
+
+  const importRegistry = normalizeImportRegistry(await ctx.state.get(IMPORT_REGISTRY_SCOPE));
+  upsertImportedIssueRecord(
+    importRegistry,
+    buildImportedIssueRecord(scope.mapping, githubIssue, issueId, new Date().toISOString())
+  );
+  await ctx.state.set(IMPORT_REGISTRY_SCOPE, importRegistry);
+
+  invalidateProjectPullRequestCaches({
+    companyId,
+    projectId: scope.mapping.paperclipProjectId ?? scope.projectId,
+    repository: scope.repository
+  });
+
+  return {
+    kind: 'issue',
+    paperclipIssueId: issueId,
+    repositoryUrl: scope.repository.url,
+    githubIssueNumber: githubIssue.number,
+    githubIssueUrl: normalizeGitHubIssueHtmlUrl(githubIssue.htmlUrl) ?? githubIssue.htmlUrl,
+    linkedPullRequestNumbers: linkedPullRequests.map((pullRequest) => pullRequest.number)
+  };
+}
+
+async function linkPaperclipIssueToGitHubPullRequest(
+  ctx: PluginSetupContext,
+  params: {
+    companyId: string;
+    issueId: string;
+    reference?: unknown;
+    repositoryUrl?: string;
+    pullRequestNumber?: unknown;
+    pullRequestUrl?: unknown;
+    requireUnlinked?: boolean;
+  }
+): Promise<Record<string, unknown>> {
+  const companyId = normalizeCompanyId(params.companyId);
+  const issueId = normalizeOptionalString(params.issueId);
+  if (!companyId || !issueId) {
+    throw new Error('companyId and issueId are required.');
+  }
+
+  if (params.requireUnlinked) {
+    await assertPaperclipIssueHasNoManualGitHubLink(ctx, {
+      companyId,
+      issueId
+    });
+  }
+
+  const reference = resolveGitHubPullRequestLinkReference({
+    reference: params.reference,
+    repositoryUrl: params.repositoryUrl,
+    pullRequestNumber: params.pullRequestNumber,
+    pullRequestUrl: params.pullRequestUrl
+  });
+  const scope = await resolveIssueGitHubLinkMapping(ctx, {
+    companyId,
+    issueId,
+    repositoryUrl: reference.repositoryUrl
+  });
+  const octokit = await createGitHubToolOctokit(ctx, companyId);
+  const response = await octokit.rest.pulls.get({
+    owner: scope.repository.owner,
+    repo: scope.repository.repo,
+    pull_number: reference.pullRequestNumber,
+    headers: {
+      'X-GitHub-Api-Version': GITHUB_API_VERSION
+    }
+  });
+  const pullRequestUrl =
+    normalizeGitHubPullRequestHtmlUrl(response.data.html_url ?? reference.pullRequestUrl)
+    ?? reference.pullRequestUrl
+    ?? `${scope.repository.url}/pull/${reference.pullRequestNumber}`;
+  const pullRequestState = getGitHubPullRequestStateForLink({
+    state: response.data.state,
+    merged: response.data.merged
+  });
+
+  await upsertGitHubPullRequestLinkRecord(ctx, {
+    companyId,
+    projectId: scope.mapping.paperclipProjectId ?? scope.projectId,
+    issueId,
+    repositoryUrl: scope.repository.url,
+    pullRequestNumber: reference.pullRequestNumber,
+    pullRequestUrl,
+    pullRequestTitle: response.data.title || `Pull request #${reference.pullRequestNumber}`,
+    pullRequestState
+  });
+
+  invalidateProjectPullRequestCaches({
+    companyId,
+    projectId: scope.mapping.paperclipProjectId ?? scope.projectId,
+    repository: scope.repository
+  });
+
+  return {
+    kind: 'pull_request',
+    paperclipIssueId: issueId,
+    repositoryUrl: scope.repository.url,
+    githubPullRequestNumber: reference.pullRequestNumber,
+    githubPullRequestUrl: pullRequestUrl,
+    githubPullRequestState: pullRequestState
+  };
 }
 
 async function upsertStatusTransitionCommentAnnotation(
@@ -12499,6 +12912,24 @@ function normalizeToolPositiveInteger(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isInteger(value) && value > 0 ? value : undefined;
 }
 
+function normalizePositiveIntegerReference(value: unknown): number | undefined {
+  if (typeof value === 'number' && Number.isInteger(value) && value > 0) {
+    return value;
+  }
+
+  if (typeof value !== 'string') {
+    return undefined;
+  }
+
+  const match = value.trim().match(/^#?(\d+)$/);
+  if (!match) {
+    return undefined;
+  }
+
+  const parsed = Number(match[1]);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : undefined;
+}
+
 function normalizeToolStringArray(value: unknown): string[] {
   if (!Array.isArray(value)) {
     return [];
@@ -12715,12 +13146,36 @@ async function handleCompanyMetricApiRoute(
   const pullRequestNumber = normalizeToolPositiveInteger(payload.pullRequestNumber);
   const pullRequestUrl = normalizeGitHubPullRequestHtmlUrl(normalizeOptionalString(payload.pullRequestUrl));
   const eventKey = normalizeOptionalString(payload.eventKey);
+  const paperclipIssueId = normalizeOptionalString(payload.paperclipIssueId);
+  let linkedPaperclipIssueId: string | undefined;
+  let linkedRepository: ParsedRepositoryReference | null = null;
+  let linkedPullRequestNumber: number | undefined;
+  let linkedPullRequestUrl: string | undefined;
+  if (paperclipIssueId) {
+    const linkResult = await linkPaperclipIssueToGitHubPullRequest(ctx, {
+      companyId,
+      issueId: paperclipIssueId,
+      repositoryUrl: repository?.url,
+      pullRequestNumber,
+      pullRequestUrl
+    });
+    linkedPaperclipIssueId =
+      typeof linkResult.paperclipIssueId === 'string' ? linkResult.paperclipIssueId : paperclipIssueId;
+    const resultRepositoryUrl = normalizeOptionalString(linkResult.repositoryUrl);
+    linkedRepository = resultRepositoryUrl ? parseRepositoryReference(resultRepositoryUrl) : null;
+    linkedPullRequestNumber = normalizeToolPositiveInteger(linkResult.githubPullRequestNumber);
+    linkedPullRequestUrl = normalizeGitHubPullRequestHtmlUrl(normalizeOptionalString(linkResult.githubPullRequestUrl));
+  }
+
+  const metricRepositoryUrl = repository?.url ?? linkedRepository?.url;
+  const metricPullRequestNumber = pullRequestNumber ?? linkedPullRequestNumber;
+  const metricPullRequestUrl = pullRequestUrl ?? linkedPullRequestUrl;
   const dedupeKey = buildCompanyMetricEventKey({
     metric,
     eventKey,
-    repositoryUrl: repository?.url,
-    pullRequestNumber,
-    pullRequestUrl
+    repositoryUrl: metricRepositoryUrl,
+    pullRequestNumber: metricPullRequestNumber,
+    pullRequestUrl: metricPullRequestUrl
   });
   if (!dedupeKey) {
     throw new Error(
@@ -12736,9 +13191,9 @@ async function handleCompanyMetricApiRoute(
       count: normalizeToolPositiveInteger(payload.count),
       occurredAt: normalizeOptionalString(payload.occurredAt),
       eventKey,
-      repositoryUrl: repository?.url,
-      pullRequestNumber,
-      pullRequestUrl
+      repositoryUrl: metricRepositoryUrl,
+      pullRequestNumber: metricPullRequestNumber,
+      pullRequestUrl: metricPullRequestUrl
     },
     {
       throwOnPersistFailure: true
@@ -12753,9 +13208,10 @@ async function handleCompanyMetricApiRoute(
       routeKey: input.routeKey,
       companyId,
       metric,
-      repositoryUrl: repository?.url,
-      pullRequestNumber,
-      pullRequestUrl,
+      repositoryUrl: metricRepositoryUrl,
+      pullRequestNumber: metricPullRequestNumber,
+      pullRequestUrl: metricPullRequestUrl,
+      linkedPaperclipIssueId: linkedPaperclipIssueId ?? null,
       agentId: input.actor.agentId ?? null,
       runId: input.actor.runId ?? null
     }
@@ -12767,7 +13223,8 @@ async function handleCompanyMetricApiRoute(
       status: recordedMetric.recorded ? 'recorded' : 'duplicate',
       recorded: recordedMetric.recorded,
       companyId,
-      metric: 'pull_request_created'
+      metric: 'pull_request_created',
+      ...(linkedPaperclipIssueId ? { paperclipIssueId: linkedPaperclipIssueId } : {})
     }
   };
 }
@@ -18004,7 +18461,15 @@ function registerGitHubAgentTools(ctx: PluginSetupContext): void {
     getGitHubAgentToolDeclaration('create_pull_request'),
     async (params, runCtx) => executeGitHubTool(async () => {
       const input = getToolInputRecord(params);
-      const repository = await resolveGitHubToolRepository(ctx, runCtx, input);
+      const paperclipIssueId = normalizeOptionalToolString(input.paperclipIssueId);
+      const explicitRepository = normalizeOptionalToolString(input.repository);
+      const issueLinkScope = paperclipIssueId && !explicitRepository
+        ? await resolveIssueGitHubLinkMapping(ctx, {
+            companyId: runCtx.companyId,
+            issueId: paperclipIssueId
+          })
+        : null;
+      const repository = issueLinkScope?.repository ?? await resolveGitHubToolRepository(ctx, runCtx, input);
       const head = normalizeOptionalToolString(input.head);
       const base = normalizeOptionalToolString(input.base);
       const title = normalizeOptionalToolString(input.title);
@@ -18032,6 +18497,36 @@ function registerGitHubAgentTools(ctx: PluginSetupContext): void {
           'X-GitHub-Api-Version': GITHUB_API_VERSION
         }
       });
+
+      if (paperclipIssueId) {
+        const linkScope = issueLinkScope ?? await resolveIssueGitHubLinkMapping(ctx, {
+          companyId: runCtx.companyId,
+          issueId: paperclipIssueId,
+          repositoryUrl: repository.url
+        });
+        const pullRequestUrl =
+          normalizeGitHubPullRequestHtmlUrl(response.data.html_url)
+          ?? `${repository.url}/pull/${response.data.number}`;
+
+        await upsertGitHubPullRequestLinkRecord(ctx, {
+          companyId: runCtx.companyId,
+          projectId: linkScope.mapping.paperclipProjectId ?? linkScope.projectId,
+          issueId: paperclipIssueId,
+          repositoryUrl: repository.url,
+          pullRequestNumber: response.data.number,
+          pullRequestUrl,
+          pullRequestTitle: response.data.title || title,
+          pullRequestState: getGitHubPullRequestStateForLink({
+            state: response.data.state,
+            merged: false
+          })
+        });
+        invalidateProjectPullRequestCaches({
+          companyId: runCtx.companyId,
+          projectId: linkScope.mapping.paperclipProjectId ?? linkScope.projectId,
+          repository
+        });
+      }
 
       await persistCompanyActivityMetricEvent(
         ctx,
@@ -18700,6 +19195,39 @@ const plugin = definePlugin({
     ctx.data.register('comment.annotation', async (input) => {
       const record = input && typeof input === 'object' ? input as Record<string, unknown> : {};
       return buildCommentAnnotationData(ctx, record);
+    });
+
+    ctx.actions.register('issue.linkGitHubItem', async (input) => {
+      const record = input && typeof input === 'object' ? input as Record<string, unknown> : {};
+      const kind = normalizeIssueGitHubLinkKind(record.kind);
+      if (!kind) {
+        throw new Error('kind must be "issue" or "pull_request".');
+      }
+
+      const companyId = normalizeCompanyId(record.companyId);
+      const issueId = normalizeOptionalString(record.issueId);
+      if (!companyId || !issueId) {
+        throw new Error('companyId and issueId are required.');
+      }
+
+      return kind === 'issue'
+        ? linkPaperclipIssueToGitHubIssue(ctx, {
+            companyId,
+            issueId,
+            reference: record.reference,
+            repositoryUrl: normalizeOptionalString(record.repository),
+            issueNumber: record.issueNumber,
+            requireUnlinked: true
+          })
+        : linkPaperclipIssueToGitHubPullRequest(ctx, {
+            companyId,
+            issueId,
+            reference: record.reference,
+            repositoryUrl: normalizeOptionalString(record.repository),
+            pullRequestNumber: record.pullRequestNumber,
+            pullRequestUrl: record.pullRequestUrl,
+            requireUnlinked: true
+          });
     });
 
     ctx.actions.register('settings.saveRegistration', async (input) => {
