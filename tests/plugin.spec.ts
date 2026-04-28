@@ -50,6 +50,87 @@ test.beforeEach(async () => {
   plugin = await importFreshWorker();
 });
 
+test('sync keeps completed healthy PR waits unassigned instead of restarting internal review', async () => {
+  const workerModule = await importFreshWorkerModule();
+  const syncContext = {
+    assignee: { kind: 'agent', id: 'engineer-agent' },
+    executionPolicy: {
+      stages: [
+        {
+          id: 'architect-review',
+          type: 'review',
+          participants: [{ kind: 'agent', id: 'architect-agent' }]
+        }
+      ]
+    },
+    executionState: null
+  };
+  const advancedSettings = {
+    defaultStatus: 'backlog',
+    ignoredIssueAuthorUsernames: []
+  };
+
+  assert.equal(
+    workerModule.__testing.isHealthyMaintainerWaitTransition({
+      currentStatus: 'done',
+      nextStatus: 'in_review',
+      syncContext
+    }),
+    true
+  );
+  assert.equal(
+    workerModule.__testing.resolveSyncTransitionAssignee({
+      currentStatus: 'done',
+      nextStatus: 'in_review',
+      syncContext,
+      advancedSettings
+    }),
+    null
+  );
+});
+
+test('sync still starts internal review for active implementation handoffs', async () => {
+  const workerModule = await importFreshWorkerModule();
+  const syncContext = {
+    assignee: { kind: 'agent', id: 'engineer-agent' },
+    executionPolicy: {
+      stages: [
+        {
+          id: 'architect-review',
+          type: 'review',
+          participants: [{ kind: 'agent', id: 'architect-agent' }]
+        }
+      ]
+    },
+    executionState: null
+  };
+  const advancedSettings = {
+    defaultStatus: 'backlog',
+    ignoredIssueAuthorUsernames: []
+  };
+
+  assert.equal(
+    workerModule.__testing.isHealthyMaintainerWaitTransition({
+      currentStatus: 'in_progress',
+      nextStatus: 'in_review',
+      syncContext
+    }),
+    false
+  );
+  assert.deepEqual(
+    workerModule.__testing.resolveSyncTransitionAssignee({
+      currentStatus: 'in_progress',
+      nextStatus: 'in_review',
+      syncContext,
+      advancedSettings
+    }),
+    {
+      principal: { kind: 'agent', id: 'architect-agent' },
+      role: 'reviewer'
+    }
+  );
+});
+
 async function importManifestWithPluginVersion(pluginVersion?: string): Promise<typeof manifest> {
   const previousPluginVersion = process.env.PLUGIN_VERSION;
   const manifestModuleUrl = new URL(
