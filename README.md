@@ -44,11 +44,11 @@ The plugin adds a full in-host workflow instead of a one-off import script:
 2. Connect one or more GitHub repositories to Paperclip projects.
 3. Run a sync manually or let the scheduled job keep things up to date.
 
-During sync, the plugin imports one top-level Paperclip issue per GitHub issue, updates already imported issues instead of recreating them, maps GitHub labels into Paperclip labels, and keeps GitHub-specific metadata in dedicated Paperclip surfaces rather than stuffing everything into the issue description.
+During sync, the plugin imports one top-level Paperclip issue per GitHub issue, stamps it with a namespaced GitHub Sync plugin origin, updates already imported issues instead of recreating them, maps GitHub labels into Paperclip labels, and keeps GitHub-specific metadata in dedicated Paperclip surfaces rather than stuffing everything into the issue description.
 
 When the host exposes plugin issue creation, imported GitHub issues are created through the Paperclip plugin SDK path so they are not attributed to the connected board user. The worker still uses direct local Paperclip REST calls for label sync and for description, assignee, or status repair paths when those routes are available.
 
-Long-running syncs continue in the background, so quick actions do not have to wait for the whole import to finish. Once a sync has started, the settings page, dashboard widget, and toolbar actions can request cancellation; the worker stops cooperatively after the current repository or issue step finishes. If the worker restarts mid-run, GitHub Sync now recovers that orphaned `running` state on the next read or control action instead of leaving the UI stuck in `running` or silently restarting the old run.
+Long-running syncs continue in the background, so quick actions do not have to wait for the whole import to finish. Once a sync has started, the settings page, dashboard widget, and toolbar actions can request cancellation; the worker stops cooperatively after the current repository or issue step finishes. If the worker restarts mid-run, GitHub Sync now recovers that orphaned `running` state on the next read or control action instead of leaving the UI stuck in `running` or silently restarting the old run. When sync needs to wake an assigned agent, it uses Paperclip's host-owned issue wakeup API first so blocker, liveness, budget, and auth checks stay centralized, then falls back to the local wakeup route only when an older or partial host bridge cannot service the SDK call.
 
 ## Highlights
 
@@ -68,9 +68,9 @@ The plugin does more than mirror issue text. It looks at linked pull requests, m
 
 GitHub Sync exposes a dedicated KPI dashboard widget alongside the operational sync widget. During full company syncs, the worker snapshots the current open GitHub backlog and records when already-imported GitHub issues move from open to closed. The KPI widget turns that worker-owned state into backlog, issue-closure, and Paperclip PR-creation cards with recent history and comparisons against older periods.
 
-Because GitHub alone cannot tell which pull requests came from a Paperclip company, the plugin uses explicit Paperclip attribution for delivery activity. `create_pull_request` automatically records a Paperclip-created PR event, and agents that use `gh` or another non-plugin GitHub client can post pull-request-created events to the plugin webhook so the KPI history stays specific to Paperclip work.
+Because GitHub alone cannot tell which pull requests came from a Paperclip company, the plugin uses explicit Paperclip attribution for delivery activity. `create_pull_request` automatically records a Paperclip-created PR event, and agents that use `gh` or another non-plugin GitHub client can post pull-request-created events to the plugin API route so the KPI history stays specific to Paperclip work.
 
-That webhook path matters on authenticated Paperclip deployments today because a current host bug blocks agents from calling plugin tools unless the instance runs in `local_trusted` mode. Those agents can still use `gh` with the propagated `GITHUB_TOKEN`, then call the plugin-owned webhook from the shell after they create a PR. KPI webhook requests instead authenticate with `Authorization: Bearer <PAPERCLIP_API_KEY>`, which the deployment validates through `GET /api/agents/me`, so anonymous POSTs are rejected.
+That API route path matters on authenticated Paperclip deployments today because a current host bug blocks agents from calling plugin tools unless the instance runs in `local_trusted` mode. Those agents can still use `gh` with the propagated `GITHUB_TOKEN`, then call the agent-authenticated plugin API route from the shell after they create a PR. The Paperclip host authenticates `Authorization: Bearer <PAPERCLIP_API_KEY>`, scopes the request to the calling agent's company, and rejects anonymous or non-agent calls before dispatching to the worker.
 
 ### Project pull request command center
 
@@ -89,7 +89,7 @@ Paperclip agents can search GitHub for duplicates, read and update issues, post 
 ## Requirements
 
 - Node.js 20+
-- a Paperclip host that supports plugin installation
+- a Paperclip host on `2026.427.0` or newer with plugin installation enabled
 - a GitHub token with API access to the repositories you want to sync
 
 ## Install from npm
@@ -178,7 +178,7 @@ The plugin is designed to avoid persisting raw credentials in plugin state.
 - On authenticated deployments, any selected propagation agents receive `GITHUB_TOKEN` as an agent env secret-ref binding that points at the same saved GitHub token secret instead of a copied raw token.
 - The worker resolves those secret references at runtime instead of storing raw tokens in plugin state.
 - On authenticated Paperclip deployments, sync is blocked until the relevant company has connected Paperclip board access.
-- KPI webhook requests must include `Authorization: Bearer <PAPERCLIP_API_KEY>`, and the worker validates that agent-scoped Paperclip token against `GET /api/agents/me` before it records any metric event.
+- KPI API route requests must include `Authorization: Bearer <PAPERCLIP_API_KEY>` from an agent run; the Paperclip host authenticates the token and supplies the agent company before the worker records any metric event.
 
 ### Optional worker-local token file
 
@@ -208,14 +208,14 @@ The plugin exposes GitHub workflow tools to Paperclip agents, including:
 
 When an agent sends GitHub body content through the plugin, including issue bodies, pull request descriptions, comments, and review-thread replies, the plugin adds a GitHub-flavored Markdown footer with a horizontal rule and compact heading that discloses AI authorship. If the tool caller supplies `llmModel`, the footer also includes the model name, for example `###### ✨ This comment was AI-generated using gpt-5.4`.
 
-### KPI attribution webhook
+### KPI attribution API route
 
-The `create_pull_request` tool automatically records a company-level Paperclip PR creation metric. For delivery flows that use `gh` or another non-plugin GitHub client, post a JSON payload to `/api/plugins/paperclip-github-plugin/webhooks/record-company-metric-event` after the PR is created.
+The `create_pull_request` tool automatically records a company-level Paperclip PR creation metric. For delivery flows that use `gh` or another non-plugin GitHub client, post a JSON payload to `/api/plugins/paperclip-github-plugin/api/company-metrics/events` after the PR is created.
 
 Supported payload fields:
 
 - `metric` required: `pull_request_created`
-- `companyId` optional when `repository` maps to exactly one company
+- `companyId` optional; when present it must match the authenticated agent's company
 - `repository` optional: `owner/repo` or `https://github.com/owner/repo`
 - `pullRequestNumber` optional
 - `pullRequestUrl` optional
@@ -223,18 +223,18 @@ Supported payload fields:
 - `eventKey` optional custom dedupe key
 - `count` optional positive integer
 
-Each request must include:
+Each request must be made by a Paperclip agent run and include:
 
 - `Authorization: Bearer <PAPERCLIP_API_KEY>`
 
-The worker validates that bearer token against Paperclip's built-in `GET /api/agents/me` endpoint on the trusted Paperclip API origin (`PAPERCLIP_API_URL` when available, otherwise the saved plugin origin). Requests are rejected when the token is missing, invalid, expired, or belongs to a different company than the metric target.
+The Paperclip host validates that bearer token and passes the authenticated agent company to the plugin worker. Requests are rejected before worker dispatch when the token is missing, invalid, expired, or not an agent token.
 
 Example:
 
 ```bash
 payload='{"metric":"pull_request_created","repository":"paperclipai/example-repo","pullRequestNumber":21}'
 
-curl -X POST "${PAPERCLIP_API_URL%/}/api/plugins/paperclip-github-plugin/webhooks/record-company-metric-event" \
+curl -X POST "${PAPERCLIP_API_URL%/}/api/plugins/paperclip-github-plugin/api/company-metrics/events" \
   -H "content-type: application/json" \
   -H "authorization: Bearer ${PAPERCLIP_API_KEY}" \
   -d "${payload}"
@@ -244,14 +244,14 @@ The worker deduplicates repeated PR events by preferring the pull request URL, t
 
 Current host caveat: on authenticated Paperclip deployments, the Paperclip host currently guards `GET /api/plugins/tools` and `POST /api/plugins/tools/execute` with board authentication before dispatching to any plugin worker. If an agent run does not have board access for the target company, GitHub Sync tool discovery and execution fail with `403 {"error":"Board access required"}` before this plugin's worker code runs.
 
-Because the KPI attribution endpoint is a normal plugin webhook rather than a plugin tool, authenticated agent runs can still call it directly with `PAPERCLIP_API_KEY` even while that host bug blocks the GitHub Sync tool surface.
+Because the KPI attribution endpoint is a native plugin JSON route rather than a plugin tool, authenticated agent runs can still call it directly with `PAPERCLIP_API_KEY` even while that host bug blocks the GitHub Sync tool surface.
 
 ## Troubleshooting
 
 - If setup is reported as incomplete, confirm that a GitHub token has been saved or that `${PAPERCLIP_HOME:-~/.paperclip}/plugins/github-sync/config.json` contains `githubToken`, and make sure at least one mapping has a created Paperclip project.
 - If Paperclip says board access is required, open plugin settings inside the affected company and complete the Paperclip board access flow before retrying sync.
 - If GitHub Sync agent tools fail with `403 {"error":"Board access required"}` on `/api/plugins/tools` or `/api/plugins/tools/execute`, the current Paperclip host rejected the request before the plugin worker ran. Re-run from a board-authenticated session or agent run that has board access to the target company.
-- If a KPI webhook call is rejected, make sure the request includes `Authorization: Bearer ${PAPERCLIP_API_KEY}`, that the token is still valid for the current run, and that it belongs to the same company the metric event targets.
+- If a KPI API route call is rejected, make sure the request includes `Authorization: Bearer ${PAPERCLIP_API_KEY}`, that the token is still valid for the current run, and that any `companyId` in the payload matches the calling agent's company.
 - If the worker reaches an authenticated HTML page instead of the Paperclip API JSON responses it expects, connect Paperclip board access for that company or set `PAPERCLIP_API_URL` to a worker-accessible Paperclip API origin.
 - If a sync run finishes with partial failures, open the saved troubleshooting panel in GitHub Sync to inspect the repository, issue number, raw error, and suggested fix for each recorded failure.
 - If sync says the Paperclip API URL is not trusted, reopen the plugin from the current Paperclip host so the settings UI can refresh the saved origin, or set `PAPERCLIP_API_URL` for the worker.
