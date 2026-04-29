@@ -707,6 +707,7 @@ type GitHubApiIssueLabelRecord =
 type GitHubIssueStateReason = 'completed' | 'not_planned' | 'duplicate';
 type GitHubPullRequestCiState = 'green' | 'red' | 'unfinished';
 type GitHubPullRequestMergeability = 'mergeable' | 'conflicting' | 'unknown';
+type GitHubPullRequestReviewDecision = 'approved' | 'changes_requested' | 'review_required' | 'unknown';
 type GitHubPullRequestMergeStateStatus =
   | 'behind'
   | 'blocked'
@@ -731,6 +732,7 @@ interface GitHubPullRequestStatusSnapshot extends GitHubPullRequestReference {
   ciState: GitHubPullRequestCiState;
   mergeability: GitHubPullRequestMergeability;
   mergeStateStatus: GitHubPullRequestMergeStateStatus;
+  reviewDecision: GitHubPullRequestReviewDecision;
 }
 
 interface GitHubIssueStatusSnapshot {
@@ -790,6 +792,7 @@ interface GitHubPullRequestCiContextsQueryResult {
     pullRequest?: {
       mergeable?: 'MERGEABLE' | 'CONFLICTING' | 'UNKNOWN' | null;
       mergeStateStatus?: string | null;
+      reviewDecision?: string | null;
       statusCheckRollup?: {
         contexts?: {
           pageInfo?: GitHubPageInfo | null;
@@ -843,6 +846,7 @@ interface GitHubRepositoryOpenPullRequestStatusesQueryResult {
         number?: number | null;
         mergeable?: 'MERGEABLE' | 'CONFLICTING' | 'UNKNOWN' | null;
         mergeStateStatus?: string | null;
+        reviewDecision?: string | null;
         reviewThreads?: {
           pageInfo?: GitHubPageInfo | null;
           nodes?: Array<{
@@ -1166,6 +1170,7 @@ interface GitHubProjectPullRequestsQueryResult {
         state?: 'OPEN' | 'CLOSED' | 'MERGED' | null;
         mergeable?: 'MERGEABLE' | 'CONFLICTING' | 'UNKNOWN' | null;
         mergeStateStatus?: string | null;
+        reviewDecision?: string | null;
         createdAt?: string | null;
         updatedAt?: string | null;
         baseRefName?: string | null;
@@ -1260,6 +1265,7 @@ interface GitHubProjectPullRequestMetricsQueryResult {
         number?: number | null;
         mergeable?: 'MERGEABLE' | 'CONFLICTING' | 'UNKNOWN' | null;
         mergeStateStatus?: string | null;
+        reviewDecision?: string | null;
         baseRefName?: string | null;
         reviews?: {
           pageInfo?: GitHubPageInfo | null;
@@ -1417,6 +1423,7 @@ const GITHUB_PULL_REQUEST_CI_CONTEXTS_QUERY = `
       pullRequest(number: $pullRequestNumber) {
         mergeable
         mergeStateStatus
+        reviewDecision
         statusCheckRollup {
           contexts(first: 100, after: $after) {
             pageInfo {
@@ -1484,6 +1491,7 @@ const GITHUB_REPOSITORY_OPEN_PULL_REQUEST_STATUSES_QUERY = `
           number
           mergeable
           mergeStateStatus
+          reviewDecision
           reviewThreads(first: 100) {
             pageInfo {
               hasNextPage
@@ -1525,6 +1533,7 @@ const GITHUB_PROJECT_PULL_REQUEST_BASE_FIELDS = `
           state
           mergeable
           mergeStateStatus
+          reviewDecision
           createdAt
           updatedAt
           baseRefName
@@ -1615,6 +1624,7 @@ const GITHUB_PROJECT_PULL_REQUEST_METRICS_FIELDS = `
           number
           mergeable
           mergeStateStatus
+          reviewDecision
           baseRefName
           reviews(first: 100) {
             pageInfo {
@@ -8106,17 +8116,35 @@ function normalizeGitHubPullRequestMergeStateStatus(value: unknown): GitHubPullR
   }
 }
 
+function normalizeGitHubPullRequestReviewDecision(value: unknown): GitHubPullRequestReviewDecision {
+  switch (typeof value === 'string' ? value.trim().toLowerCase() : '') {
+    case 'approved':
+      return 'approved';
+    case 'changes_requested':
+      return 'changes_requested';
+    case 'review_required':
+      return 'review_required';
+    default:
+      return 'unknown';
+  }
+}
+
 function isGitHubPullRequestActionRequiredForSync(
-  pullRequest: Pick<GitHubPullRequestStatusSnapshot, 'mergeability' | 'mergeStateStatus'>
+  pullRequest: Pick<GitHubPullRequestStatusSnapshot, 'mergeability' | 'mergeStateStatus' | 'reviewDecision'>
 ): boolean {
-  return pullRequest.mergeability === 'conflicting'
+  return pullRequest.reviewDecision === 'changes_requested'
+    || pullRequest.mergeability === 'conflicting'
     || ACTION_REQUIRED_GITHUB_PULL_REQUEST_MERGE_STATE_STATUSES.has(pullRequest.mergeStateStatus);
 }
 
 function isGitHubPullRequestReviewReadyForSync(
-  pullRequest: Pick<GitHubPullRequestStatusSnapshot, 'ciState' | 'hasUnresolvedReviewThreads' | 'mergeability' | 'mergeStateStatus'>
+  pullRequest: Pick<GitHubPullRequestStatusSnapshot, 'ciState' | 'hasUnresolvedReviewThreads' | 'mergeability' | 'mergeStateStatus' | 'reviewDecision'>
 ): boolean {
-  if (pullRequest.ciState !== 'green' || pullRequest.hasUnresolvedReviewThreads) {
+  if (
+    pullRequest.ciState !== 'green'
+    || pullRequest.hasUnresolvedReviewThreads
+    || pullRequest.reviewDecision === 'changes_requested'
+  ) {
     return false;
   }
 
@@ -8124,7 +8152,7 @@ function isGitHubPullRequestReviewReadyForSync(
 }
 
 function listGitHubPullRequestSyncBlockingConditions(
-  pullRequest: Pick<GitHubPullRequestStatusSnapshot, 'ciState' | 'hasUnresolvedReviewThreads' | 'mergeability' | 'mergeStateStatus'>
+  pullRequest: Pick<GitHubPullRequestStatusSnapshot, 'ciState' | 'hasUnresolvedReviewThreads' | 'mergeability' | 'mergeStateStatus' | 'reviewDecision'>
 ): string[] {
   const conditions: string[] = [];
 
@@ -8157,6 +8185,10 @@ function listGitHubPullRequestSyncBlockingConditions(
     conditions.push('unresolved review threads');
   }
 
+  if (pullRequest.reviewDecision === 'changes_requested') {
+    conditions.push('requested changes');
+  }
+
   return conditions;
 }
 
@@ -8164,6 +8196,7 @@ function tryBuildGitHubPullRequestStatusSnapshotFromBatchNode(node: {
   number?: number | null;
   mergeable?: 'MERGEABLE' | 'CONFLICTING' | 'UNKNOWN' | null;
   mergeStateStatus?: string | null;
+  reviewDecision?: string | null;
   reviewThreads?: {
     pageInfo?: GitHubPageInfo | null;
     nodes?: Array<{
@@ -8206,7 +8239,8 @@ function tryBuildGitHubPullRequestStatusSnapshotFromBatchNode(node: {
     hasUnresolvedReviewThreads: reviewThreadSummary.unresolvedReviewThreads > 0,
     ciState,
     mergeability: normalizeGitHubPullRequestMergeability(node.mergeable),
-    mergeStateStatus: normalizeGitHubPullRequestMergeStateStatus(node.mergeStateStatus)
+    mergeStateStatus: normalizeGitHubPullRequestMergeStateStatus(node.mergeStateStatus),
+    reviewDecision: normalizeGitHubPullRequestReviewDecision(node.reviewDecision)
   };
 }
 
@@ -8306,10 +8340,12 @@ async function getGitHubPullRequestCiSnapshot(
   ciState: GitHubPullRequestCiState;
   mergeability: GitHubPullRequestMergeability;
   mergeStateStatus: GitHubPullRequestMergeStateStatus;
+  reviewDecision: GitHubPullRequestReviewDecision;
 }> {
   const contexts: GitHubCiContextRecord[] = [];
   let mergeability: GitHubPullRequestMergeability = 'unknown';
   let mergeStateStatus: GitHubPullRequestMergeStateStatus = 'unknown';
+  let reviewDecision: GitHubPullRequestReviewDecision = 'unknown';
   let after: string | undefined;
 
   do {
@@ -8322,6 +8358,7 @@ async function getGitHubPullRequestCiSnapshot(
 
     mergeability = normalizeGitHubPullRequestMergeability(response.repository?.pullRequest?.mergeable);
     mergeStateStatus = normalizeGitHubPullRequestMergeStateStatus(response.repository?.pullRequest?.mergeStateStatus);
+    reviewDecision = normalizeGitHubPullRequestReviewDecision(response.repository?.pullRequest?.reviewDecision);
 
     const connection = response.repository?.pullRequest?.statusCheckRollup?.contexts;
     const nodes = connection?.nodes ?? [];
@@ -8353,7 +8390,8 @@ async function getGitHubPullRequestCiSnapshot(
   return {
     ciState: classifyGitHubPullRequestCiState(contexts),
     mergeability,
-    mergeStateStatus
+    mergeStateStatus,
+    reviewDecision
   };
 }
 
@@ -8367,6 +8405,7 @@ async function getGitHubPullRequestStatusSnapshot(
     ciState?: GitHubPullRequestCiState | null;
     mergeability?: GitHubPullRequestMergeability;
     mergeStateStatus?: GitHubPullRequestMergeStateStatus;
+    reviewDecision?: GitHubPullRequestReviewDecision;
   }
 ): Promise<GitHubPullRequestStatusSnapshot> {
   const cached = getCachedGitHubPullRequestStatusSnapshot(pullRequestStatusCache, repository, pullRequestNumber);
@@ -8386,6 +8425,7 @@ async function getGitHubPullRequestStatusSnapshot(
     && options.ciState
     && options.mergeability !== undefined
     && options.mergeStateStatus !== undefined
+    && options.reviewDecision !== undefined
   ) {
     const snapshot = cacheGitHubPullRequestStatusSnapshot(repository, {
       number: pullRequestNumber,
@@ -8393,7 +8433,8 @@ async function getGitHubPullRequestStatusSnapshot(
       hasUnresolvedReviewThreads: options.reviewThreadSummary.unresolvedReviewThreads > 0,
       ciState: options.ciState,
       mergeability: options.mergeability,
-      mergeStateStatus: options.mergeStateStatus
+      mergeStateStatus: options.mergeStateStatus,
+      reviewDecision: options.reviewDecision
     });
     setCachedGitHubPullRequestStatusSnapshot(pullRequestStatusCache, snapshot);
     return snapshot;
@@ -8410,11 +8451,15 @@ async function getGitHubPullRequestStatusSnapshot(
     const [reviewThreadSummary, ciSnapshot] = await Promise.all([
       options?.reviewThreadSummary
         ?? getOrLoadCachedGitHubPullRequestReviewThreadSummary(octokit, repository, pullRequestNumber),
-      options?.ciState && options.mergeability !== undefined && options.mergeStateStatus !== undefined
+      options?.ciState
+        && options.mergeability !== undefined
+        && options.mergeStateStatus !== undefined
+        && options.reviewDecision !== undefined
         ? {
             ciState: options.ciState,
             mergeability: options.mergeability,
-            mergeStateStatus: options.mergeStateStatus
+            mergeStateStatus: options.mergeStateStatus,
+            reviewDecision: options.reviewDecision
           }
         : getGitHubPullRequestCiSnapshot(octokit, repository, pullRequestNumber)
     ]);
@@ -8425,7 +8470,8 @@ async function getGitHubPullRequestStatusSnapshot(
       hasUnresolvedReviewThreads: reviewThreadSummary.unresolvedReviewThreads > 0,
       ciState: ciSnapshot.ciState,
       mergeability: ciSnapshot.mergeability,
-      mergeStateStatus: ciSnapshot.mergeStateStatus
+      mergeStateStatus: ciSnapshot.mergeStateStatus,
+      reviewDecision: ciSnapshot.reviewDecision
     });
   })();
   activeGitHubPullRequestStatusSnapshotPromiseCache.set(cacheKey, loadSnapshotPromise);
@@ -15029,6 +15075,7 @@ async function buildProjectPullRequestSummaryRecord(
   });
   const inlineMergeability = normalizeGitHubPullRequestMergeability(node.mergeable);
   const inlineMergeStateStatus = normalizeGitHubPullRequestMergeStateStatus(node.mergeStateStatus);
+  const inlineReviewDecision = normalizeGitHubPullRequestReviewDecision(node.reviewDecision);
   const [reviewThreadSummary, reviewSummary, statusSnapshot, behindBy] = await Promise.all([
     getOrLoadCachedGitHubPullRequestReviewThreadSummary(
       octokit,
@@ -15046,7 +15093,8 @@ async function buildProjectPullRequestSummaryRecord(
       reviewThreadSummary: inlineReviewThreadSummary,
       ciState: inlineCiState,
       mergeability: inlineMergeability,
-      mergeStateStatus: inlineMergeStateStatus
+      mergeStateStatus: inlineMergeStateStatus,
+      reviewDecision: inlineReviewDecision
     }),
     getGitHubPullRequestBehindCount(octokit, repository, {
       baseBranch: node.baseRefName,
@@ -15236,6 +15284,7 @@ async function buildProjectPullRequestMetricCounts(
   });
   const inlineMergeability = normalizeGitHubPullRequestMergeability(node.mergeable);
   const inlineMergeStateStatus = normalizeGitHubPullRequestMergeStateStatus(node.mergeStateStatus);
+  const inlineReviewDecision = normalizeGitHubPullRequestReviewDecision(node.reviewDecision);
   const [reviewThreadSummary, reviewSummary, statusSnapshot] = await Promise.all([
     getOrLoadCachedGitHubPullRequestReviewThreadSummary(
       octokit,
@@ -15253,7 +15302,8 @@ async function buildProjectPullRequestMetricCounts(
       reviewThreadSummary: inlineReviewThreadSummary,
       ciState: inlineCiState,
       mergeability: inlineMergeability,
-      mergeStateStatus: inlineMergeStateStatus
+      mergeStateStatus: inlineMergeStateStatus,
+      reviewDecision: inlineReviewDecision
     })
   ]);
   const checksStatus =

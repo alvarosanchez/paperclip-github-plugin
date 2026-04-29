@@ -5881,6 +5881,200 @@ test('sync.runNow monitors Paperclip issues created from pull requests without c
   }
 });
 
+test('sync.runNow moves directly linked pull request issues back to todo when review changes are requested', async () => {
+  const harness = await createProjectPullRequestsHarness();
+  const originalFetch = globalThis.fetch;
+  const originalCreateComment = harness.ctx.issues.createComment;
+  const statusTransitionComments: Array<{ issueId: string; body: string }> = [];
+  const issue = await harness.ctx.issues.create({
+    companyId: 'company-1',
+    projectId: 'project-1',
+    title: 'Requested changes PR link',
+    description: 'This Paperclip issue is linked directly to a GitHub PR.'
+  });
+
+  harness.ctx.issues.createComment = async (issueId, body, companyId) => {
+    statusTransitionComments.push({ issueId, body });
+    return originalCreateComment(issueId, body, companyId);
+  };
+
+  await harness.ctx.entities.upsert({
+    entityType: 'paperclip-github-plugin.pull-request-link',
+    scopeKind: 'issue',
+    scopeId: issue.id,
+    externalId: 'https://github.com/paperclipai/example-repo/pull/43',
+    title: 'GitHub pull request #43',
+    status: 'open',
+    data: {
+      companyId: 'company-1',
+      paperclipProjectId: 'project-1',
+      repositoryUrl: 'https://github.com/paperclipai/example-repo',
+      githubPullRequestNumber: 43,
+      githubPullRequestUrl: 'https://github.com/paperclipai/example-repo/pull/43',
+      githubPullRequestState: 'open',
+      title: 'Requested changes PR link',
+      syncedAt: '2026-04-27T09:30:00.000Z'
+    }
+  });
+  await harness.ctx.issues.update(issue.id, { status: 'in_review' }, 'company-1');
+
+  globalThis.fetch = async (input, init) => {
+    const requestUrl = getRequestUrl(input);
+    const requestPathname = getDecodedRequestPathname(input);
+
+    if (requestPathname === '/repos/paperclipai/example-repo/issues') {
+      return jsonResponse([]);
+    }
+
+    if (requestPathname === '/repos/paperclipai/example-repo/pulls/43') {
+      return jsonResponse({
+        number: 43,
+        title: 'Requested changes PR link',
+        body: 'GitHub owns PR readiness.',
+        html_url: 'https://github.com/paperclipai/example-repo/pull/43',
+        state: 'open',
+        merged: false
+      });
+    }
+
+    if (requestPathname === '/graphql') {
+      const { query, variables } = getGraphqlRequest(init);
+      const pullRequestNumber =
+        typeof variables.pullRequestNumber === 'number' ? variables.pullRequestNumber : undefined;
+
+      if (query.includes('query GitHubRepositoryOpenIssueLinkedPullRequests')) {
+        return graphqlResponse({
+          repository: {
+            issues: {
+              pageInfo: {
+                hasNextPage: false,
+                endCursor: null
+              },
+              nodes: []
+            }
+          }
+        });
+      }
+
+      if (query.includes('query GitHubRepositoryOpenPullRequestStatuses')) {
+        return graphqlResponse({
+          repository: {
+            pullRequests: {
+              pageInfo: {
+                hasNextPage: false,
+                endCursor: null
+              },
+              nodes: [
+                {
+                  number: 43,
+                  mergeable: 'MERGEABLE',
+                  mergeStateStatus: 'CLEAN',
+                  reviewDecision: 'CHANGES_REQUESTED',
+                  reviewThreads: {
+                    pageInfo: {
+                      hasNextPage: false,
+                      endCursor: null
+                    },
+                    nodes: [
+                      {
+                        isResolved: true
+                      }
+                    ]
+                  },
+                  statusCheckRollup: {
+                    contexts: {
+                      pageInfo: {
+                        hasNextPage: false,
+                        endCursor: null
+                      },
+                      nodes: [
+                        {
+                          __typename: 'StatusContext',
+                          state: 'SUCCESS'
+                        }
+                      ]
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        });
+      }
+
+      if (query.includes('query GitHubPullRequestReviewThreads') && pullRequestNumber === 43) {
+        return graphqlResponse({
+          repository: {
+            pullRequest: {
+              reviewThreads: {
+                pageInfo: {
+                  hasNextPage: false,
+                  endCursor: null
+                },
+                nodes: [
+                  {
+                    isResolved: true
+                  }
+                ]
+              }
+            }
+          }
+        });
+      }
+
+      if (query.includes('query GitHubPullRequestCiContexts') && pullRequestNumber === 43) {
+        return graphqlResponse({
+          repository: {
+            pullRequest: {
+              mergeable: 'MERGEABLE',
+              mergeStateStatus: 'CLEAN',
+              reviewDecision: 'CHANGES_REQUESTED',
+              statusCheckRollup: {
+                contexts: {
+                  pageInfo: {
+                    hasNextPage: false,
+                    endCursor: null
+                  },
+                  nodes: [
+                    {
+                      __typename: 'StatusContext',
+                      state: 'SUCCESS'
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        });
+      }
+    }
+
+    throw new Error(`Unexpected fetch during requested-changes PR link sync test: ${requestUrl}`);
+  };
+
+  try {
+    const sync = await harness.performAction('sync.runNow', {
+      companyId: 'company-1',
+      issueId: issue.id,
+      waitForCompletion: true
+    }) as {
+      syncState: { status: string; syncedIssuesCount?: number };
+    };
+
+    assert.equal(sync.syncState.status, 'success');
+    assert.equal(sync.syncState.syncedIssuesCount, 1);
+
+    const updatedIssue = await harness.ctx.issues.get(issue.id, 'company-1');
+    assert.equal(updatedIssue?.status, 'todo');
+    assert.equal(statusTransitionComments.length, 1);
+    assert.match(statusTransitionComments[0]?.body ?? '', /from `in review` to `todo`/);
+    assert.match(statusTransitionComments[0]?.body ?? '', /requested changes/);
+  } finally {
+    harness.ctx.issues.createComment = originalCreateComment;
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test('project.pullRequests.updateBranch requests a GitHub branch update for behind clean pull requests', async () => {
   const harness = await createProjectPullRequestsHarness();
   const originalFetch = globalThis.fetch;
