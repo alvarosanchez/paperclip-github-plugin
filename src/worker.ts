@@ -18538,6 +18538,76 @@ function registerGitHubAgentTools(ctx: PluginSetupContext): void {
   );
 
   ctx.tools.register(
+    'assign_to_current_user',
+    getGitHubAgentToolDeclaration('assign_to_current_user'),
+    async (params, runCtx) => executeGitHubTool(async () => {
+      const input = getToolInputRecord(params);
+      const target = await resolveGitHubIssueToolTarget(ctx, runCtx, input);
+      const octokit = await createGitHubToolOctokit(ctx, runCtx.companyId);
+      const [currentResponse, authenticatedUserResponse] = await Promise.all([
+        octokit.rest.issues.get({
+          owner: target.repository.owner,
+          repo: target.repository.repo,
+          issue_number: target.issueNumber,
+          headers: {
+            'X-GitHub-Api-Version': GITHUB_API_VERSION
+          }
+        }),
+        octokit.rest.users.getAuthenticated({
+          headers: {
+            'X-GitHub-Api-Version': GITHUB_API_VERSION
+          }
+        })
+      ]);
+      const assignedLogin = normalizeOptionalToolString(authenticatedUserResponse.data.login);
+      if (!assignedLogin) {
+        throw new Error('GitHub did not return the login for the saved token.');
+      }
+
+      const currentAssignees = (currentResponse.data.assignees ?? [])
+        .map((assignee) => assignee?.login ?? '')
+        .filter(Boolean);
+      const nextAssignees = mergeNamedValues(currentAssignees, {
+        setValues: [],
+        addValues: [assignedLogin],
+        removeValues: []
+      });
+      const alreadyAssigned = nextAssignees.length === currentAssignees.length
+        && nextAssignees.every((assignee, index) => assignee.toLowerCase() === currentAssignees[index]?.toLowerCase());
+      const updatedResponse = alreadyAssigned
+        ? currentResponse
+        : await octokit.rest.issues.update({
+            owner: target.repository.owner,
+            repo: target.repository.repo,
+            issue_number: target.issueNumber,
+            assignees: nextAssignees,
+            headers: {
+              'X-GitHub-Api-Version': GITHUB_API_VERSION
+            }
+          });
+      const updatedIssue = normalizeGitHubIssueRecord(updatedResponse.data as GitHubApiIssueRecord);
+
+      return buildToolSuccessResult(
+        alreadyAssigned
+          ? `GitHub issue #${updatedIssue.number} in ${formatRepositoryLabel(target.repository)} was already assigned to ${assignedLogin}.`
+          : `Assigned GitHub issue #${updatedIssue.number} in ${formatRepositoryLabel(target.repository)} to ${assignedLogin}.`,
+        {
+          repository: target.repository.url,
+          assignedLogin,
+          issue: {
+            number: updatedIssue.number,
+            title: updatedIssue.title,
+            url: updatedIssue.htmlUrl,
+            state: updatedIssue.state,
+            labels: normalizeGitHubIssueLabels((updatedResponse.data as GitHubApiIssueRecord).labels),
+            assignees: (updatedResponse.data.assignees ?? []).map((assignee) => assignee?.login ?? '').filter(Boolean)
+          }
+        }
+      );
+    })
+  );
+
+  ctx.tools.register(
     'add_issue_comment',
     getGitHubAgentToolDeclaration('add_issue_comment'),
     async (params, runCtx) => executeGitHubTool(async () => {

@@ -90,7 +90,7 @@ Manual GitHub issue links are added to the same import registry and issue-link e
 
 ### Agent workflows built in
 
-Paperclip agents can search GitHub for duplicates, read and update issues, post comments, create pull requests, inspect changed files and CI, reply to review threads, resolve or unresolve threads, request reviewers, search org-level GitHub Projects, and associate pull requests with those projects without leaving the Paperclip plugin surface.
+Paperclip agents can search GitHub for duplicates, read and update issues, assign issues to the saved token owner, post comments, create pull requests, inspect changed files and CI, reply to review threads, resolve or unresolve threads, request reviewers, search org-level GitHub Projects, and associate pull requests with those projects without leaving the Paperclip plugin surface.
 
 ## Requirements
 
@@ -207,9 +207,9 @@ Notes:
 The plugin exposes GitHub workflow tools to Paperclip agents, including:
 
 - repository-scoped search for issues and pull requests
-- issue reads, comment reads, comment writes, and metadata updates
+- issue reads, comment reads, comment writes, metadata updates, and `assign_to_current_user` assignment to the saved token owner
 - pull request creation, reads, updates, changed-file inspection, and CI-check inspection
-- review-thread reads, replies, resolve and unresolve actions, and reviewer requests
+- review-thread reads, replies, resolve and unresolve actions, and `request_pull_request_reviewers` reviewer requests
 - organization-level GitHub Project search/listing and pull-request-to-project association
 
 When an agent sends GitHub body content through the plugin, including issue bodies, pull request descriptions, comments, and review-thread replies, the plugin adds a GitHub-flavored Markdown footer with a horizontal rule and compact heading that discloses AI authorship. If the tool caller supplies `llmModel`, the footer also includes the model name, for example `###### ✨ This comment was AI-generated using gpt-5.4`.

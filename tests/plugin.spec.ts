@@ -1359,6 +1359,7 @@ test('manifest declares the GitHub agent tools, KPI API route, and capabilities'
       'get_issue',
       'list_issue_comments',
       'update_issue',
+      'assign_to_current_user',
       'add_issue_comment',
       'create_pull_request',
       'get_pull_request',
@@ -1486,6 +1487,89 @@ test('search_repository_items strips repository qualifiers from the free-text qu
     assert.doesNotMatch(capturedQuery, /repo:other\/repo/);
     assert.doesNotMatch(capturedQuery, /org:other/);
     assert.match(capturedQuery, /duplicate crash/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('assign_to_current_user assigns the GitHub issue to the token owner without removing existing assignees', async () => {
+  const harness = await createGitHubAgentToolHarness();
+  const originalFetch = globalThis.fetch;
+  let patchRequestBody: Record<string, unknown> | null = null;
+
+  globalThis.fetch = async (input, init) => {
+    const url = new URL(getRequestUrl(input));
+    if (url.pathname === '/user') {
+      return jsonResponse({
+        login: 'paperclip-dev'
+      });
+    }
+
+    if (url.pathname === '/repos/paperclipai/example-repo/issues/12' && init?.method === 'PATCH') {
+      patchRequestBody = getJsonRequestBody(init);
+      return jsonResponse({
+        id: 1200,
+        number: 12,
+        title: 'Importer bug',
+        body: 'Original issue body.',
+        html_url: 'https://github.com/paperclipai/example-repo/issues/12',
+        state: 'open',
+        comments: 3,
+        user: {
+          login: 'octocat'
+        },
+        assignees: [
+          {
+            login: 'maintainer'
+          },
+          {
+            login: 'paperclip-dev'
+          }
+        ],
+        labels: [],
+        milestone: null
+      });
+    }
+
+    if (url.pathname === '/repos/paperclipai/example-repo/issues/12') {
+      return jsonResponse({
+        id: 1200,
+        number: 12,
+        title: 'Importer bug',
+        body: 'Original issue body.',
+        html_url: 'https://github.com/paperclipai/example-repo/issues/12',
+        state: 'open',
+        comments: 3,
+        user: {
+          login: 'octocat'
+        },
+        assignees: [
+          {
+            login: 'maintainer'
+          }
+        ],
+        labels: [],
+        milestone: null
+      });
+    }
+
+    throw new Error(`Unexpected GitHub request: ${url.toString()}`);
+  };
+
+  try {
+    const result = await harness.executeTool('assign_to_current_user', {
+      issueNumber: 12
+    }, {
+      companyId: 'company-1',
+      projectId: 'project-1'
+    });
+
+    assert.ok(!result.error);
+    assert.deepEqual(patchRequestBody, {
+      assignees: ['maintainer', 'paperclip-dev']
+    });
+    assert.equal((result.data as { assignedLogin: string }).assignedLogin, 'paperclip-dev');
+    assert.deepEqual((result.data as { issue: { assignees: string[] } }).issue.assignees, ['maintainer', 'paperclip-dev']);
   } finally {
     globalThis.fetch = originalFetch;
   }

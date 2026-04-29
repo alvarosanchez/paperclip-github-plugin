@@ -224,6 +224,21 @@ export const GITHUB_AGENT_TOOLS: PluginToolDeclaration[] = [
     }
   },
   {
+    name: 'assign_to_current_user',
+    displayName: 'Assign To Current User',
+    description: 'Assign a GitHub issue to the GitHub user authenticated by the saved token, preserving any existing assignees.',
+    parametersSchema: {
+      type: 'object',
+      additionalProperties: false,
+      ...issueTargetSchema,
+      properties: {
+        repository: repositoryProperty,
+        issueNumber: issueNumberProperty,
+        paperclipIssueId: paperclipIssueIdProperty
+      }
+    }
+  },
+  {
     name: 'add_issue_comment',
     displayName: 'Add Issue Comment',
     description: 'Post a comment on a GitHub issue or pull request. Provide only the human-facing message body; it must remain non-empty after trimming and removing any existing AI footer. The plugin appends the required AI-authorship footer and includes llmModel when supplied.',
