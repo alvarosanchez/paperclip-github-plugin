@@ -11794,6 +11794,8 @@ async function updatePaperclipIssueState(
     paperclipApiBaseUrl
   } = params;
   const trimmedTransitionComment = transitionComment.trim();
+  const statusWillChange = currentStatus !== nextStatus;
+  let createdTransitionComment: IssueComment | null = null;
   let issueUpdated = false;
   const syncExecutionStatePatch = buildSyncFallbackExecutionStatePatch({
     currentStatus,
@@ -11818,6 +11820,18 @@ async function updatePaperclipIssueState(
   } else if (clearAssignee) {
     issuePatch.assigneeAgentId = null;
     issuePatch.assigneeUserId = null;
+  }
+
+  if (statusWillChange) {
+    if (!trimmedTransitionComment) {
+      throw new Error('GitHub Sync refused to update a Paperclip issue status without an explanatory transition comment.');
+    }
+
+    if (typeof ctx.issues.createComment !== 'function') {
+      throw new Error('This Paperclip runtime does not expose issue comment creation, so GitHub Sync refused to update a Paperclip issue status without an explanatory comment.');
+    }
+
+    createdTransitionComment = await ctx.issues.createComment(issueId, trimmedTransitionComment, companyId);
   }
 
   if (paperclipApiBaseUrl) {
@@ -11887,7 +11901,19 @@ async function updatePaperclipIssueState(
 
     await ctx.issues.update(issueId, sdkIssuePatch as PaperclipIssueUpdatePatchWithLabels, companyId);
   }
-  if (trimmedTransitionComment && typeof ctx.issues.createComment === 'function') {
+  if (createdTransitionComment) {
+    if (transitionCommentAnnotation) {
+      await upsertStatusTransitionCommentAnnotation(ctx, {
+        issueId,
+        commentId: createdTransitionComment.id,
+        annotation: {
+          ...transitionCommentAnnotation,
+          companyId,
+          paperclipIssueId: issueId
+        }
+      });
+    }
+  } else if (trimmedTransitionComment && typeof ctx.issues.createComment === 'function') {
     const createdComment = await ctx.issues.createComment(issueId, trimmedTransitionComment, companyId);
     if (transitionCommentAnnotation) {
       await upsertStatusTransitionCommentAnnotation(ctx, {
