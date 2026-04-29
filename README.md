@@ -62,7 +62,7 @@ If a company already has a Paperclip project bound to a GitHub repository worksp
 
 ### Status sync with delivery context
 
-The plugin does more than mirror issue text. It looks at linked pull requests, mergeability, CI, review threads, and trusted new GitHub comments so imported Paperclip issues can reflect where the work actually is. When GitHub links an issue to a pull request in another repository, GitHub Sync now follows that pull request's actual repository for status checks, review-thread state, and deep links instead of assuming the issue repository. When sync closes an imported issue as `done` or `cancelled`, it also clears any pending Paperclip review or approval execution state so the host accepts the terminal transition cleanly.
+The plugin does more than mirror issue text. It looks at linked pull requests, mergeability, CI, review decisions, review threads, and trusted new GitHub comments so imported Paperclip issues can reflect where the work actually is. When GitHub links an issue to a pull request in another repository, GitHub Sync now follows that pull request's actual repository for status checks, review state, and deep links instead of assuming the issue repository. When sync closes an imported issue as `done` or `cancelled`, it also clears any pending Paperclip review or approval execution state so the host accepts the terminal transition cleanly.
 
 ### Company KPI dashboard
 
@@ -78,7 +78,7 @@ Each mapped project can expose a **Pull Requests** entry in the sidebar that ope
 
 Paperclip issue linkage on the queue prefers the GitHub issue that the pull request closes, so imported GitHub issues and delivery work stay connected in the same project view. If a pull request has no closing-issue-backed link yet, the queue falls back to the Paperclip issue created directly from that pull request and updates the table immediately when that create action returns.
 
-Those pull-request-created Paperclip issues also stay in the scheduled/manual sync loop even when the pull request does not close a GitHub issue. GitHub Sync checks their CI, merge state, and review threads so new failures or unresolved feedback move the Paperclip issue back into active work. The same durable PR link is written when an agent creates a PR through the plugin tool with `paperclipIssueId`, when an authenticated agent records a `gh`-created PR through the agent API route with `paperclipIssueId`, or when an operator manually links an unlinked issue from the issue page.
+Those pull-request-created Paperclip issues also stay in the scheduled/manual sync loop even when the pull request does not close a GitHub issue. GitHub Sync checks their CI, merge state, review decision, and review threads so new failures or requested feedback move the Paperclip issue back into active work. The same durable PR link is written when an agent creates a PR through the plugin tool with `paperclipIssueId`, when an authenticated agent records a `gh`-created PR through the agent API route with `paperclipIssueId`, or when an operator manually links an unlinked issue from the issue page.
 
 The issue detail panel and sync-created comment annotations also preserve cross-repository linked pull requests, showing those PRs with their real repository path so operators land in the right place on GitHub.
 
@@ -155,8 +155,8 @@ When the local Paperclip API is available, the plugin also syncs labels by name,
 | Open issue with no linked pull request, created by a repository maintainer | `todo` on first import |
 | Open issue with no linked pull request | Configured default status, which defaults to `backlog` |
 | Open issue with a linked pull request and unfinished CI | `in_progress` |
-| Open issue with failing CI, a non-mergeable linked pull request, or unresolved review threads | `todo`, or `in_progress` when GitHub Sync can hand the work back to an executor |
-| Open issue with green CI, a merge-ready linked pull request, and all review threads resolved | `in_review` |
+| Open issue with failing CI, a non-mergeable linked pull request, requested changes, or unresolved review threads | `todo`, or `in_progress` when GitHub Sync can hand the work back to an executor |
+| Open issue with green CI, a merge-ready linked pull request, no requested changes, and all review threads resolved | `in_review` |
 | Closed issue completed as finished work | `done` |
 | Closed issue closed as `not_planned` or `duplicate` | `cancelled` |
 
@@ -165,7 +165,7 @@ Additional behavior:
 - Open issues with no linked pull request that are created by a verified repository maintainer/admin bypass the default imported status and start in `todo`.
 - When Paperclip board access is connected for a company, the advanced assignee dropdowns list both company agents and `Me` for the connected board user.
 - Newly imported issues that finish sync in `todo` and are assigned to an agent enqueue an assignee wakeup so the agent can pick them up promptly.
-- For linked pull requests, GitHub Sync treats merge-conflict, behind-branch, blocked, draft, and unstable merge states as executor work, while merge-ready states such as `CLEAN` and `HAS_HOOKS` can move work into `in_review` when CI and review threads are also clear.
+- For linked pull requests, GitHub Sync treats merge-conflict, behind-branch, blocked, draft, unstable merge states, and requested-changes review decisions as executor work, while merge-ready states such as `CLEAN` and `HAS_HOOKS` can move work into `in_review` when CI is green and there are no requested changes or unresolved review threads.
 - When sync moves work into `in_review`, GitHub Sync first follows the Paperclip issue execution policy's current reviewer or approver when that stage is visible on the issue. If Paperclip exposes an internal review or approval stage but not yet the participant, the plugin falls back to the configured reviewer or approver handoff assignee. If the transition is only a healthy linked-PR wait with no visible internal review or approval stage, GitHub Sync leaves the issue unassigned so it can wait on normal maintainer review without waking an internal owner.
 - When sync moves work back into active execution, GitHub Sync first follows the Paperclip issue execution policy `returnAssignee` when it is available. Otherwise it falls back to the configured executor handoff assignee and then to the default imported assignee.
 - Sync-driven handoffs to agent assignees best-effort enqueue an explicit wakeup so the next reviewer, approver, or executor can pick the issue up even when their agent is not running heartbeats.
