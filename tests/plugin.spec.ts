@@ -17453,6 +17453,138 @@ test('worker uses the local Paperclip issue PATCH API for status transitions whe
   }
 });
 
+test('worker does not perform sync-driven status transitions when the explanatory comment cannot be created', async () => {
+  const harness = createTestHarness({
+    manifest,
+    config: {
+      githubTokenRef: 'github-secret-ref'
+    }
+  });
+  await plugin.definition.setup(harness.ctx);
+
+  await harness.performAction('settings.saveRegistration', {
+    mappings: [
+      {
+        id: 'mapping-a',
+        repositoryUrl: 'paperclipai/example-repo',
+        paperclipProjectName: 'Engineering',
+        paperclipProjectId: 'project-1',
+        companyId: 'company-1'
+      }
+    ],
+    syncState: {
+      status: 'idle'
+    }
+  });
+
+  const originalUpdate = harness.ctx.issues.update;
+  const originalCreateComment = harness.ctx.issues.createComment;
+  const importedIssue = await harness.ctx.issues.create({
+    companyId: 'company-1',
+    projectId: 'project-1',
+    title: 'Comment creation must gate status changes',
+    description: '* GitHub issue: [#47](https://github.com/paperclipai/example-repo/issues/47)\n\n---\n\nBody'
+  });
+  await originalUpdate(importedIssue.id, { status: 'in_progress' }, 'company-1');
+
+  await harness.ctx.state.set(
+    {
+      scopeKind: 'instance',
+      stateKey: 'paperclip-github-plugin-import-registry'
+    },
+    [
+      {
+        mappingId: 'mapping-a',
+        githubIssueId: 4701,
+        githubIssueNumber: 47,
+        paperclipIssueId: importedIssue.id,
+        importedAt: '2026-04-09T09:00:00.000Z',
+        lastSeenCommentCount: 0,
+        repositoryUrl: 'https://github.com/paperclipai/example-repo',
+        paperclipProjectId: 'project-1',
+        companyId: 'company-1'
+      }
+    ]
+  );
+
+  harness.ctx.issues.createComment = async () => {
+    throw new Error('Comment bridge unavailable');
+  };
+
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input, init) => {
+    const rawUrl = getRequestUrl(input);
+    const url = new URL(rawUrl);
+
+    if (url.pathname === '/repos/paperclipai/example-repo/issues' && ['all', 'open'].includes(url.searchParams.get('state') ?? '')) {
+      return jsonResponse([
+        {
+          id: 4701,
+          number: 47,
+          title: 'Comment creation must gate status changes',
+          body: 'Body',
+          html_url: 'https://github.com/paperclipai/example-repo/issues/47',
+          state: 'closed',
+          state_reason: 'completed',
+          comments: 0
+        }
+      ]);
+    }
+
+    if (url.pathname === '/graphql') {
+      const { query, variables } = getGraphqlRequest(init);
+      const issueNumber = typeof variables.issueNumber === 'number' ? variables.issueNumber : undefined;
+
+      if (query.includes('query GitHubIssueParentRelationships')) {
+        return graphqlIssueParentRelationshipsResponse([
+          {
+            issueNumber: 47
+          }
+        ]);
+      }
+
+      if (query.includes('query GitHubIssueStatusSnapshot') && issueNumber === 47) {
+        return graphqlResponse({
+          repository: {
+            issue: {
+              number: 47,
+              state: 'CLOSED',
+              stateReason: 'COMPLETED',
+              comments: {
+                totalCount: 0
+              },
+              closedByPullRequestsReferences: {
+                pageInfo: {
+                  hasNextPage: false,
+                  endCursor: null
+                },
+                nodes: []
+              }
+            }
+          }
+        });
+      }
+    }
+
+    throw new Error(`Unexpected GitHub request: ${url.toString()}`);
+  };
+
+  try {
+    const sync = await harness.performAction('sync.runNow', {
+      waitForCompletion: true
+    }) as {
+      syncState: { status: string; updatedStatusesCount?: number };
+    };
+
+    assert.equal(sync.syncState.status, 'error');
+    assert.equal(sync.syncState.updatedStatusesCount ?? 0, 0);
+    assert.equal((await harness.ctx.issues.get(importedIssue.id, 'company-1'))?.status, 'in_progress');
+  } finally {
+    harness.ctx.issues.createComment = originalCreateComment;
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test('worker clears pending review and approval execution state before closing an imported issue', async () => {
   const harness = createTestHarness({
     manifest,
