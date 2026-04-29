@@ -22,6 +22,12 @@ const seededMappingId = 'manual-review-seeded-mapping';
 const seededAgentName = 'CEO';
 const seededAgentModel = 'gpt-5.4';
 const seededAgentHireDecisionNote = 'Approved automatically for GitHub Sync manual verification seeding.';
+const seededCompanyAttachmentMaxBytes = 10 * 1024 * 1024;
+const defaultPaperclipaiVersion = '2026.428.0';
+const paperclipaiVersion = process.env.PAPERCLIP_E2E_PAPERCLIPAI_VERSION?.trim() || defaultPaperclipaiVersion;
+const paperclipaiPackageSpec = paperclipaiVersion.startsWith('paperclipai@')
+  ? paperclipaiVersion
+  : `paperclipai@${paperclipaiVersion}`;
 const githubSyncPluginKey = 'paperclip-github-plugin';
 const seedAgentBypassApprovalsAndSandbox = process.env.PAPERCLIP_E2E_CEO_BYPASS_APPROVALS_AND_SANDBOX === 'true';
 const requestedPort = process.env.PAPERCLIP_E2E_PORT ? Number(process.env.PAPERCLIP_E2E_PORT) : 3100;
@@ -65,7 +71,7 @@ function log(message) {
 }
 
 function getPaperclipCommandArgs(args) {
-  return ['-p', 'node@20', '-p', 'paperclipai', 'paperclipai', ...args];
+  return ['-p', 'node@20', '-p', paperclipaiPackageSpec, 'paperclipai', ...args];
 }
 
 function runCommand(command, args, options = {}) {
@@ -135,6 +141,18 @@ function tryListen(port) {
       });
     });
   });
+}
+
+async function assertPaperclipReleaseUnderTest() {
+  const { stdout, stderr } = await runCommand('npx', getPaperclipCommandArgs(['--version']), { quiet: true });
+  const versionOutput = `${stdout}\n${stderr}`.trim();
+  if (!versionOutput.includes(paperclipaiVersion)) {
+    throw new Error(
+      `Expected disposable Paperclip CLI ${paperclipaiVersion}, but received version output: ${versionOutput || '<empty>'}`
+    );
+  }
+
+  log(`Using ${paperclipaiPackageSpec} for manual Paperclip verification.`);
 }
 
 async function findAvailablePort(startPort) {
@@ -312,7 +330,8 @@ async function ensureCompanySeeded() {
     method: 'POST',
     body: JSON.stringify({
       name: seededCompanyName,
-      description: 'Seed company for GitHub Sync manual review.'
+      description: 'Seed company for GitHub Sync manual review.',
+      attachmentMaxBytes: seededCompanyAttachmentMaxBytes
     })
   });
 
@@ -685,6 +704,7 @@ async function main() {
   embeddedDbPort = await findAvailablePort(requestedDbPort);
   const configPath = join(paperclipHome, 'instances', instanceId, 'config.json');
   env.PAPERCLIP_CONFIG_PATH = configPath;
+  await assertPaperclipReleaseUnderTest();
   await ensureConfigFile(configPath);
   baseUrl = await readConfiguredBaseUrl(configPath);
 
