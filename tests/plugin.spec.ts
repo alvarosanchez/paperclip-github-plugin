@@ -8622,6 +8622,99 @@ test('worker issue.githubDetails returns issue-scoped GitHub detail payloads', a
   });
 });
 
+test('worker issue.githubDetails recovers GitHub issue links from Paperclip origin fields', async () => {
+  const harness = createTestHarness({ manifest });
+  await plugin.definition.setup(harness.ctx);
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input, init) => {
+    const url = getRequestUrl(input);
+    if (url === 'https://api.github.com/repos/paperclipai/example-repo/issues/303') {
+      return jsonResponse({ message: 'Not Found' }, 404);
+    }
+
+    return originalFetch(input, init);
+  };
+
+  try {
+    const issue = await harness.ctx.issues.create({
+      companyId: 'company-1',
+      projectId: 'project-1',
+      title: 'Origin-only imported issue',
+      description: 'No hidden import marker here.',
+      originKind: 'plugin:paperclip-github-plugin:github-issue',
+      originId: 'https://github.com/paperclipai/example-repo/issues/303'
+    });
+
+    const details = await harness.getData<{
+      paperclipIssueId: string;
+      kind: 'issue';
+      source: string;
+      repositoryUrl: string;
+      githubIssueNumber: number;
+      githubIssueUrl: string;
+      linkedPullRequestNumbers: number[];
+    } | null>('issue.githubDetails', {
+      companyId: 'company-1',
+      issueId: issue.id
+    });
+
+    assert.equal(details?.paperclipIssueId, issue.id);
+    assert.equal(details?.kind, 'issue');
+    assert.equal(details?.source, 'issue_origin');
+    assert.equal(details?.repositoryUrl, 'https://github.com/paperclipai/example-repo');
+    assert.equal(details?.githubIssueNumber, 303);
+    assert.equal(details?.githubIssueUrl, 'https://github.com/paperclipai/example-repo/issues/303');
+    assert.deepEqual(details?.linkedPullRequestNumbers, []);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('worker issue.githubDetails recovers GitHub pull request links from Paperclip origin fields', async () => {
+  const harness = createTestHarness({ manifest });
+  await plugin.definition.setup(harness.ctx);
+
+  const issue = await harness.ctx.issues.create({
+    companyId: 'company-1',
+    projectId: 'project-1',
+    title: 'Origin-only pull request issue',
+    description: 'Created from a pull request before the link entity was written.',
+    originKind: 'plugin:paperclip-github-plugin:github-pull-request',
+    originId: 'https://github.com/paperclipai/example-repo/pull/404'
+  });
+
+  const details = await harness.getData<{
+    paperclipIssueId: string;
+    kind: 'pull_request';
+    source: string;
+    repositoryUrl: string;
+    githubPullRequestNumber: number;
+    githubPullRequestUrl: string;
+    linkedPullRequestNumbers: number[];
+    linkedPullRequests: Array<{
+      number: number;
+      repositoryUrl: string;
+    }>;
+  } | null>('issue.githubDetails', {
+    companyId: 'company-1',
+    issueId: issue.id
+  });
+
+  assert.equal(details?.paperclipIssueId, issue.id);
+  assert.equal(details?.kind, 'pull_request');
+  assert.equal(details?.source, 'issue_origin');
+  assert.equal(details?.repositoryUrl, 'https://github.com/paperclipai/example-repo');
+  assert.equal(details?.githubPullRequestNumber, 404);
+  assert.equal(details?.githubPullRequestUrl, 'https://github.com/paperclipai/example-repo/pull/404');
+  assert.deepEqual(details?.linkedPullRequestNumbers, [404]);
+  assert.deepEqual(details?.linkedPullRequests, [
+    {
+      number: 404,
+      repositoryUrl: 'https://github.com/paperclipai/example-repo'
+    }
+  ]);
+});
+
 test('worker filters issue-scoped GitHub link records even when entities.list ignores scopeId', async () => {
   const harness = createTestHarness({
     manifest,

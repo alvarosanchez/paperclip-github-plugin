@@ -22,6 +22,12 @@ const seededGitHubIssueUrl = 'https://github.com/paperclipai/example-repo/issues
 const seededGitHubPullRequestUrl = 'https://github.com/paperclipai/example-repo/pull/1000';
 const manualGitHubIssueLinkTitle = 'Manual GitHub Issue Link Smoke';
 const manualGitHubPullRequestLinkTitle = 'Manual GitHub PR Link Smoke';
+const seededCompanyAttachmentMaxBytes = 10 * 1024 * 1024;
+const defaultPaperclipaiVersion = '2026.428.0';
+const paperclipaiVersion = process.env.PAPERCLIP_E2E_PAPERCLIPAI_VERSION?.trim() || defaultPaperclipaiVersion;
+const paperclipaiPackageSpec = paperclipaiVersion.startsWith('paperclipai@')
+  ? paperclipaiVersion
+  : `paperclipai@${paperclipaiVersion}`;
 const requestedPort = process.env.PAPERCLIP_E2E_PORT ? Number(process.env.PAPERCLIP_E2E_PORT) : 3100;
 const requestedDbPort = process.env.PAPERCLIP_E2E_DB_PORT ? Number(process.env.PAPERCLIP_E2E_DB_PORT) : 54329;
 const defaultTimeoutMs = 30000;
@@ -48,7 +54,7 @@ function log(message) {
 }
 
 function getPaperclipCommandArgs(args) {
-  return ['-p', 'node@20', '-p', 'paperclipai', 'paperclipai', ...args];
+  return ['-p', 'node@20', '-p', paperclipaiPackageSpec, 'paperclipai', ...args];
 }
 
 function runCommand(command, args, options = {}) {
@@ -117,6 +123,18 @@ function captureCommand(command, args, options = {}) {
       rejectPromise(new Error(`${command} ${args.join(' ')} exited with code ${code}\n${stderr}`));
     });
   });
+}
+
+async function assertPaperclipReleaseUnderTest() {
+  const { stdout, stderr } = await captureCommand('npx', getPaperclipCommandArgs(['--version']));
+  const versionOutput = `${stdout}\n${stderr}`.trim();
+  if (!versionOutput.includes(paperclipaiVersion)) {
+    throw new Error(
+      `Expected disposable Paperclip CLI ${paperclipaiVersion}, but received version output: ${versionOutput || '<empty>'}`
+    );
+  }
+
+  log(`Using ${paperclipaiPackageSpec} for disposable Paperclip verification.`);
 }
 
 function tryListen(port) {
@@ -421,7 +439,8 @@ async function ensureCompanySeeded() {
     method: 'POST',
     body: JSON.stringify({
       name: 'Dummy Company',
-      description: 'Seed company for paperclip-github-plugin e2e verification.'
+      description: 'Seed company for paperclip-github-plugin e2e verification.',
+      attachmentMaxBytes: seededCompanyAttachmentMaxBytes
     })
   });
 
@@ -680,6 +699,7 @@ async function main() {
   embeddedDbPort = await findAvailablePort(requestedDbPort);
   const configPath = join(paperclipHome, 'instances', instanceId, 'config.json');
   env.PAPERCLIP_CONFIG_PATH = configPath;
+  await assertPaperclipReleaseUnderTest();
   await ensureConfigFile(configPath);
   const githubToken = await ensureWorkerGitHubTokenConfig();
   const manualLinkFixtures = await resolveManualLinkFixtures(githubToken);

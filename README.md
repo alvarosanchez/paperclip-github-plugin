@@ -44,7 +44,7 @@ The plugin adds a full in-host workflow instead of a one-off import script:
 2. Connect one or more GitHub repositories to Paperclip projects.
 3. Run a sync manually or let the scheduled job keep things up to date.
 
-During sync, the plugin imports one top-level Paperclip issue per GitHub issue, stamps it with a namespaced GitHub Sync plugin origin, updates already imported issues instead of recreating them, maps GitHub labels into Paperclip labels, and keeps GitHub-specific metadata in dedicated Paperclip surfaces rather than stuffing everything into the issue description.
+During sync, the plugin imports one top-level Paperclip issue per GitHub issue, stamps it with a namespaced GitHub Sync plugin origin, updates already imported issues instead of recreating them, maps GitHub labels into Paperclip labels, and keeps GitHub-specific metadata in dedicated Paperclip surfaces rather than stuffing everything into the issue description. On Paperclip `2026.428.0` and newer, the detail surfaces can also recover GitHub issue and pull request links from Paperclip's own `originKind` / `originId` fields when the plugin registry or legacy hidden marker is missing.
 
 When the host exposes plugin issue creation, imported GitHub issues are created through the Paperclip plugin SDK path so they are not attributed to the connected board user. The worker still uses direct local Paperclip REST calls for label sync and for description, assignee, or status repair paths when those routes are available.
 
@@ -95,7 +95,7 @@ Paperclip agents can search GitHub for duplicates, read and update issues, assig
 ## Requirements
 
 - Node.js 20+
-- a Paperclip host with plugin installation enabled. GitHub Sync is built and tested against Paperclip `2026.427.0`; the manifest relies on explicit capabilities instead of a strict host-version gate because current latest/development hosts can report `0.0.0` during plugin upgrade.
+- a Paperclip host with plugin installation enabled. GitHub Sync is built and tested against Paperclip `2026.428.0`; the manifest relies on explicit capabilities instead of a strict host-version gate because current latest/development hosts can report `0.0.0` during plugin upgrade.
 - a GitHub token with API access to the repositories you want to sync
 
 ## Install from npm
@@ -283,10 +283,12 @@ Useful scripts:
 
 - `pnpm dev` watches the manifest, worker, and UI bundles and rebuilds them into `dist/`
 - `pnpm dev:ui` starts a local Paperclip plugin UI dev server from `dist/ui` on port `4177`
-- `pnpm test:e2e` builds the plugin, boots an isolated Paperclip instance, installs the plugin, and verifies the hosted settings page renders
-- `pnpm verify:manual` builds the plugin, boots a local-trusted Paperclip instance for manual inspection, seeds a `Dummy Company` with a mapped review project and a `CEO` agent on the Codex local adapter using model `gpt-5.4`, installs the plugin, and opens the company dashboard without seeding KPI history.
+- `pnpm test:e2e` builds the plugin, boots an isolated Paperclip `2026.428.0` instance, installs the plugin, and verifies the hosted settings page renders
+- `pnpm verify:manual` builds the plugin, boots a local-trusted Paperclip `2026.428.0` instance for manual inspection, seeds a `Dummy Company` with a mapped review project and a `CEO` agent on the Codex local adapter using model `gpt-5.4`, installs the plugin, and opens the company dashboard without seeding KPI history.
 
 For fast hosted UI iteration, run `pnpm dev` in one terminal and `pnpm dev:ui` in another.
+
+Set `PAPERCLIP_E2E_PAPERCLIPAI_VERSION` to run e2e or manual verification against a different Paperclip release.
 
 If you want the seeded `CEO` agent used in manual verification to opt into Codex's bypass flag, set `PAPERCLIP_E2E_CEO_BYPASS_APPROVALS_AND_SANDBOX=true`.
 

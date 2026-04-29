@@ -326,7 +326,7 @@ interface SyncToolbarStateData {
 interface GitHubIssueDetailsData {
   paperclipIssueId: string;
   kind?: 'issue' | 'pull_request';
-  source: 'entity' | 'import_registry' | 'description' | 'pull_request_entity';
+  source: 'entity' | 'import_registry' | 'description' | 'issue_origin' | 'pull_request_entity';
   githubIssueNumber?: number;
   githubIssueUrl?: string;
   githubPullRequestNumber?: number;
@@ -14656,6 +14656,8 @@ function GitHubSyncIssueDetailTabContent(props: {
       ? 'Closed'
       : 'Open'
     : formatGitHubIssueState(issueDetails?.githubIssueState, issueDetails?.githubIssueStateReason);
+  const showRecoveredLinkNote = issueDetails?.source === 'issue_origin'
+    || (issueDetails?.kind !== 'pull_request' && issueDetails?.source !== 'entity');
 
   function closeManualLinkModal(): void {
     if (manualLinkPending) {
@@ -14858,9 +14860,11 @@ function GitHubSyncIssueDetailTabContent(props: {
             </div>
           ) : null}
 
-          {issueDetails.kind !== 'pull_request' && issueDetails.source !== 'entity' ? (
+          {showRecoveredLinkNote ? (
             <div className="ghsync-extension-note">
-              GitHub Sync recovered this link from older sync metadata. Run sync once to refresh the creator, GitHub state, labels, and linked PRs in this panel.
+              {issueDetails.source === 'issue_origin'
+                ? 'GitHub Sync recovered this link from the Paperclip issue origin. Run sync once to refresh richer GitHub metadata in this panel.'
+                : 'GitHub Sync recovered this link from older sync metadata. Run sync once to refresh the creator, GitHub state, labels, and linked PRs in this panel.'}
             </div>
           ) : null}
         </>

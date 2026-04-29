@@ -74,6 +74,7 @@ The plugin MUST persist repository mappings, company-scoped advanced issue defau
 - The sync flow MUST create one top-level Paperclip issue per imported GitHub issue when the target mapping has a resolved Paperclip project identifier.
 - When the Paperclip runtime exposes plugin issue creation, the sync flow SHOULD prefer `ctx.issues.create(...)` for imported issue creation and reserve direct Paperclip REST issue calls for repair or update paths so imported issues are not attributed to the connected board user.
 - Imported GitHub issues MUST be created with a GitHub Sync namespaced plugin origin and the canonical GitHub issue URL as `originId`.
+- When a Paperclip issue has a GitHub Sync GitHub-issue or pull-request `originKind` and a parseable GitHub URL in `originId`, issue-scoped GitHub detail reads MUST use that origin metadata as a durable fallback when plugin-owned link entities, import-registry entries, or hidden description markers are missing.
 - When the mapping company has a configured default assignee, the sync flow MUST assign newly created imported Paperclip issues to that Paperclip assignee, whether the saved principal is a Paperclip agent or the connected board user.
 - Imported Paperclip issues MUST keep the original GitHub issue title without adding a `[GitHub]` prefix.
 - Imported issue descriptions SHOULD contain the normalized GitHub body when present and MUST normalize the GitHub raw HTML constructs that Paperclip cannot render in multiline descriptions.
@@ -131,7 +132,8 @@ The plugin MUST persist repository mappings, company-scoped advanced issue defau
 ## Host integration requirements
 
 - The plugin MUST register successfully in Paperclip.
-- The plugin manifest MUST NOT declare a strict `minimumHostVersion` or `minimumPaperclipVersion` gate while current latest/development Paperclip hosts may report `0.0.0` during plugin upgrade. Required host surfaces MUST remain represented by manifest capabilities and guarded by worker fallbacks where possible, and the docs MUST still state the intended Paperclip `2026.427.0` support baseline.
+- The plugin manifest MUST NOT declare a strict `minimumHostVersion` or `minimumPaperclipVersion` gate while current latest/development Paperclip hosts may report `0.0.0` during plugin upgrade. Required host surfaces MUST remain represented by manifest capabilities and guarded by worker fallbacks where possible, and the docs MUST still state the intended Paperclip `2026.428.0` support baseline.
+- Disposable e2e and manual host verification MUST pin the Paperclip CLI to `2026.428.0` by default, while retaining an explicit environment override for forward and backward compatibility checks.
 - The plugin MUST expose a dashboard widget contribution for sync readiness and setup.
 - The plugin MUST expose a separate dashboard KPI widget contribution.
 - The plugin MUST expose a settings page contribution.
