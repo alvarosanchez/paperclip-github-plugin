@@ -7611,6 +7611,18 @@ function isHealthyMaintainerWaitTransition(params: {
     && syncContext.executionPolicy !== null;
 }
 
+function shouldPreserveImportedTriageAssignee(params: {
+  currentStatus: PaperclipIssueStatus;
+  nextStatus: PaperclipIssueStatus;
+  wasImportedThisRun: boolean;
+  maintainerAuthoredImportedIssue?: boolean;
+}): boolean {
+  return params.wasImportedThisRun
+    && params.maintainerAuthoredImportedIssue === true
+    && params.currentStatus === 'backlog'
+    && params.nextStatus === 'todo';
+}
+
 function doesPaperclipIssueAssigneeMatch(
   currentAssignee: PaperclipIssueAssigneePrincipal | null,
   nextAssignee: PaperclipIssueAssigneePrincipal | null
@@ -12568,12 +12580,20 @@ async function synchronizePaperclipIssueStatuses(
         nextStatus,
         syncContext: paperclipIssueSyncContext
       });
-      const nextTransitionAssignee = resolveSyncTransitionAssignee({
+      const shouldPreserveImportedTriageRouting = shouldPreserveImportedTriageAssignee({
         currentStatus: paperclipIssue.status,
         nextStatus,
-        syncContext: paperclipIssueSyncContext,
-        advancedSettings
+        wasImportedThisRun,
+        maintainerAuthoredImportedIssue
       });
+      const nextTransitionAssignee = shouldPreserveImportedTriageRouting
+        ? null
+        : resolveSyncTransitionAssignee({
+            currentStatus: paperclipIssue.status,
+            nextStatus,
+            syncContext: paperclipIssueSyncContext,
+            advancedSettings
+          });
       const shouldClearTransitionAssignee =
         nextStatus === 'in_review'
         && (nextTransitionAssignee === null || shouldPreserveMaintainerWaitRouting)
@@ -12583,8 +12603,8 @@ async function synchronizePaperclipIssueStatuses(
         : false;
       const shouldWakeImportedAssignee =
         wasImportedThisRun
-        && paperclipIssue.status === nextStatus
         && nextStatus === 'todo'
+        && (paperclipIssue.status === nextStatus || shouldPreserveImportedTriageRouting)
         && paperclipIssueSyncContext.assignee?.kind === 'agent';
       const shouldWakeTransitionAssignee =
         paperclipIssue.status !== nextStatus
@@ -12656,6 +12676,15 @@ async function synchronizePaperclipIssueStatuses(
         paperclipApiBaseUrl
       });
       updatedStatusesCount += 1;
+
+      if (shouldWakeImportedAssignee) {
+        queuedIssueWakeups.push({
+          assigneeAgentId: paperclipIssueSyncContext.assignee?.kind === 'agent' ? paperclipIssueSyncContext.assignee.id : null,
+          paperclipIssueId: importedIssue.paperclipIssueId,
+          reason: IMPORTED_ISSUE_WAKE_REASON,
+          mutation: 'import'
+        });
+      }
 
       if (shouldWakeTransitionAssignee && nextTransitionAssignee?.principal.kind === 'agent') {
         queuedIssueWakeups.push({
