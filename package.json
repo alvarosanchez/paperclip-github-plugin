@@ -1,6 +1,6 @@
 {
   "name": "paperclip-github-plugin",
-  "version": "0.8.2",
+  "version": "0.8.3",
   "description": "Paperclip plugin for synchronizing GitHub issues into Paperclip projects.",
   "license": "Apache-2.0",
   "type": "module",
