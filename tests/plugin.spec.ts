@@ -11125,6 +11125,215 @@ test('worker promotes newly imported member-authored backlog issues to todo on f
   }
 });
 
+test('worker preserves the imported triage assignee when maintainer-authored backlog imports are promoted to todo', { concurrency: false }, async () => {
+  const harness = createTestHarness({
+    manifest,
+    config: {
+      githubTokenRef: 'github-secret-ref',
+      paperclipApiBaseUrl: 'http://127.0.0.1:63675'
+    }
+  });
+  await plugin.definition.setup(harness.ctx);
+  harness.seed({
+    agents: [
+      createAgentFixture({
+        id: 'agent-qa',
+        companyId: 'company-1',
+        name: 'QA Engineer',
+        title: 'QA'
+      }),
+      createAgentFixture({
+        id: 'agent-executor',
+        companyId: 'company-1',
+        name: 'Executor Engineer',
+        title: 'Engineer'
+      })
+    ]
+  });
+
+  await harness.performAction('settings.saveRegistration', {
+    companyId: 'company-1',
+    mappings: [
+      {
+        id: 'mapping-a',
+        repositoryUrl: 'paperclipai/example-repo',
+        paperclipProjectName: 'Engineering',
+        paperclipProjectId: 'project-1',
+        companyId: 'company-1'
+      }
+    ],
+    advancedSettings: {
+      defaultAssigneeAgentId: 'agent-qa',
+      executorAssigneeAgentId: 'agent-executor',
+      defaultStatus: 'backlog',
+      ignoredIssueAuthorUsernames: []
+    },
+    syncState: {
+      status: 'idle'
+    }
+  });
+
+  const originalCreate = harness.ctx.issues.create.bind(harness.ctx.issues);
+  const originalUpdate = harness.ctx.issues.update.bind(harness.ctx.issues);
+  harness.ctx.issues.create = async (input) => {
+    const created = await originalCreate(input);
+    return originalUpdate(created.id, { status: 'backlog', assigneeAgentId: 'agent-qa' }, input.companyId);
+  };
+
+  const wakeupRequests: Array<{
+    issueId: string;
+    companyId: string;
+    options: Parameters<typeof harness.ctx.issues.requestWakeup>[2];
+  }> = [];
+  const originalRequestWakeup = harness.ctx.issues.requestWakeup.bind(harness.ctx.issues);
+  harness.ctx.issues.requestWakeup = async (issueId, companyId, options) => {
+    wakeupRequests.push({ issueId, companyId, options });
+    return originalRequestWakeup(issueId, companyId, options);
+  };
+
+  const statusTransitionComments: Array<{ issueId: string; body: string }> = [];
+  const originalCreateComment = harness.ctx.issues.createComment;
+  harness.ctx.issues.createComment = async (issueId, body, companyId) => {
+    statusTransitionComments.push({ issueId, body });
+    return originalCreateComment(issueId, body, companyId);
+  };
+  const originalFetch = globalThis.fetch;
+
+  globalThis.fetch = async (input, init) => {
+    const rawUrl = getRequestUrl(input);
+    const url = new URL(rawUrl);
+    const method = (init?.method ?? 'GET').toUpperCase();
+
+    if (url.origin === 'http://127.0.0.1:63675' && url.pathname === '/api/health' && method === 'GET') {
+      return jsonResponse({
+        deploymentMode: 'local_trusted'
+      });
+    }
+
+    if (url.origin === 'http://127.0.0.1:63675' && method === 'PATCH' && url.pathname.startsWith('/api/issues/')) {
+      const issueId = url.pathname.split('/').pop() ?? '';
+      const body = getJsonRequestBody(init);
+      const patch: Record<string, unknown> = {};
+
+      if (typeof body?.status === 'string') {
+        patch.status = body.status;
+      }
+      if (body && Object.prototype.hasOwnProperty.call(body, 'assigneeAgentId')) {
+        patch.assigneeAgentId = body.assigneeAgentId;
+      }
+      if (body && Object.prototype.hasOwnProperty.call(body, 'assigneeUserId')) {
+        patch.assigneeUserId = body.assigneeUserId;
+      }
+
+      await originalUpdate(issueId, patch as never, 'company-1');
+
+      return jsonResponse({
+        id: issueId,
+        status: body?.status ?? null,
+        assigneeAgentId: body?.assigneeAgentId ?? null,
+        assigneeUserId: body?.assigneeUserId ?? null
+      });
+    }
+
+    if (url.pathname === '/repos/paperclipai/example-repo/issues' && ['all', 'open'].includes(url.searchParams.get('state') ?? '')) {
+      return jsonResponse([
+        {
+          id: 2631,
+          number: 30,
+          title: 'Maintainer triage stays with QA',
+          body: 'Please triage this before implementation',
+          html_url: 'https://github.com/paperclipai/example-repo/issues/30',
+          user: {
+            login: 'repo-maintainer'
+          },
+          state: 'open',
+          comments: 0
+        }
+      ]);
+    }
+
+    if (url.pathname === '/repos/paperclipai/example-repo/collaborators/repo-maintainer/permission') {
+      return jsonResponse({
+        permission: 'admin',
+        role_name: 'maintain',
+        user: {
+          login: 'repo-maintainer'
+        }
+      });
+    }
+
+    if (url.pathname === '/graphql') {
+      const { query, variables } = getGraphqlRequest(init);
+      const issueNumber = typeof variables.issueNumber === 'number' ? variables.issueNumber : undefined;
+
+      if (query.includes('query GitHubIssueParentRelationships')) {
+        return graphqlIssueParentRelationshipsResponse([
+          {
+            issueNumber: 30
+          }
+        ]);
+      }
+
+      if (query.includes('query GitHubIssueStatusSnapshot') && issueNumber === 30) {
+        return graphqlResponse({
+          repository: {
+            issue: {
+              number: 30,
+              state: 'OPEN',
+              stateReason: null,
+              comments: {
+                totalCount: 0
+              },
+              closedByPullRequestsReferences: {
+                pageInfo: {
+                  hasNextPage: false,
+                  endCursor: null
+                },
+                nodes: []
+              }
+            }
+          }
+        });
+      }
+    }
+
+    throw new Error(`Unexpected GitHub request: ${url.toString()}`);
+  };
+
+  try {
+    const sync = await harness.performAction('sync.runNow', {}) as {
+      syncState: { status: string; createdIssuesCount?: number; syncedIssuesCount?: number };
+    };
+
+    assert.equal(sync.syncState.status, 'success');
+    assert.equal(sync.syncState.createdIssuesCount, 1);
+    assert.equal(sync.syncState.syncedIssuesCount, 1);
+
+    const importedIssue = (await harness.ctx.issues.list({
+      companyId: 'company-1'
+    })).find((issue) => issue.title === 'Maintainer triage stays with QA');
+
+    assert.ok(importedIssue);
+    assert.equal(importedIssue?.status, 'todo');
+    assert.equal(importedIssue?.assigneeAgentId, 'agent-qa');
+    assert.equal(statusTransitionComments.length, 1);
+    assert.match(statusTransitionComments[0]?.body ?? '', /from `backlog` to `todo`/);
+    assert.match(statusTransitionComments[0]?.body ?? '', /created by a repository maintainer/);
+    assert.equal(wakeupRequests.length, 1);
+    assert.equal(wakeupRequests[0]?.issueId, importedIssue?.id);
+    assert.equal(wakeupRequests[0]?.companyId, 'company-1');
+    assert.match(String(wakeupRequests[0]?.options?.reason ?? ''), /imported/i);
+    assert.equal(wakeupRequests[0]?.options?.contextSource, 'github-sync.import');
+    assert.match(String(wakeupRequests[0]?.options?.idempotencyKey ?? ''), /^github-sync:import:/);
+  } finally {
+    harness.ctx.issues.create = originalCreate;
+    harness.ctx.issues.update = originalUpdate;
+    harness.ctx.issues.requestWakeup = originalRequestWakeup;
+    harness.ctx.issues.createComment = originalCreateComment;
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test('worker wakes the assignee when a newly imported maintainer-authored issue stays in todo', async () => {
   const harness = createTestHarness({
     manifest,

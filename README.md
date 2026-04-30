@@ -163,6 +163,7 @@ When the local Paperclip API is available, the plugin also syncs labels by name,
 Additional behavior:
 
 - Open issues with no linked pull request that are created by a verified repository maintainer/admin bypass the default imported status and start in `todo`.
+- If the Paperclip host initially creates that imported maintainer issue in `backlog`, GitHub Sync promotes it to `todo` without replacing the configured default assignee with the executor handoff assignee, so triage ownership stays intact.
 - When Paperclip board access is connected for a company, the advanced assignee dropdowns list both company agents and `Me` for the connected board user.
 - Newly imported issues that finish sync in `todo` and are assigned to an agent enqueue an assignee wakeup so the agent can pick them up promptly.
 - For linked pull requests, GitHub Sync treats merge-conflict, behind-branch, blocked, draft, unstable merge states, and requested-changes review decisions as executor work, while merge-ready states such as `CLEAN` and `HAS_HOOKS` can move work into `in_review` when CI is green and there are no requested changes or unresolved review threads.
