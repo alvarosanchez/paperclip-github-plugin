@@ -35,7 +35,7 @@ The plugin adds a full in-host workflow instead of a one-off import script:
 - saved sync diagnostics that let operators inspect the latest per-issue failures, raw errors, and suggested next steps
 - a project sidebar item that opens a live project-scoped Pull Requests page for the mapped repository and can show the open PR count through a lightweight badge read
 - manual sync actions from global, project, and issue surfaces
-- a GitHub detail tab on synced Paperclip issues that includes GitHub-marked action buttons plus the GitHub issue creator with avatar, and lets operators manually link an unlinked Paperclip issue to a GitHub issue or pull request
+- a GitHub detail tab on synced Paperclip issues that includes GitHub-marked action buttons plus the GitHub issue creator with avatar, and lets operators manually link or unlink a Paperclip issue from a GitHub issue or pull request
 - GitHub link annotations on sync-generated status transition comments when the host supports comment annotations
 
 ## How it works
@@ -87,6 +87,8 @@ The issue detail panel and sync-created comment annotations also preserve cross-
 If a Paperclip issue was created locally or by an agent workflow before GitHub Sync saw the matching GitHub item, the issue detail surface shows a **Link GitHub item** action. The modal accepts either a GitHub issue number or full issue URL, or a pull request number or full pull request URL. Number-only entries use the issue's mapped Paperclip project repository; full URLs can point at any repository mapped to that project.
 
 Manual GitHub issue links are added to the same import registry and issue-link entity used by normal sync, so future syncs update the Paperclip issue from the GitHub issue. Manual pull request links are added to the PR-link entity used by the project Pull Requests page, so future syncs monitor PR status even when there is no closing GitHub issue.
+
+Linked Paperclip issues can also be unlinked from the GitHub detail surface. Unlinking removes the active GitHub Sync link metadata and import-registry tracking for that Paperclip issue without deleting either side, so the issue stays local until it is linked again.
 
 ### Agent workflows built in
 
@@ -145,6 +147,8 @@ Imported issues keep the original GitHub title and use the normalized GitHub bod
 To keep imported issues recognizable without cluttering the visible description, the plugin appends a hidden HTML comment footer with the source GitHub issue URL. Agents and repair flows use that marker when the plugin-owned link entity or import registry is missing.
 
 Repeated syncs keep existing imports current instead of creating duplicates again. If the plugin's import registry is stale, the worker can repair deduplication by reusing existing Paperclip issues when durable GitHub link metadata is already present.
+
+If a linked GitHub issue is transferred to another repository, GitHub Sync follows the canonical GitHub URL. When the destination repository is mapped to another Paperclip project in the same company, the existing Paperclip issue moves to that project and keeps its GitHub link. When the destination repository is not mapped, GitHub Sync unlinks the Paperclip issue and marks it `cancelled` with a Paperclip comment explaining the transfer.
 
 When the local Paperclip API is available, the plugin also syncs labels by name, prefers exact color matches when multiple Paperclip labels share the same name, and creates missing Paperclip labels when needed.
 

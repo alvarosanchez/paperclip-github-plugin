@@ -1406,7 +1406,7 @@ test('search_repository_items infers the mapped repository from the tool run con
   const originalFetch = globalThis.fetch;
   let capturedQuery = '';
 
-  globalThis.fetch = async (input) => {
+  globalThis.fetch = async (input, init) => {
     const url = new URL(getRequestUrl(input));
     if (url.pathname === '/search/issues') {
       capturedQuery = url.searchParams.get('q') ?? '';
@@ -1460,7 +1460,7 @@ test('search_repository_items strips repository qualifiers from the free-text qu
   const originalFetch = globalThis.fetch;
   let capturedQuery = '';
 
-  globalThis.fetch = async (input) => {
+  globalThis.fetch = async (input, init) => {
     const url = new URL(getRequestUrl(input));
     if (url.pathname === '/search/issues') {
       capturedQuery = url.searchParams.get('q') ?? '';
@@ -1856,7 +1856,7 @@ test('company metric API route links gh-created pull requests to supplied Paperc
     description: 'Agents create the PR with gh and register it afterward.'
   });
 
-  globalThis.fetch = async (input) => {
+  globalThis.fetch = async (input, init) => {
     const url = new URL(getRequestUrl(input));
     if (url.pathname === '/repos/paperclipai/example-repo/pulls/24') {
       return jsonResponse({
@@ -5710,6 +5710,173 @@ test('issue.linkGitHubItem links a Paperclip issue to a GitHub pull request for 
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+test('issue.unlinkGitHubItem detaches a Paperclip issue from a synced GitHub issue', async () => {
+  const harness = await createProjectPullRequestsHarness();
+  const issue = await harness.ctx.issues.create({
+    companyId: 'company-1',
+    projectId: 'project-1',
+    title: 'Unlink synced issue target',
+    description: [
+      'Created in Paperclip first.',
+      '',
+      '<!-- paperclip-github-plugin-imported-from: https://github.com/paperclipai/example-repo/issues/88 -->'
+    ].join('\n'),
+    originKind: 'plugin:paperclip-github-plugin:github-issue',
+    originId: 'https://github.com/paperclipai/example-repo/issues/88'
+  });
+
+  await harness.ctx.entities.upsert({
+    entityType: 'paperclip-github-plugin.issue-link',
+    scopeKind: 'issue',
+    scopeId: issue.id,
+    externalId: 'https://github.com/paperclipai/example-repo/issues/88',
+    title: 'GitHub issue #88',
+    status: 'open',
+    data: {
+      companyId: 'company-1',
+      paperclipProjectId: 'project-1',
+      repositoryUrl: 'https://github.com/paperclipai/example-repo',
+      githubIssueId: 8800,
+      githubIssueNumber: 88,
+      githubIssueUrl: 'https://github.com/paperclipai/example-repo/issues/88',
+      githubIssueState: 'open',
+      commentsCount: 2,
+      linkedPullRequestNumbers: [],
+      linkedPullRequests: [],
+      labels: [],
+      syncedAt: '2026-04-10T08:00:00.000Z'
+    }
+  });
+  await harness.ctx.state.set(
+    {
+      scopeKind: 'instance',
+      stateKey: 'paperclip-github-plugin-import-registry'
+    },
+    [
+      {
+        mappingId: 'mapping-a',
+        githubIssueId: 8800,
+        githubIssueNumber: 88,
+        paperclipIssueId: issue.id,
+        importedAt: '2026-04-10T08:00:00.000Z',
+        lastSeenCommentCount: 2,
+        lastSeenGitHubState: 'open',
+        repositoryUrl: 'https://github.com/paperclipai/example-repo',
+        paperclipProjectId: 'project-1',
+        companyId: 'company-1'
+      }
+    ]
+  );
+
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    throw new Error(`Unlinked issue details should not call GitHub: ${getRequestUrl(input)}`);
+  };
+
+  try {
+    const result = await harness.performAction<{
+      paperclipIssueId: string;
+      unlinked: boolean;
+      unlinkedIssueLinksCount: number;
+      removedImportRegistryEntriesCount: number;
+    }>('issue.unlinkGitHubItem', {
+      companyId: 'company-1',
+      issueId: issue.id
+    });
+
+    assert.equal(result.paperclipIssueId, issue.id);
+    assert.equal(result.unlinked, true);
+    assert.equal(result.unlinkedIssueLinksCount, 1);
+    assert.equal(result.removedImportRegistryEntriesCount, 1);
+
+    const details = await harness.getData('issue.githubDetails', {
+      companyId: 'company-1',
+      issueId: issue.id
+    });
+    const updatedIssue = await harness.ctx.issues.get(issue.id, 'company-1');
+    const issueLinks = await harness.ctx.entities.list({
+      entityType: 'paperclip-github-plugin.issue-link',
+      scopeKind: 'issue',
+      scopeId: issue.id
+    });
+    const importRegistry = harness.getState({
+      scopeKind: 'instance',
+      stateKey: 'paperclip-github-plugin-import-registry'
+    }) as unknown[];
+
+    assert.equal(details, null);
+    assert.notEqual(updatedIssue?.originKind, 'plugin:paperclip-github-plugin:github-issue');
+    assert.equal(updatedIssue?.originId, null);
+    assert.doesNotMatch(updatedIssue?.description ?? '', /paperclip-github-plugin-imported-from/);
+    assert.equal(issueLinks.length, 1);
+    assert.equal(issueLinks[0]?.status, 'unlinked');
+    assert.equal((issueLinks[0]?.data as { kind?: unknown }).kind, 'issue');
+    assert.equal(importRegistry.length, 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('issue.unlinkGitHubItem detaches a Paperclip issue from a GitHub pull request', async () => {
+  const harness = await createProjectPullRequestsHarness();
+  const issue = await harness.ctx.issues.create({
+    companyId: 'company-1',
+    projectId: 'project-1',
+    title: 'Unlink PR target',
+    description: 'Created in Paperclip first.',
+    originKind: 'plugin:paperclip-github-plugin:github-pull-request',
+    originId: 'https://github.com/paperclipai/example-repo/pull/89'
+  });
+
+  await harness.ctx.entities.upsert({
+    entityType: 'paperclip-github-plugin.pull-request-link',
+    scopeKind: 'issue',
+    scopeId: issue.id,
+    externalId: 'https://github.com/paperclipai/example-repo/pull/89',
+    title: 'GitHub pull request #89',
+    status: 'open',
+    data: {
+      companyId: 'company-1',
+      paperclipProjectId: 'project-1',
+      repositoryUrl: 'https://github.com/paperclipai/example-repo',
+      githubPullRequestNumber: 89,
+      githubPullRequestUrl: 'https://github.com/paperclipai/example-repo/pull/89',
+      githubPullRequestState: 'open',
+      title: 'GitHub PR linked later',
+      syncedAt: '2026-04-27T09:30:00.000Z'
+    }
+  });
+
+  const result = await harness.performAction<{
+    paperclipIssueId: string;
+    unlinked: boolean;
+    unlinkedPullRequestLinksCount: number;
+  }>('issue.unlinkGitHubItem', {
+    companyId: 'company-1',
+    issueId: issue.id
+  });
+  const details = await harness.getData('issue.githubDetails', {
+    companyId: 'company-1',
+    issueId: issue.id
+  });
+  const updatedIssue = await harness.ctx.issues.get(issue.id, 'company-1');
+  const pullRequestLinks = await harness.ctx.entities.list({
+    entityType: 'paperclip-github-plugin.pull-request-link',
+    scopeKind: 'issue',
+    scopeId: issue.id
+  });
+
+  assert.equal(result.paperclipIssueId, issue.id);
+  assert.equal(result.unlinked, true);
+  assert.equal(result.unlinkedPullRequestLinksCount, 1);
+  assert.equal(details, null);
+  assert.notEqual(updatedIssue?.originKind, 'plugin:paperclip-github-plugin:github-pull-request');
+  assert.equal(updatedIssue?.originId, null);
+  assert.equal(pullRequestLinks.length, 1);
+  assert.equal(pullRequestLinks[0]?.status, 'unlinked');
+  assert.equal((pullRequestLinks[0]?.data as { kind?: unknown }).kind, 'pull_request');
 });
 
 test('sync.runNow monitors Paperclip issues created from pull requests without closing GitHub issues', async () => {
@@ -10327,7 +10494,7 @@ test('worker lists only open GitHub issues when bootstrapping a repository with 
       };
     };
 
-    assert.equal(result.syncState.status, 'success');
+    assert.equal(result.syncState.status, 'success', JSON.stringify(result.syncState));
     assert.equal(result.syncState.syncedIssuesCount, 1);
     assert.deepEqual(issueStates, ['open']);
   } finally {
@@ -11886,6 +12053,397 @@ test('worker repairs missing import registry entries by reusing existing importe
     assert.equal(importRegistry[0]?.paperclipProjectId, 'project-1');
     assert.equal(importRegistry[0]?.companyId, 'company-1');
     assert.match(importRegistry[0]?.importedAt ?? '', /^\d{4}-\d{2}-\d{2}T/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('worker moves linked Paperclip issues when their GitHub issue transfers to another mapped repository', async () => {
+  const harness = createTestHarness({
+    manifest,
+    config: {
+      githubTokenRef: 'github-secret-ref'
+    }
+  });
+  await plugin.definition.setup(harness.ctx);
+
+  await harness.performAction('settings.saveRegistration', {
+    mappings: [
+      {
+        id: 'mapping-source',
+        repositoryUrl: 'paperclipai/source-repo',
+        paperclipProjectName: 'Source',
+        paperclipProjectId: 'project-source',
+        companyId: 'company-1'
+      },
+      {
+        id: 'mapping-target',
+        repositoryUrl: 'paperclipai/target-repo',
+        paperclipProjectName: 'Target',
+        paperclipProjectId: 'project-target',
+        companyId: 'company-1'
+      }
+    ],
+    syncState: {
+      status: 'idle'
+    }
+  });
+
+  const paperclipIssue = await harness.ctx.issues.create({
+    companyId: 'company-1',
+    projectId: 'project-source',
+    title: 'Transferred mapped issue',
+    description: [
+      'Original body.',
+      '',
+      '<!-- paperclip-github-plugin-imported-from: https://github.com/paperclipai/source-repo/issues/50 -->'
+    ].join('\n'),
+    originKind: 'plugin:paperclip-github-plugin:github-issue',
+    originId: 'https://github.com/paperclipai/source-repo/issues/50',
+    status: 'todo'
+  });
+
+  await harness.ctx.entities.upsert({
+    entityType: 'paperclip-github-plugin.issue-link',
+    scopeKind: 'issue',
+    scopeId: paperclipIssue.id,
+    externalId: 'https://github.com/paperclipai/source-repo/issues/50',
+    title: 'GitHub issue #50',
+    status: 'open',
+    data: {
+      companyId: 'company-1',
+      paperclipProjectId: 'project-source',
+      repositoryUrl: 'https://github.com/paperclipai/source-repo',
+      githubIssueId: 5000,
+      githubIssueNumber: 50,
+      githubIssueUrl: 'https://github.com/paperclipai/source-repo/issues/50',
+      githubIssueState: 'open',
+      commentsCount: 1,
+      linkedPullRequestNumbers: [],
+      linkedPullRequests: [],
+      labels: [],
+      syncedAt: '2026-04-10T08:00:00.000Z'
+    }
+  });
+  await harness.ctx.state.set(
+    {
+      scopeKind: 'instance',
+      stateKey: 'paperclip-github-plugin-import-registry'
+    },
+    [
+      {
+        mappingId: 'mapping-source',
+        githubIssueId: 5000,
+        githubIssueNumber: 50,
+        paperclipIssueId: paperclipIssue.id,
+        importedAt: '2026-04-10T08:00:00.000Z',
+        lastSeenCommentCount: 1,
+        lastSeenGitHubState: 'open',
+        repositoryUrl: 'https://github.com/paperclipai/source-repo',
+        paperclipProjectId: 'project-source',
+        companyId: 'company-1'
+      }
+    ]
+  );
+
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input, init) => {
+    const requestUrl = new URL(getRequestUrl(input));
+    const transferredIssue = {
+      id: 5000,
+      number: 7,
+      title: 'Transferred mapped issue',
+      body: 'Moved to the target repository.',
+      html_url: 'https://github.com/paperclipai/target-repo/issues/7',
+      state: 'open',
+      comments: 3,
+      labels: []
+    };
+
+    if (requestUrl.pathname === '/repos/paperclipai/source-repo/issues') {
+      return jsonResponse([]);
+    }
+
+    if (requestUrl.pathname === '/repos/paperclipai/target-repo/issues') {
+      return jsonResponse([transferredIssue]);
+    }
+
+    if (requestUrl.pathname === '/repos/paperclipai/source-repo/issues/50') {
+      return jsonResponse(transferredIssue);
+    }
+
+    if (requestUrl.pathname === '/graphql') {
+      const { query, variables } = getGraphqlRequest(init);
+      if (query.includes('query GitHubIssueParentRelationships')) {
+        const owner = typeof variables.owner === 'string' ? variables.owner : undefined;
+        const repo = typeof variables.repo === 'string' ? variables.repo : undefined;
+        return graphqlIssueParentRelationshipsResponse(
+          owner === 'paperclipai' && repo === 'target-repo'
+            ? [{ issueNumber: 7 }]
+            : []
+        );
+      }
+
+      if (query.includes('query GitHubRepositoryOpenIssueLinkedPullRequests')) {
+        const owner = typeof variables.owner === 'string' ? variables.owner : undefined;
+        const repo = typeof variables.repo === 'string' ? variables.repo : undefined;
+        return graphqlResponse({
+          repository: {
+            issues: {
+              pageInfo: {
+                hasNextPage: false,
+                endCursor: null
+              },
+              nodes:
+                owner === 'paperclipai' && repo === 'target-repo'
+                  ? [
+                      {
+                        number: 7,
+                        closedByPullRequestsReferences: {
+                          pageInfo: {
+                            hasNextPage: false,
+                            endCursor: null
+                          },
+                          nodes: []
+                        }
+                      }
+                    ]
+                  : []
+            }
+          }
+        });
+      }
+
+      if (query.includes('query GitHubIssueStatusSnapshot') && variables.issueNumber === 7) {
+        return graphqlResponse({
+          repository: {
+            issue: {
+              number: 7,
+              state: 'OPEN',
+              stateReason: null,
+              comments: {
+                totalCount: 3
+              },
+              closedByPullRequestsReferences: {
+                pageInfo: {
+                  hasNextPage: false,
+                  endCursor: null
+                },
+                nodes: []
+              }
+            }
+          }
+        });
+      }
+    }
+
+    throw new Error(`Unexpected fetch during mapped transfer test: ${requestUrl.toString()}`);
+  };
+
+  try {
+    const result = await harness.performAction('sync.runNow', {
+      waitForCompletion: true
+    }) as {
+      syncState: {
+        status: string;
+      };
+    };
+    const updatedIssue = await harness.ctx.issues.get(paperclipIssue.id, 'company-1');
+    const issueLinks = await harness.ctx.entities.list({
+      entityType: 'paperclip-github-plugin.issue-link',
+      scopeKind: 'issue',
+      scopeId: paperclipIssue.id
+    });
+    const importRegistry = harness.getState({
+      scopeKind: 'instance',
+      stateKey: 'paperclip-github-plugin-import-registry'
+    }) as Array<{
+      mappingId?: string;
+      githubIssueId?: number;
+      githubIssueNumber?: number;
+      paperclipIssueId?: string;
+      repositoryUrl?: string;
+      paperclipProjectId?: string;
+    }>;
+
+    assert.equal(result.syncState.status, 'success', JSON.stringify(result.syncState));
+    assert.equal(updatedIssue?.projectId, 'project-target');
+    assert.equal(updatedIssue?.originId, 'https://github.com/paperclipai/target-repo/issues/7');
+    assert.match(updatedIssue?.description ?? '', /Moved to the target repository/);
+    assert.match(updatedIssue?.description ?? '', /paperclip-github-plugin-imported-from: https:\/\/github.com\/paperclipai\/target-repo\/issues\/7/);
+    assert.equal(issueLinks.filter((entry) => entry.status === 'unlinked').length, 1);
+    const activeLink = issueLinks.find((entry) => entry.externalId === 'https://github.com/paperclipai/target-repo/issues/7');
+    assert.equal((activeLink?.data as { githubIssueNumber?: unknown }).githubIssueNumber, 7);
+    assert.deepEqual(
+      importRegistry.map((entry) => ({
+        mappingId: entry.mappingId,
+        githubIssueId: entry.githubIssueId,
+        githubIssueNumber: entry.githubIssueNumber,
+        paperclipIssueId: entry.paperclipIssueId,
+        repositoryUrl: entry.repositoryUrl,
+        paperclipProjectId: entry.paperclipProjectId
+      })),
+      [
+        {
+          mappingId: 'mapping-target',
+          githubIssueId: 5000,
+          githubIssueNumber: 7,
+          paperclipIssueId: paperclipIssue.id,
+          repositoryUrl: 'https://github.com/paperclipai/target-repo',
+          paperclipProjectId: 'project-target'
+        }
+      ]
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('worker unlinks and cancels Paperclip issues when their GitHub issue transfers to an unmapped repository', async () => {
+  const harness = createTestHarness({
+    manifest,
+    config: {
+      githubTokenRef: 'github-secret-ref'
+    }
+  });
+  await plugin.definition.setup(harness.ctx);
+
+  await harness.performAction('settings.saveRegistration', {
+    mappings: [
+      {
+        id: 'mapping-source',
+        repositoryUrl: 'paperclipai/source-repo',
+        paperclipProjectName: 'Source',
+        paperclipProjectId: 'project-source',
+        companyId: 'company-1'
+      }
+    ],
+    syncState: {
+      status: 'idle'
+    }
+  });
+
+  const paperclipIssue = await harness.ctx.issues.create({
+    companyId: 'company-1',
+    projectId: 'project-source',
+    title: 'Transferred unmapped issue',
+    description: [
+      'Original body.',
+      '',
+      '<!-- paperclip-github-plugin-imported-from: https://github.com/paperclipai/source-repo/issues/51 -->'
+    ].join('\n'),
+    originKind: 'plugin:paperclip-github-plugin:github-issue',
+    originId: 'https://github.com/paperclipai/source-repo/issues/51',
+    status: 'todo'
+  });
+
+  await harness.ctx.entities.upsert({
+    entityType: 'paperclip-github-plugin.issue-link',
+    scopeKind: 'issue',
+    scopeId: paperclipIssue.id,
+    externalId: 'https://github.com/paperclipai/source-repo/issues/51',
+    title: 'GitHub issue #51',
+    status: 'open',
+    data: {
+      companyId: 'company-1',
+      paperclipProjectId: 'project-source',
+      repositoryUrl: 'https://github.com/paperclipai/source-repo',
+      githubIssueId: 5100,
+      githubIssueNumber: 51,
+      githubIssueUrl: 'https://github.com/paperclipai/source-repo/issues/51',
+      githubIssueState: 'open',
+      commentsCount: 1,
+      linkedPullRequestNumbers: [],
+      linkedPullRequests: [],
+      labels: [],
+      syncedAt: '2026-04-10T08:00:00.000Z'
+    }
+  });
+  await harness.ctx.state.set(
+    {
+      scopeKind: 'instance',
+      stateKey: 'paperclip-github-plugin-import-registry'
+    },
+    [
+      {
+        mappingId: 'mapping-source',
+        githubIssueId: 5100,
+        githubIssueNumber: 51,
+        paperclipIssueId: paperclipIssue.id,
+        importedAt: '2026-04-10T08:00:00.000Z',
+        lastSeenCommentCount: 1,
+        lastSeenGitHubState: 'open',
+        repositoryUrl: 'https://github.com/paperclipai/source-repo',
+        paperclipProjectId: 'project-source',
+        companyId: 'company-1'
+      }
+    ]
+  );
+
+  const statusTransitionComments: Array<{ issueId: string; body: string }> = [];
+  const originalCreateComment = harness.ctx.issues.createComment;
+  harness.ctx.issues.createComment = async (issueId, body, companyId) => {
+    statusTransitionComments.push({ issueId, body });
+    return originalCreateComment(issueId, body, companyId);
+  };
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    const requestUrl = new URL(getRequestUrl(input));
+
+    if (requestUrl.pathname === '/repos/paperclipai/source-repo/issues') {
+      return jsonResponse([]);
+    }
+
+    if (requestUrl.pathname === '/repos/paperclipai/source-repo/issues/51') {
+      return jsonResponse({
+        id: 5100,
+        number: 3,
+        title: 'Transferred unmapped issue',
+        body: 'Moved outside configured sync.',
+        html_url: 'https://github.com/outside/unmapped-repo/issues/3',
+        state: 'open',
+        comments: 2,
+        labels: []
+      });
+    }
+
+    throw new Error(`Unexpected fetch during unmapped transfer test: ${requestUrl.toString()}`);
+  };
+
+  try {
+    const result = await harness.performAction('sync.runNow', {
+      waitForCompletion: true
+    }) as {
+      syncState: {
+        status: string;
+      };
+    };
+    const updatedIssue = await harness.ctx.issues.get(paperclipIssue.id, 'company-1');
+    const details = await harness.getData('issue.githubDetails', {
+      companyId: 'company-1',
+      issueId: paperclipIssue.id
+    });
+    const issueLinks = await harness.ctx.entities.list({
+      entityType: 'paperclip-github-plugin.issue-link',
+      scopeKind: 'issue',
+      scopeId: paperclipIssue.id
+    });
+    const importRegistry = harness.getState({
+      scopeKind: 'instance',
+      stateKey: 'paperclip-github-plugin-import-registry'
+    }) as unknown[];
+
+    assert.equal(result.syncState.status, 'success');
+    assert.equal(updatedIssue?.status, 'cancelled');
+    assert.equal(updatedIssue?.originId, null);
+    assert.doesNotMatch(updatedIssue?.description ?? '', /paperclip-github-plugin-imported-from/);
+    assert.equal(details, null);
+    assert.equal(issueLinks.length, 1);
+    assert.equal(issueLinks[0]?.status, 'unlinked');
+    assert.equal(importRegistry.length, 0);
+    assert.equal(statusTransitionComments.length, 1);
+    assert.match(statusTransitionComments[0]?.body ?? '', /transferred to `outside\/unmapped-repo`/);
+    assert.match(statusTransitionComments[0]?.body ?? '', /not mapped to a Paperclip project/);
   } finally {
     globalThis.fetch = originalFetch;
   }

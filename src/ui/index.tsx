@@ -14626,11 +14626,13 @@ function GitHubSyncIssueDetailTabContent(props: {
     forceVisible: true
   });
   const linkGitHubItem = usePluginAction('issue.linkGitHubItem');
+  const unlinkGitHubItem = usePluginAction('issue.unlinkGitHubItem');
   const toast = usePluginToast();
   const [manualLinkOpen, setManualLinkOpen] = useState(false);
   const [manualLinkKind, setManualLinkKind] = useState<ManualGitHubLinkKind>('issue');
   const [manualLinkReference, setManualLinkReference] = useState('');
   const [manualLinkPending, setManualLinkPending] = useState(false);
+  const [unlinkPending, setUnlinkPending] = useState(false);
 
   useEffect(() => {
     if (!props.companyId || !props.issueId) {
@@ -14702,6 +14704,42 @@ function GitHubSyncIssueDetailTabContent(props: {
       });
     } finally {
       setManualLinkPending(false);
+    }
+  }
+
+  async function handleUnlinkGitHubItem(): Promise<void> {
+    if (!props.companyId || !props.issueId || unlinkPending) {
+      return;
+    }
+
+    if (
+      typeof window !== 'undefined' &&
+      !window.confirm('Unlink this Paperclip issue from GitHub? GitHub Sync will stop updating it until it is linked again.')
+    ) {
+      return;
+    }
+
+    setUnlinkPending(true);
+    try {
+      await unlinkGitHubItem({
+        companyId: props.companyId,
+        issueId: props.issueId
+      });
+      await details.refresh();
+      notifyGitHubSyncPullRequestsChanged();
+      toast({
+        title: 'GitHub link removed',
+        body: 'This Paperclip issue is no longer linked to GitHub.',
+        tone: 'success'
+      });
+    } catch (error) {
+      toast({
+        title: 'Unable to unlink GitHub item',
+        body: getActionErrorMessage(error, 'GitHub Sync could not remove this link.'),
+        tone: 'error'
+      });
+    } finally {
+      setUnlinkPending(false);
     }
   }
 
@@ -14796,6 +14834,19 @@ function GitHubSyncIssueDetailTabContent(props: {
                   <GitHubButtonLabel label="Open on GitHub" />
                 </a>
               ) : null}
+              <button
+                type="button"
+                className={getPluginActionClassName({
+                  variant: 'danger',
+                  size: 'sm',
+                  extraClassName: 'ghsync-extension-link'
+                })}
+                disabled={unlinkPending}
+                onClick={() => { void handleUnlinkGitHubItem(); }}
+                title="Unlink from GitHub"
+              >
+                <LoadingButtonContent busy={unlinkPending} label="Unlink" busyLabel="Unlinking" />
+              </button>
             </div>
           </div>
 

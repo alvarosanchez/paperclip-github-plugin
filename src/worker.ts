@@ -24,6 +24,7 @@ import {
 } from './kpi-contract.ts';
 import { normalizePaperclipHealthResponse, requiresPaperclipBoardAccess } from './paperclip-health.ts';
 
+const GITHUB_SYNC_BASE_ORIGIN_KIND = `plugin:${GITHUB_SYNC_PLUGIN_ID}` as const;
 const GITHUB_ISSUE_ORIGIN_KIND = `plugin:${GITHUB_SYNC_PLUGIN_ID}:github-issue` as const;
 const GITHUB_PULL_REQUEST_ORIGIN_KIND = `plugin:${GITHUB_SYNC_PLUGIN_ID}:github-pull-request` as const;
 
@@ -362,6 +363,7 @@ interface GitHubIssueLinkEntityData {
 
 interface GitHubIssueLinkRecord {
   paperclipIssueId: string;
+  externalId?: string;
   createdAt?: string;
   updatedAt?: string;
   title?: string;
@@ -1101,6 +1103,7 @@ interface GitHubPullRequestLinkEntityData {
 
 interface GitHubPullRequestLinkRecord {
   paperclipIssueId: string;
+  externalId?: string;
   createdAt?: string;
   updatedAt?: string;
   title?: string;
@@ -9396,6 +9399,27 @@ function extractImportedGitHubIssueUrlFromDescription(description: string | null
   return normalizeGitHubIssueHtmlUrl(legacyMatch[1]);
 }
 
+function removeGitHubIssueLinkMetadataFromDescription(description: string | null | undefined): string | undefined {
+  if (typeof description !== 'string') {
+    return undefined;
+  }
+
+  let next = description;
+  const hiddenMarkerPattern = getHiddenGitHubImportMarkerPattern();
+  while (hiddenMarkerPattern.test(next)) {
+    next = next.replace(hiddenMarkerPattern, '');
+  }
+
+  next = next
+    .replace(/^\*\s+GitHub issue:\s+\[[^\]]+\]\([^)]+\)\s*$/gm, '')
+    .replace(/^Imported from https:\/\/github\.com\/[^\s)]+\/[^\s)]+\/issues\/\d+\.?\s*$/gim, '')
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+
+  return next === description ? undefined : next;
+}
+
 interface ImportedPaperclipIssueReference {
   id: string;
   createdAt?: unknown;
@@ -9850,6 +9874,7 @@ async function listGitHubIssueLinkRecords(
 
       records.push({
         paperclipIssueId: entry.scopeId,
+        ...(typeof entry.externalId === 'string' && entry.externalId.trim() ? { externalId: entry.externalId.trim() } : {}),
         ...(typeof entry.createdAt === 'string' ? { createdAt: entry.createdAt } : {}),
         ...(typeof entry.updatedAt === 'string' ? { updatedAt: entry.updatedAt } : {}),
         ...(typeof entry.title === 'string' && entry.title.trim() ? { title: entry.title.trim() } : {}),
@@ -9913,6 +9938,7 @@ async function listGitHubPullRequestLinkRecords(
 
       records.push({
         paperclipIssueId: entry.scopeId,
+        ...(typeof entry.externalId === 'string' && entry.externalId.trim() ? { externalId: entry.externalId.trim() } : {}),
         ...(typeof entry.createdAt === 'string' ? { createdAt: entry.createdAt } : {}),
         ...(typeof entry.updatedAt === 'string' ? { updatedAt: entry.updatedAt } : {}),
         ...(typeof entry.title === 'string' && entry.title.trim() ? { title: entry.title.trim() } : {}),
@@ -10503,6 +10529,173 @@ async function linkPaperclipIssueToGitHubPullRequest(
     githubPullRequestNumber: reference.pullRequestNumber,
     githubPullRequestUrl: pullRequestUrl,
     githubPullRequestState: pullRequestState
+  };
+}
+
+function invalidateGitHubLinkCachesForTarget(params: {
+  companyId?: string;
+  projectId?: string;
+  repositoryUrl?: string;
+}): void {
+  if (!params.companyId || !params.projectId || !params.repositoryUrl) {
+    return;
+  }
+
+  const repository = parseRepositoryReference(params.repositoryUrl);
+  if (!repository) {
+    return;
+  }
+
+  invalidateProjectPullRequestCaches({
+    companyId: params.companyId,
+    projectId: params.projectId,
+    repository
+  });
+}
+
+async function tombstoneGitHubIssueLinkRecord(
+  ctx: PluginSetupContext,
+  record: GitHubIssueLinkRecord,
+  unlinkedAt: string
+): Promise<void> {
+  await ctx.entities.upsert({
+    entityType: ISSUE_LINK_ENTITY_TYPE,
+    scopeKind: 'issue',
+    scopeId: record.paperclipIssueId,
+    externalId: record.externalId ?? record.data.githubIssueUrl,
+    title: record.title ?? `GitHub issue #${record.data.githubIssueNumber}`,
+    status: 'unlinked',
+    data: {
+      kind: 'issue',
+      paperclipIssueId: record.paperclipIssueId,
+      repositoryUrl: record.data.repositoryUrl,
+      githubIssueNumber: record.data.githubIssueNumber,
+      githubIssueUrl: record.data.githubIssueUrl,
+      ...(record.data.companyId ? { companyId: record.data.companyId } : {}),
+      ...(record.data.paperclipProjectId ? { paperclipProjectId: record.data.paperclipProjectId } : {}),
+      unlinkedAt
+    }
+  });
+}
+
+async function tombstoneGitHubPullRequestLinkRecord(
+  ctx: PluginSetupContext,
+  record: GitHubPullRequestLinkRecord,
+  unlinkedAt: string
+): Promise<void> {
+  await ctx.entities.upsert({
+    entityType: PULL_REQUEST_LINK_ENTITY_TYPE,
+    scopeKind: 'issue',
+    scopeId: record.paperclipIssueId,
+    externalId: record.externalId ?? record.data.githubPullRequestUrl,
+    title: record.title ?? `GitHub pull request #${record.data.githubPullRequestNumber}`,
+    status: 'unlinked',
+    data: {
+      kind: 'pull_request',
+      paperclipIssueId: record.paperclipIssueId,
+      repositoryUrl: record.data.repositoryUrl,
+      githubPullRequestNumber: record.data.githubPullRequestNumber,
+      githubPullRequestUrl: record.data.githubPullRequestUrl,
+      ...(record.data.companyId ? { companyId: record.data.companyId } : {}),
+      ...(record.data.paperclipProjectId ? { paperclipProjectId: record.data.paperclipProjectId } : {}),
+      unlinkedAt
+    }
+  });
+}
+
+async function unlinkPaperclipIssueFromGitHub(
+  ctx: PluginSetupContext,
+  params: {
+    companyId: string;
+    issueId: string;
+  }
+): Promise<Record<string, unknown>> {
+  const companyId = normalizeCompanyId(params.companyId);
+  const issueId = normalizeOptionalString(params.issueId);
+  if (!companyId || !issueId) {
+    throw new Error('companyId and issueId are required.');
+  }
+
+  const issue = await ctx.issues.get(issueId, companyId);
+  if (!issue) {
+    throw new Error('Paperclip issue was not found.');
+  }
+
+  const issueLinkRecords = (await listGitHubIssueLinkRecords(ctx, {
+    paperclipIssueId: issueId
+  })).filter((record) => !record.data.companyId || record.data.companyId === companyId);
+  const pullRequestLinkRecords = (await listGitHubPullRequestLinkRecords(ctx, {
+    paperclipIssueId: issueId
+  })).filter((record) => !record.data.companyId || record.data.companyId === companyId);
+  const importRegistry = normalizeImportRegistry(await ctx.state.get(IMPORT_REGISTRY_SCOPE));
+  const removedImportRegistryEntries = importRegistry.filter((entry) =>
+    entry.paperclipIssueId === issueId && (!entry.companyId || entry.companyId === companyId)
+  );
+  const nextImportRegistry = importRegistry.filter((entry) =>
+    !(entry.paperclipIssueId === issueId && (!entry.companyId || entry.companyId === companyId))
+  );
+  const unlinkedAt = new Date().toISOString();
+
+  for (const record of issueLinkRecords) {
+    await tombstoneGitHubIssueLinkRecord(ctx, record, unlinkedAt);
+    invalidateGitHubLinkCachesForTarget({
+      companyId: record.data.companyId ?? companyId,
+      projectId: record.data.paperclipProjectId ?? issue.projectId ?? undefined,
+      repositoryUrl: record.data.repositoryUrl
+    });
+  }
+
+  for (const record of pullRequestLinkRecords) {
+    await tombstoneGitHubPullRequestLinkRecord(ctx, record, unlinkedAt);
+    invalidateGitHubLinkCachesForTarget({
+      companyId: record.data.companyId ?? companyId,
+      projectId: record.data.paperclipProjectId ?? issue.projectId ?? undefined,
+      repositoryUrl: record.data.repositoryUrl
+    });
+  }
+
+  for (const entry of removedImportRegistryEntries) {
+    invalidateGitHubLinkCachesForTarget({
+      companyId: entry.companyId ?? companyId,
+      projectId: entry.paperclipProjectId ?? issue.projectId ?? undefined,
+      repositoryUrl: entry.repositoryUrl
+    });
+  }
+
+  if (removedImportRegistryEntries.length > 0) {
+    await ctx.state.set(IMPORT_REGISTRY_SCOPE, nextImportRegistry);
+  }
+
+  const shouldClearGitHubOrigin =
+    issue.originKind === GITHUB_ISSUE_ORIGIN_KIND || issue.originKind === GITHUB_PULL_REQUEST_ORIGIN_KIND;
+  const nextDescription = removeGitHubIssueLinkMetadataFromDescription(issue.description);
+  const issuePatch: Partial<Pick<Issue, 'description' | 'originKind' | 'originId' | 'originRunId'>> = {};
+  if (shouldClearGitHubOrigin) {
+    issuePatch.originKind = GITHUB_SYNC_BASE_ORIGIN_KIND;
+    issuePatch.originId = null;
+    issuePatch.originRunId = null;
+  }
+
+  if (nextDescription !== undefined) {
+    issuePatch.description = nextDescription;
+  }
+
+  if (Object.keys(issuePatch).length > 0) {
+    await ctx.issues.update(issueId, issuePatch, companyId);
+  }
+
+  return {
+    paperclipIssueId: issueId,
+    unlinked: issueLinkRecords.length > 0
+      || pullRequestLinkRecords.length > 0
+      || removedImportRegistryEntries.length > 0
+      || shouldClearGitHubOrigin
+      || nextDescription !== undefined,
+    unlinkedIssueLinksCount: issueLinkRecords.length,
+    unlinkedPullRequestLinksCount: pullRequestLinkRecords.length,
+    removedImportRegistryEntriesCount: removedImportRegistryEntries.length,
+    clearedIssueOrigin: shouldClearGitHubOrigin,
+    removedDescriptionMetadata: nextDescription !== undefined
   };
 }
 
@@ -12305,6 +12498,367 @@ async function ensurePaperclipIssueImported(
   }
 
   return createdIssue.id;
+}
+
+function getGitHubIssueRepositoryReference(issue: GitHubIssueRecord): ParsedGitHubIssueReference | undefined {
+  return parseGitHubIssueHtmlUrl(issue.htmlUrl);
+}
+
+function findTransferredIssueTargetMapping(
+  mappings: RepositoryMapping[],
+  params: {
+    companyId?: string;
+    repositoryUrl: string;
+  }
+): RepositoryMapping | undefined {
+  const companyId = normalizeCompanyId(params.companyId);
+  const repository = parseRepositoryReference(params.repositoryUrl);
+  if (!companyId || !repository) {
+    return undefined;
+  }
+
+  return getSyncableMappings(mappings).find((mapping) => {
+    if (normalizeCompanyId(mapping.companyId) !== companyId) {
+      return false;
+    }
+
+    const mappingRepository = parseRepositoryReference(mapping.repositoryUrl);
+    return Boolean(mappingRepository && areRepositoriesEqual(mappingRepository, repository));
+  });
+}
+
+async function patchPaperclipIssueForGitHubIssueTransfer(
+  ctx: PluginSetupContext,
+  params: {
+    companyId: string;
+    issueId: string;
+    projectId: string;
+    githubIssue: GitHubIssueRecord;
+    currentDescription?: string | null;
+    paperclipApiBaseUrl?: string;
+  }
+): Promise<{
+  descriptionUpdated: boolean;
+}> {
+  const nextDescription = buildPaperclipIssueDescription(params.githubIssue, []);
+  const nextOriginId = normalizeGitHubIssueHtmlUrl(params.githubIssue.htmlUrl) ?? params.githubIssue.htmlUrl;
+  const descriptionUpdated = normalizeIssueDescriptionValue(params.currentDescription) !== nextDescription;
+  const patch: Record<string, unknown> = {
+    projectId: params.projectId,
+    originKind: GITHUB_ISSUE_ORIGIN_KIND,
+    originId: nextOriginId,
+    ...(descriptionUpdated ? { description: nextDescription } : {})
+  };
+  let issueUpdated = false;
+
+  if (params.paperclipApiBaseUrl) {
+    try {
+      const response = await fetchPaperclipApi(
+        getPaperclipIssueEndpoint(params.paperclipApiBaseUrl, params.issueId),
+        {
+          method: 'PATCH',
+          headers: {
+            accept: 'application/json',
+            'content-type': 'application/json'
+          },
+          body: JSON.stringify(patch)
+        },
+        {
+          companyId: params.companyId
+        }
+      );
+      const payloadResult = await readPaperclipApiJsonResponse<unknown>(response, {
+        operationLabel: 'issue update',
+        bodyRequired: false
+      });
+      issueUpdated = !payloadResult.failure;
+    } catch {
+      issueUpdated = false;
+    }
+  }
+
+  if (!issueUpdated) {
+    await ctx.issues.update(
+      params.issueId,
+      patch as unknown as PaperclipIssueUpdatePatchWithLabels,
+      params.companyId
+    );
+  }
+
+  return {
+    descriptionUpdated
+  };
+}
+
+async function moveImportedIssueToTransferredGitHubMapping(
+  ctx: PluginSetupContext,
+  params: {
+    sourceMapping: RepositoryMapping;
+    targetMapping: RepositoryMapping;
+    importedIssue: ImportedIssueRecord;
+    githubIssue: GitHubIssueRecord;
+    nextRegistry: ImportedIssueRecord[];
+    paperclipApiBaseUrl?: string;
+  }
+): Promise<{
+  updatedDescriptionsCount: number;
+}> {
+  const companyId = normalizeCompanyId(params.targetMapping.companyId);
+  const projectId = normalizeOptionalString(params.targetMapping.paperclipProjectId);
+  if (!companyId || !projectId) {
+    return {
+      updatedDescriptionsCount: 0
+    };
+  }
+
+  const paperclipIssue = await ctx.issues.get(params.importedIssue.paperclipIssueId, companyId);
+  if (!paperclipIssue) {
+    return {
+      updatedDescriptionsCount: 0
+    };
+  }
+
+  const transferPatchResult = await patchPaperclipIssueForGitHubIssueTransfer(ctx, {
+    companyId,
+    issueId: params.importedIssue.paperclipIssueId,
+    projectId,
+    githubIssue: params.githubIssue,
+    currentDescription: paperclipIssue.description,
+    paperclipApiBaseUrl: params.paperclipApiBaseUrl
+  });
+  const nextGitHubIssueUrl = normalizeGitHubIssueHtmlUrl(params.githubIssue.htmlUrl) ?? params.githubIssue.htmlUrl;
+  const existingLinks = await listGitHubIssueLinkRecords(ctx, {
+    paperclipIssueId: params.importedIssue.paperclipIssueId
+  });
+  const unlinkedAt = new Date().toISOString();
+  for (const link of existingLinks) {
+    if (
+      (!link.data.companyId || link.data.companyId === companyId)
+      && link.data.githubIssueUrl !== nextGitHubIssueUrl
+    ) {
+      await tombstoneGitHubIssueLinkRecord(ctx, link, unlinkedAt);
+    }
+  }
+
+  await upsertGitHubIssueLinkRecord(
+    ctx,
+    params.targetMapping,
+    params.importedIssue.paperclipIssueId,
+    params.githubIssue,
+    []
+  );
+  upsertImportedIssueRecord(
+    params.nextRegistry,
+    buildImportedIssueRecord(
+      params.targetMapping,
+      params.githubIssue,
+      params.importedIssue.paperclipIssueId,
+      params.importedIssue.importedAt
+    )
+  );
+  invalidateGitHubLinkCachesForTarget({
+    companyId,
+    projectId: params.sourceMapping.paperclipProjectId ?? paperclipIssue.projectId ?? undefined,
+    repositoryUrl: params.sourceMapping.repositoryUrl
+  });
+  invalidateGitHubLinkCachesForTarget({
+    companyId,
+    projectId,
+    repositoryUrl: params.targetMapping.repositoryUrl
+  });
+
+  return {
+    updatedDescriptionsCount: transferPatchResult.descriptionUpdated ? 1 : 0
+  };
+}
+
+function buildUnmappedTransferredIssueCancellationComment(params: {
+  previousStatus: PaperclipIssueStatus;
+  nextStatus: PaperclipIssueStatus;
+  transferredRepository: ParsedRepositoryReference;
+}): string {
+  return `GitHub Sync updated the status from \`${formatPaperclipIssueStatus(params.previousStatus)}\` to \`${formatPaperclipIssueStatus(params.nextStatus)}\` because the linked GitHub issue was transferred to \`${formatRepositoryLabel(params.transferredRepository)}\`, which is not mapped to a Paperclip project. The GitHub link was removed so sync will stop updating this Paperclip issue.`;
+}
+
+async function cancelUnmappedTransferredGitHubIssue(
+  ctx: PluginSetupContext,
+  params: {
+    mapping: RepositoryMapping;
+    importedIssue: ImportedIssueRecord;
+    transferredRepository: ParsedRepositoryReference;
+    paperclipApiBaseUrl?: string;
+  }
+): Promise<{
+  updatedStatusesCount: number;
+}> {
+  const companyId = normalizeCompanyId(params.mapping.companyId);
+  if (!companyId) {
+    return {
+      updatedStatusesCount: 0
+    };
+  }
+
+  const paperclipIssue = await ctx.issues.get(params.importedIssue.paperclipIssueId, companyId);
+  if (!paperclipIssue) {
+    return {
+      updatedStatusesCount: 0
+    };
+  }
+
+  await unlinkPaperclipIssueFromGitHub(ctx, {
+    companyId,
+    issueId: params.importedIssue.paperclipIssueId
+  });
+
+  const nextStatus: PaperclipIssueStatus = 'cancelled';
+  await updatePaperclipIssueState(ctx, {
+    companyId,
+    issueId: params.importedIssue.paperclipIssueId,
+    currentStatus: paperclipIssue.status,
+    syncContext: getPaperclipIssueSyncContext(paperclipIssue),
+    nextStatus,
+    transitionComment: buildUnmappedTransferredIssueCancellationComment({
+      previousStatus: paperclipIssue.status,
+      nextStatus,
+      transferredRepository: params.transferredRepository
+    }),
+    paperclipApiBaseUrl: params.paperclipApiBaseUrl
+  });
+
+  return {
+    updatedStatusesCount: paperclipIssue.status === nextStatus ? 0 : 1
+  };
+}
+
+async function fetchTransferredGitHubIssueForImportedRecord(
+  octokit: Octokit,
+  repository: ParsedRepositoryReference,
+  importedIssue: ImportedIssueRecord
+): Promise<{
+  githubIssue: GitHubIssueRecord;
+  transferredRepository: ParsedRepositoryReference;
+} | null> {
+  if (importedIssue.githubIssueNumber === undefined) {
+    return null;
+  }
+
+  const response = await octokit.rest.issues.get({
+    owner: repository.owner,
+    repo: repository.repo,
+    issue_number: importedIssue.githubIssueNumber,
+    headers: {
+      accept: 'application/vnd.github+json',
+      'X-GitHub-Api-Version': GITHUB_API_VERSION
+    }
+  });
+  const rawIssue = response.data as GitHubApiIssueRecord;
+  if (rawIssue.pull_request) {
+    return null;
+  }
+
+  const githubIssue = normalizeGitHubIssueRecord(rawIssue);
+  const transferredIssueReference = getGitHubIssueRepositoryReference(githubIssue);
+  const transferredRepository = transferredIssueReference
+    ? parseRepositoryReference(transferredIssueReference.repositoryUrl)
+    : undefined;
+  if (!transferredRepository || areRepositoriesEqual(repository, transferredRepository)) {
+    return null;
+  }
+
+  return {
+    githubIssue,
+    transferredRepository
+  };
+}
+
+async function reconcileTransferredImportedIssues(
+  ctx: PluginSetupContext,
+  params: {
+    octokit: Octokit;
+    sourceMapping: RepositoryMapping;
+    sourceRepository: ParsedRepositoryReference;
+    allMappings: RepositoryMapping[];
+    importedIssues: ImportedIssueRecord[];
+    allIssuesById: Map<number, GitHubIssueRecord>;
+    nextRegistry: ImportedIssueRecord[];
+    paperclipApiBaseUrl?: string;
+    syncFailureContext: SyncFailureContext;
+    failures: SyncProcessingFailure[];
+  }
+): Promise<{
+  updatedStatusesCount: number;
+  updatedDescriptionsCount: number;
+}> {
+  let updatedStatusesCount = 0;
+  let updatedDescriptionsCount = 0;
+
+  for (const importedIssue of params.importedIssues) {
+    if (params.allIssuesById.has(importedIssue.githubIssueId)) {
+      continue;
+    }
+
+    try {
+      updateSyncFailureContext(params.syncFailureContext, {
+        phase: 'evaluating_github_status',
+        repositoryUrl: params.sourceRepository.url,
+        githubIssueNumber: importedIssue.githubIssueNumber
+      });
+      const transfer = await fetchTransferredGitHubIssueForImportedRecord(
+        params.octokit,
+        params.sourceRepository,
+        importedIssue
+      );
+      if (!transfer) {
+        continue;
+      }
+
+      const targetMapping = findTransferredIssueTargetMapping(params.allMappings, {
+        companyId: params.sourceMapping.companyId,
+        repositoryUrl: transfer.transferredRepository.url
+      });
+      if (targetMapping) {
+        const moveResult = await moveImportedIssueToTransferredGitHubMapping(ctx, {
+          sourceMapping: params.sourceMapping,
+          targetMapping,
+          importedIssue,
+          githubIssue: transfer.githubIssue,
+          nextRegistry: params.nextRegistry,
+          paperclipApiBaseUrl: params.paperclipApiBaseUrl
+        });
+        updatedDescriptionsCount += moveResult.updatedDescriptionsCount;
+        continue;
+      }
+
+      const cancelResult = await cancelUnmappedTransferredGitHubIssue(ctx, {
+        mapping: params.sourceMapping,
+        importedIssue,
+        transferredRepository: transfer.transferredRepository,
+        paperclipApiBaseUrl: params.paperclipApiBaseUrl
+      });
+      for (let index = params.nextRegistry.length - 1; index >= 0; index -= 1) {
+        const entry = params.nextRegistry[index];
+        if (
+          entry?.paperclipIssueId === importedIssue.paperclipIssueId &&
+          (!entry.companyId || entry.companyId === params.sourceMapping.companyId)
+        ) {
+          params.nextRegistry.splice(index, 1);
+        }
+      }
+      updatedStatusesCount += cancelResult.updatedStatusesCount;
+    } catch (error) {
+      if (isGitHubRateLimitError(error)) {
+        throw error;
+      }
+
+      recordRecoverableSyncFailure(ctx, params.failures, error, params.syncFailureContext);
+      continue;
+    }
+  }
+
+  return {
+    updatedStatusesCount,
+    updatedDescriptionsCount
+  };
 }
 
 async function synchronizePaperclipIssueStatuses(
@@ -18115,6 +18669,23 @@ async function performSync(
           }
         }
 
+        const transferReconciliationResult = await reconcileTransferredImportedIssues(ctx, {
+          octokit,
+          sourceMapping: mapping,
+          sourceRepository: repository,
+          allMappings: settings.mappings,
+          importedIssues: [...importRegistryByIssueId.values()].filter((importedIssue) =>
+            doesImportedIssueMatchTarget(importedIssue, options.target)
+          ),
+          allIssuesById,
+          nextRegistry,
+          paperclipApiBaseUrl,
+          syncFailureContext: failureContext,
+          failures: recoverableFailures
+        });
+        updatedStatusesCount += transferReconciliationResult.updatedStatusesCount;
+        updatedDescriptionsCount += transferReconciliationResult.updatedDescriptionsCount;
+
         const importedIssuesForSynchronization = [...importRegistryByIssueId.values()].filter((importedIssue) =>
           allIssuesById.has(importedIssue.githubIssueId) &&
           doesImportedIssueMatchTarget(importedIssue, options.target)
@@ -19596,6 +20167,20 @@ const plugin = definePlugin({
             pullRequestUrl: record.pullRequestUrl,
             requireUnlinked: true
           });
+    });
+
+    ctx.actions.register('issue.unlinkGitHubItem', async (input) => {
+      const record = input && typeof input === 'object' ? input as Record<string, unknown> : {};
+      const companyId = normalizeCompanyId(record.companyId);
+      const issueId = normalizeOptionalString(record.issueId);
+      if (!companyId || !issueId) {
+        throw new Error('companyId and issueId are required.');
+      }
+
+      return unlinkPaperclipIssueFromGitHub(ctx, {
+        companyId,
+        issueId
+      });
     });
 
     ctx.actions.register('settings.saveRegistration', async (input) => {
