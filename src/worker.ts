@@ -7333,6 +7333,39 @@ function getPaperclipIssueSyncContext(issue: Issue): PaperclipIssueSyncContext {
   };
 }
 
+function hasUnresolvedPaperclipIssueBlockerSummary(blockers: unknown): boolean {
+  if (!Array.isArray(blockers)) {
+    return false;
+  }
+
+  return blockers.some((blocker) => {
+    if (!blocker || typeof blocker !== 'object') {
+      return true;
+    }
+
+    const status = (blocker as Record<string, unknown>).status;
+    return status !== 'done' && status !== 'cancelled';
+  });
+}
+
+async function hasUnresolvedPaperclipIssueBlocker(
+  ctx: PluginSetupContext,
+  issue: Issue,
+  companyId: string
+): Promise<boolean> {
+  const record = issue as unknown as Record<string, unknown>;
+  if (hasUnresolvedPaperclipIssueBlockerSummary(record.blockedBy)) {
+    return true;
+  }
+
+  if (typeof ctx.issues.relations?.get !== 'function') {
+    return false;
+  }
+
+  const relations = await ctx.issues.relations.get(issue.id, companyId);
+  return hasUnresolvedPaperclipIssueBlockerSummary(relations.blockedBy);
+}
+
 function isSamePaperclipIssueAssigneePrincipal(
   left: PaperclipIssueAssigneePrincipal | null | undefined,
   right: PaperclipIssueAssigneePrincipal | null | undefined
@@ -8147,8 +8180,7 @@ function normalizeGitHubPullRequestReviewDecision(value: unknown): GitHubPullReq
 function isGitHubPullRequestActionRequiredForSync(
   pullRequest: Pick<GitHubPullRequestStatusSnapshot, 'mergeability' | 'mergeStateStatus' | 'reviewDecision'>
 ): boolean {
-  return pullRequest.reviewDecision === 'changes_requested'
-    || pullRequest.mergeability === 'conflicting'
+  return pullRequest.mergeability === 'conflicting'
     || ACTION_REQUIRED_GITHUB_PULL_REQUEST_MERGE_STATE_STATUSES.has(pullRequest.mergeStateStatus);
 }
 
@@ -8158,7 +8190,6 @@ function isGitHubPullRequestReviewReadyForSync(
   if (
     pullRequest.ciState !== 'green'
     || pullRequest.hasUnresolvedReviewThreads
-    || pullRequest.reviewDecision === 'changes_requested'
   ) {
     return false;
   }
@@ -8198,10 +8229,6 @@ function listGitHubPullRequestSyncBlockingConditions(
 
   if (pullRequest.hasUnresolvedReviewThreads) {
     conditions.push('unresolved review threads');
-  }
-
-  if (pullRequest.reviewDecision === 'changes_requested') {
-    conditions.push('requested changes');
   }
 
   return conditions;
@@ -13129,6 +13156,13 @@ async function synchronizePaperclipIssueStatuses(
         maintainerAuthoredImportedIssue,
         hasExecutorHandoffTarget: Boolean(executorTransitionAssignee)
       });
+      if (
+        paperclipIssue.status === 'blocked'
+        && nextStatus !== 'blocked'
+        && await hasUnresolvedPaperclipIssueBlocker(ctx, paperclipIssue, mapping.companyId)
+      ) {
+        continue;
+      }
       const shouldPreserveMaintainerWaitRouting = isHealthyMaintainerWaitTransition({
         currentStatus: paperclipIssue.status,
         nextStatus,
@@ -13405,6 +13439,13 @@ async function synchronizePaperclipPullRequestIssueStatuses(
         pullRequest,
         hasExecutorHandoffTarget: Boolean(executorTransitionAssignee)
       });
+      if (
+        paperclipIssue.status === 'blocked'
+        && nextStatus !== 'blocked'
+        && await hasUnresolvedPaperclipIssueBlocker(ctx, paperclipIssue, mapping.companyId)
+      ) {
+        continue;
+      }
       const shouldPreserveMaintainerWaitRouting = isHealthyMaintainerWaitTransition({
         currentStatus: paperclipIssue.status,
         nextStatus,

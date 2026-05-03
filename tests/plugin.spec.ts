@@ -3628,6 +3628,7 @@ test('manifest exposes GitHub Sync page, sidebar, dashboard widgets, and setting
   assert.ok(manifest.capabilities.includes('issues.read'));
   assert.ok(manifest.capabilities.includes('issues.update'));
   assert.ok(manifest.capabilities.includes('issues.wakeup'));
+  assert.ok(manifest.capabilities.includes('issue.relations.read'));
   assert.ok(manifest.capabilities.includes('issue.comments.read'));
   assert.ok(manifest.capabilities.includes('issue.comments.create'));
   assert.ok(manifest.capabilities.includes('agents.read'));
@@ -6048,7 +6049,7 @@ test('sync.runNow monitors Paperclip issues created from pull requests without c
   }
 });
 
-test('sync.runNow moves directly linked pull request issues back to todo when review changes are requested', async () => {
+test('sync.runNow keeps directly linked pull request issues in review when only stale aggregate changes are requested', async () => {
   const harness = await createProjectPullRequestsHarness();
   const originalFetch = globalThis.fetch;
   const originalCreateComment = harness.ctx.issues.createComment;
@@ -6232,10 +6233,8 @@ test('sync.runNow moves directly linked pull request issues back to todo when re
     assert.equal(sync.syncState.syncedIssuesCount, 1);
 
     const updatedIssue = await harness.ctx.issues.get(issue.id, 'company-1');
-    assert.equal(updatedIssue?.status, 'todo');
-    assert.equal(statusTransitionComments.length, 1);
-    assert.match(statusTransitionComments[0]?.body ?? '', /from `in review` to `todo`/);
-    assert.match(statusTransitionComments[0]?.body ?? '', /requested changes/);
+    assert.equal(updatedIssue?.status, 'in_review');
+    assert.equal(statusTransitionComments.length, 0);
   } finally {
     harness.ctx.issues.createComment = originalCreateComment;
     globalThis.fetch = originalFetch;
@@ -17549,6 +17548,334 @@ test('worker routes execution-policy review handoffs to saved reviewers, executo
     assert.equal(updatedHealthyWaitIssue?.assigneeAgentId ?? null, null);
     assert.equal(updatedHealthyWaitIssue?.assigneeUserId ?? null, null);
   } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('worker keeps blocked issues blocked and treats stale aggregate changes-requested PRs as review waits', async () => {
+  const harness = createTestHarness({
+    manifest,
+    config: {
+      githubTokenRef: 'github-secret-ref'
+    }
+  });
+  await plugin.definition.setup(harness.ctx);
+
+  await harness.performAction('settings.saveRegistration', {
+    mappings: [
+      {
+        id: 'mapping-a',
+        repositoryUrl: 'paperclipai/example-repo',
+        paperclipProjectName: 'Engineering',
+        paperclipProjectId: 'project-1',
+        companyId: 'company-1'
+      }
+    ],
+    syncState: {
+      status: 'idle'
+    }
+  });
+
+  const blocker = await harness.ctx.issues.create({
+    companyId: 'company-1',
+    projectId: 'project-1',
+    title: 'External release proof'
+  });
+  const blockedIssue = await harness.ctx.issues.create({
+    companyId: 'company-1',
+    projectId: 'project-1',
+    title: 'Blocked green PR'
+  });
+  const staleChangesIssue = await harness.ctx.issues.create({
+    companyId: 'company-1',
+    projectId: 'project-1',
+    title: 'Stale changes requested'
+  });
+
+  await harness.ctx.issues.update(blockedIssue.id, {
+    status: 'blocked',
+    blockedByIssueIds: [blocker.id]
+  }, 'company-1');
+  await harness.ctx.issues.update(staleChangesIssue.id, { status: 'in_review' }, 'company-1');
+
+  await harness.ctx.state.set(
+    {
+      scopeKind: 'instance',
+      stateKey: 'paperclip-github-plugin-import-registry'
+    },
+    [
+      {
+        mappingId: 'mapping-a',
+        githubIssueId: 5001,
+        githubIssueNumber: 501,
+        paperclipIssueId: blockedIssue.id,
+        importedAt: '2026-04-09T09:00:00.000Z',
+        lastSeenCommentCount: 0
+      },
+      {
+        mappingId: 'mapping-a',
+        githubIssueId: 5002,
+        githubIssueNumber: 502,
+        paperclipIssueId: staleChangesIssue.id,
+        importedAt: '2026-04-09T09:00:00.000Z',
+        lastSeenCommentCount: 0
+      }
+    ]
+  );
+
+  const statusTransitionComments: Array<{ issueId: string; body: string }> = [];
+  const originalCreateComment = harness.ctx.issues.createComment;
+  harness.ctx.issues.createComment = async (issueId, body, companyId) => {
+    statusTransitionComments.push({ issueId, body });
+    return originalCreateComment(issueId, body, companyId);
+  };
+
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input, init) => {
+    const rawUrl = getRequestUrl(input);
+    const url = new URL(rawUrl);
+
+    if (url.pathname === '/repos/paperclipai/example-repo/issues' && ['all', 'open'].includes(url.searchParams.get('state') ?? '')) {
+      return jsonResponse([
+        {
+          id: 5001,
+          number: 501,
+          title: 'Blocked green PR',
+          body: null,
+          html_url: 'https://github.com/paperclipai/example-repo/issues/501',
+          state: 'open',
+          comments: 0
+        },
+        {
+          id: 5002,
+          number: 502,
+          title: 'Stale changes requested',
+          body: null,
+          html_url: 'https://github.com/paperclipai/example-repo/issues/502',
+          state: 'open',
+          comments: 0
+        }
+      ]);
+    }
+
+    if (url.pathname === '/repos/paperclipai/example-repo/pulls/5010' || url.pathname === '/repos/paperclipai/example-repo/pulls/5020') {
+      const number = url.pathname.endsWith('/5010') ? 5010 : 5020;
+      return jsonResponse({
+        number,
+        title: number === 5010 ? 'Blocked green PR' : 'Stale changes requested',
+        body: null,
+        html_url: `https://github.com/paperclipai/example-repo/pull/${number}`,
+        state: 'open',
+        merged: false
+      });
+    }
+
+    if (url.pathname === '/graphql') {
+      const { query, variables } = getGraphqlRequest(init);
+      const issueNumber = typeof variables.issueNumber === 'number' ? variables.issueNumber : undefined;
+      const pullRequestNumber =
+        typeof variables.pullRequestNumber === 'number' ? variables.pullRequestNumber : undefined;
+
+      if (query.includes('query GitHubIssueParentRelationships')) {
+        return graphqlIssueParentRelationshipsResponse([
+          {
+            issueNumber: 501
+          },
+          {
+            issueNumber: 502
+          }
+        ]);
+      }
+
+      if (query.includes('query GitHubRepositoryOpenIssueLinkedPullRequests')) {
+        return graphqlResponse({
+          repository: {
+            issues: {
+              pageInfo: {
+                hasNextPage: false,
+                endCursor: null
+              },
+              nodes: [
+                {
+                  number: 501,
+                  closedByPullRequestsReferences: {
+                    pageInfo: {
+                      hasNextPage: false,
+                      endCursor: null
+                    },
+                    nodes: [
+                      {
+                        number: 5010,
+                        state: 'OPEN'
+                      }
+                    ]
+                  }
+                },
+                {
+                  number: 502,
+                  closedByPullRequestsReferences: {
+                    pageInfo: {
+                      hasNextPage: false,
+                      endCursor: null
+                    },
+                    nodes: [
+                      {
+                        number: 5020,
+                        state: 'OPEN'
+                      }
+                    ]
+                  }
+                }
+              ]
+            }
+          }
+        });
+      }
+
+      if (query.includes('query GitHubRepositoryOpenPullRequestStatuses')) {
+        return graphqlResponse({
+          repository: {
+            pullRequests: {
+              pageInfo: {
+                hasNextPage: false,
+                endCursor: null
+              },
+              nodes: [
+                {
+                  number: 5010,
+                  mergeable: 'MERGEABLE',
+                  mergeStateStatus: 'CLEAN',
+                  reviewDecision: null,
+                  reviewThreads: {
+                    pageInfo: {
+                      hasNextPage: false,
+                      endCursor: null
+                    },
+                    nodes: [{ isResolved: true }]
+                  },
+                  statusCheckRollup: {
+                    contexts: {
+                      pageInfo: {
+                        hasNextPage: false,
+                        endCursor: null
+                      },
+                      nodes: [{ __typename: 'StatusContext', state: 'SUCCESS' }]
+                    }
+                  }
+                },
+                {
+                  number: 5020,
+                  mergeable: 'MERGEABLE',
+                  mergeStateStatus: 'CLEAN',
+                  reviewDecision: 'CHANGES_REQUESTED',
+                  reviewThreads: {
+                    pageInfo: {
+                      hasNextPage: false,
+                      endCursor: null
+                    },
+                    nodes: [{ isResolved: true }]
+                  },
+                  statusCheckRollup: {
+                    contexts: {
+                      pageInfo: {
+                        hasNextPage: false,
+                        endCursor: null
+                      },
+                      nodes: [{ __typename: 'StatusContext', state: 'SUCCESS' }]
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        });
+      }
+
+      if (query.includes('query GitHubIssueStatusSnapshot') && (issueNumber === 501 || issueNumber === 502)) {
+        return graphqlResponse({
+          repository: {
+            issue: {
+              number: issueNumber,
+              state: 'OPEN',
+              stateReason: null,
+              comments: {
+                totalCount: 0
+              },
+              closedByPullRequestsReferences: {
+                pageInfo: {
+                  hasNextPage: false,
+                  endCursor: null
+                },
+                nodes: [
+                  {
+                    number: issueNumber === 501 ? 5010 : 5020,
+                    state: 'OPEN'
+                  }
+                ]
+              }
+            }
+          }
+        });
+      }
+
+      if (query.includes('query GitHubPullRequestReviewThreads') && (pullRequestNumber === 5010 || pullRequestNumber === 5020)) {
+        return graphqlResponse({
+          repository: {
+            pullRequest: {
+              reviewThreads: {
+                pageInfo: {
+                  hasNextPage: false,
+                  endCursor: null
+                },
+                nodes: [{ isResolved: true }]
+              }
+            }
+          }
+        });
+      }
+
+      if (query.includes('query GitHubPullRequestCiContexts') && (pullRequestNumber === 5010 || pullRequestNumber === 5020)) {
+        return graphqlResponse({
+          repository: {
+            pullRequest: {
+              mergeable: 'MERGEABLE',
+              mergeStateStatus: 'CLEAN',
+              reviewDecision: pullRequestNumber === 5020 ? 'CHANGES_REQUESTED' : null,
+              statusCheckRollup: {
+                contexts: {
+                  pageInfo: {
+                    hasNextPage: false,
+                    endCursor: null
+                  },
+                  nodes: [{ __typename: 'StatusContext', state: 'SUCCESS' }]
+                }
+              }
+            }
+          }
+        });
+      }
+    }
+
+    throw new Error(`Unexpected GitHub request: ${url.toString()}`);
+  };
+
+  try {
+    const sync = await harness.performAction('sync.runNow', {}) as {
+      syncState: { status: string };
+    };
+
+    assert.equal(sync.syncState.status, 'success');
+    assert.equal(statusTransitionComments.length, 0);
+
+    const updatedBlockedIssue = await harness.ctx.issues.get(blockedIssue.id, 'company-1');
+    const updatedStaleChangesIssue = await harness.ctx.issues.get(staleChangesIssue.id, 'company-1');
+    const updatedBlockedIssueRelations = await harness.ctx.issues.relations.get(blockedIssue.id, 'company-1');
+
+    assert.equal(updatedBlockedIssue?.status, 'blocked');
+    assert.equal(updatedBlockedIssueRelations.blockedBy[0]?.id, blocker.id);
+    assert.equal(updatedStaleChangesIssue?.status, 'in_review');
+  } finally {
+    harness.ctx.issues.createComment = originalCreateComment;
     globalThis.fetch = originalFetch;
   }
 });

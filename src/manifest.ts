@@ -40,6 +40,7 @@ export const manifest: PaperclipPluginManifestV1 = {
     'issues.create',
     'issues.update',
     'issues.wakeup',
+    'issue.relations.read',
     'issue.comments.read',
     'issue.comments.create',
     'agents.read',
