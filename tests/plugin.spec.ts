@@ -17625,9 +17625,20 @@ test('worker keeps blocked issues blocked and treats stale aggregate changes-req
 
   const statusTransitionComments: Array<{ issueId: string; body: string }> = [];
   const originalCreateComment = harness.ctx.issues.createComment;
+  const originalStateSet = harness.ctx.state.set.bind(harness.ctx.state);
+  const savedImportRegistrySnapshots: Array<Array<{ githubIssueNumber?: number; lastSeenGitHubState?: string }>> = [];
   harness.ctx.issues.createComment = async (issueId, body, companyId) => {
     statusTransitionComments.push({ issueId, body });
     return originalCreateComment(issueId, body, companyId);
+  };
+  harness.ctx.state.set = async (scope, value) => {
+    if (scope.stateKey === 'paperclip-github-plugin-import-registry' && Array.isArray(value)) {
+      savedImportRegistrySnapshots.push(
+        value as Array<{ githubIssueNumber?: number; lastSeenGitHubState?: string }>
+      );
+    }
+
+    return originalStateSet(scope, value);
   };
 
   const originalFetch = globalThis.fetch;
@@ -17874,8 +17885,13 @@ test('worker keeps blocked issues blocked and treats stale aggregate changes-req
     assert.equal(updatedBlockedIssue?.status, 'blocked');
     assert.equal(updatedBlockedIssueRelations.blockedBy[0]?.id, blocker.id);
     assert.equal(updatedStaleChangesIssue?.status, 'in_review');
+    assert.equal(
+      savedImportRegistrySnapshots.at(-1)?.find((entry) => entry.githubIssueNumber === 501)?.lastSeenGitHubState,
+      'open'
+    );
   } finally {
     harness.ctx.issues.createComment = originalCreateComment;
+    harness.ctx.state.set = originalStateSet;
     globalThis.fetch = originalFetch;
   }
 });

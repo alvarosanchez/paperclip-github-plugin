@@ -13147,7 +13147,7 @@ async function synchronizePaperclipIssueStatuses(
         paperclipIssueSyncContext,
         advancedSettings
       );
-      const nextStatus = resolvePaperclipIssueStatus({
+      let nextStatus = resolvePaperclipIssueStatus({
         currentStatus: paperclipIssue.status,
         snapshot,
         hasTrustedNewComment,
@@ -13161,7 +13161,7 @@ async function synchronizePaperclipIssueStatuses(
         && nextStatus !== 'blocked'
         && await hasUnresolvedPaperclipIssueBlocker(ctx, paperclipIssue, mapping.companyId)
       ) {
-        continue;
+        nextStatus = 'blocked';
       }
       const shouldPreserveMaintainerWaitRouting = isHealthyMaintainerWaitTransition({
         currentStatus: paperclipIssue.status,
@@ -13434,7 +13434,7 @@ async function synchronizePaperclipPullRequestIssueStatuses(
         paperclipIssueSyncContext,
         advancedSettings
       );
-      const nextStatus = resolvePaperclipPullRequestIssueStatus({
+      let nextStatus = resolvePaperclipPullRequestIssueStatus({
         currentStatus: paperclipIssue.status,
         pullRequest,
         hasExecutorHandoffTarget: Boolean(executorTransitionAssignee)
@@ -13444,7 +13444,7 @@ async function synchronizePaperclipPullRequestIssueStatuses(
         && nextStatus !== 'blocked'
         && await hasUnresolvedPaperclipIssueBlocker(ctx, paperclipIssue, mapping.companyId)
       ) {
-        continue;
+        nextStatus = 'blocked';
       }
       const shouldPreserveMaintainerWaitRouting = isHealthyMaintainerWaitTransition({
         currentStatus: paperclipIssue.status,
