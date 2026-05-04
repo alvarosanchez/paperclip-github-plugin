@@ -7348,6 +7348,21 @@ function hasUnresolvedPaperclipIssueBlockerSummary(blockers: unknown): boolean {
   });
 }
 
+function isMissingIssueRelationsReadCapabilityError(error: unknown): boolean {
+  const message =
+    error instanceof Error
+      ? error.message
+      : typeof error === 'string'
+        ? error
+        : '';
+
+  return (
+    /missing required capability/i.test(message)
+    && /issue\.relations\.read/.test(message)
+    && /issues\.relations\.get/.test(message)
+  );
+}
+
 async function hasUnresolvedPaperclipIssueBlocker(
   ctx: PluginSetupContext,
   issue: Issue,
@@ -7362,8 +7377,16 @@ async function hasUnresolvedPaperclipIssueBlocker(
     return false;
   }
 
-  const relations = await ctx.issues.relations.get(issue.id, companyId);
-  return hasUnresolvedPaperclipIssueBlockerSummary(relations.blockedBy);
+  try {
+    const relations = await ctx.issues.relations.get(issue.id, companyId);
+    return hasUnresolvedPaperclipIssueBlockerSummary(relations.blockedBy);
+  } catch (error) {
+    if (isMissingIssueRelationsReadCapabilityError(error)) {
+      return false;
+    }
+
+    throw error;
+  }
 }
 
 function isSamePaperclipIssueAssigneePrincipal(
@@ -20069,6 +20092,7 @@ export function shouldStartWorkerHost(moduleUrl: string, entry = process.argv[1]
 
 export const __testing = {
   buildSyncFallbackExecutionStatePatch,
+  hasUnresolvedPaperclipIssueBlocker,
   isHealthyMaintainerWaitTransition,
   resolveSyncTransitionAssignee
 };
