@@ -7138,6 +7138,7 @@ function resolvePaperclipStatusFromLinkedPullRequests(
   linkedPullRequests: GitHubPullRequestStatusSnapshot[],
   options?: {
     preferInProgress?: boolean;
+    preserveTransientUnknownMergeabilityWait?: boolean;
   }
 ): PaperclipIssueStatus {
   if (
@@ -7153,7 +7154,13 @@ function resolvePaperclipStatusFromLinkedPullRequests(
 
   if (
     linkedPullRequests.length > 0 &&
-    linkedPullRequests.every((pullRequest) => isGitHubPullRequestReviewReadyForSync(pullRequest))
+    linkedPullRequests.every((pullRequest) =>
+      isGitHubPullRequestReviewReadyForSync(pullRequest)
+      || (
+        options?.preserveTransientUnknownMergeabilityWait === true
+        && isGitHubPullRequestTransientUnknownMergeabilityWait(pullRequest)
+      )
+    )
   ) {
     return 'in_review';
   }
@@ -7967,7 +7974,8 @@ function resolvePaperclipIssueStatus(params: {
 
   if (snapshot.linkedPullRequests.length > 0) {
     return resolvePaperclipStatusFromLinkedPullRequests(snapshot.linkedPullRequests, {
-      preferInProgress: hasExecutorHandoffTarget
+      preferInProgress: hasExecutorHandoffTarget,
+      preserveTransientUnknownMergeabilityWait: currentStatus === 'done' || currentStatus === 'in_review'
     });
   }
 
@@ -7994,7 +8002,8 @@ function resolvePaperclipPullRequestIssueStatus(params: {
   }
 
   return resolvePaperclipStatusFromLinkedPullRequests([pullRequest], {
-    preferInProgress: hasExecutorHandoffTarget
+    preferInProgress: hasExecutorHandoffTarget,
+    preserveTransientUnknownMergeabilityWait: currentStatus === 'in_review'
   });
 }
 
@@ -8211,6 +8220,15 @@ function isGitHubPullRequestActionRequiredForSync(
 ): boolean {
   return pullRequest.mergeability === 'conflicting'
     || ACTION_REQUIRED_GITHUB_PULL_REQUEST_MERGE_STATE_STATUSES.has(pullRequest.mergeStateStatus);
+}
+
+function isGitHubPullRequestTransientUnknownMergeabilityWait(
+  pullRequest: Pick<GitHubPullRequestStatusSnapshot, 'ciState' | 'hasUnresolvedReviewThreads' | 'mergeability' | 'mergeStateStatus'>
+): boolean {
+  return pullRequest.ciState === 'green'
+    && !pullRequest.hasUnresolvedReviewThreads
+    && pullRequest.mergeability !== 'conflicting'
+    && pullRequest.mergeStateStatus === 'unknown';
 }
 
 function isGitHubPullRequestReviewReadyForSync(

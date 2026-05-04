@@ -16424,6 +16424,7 @@ test('worker routes non-review-ready GitHub merge state statuses back to active 
       title: 'Behind branch',
       mergeable: 'MERGEABLE' as const,
       mergeStateStatus: 'BEHIND',
+      expectedStatus: 'in_progress' as const,
       expectedReason: /out-of-date branch state/
     },
     {
@@ -16433,6 +16434,7 @@ test('worker routes non-review-ready GitHub merge state statuses back to active 
       title: 'Blocked merge',
       mergeable: 'UNKNOWN' as const,
       mergeStateStatus: 'BLOCKED',
+      expectedStatus: 'in_progress' as const,
       expectedReason: /blocked merge requirements/
     },
     {
@@ -16442,6 +16444,7 @@ test('worker routes non-review-ready GitHub merge state statuses back to active 
       title: 'Draft pull request',
       mergeable: 'UNKNOWN' as const,
       mergeStateStatus: 'DRAFT',
+      expectedStatus: 'in_progress' as const,
       expectedReason: /draft status/
     },
     {
@@ -16451,6 +16454,7 @@ test('worker routes non-review-ready GitHub merge state statuses back to active 
       title: 'Unstable merge requirements',
       mergeable: 'UNKNOWN' as const,
       mergeStateStatus: 'UNSTABLE',
+      expectedStatus: 'in_progress' as const,
       expectedReason: /unstable merge requirements/
     },
     {
@@ -16460,7 +16464,7 @@ test('worker routes non-review-ready GitHub merge state statuses back to active 
       title: 'Unknown mergeability',
       mergeable: 'UNKNOWN' as const,
       mergeStateStatus: 'UNKNOWN',
-      expectedReason: /unknown mergeability/
+      expectedStatus: 'in_review' as const
     },
     {
       githubIssueId: 4601,
@@ -16469,6 +16473,17 @@ test('worker routes non-review-ready GitHub merge state statuses back to active 
       title: 'Merge state still resolving',
       mergeable: 'MERGEABLE' as const,
       mergeStateStatus: 'UNKNOWN',
+      expectedStatus: 'in_review' as const
+    },
+    {
+      githubIssueId: 4701,
+      githubIssueNumber: 47,
+      pullRequestNumber: 470,
+      title: 'Completed merge state still resolving',
+      initialStatus: 'done' as const,
+      mergeable: 'MERGEABLE' as const,
+      mergeStateStatus: 'UNKNOWN',
+      expectedStatus: 'in_review' as const,
       expectedReason: /unknown mergeability/
     }
   ];
@@ -16481,9 +16496,10 @@ test('worker routes non-review-ready GitHub merge state statuses back to active 
         title: scenario.title
       });
 
-      return created.status === 'in_review'
+      const initialStatus = scenario.initialStatus ?? 'in_review';
+      return created.status === initialStatus
         ? created
-        : harness.ctx.issues.update(created.id, { status: 'in_review' }, 'company-1');
+        : harness.ctx.issues.update(created.id, { status: initialStatus }, 'company-1');
     })
   );
 
@@ -16631,16 +16647,28 @@ test('worker routes non-review-ready GitHub merge state statuses back to active 
 
     for (const scenario of scenarios) {
       const issue = issues.find((entry) => entry.title === scenario.title);
-      assert.equal(issue?.status, 'in_progress');
-      assert.equal(issue?.assigneeAgentId, 'agent-1');
-      assert.match(
-        statusTransitionComments.find((comment) => comment.issueId === issue?.id)?.body ?? '',
-        /from `in review` to `in progress`/
-      );
-      assert.match(
-        statusTransitionComments.find((comment) => comment.issueId === issue?.id)?.body ?? '',
-        scenario.expectedReason
-      );
+      assert.equal(issue?.status, scenario.expectedStatus);
+
+      if (scenario.expectedStatus === 'in_progress') {
+        assert.equal(issue?.assigneeAgentId, 'agent-1');
+        assert.match(
+          statusTransitionComments.find((comment) => comment.issueId === issue?.id)?.body ?? '',
+          /from `in review` to `in progress`/
+        );
+        assert.match(
+          statusTransitionComments.find((comment) => comment.issueId === issue?.id)?.body ?? '',
+          scenario.expectedReason ?? /./
+        );
+      } else {
+        assert.equal(issue?.assigneeAgentId ?? null, null);
+        const transitionComment = statusTransitionComments.find((comment) => comment.issueId === issue?.id);
+        if (scenario.initialStatus === 'done') {
+          assert.match(transitionComment?.body ?? '', /from `done` to `in review`/);
+          assert.match(transitionComment?.body ?? '', scenario.expectedReason ?? /unknown mergeability/);
+        } else {
+          assert.equal(transitionComment, undefined);
+        }
+      }
     }
   } finally {
     globalThis.fetch = originalFetch;
