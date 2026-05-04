@@ -2121,7 +2121,18 @@ function formatGitHubIssueCountLabel(count: number): string {
 }
 
 function getErrorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+  if (error instanceof Error) {
+    return error.message;
+  }
+
+  if (error && typeof error === 'object' && 'message' in error) {
+    const message = (error as { message?: unknown }).message;
+    if (typeof message === 'string') {
+      return message;
+    }
+  }
+
+  return String(error);
 }
 
 function isPaperclipLabelSyncError(error: unknown): error is PaperclipLabelSyncError {
@@ -7349,17 +7360,12 @@ function hasUnresolvedPaperclipIssueBlockerSummary(blockers: unknown): boolean {
 }
 
 function isMissingIssueRelationsReadCapabilityError(error: unknown): boolean {
-  const message =
-    error instanceof Error
-      ? error.message
-      : typeof error === 'string'
-        ? error
-        : '';
+  const message = getErrorMessage(error);
 
   return (
     /missing required capability/i.test(message)
-    && /issue\.relations\.read/.test(message)
-    && /issues\.relations\.get/.test(message)
+    && /issue\.relations\.read/i.test(message)
+    && /issues\.relations\.get/i.test(message)
   );
 }
 
