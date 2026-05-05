@@ -13423,7 +13423,7 @@ async function synchronizePaperclipIssueStatuses(
             currentStatus: paperclipIssue.status,
             syncContext: paperclipIssueSyncContext,
             nextStatus,
-            clearAssignee: true,
+            ...(shouldClearTransitionAssignee ? { clearAssignee: true } : {}),
             ...(shouldPreserveMaintainerWaitRouting || shouldClearCompletedExecutionPolicy ? { clearExecutionPolicy: true } : {}),
             transitionComment: '',
             paperclipApiBaseUrl
@@ -13656,10 +13656,6 @@ async function synchronizePaperclipPullRequestIssueStatuses(
         nextStatus,
         syncContext: paperclipIssueSyncContext
       });
-      const shouldClearCompletedExecutionPolicy = shouldClearCompletedSyncExecutionPolicy({
-        nextStatus,
-        syncContext: paperclipIssueSyncContext
-      });
       const nextTransitionAssignee = resolveSyncTransitionAssignee({
         currentStatus: paperclipIssue.status,
         nextStatus,
@@ -13680,7 +13676,7 @@ async function synchronizePaperclipPullRequestIssueStatuses(
         && (nextAssigneeChanged || paperclipIssue.status !== nextStatus);
 
       if (paperclipIssue.status === nextStatus) {
-        if (shouldClearTransitionAssignee || shouldClearCompletedExecutionPolicy) {
+        if (shouldClearTransitionAssignee) {
           updateSyncFailureContext(syncFailureContext, {
             phase: 'updating_paperclip_status',
             repositoryUrl: pullRequestRepository.url,
@@ -13693,7 +13689,7 @@ async function synchronizePaperclipPullRequestIssueStatuses(
             syncContext: paperclipIssueSyncContext,
             nextStatus,
             clearAssignee: true,
-            ...(shouldPreserveMaintainerWaitRouting || shouldClearCompletedExecutionPolicy ? { clearExecutionPolicy: true } : {}),
+            ...(shouldPreserveMaintainerWaitRouting ? { clearExecutionPolicy: true } : {}),
             transitionComment: '',
             paperclipApiBaseUrl
           });
@@ -13720,7 +13716,7 @@ async function synchronizePaperclipPullRequestIssueStatuses(
         nextStatus,
         ...(nextTransitionAssignee ? { nextAssignee: nextTransitionAssignee.principal } : {}),
         ...(shouldClearTransitionAssignee ? { clearAssignee: true } : {}),
-        ...(shouldPreserveMaintainerWaitRouting || shouldClearCompletedExecutionPolicy ? { clearExecutionPolicy: true } : {}),
+        ...(shouldPreserveMaintainerWaitRouting ? { clearExecutionPolicy: true } : {}),
         transitionComment,
         paperclipApiBaseUrl
       });
