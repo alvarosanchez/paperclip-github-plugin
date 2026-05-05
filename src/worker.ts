@@ -146,6 +146,14 @@ interface PaperclipApiJsonReadResult<T> {
   failure?: PaperclipApiOperationFailure;
 }
 
+interface GitHubOctokitLogContext {
+  companyId?: string;
+  operation?: string;
+  repositoryUrl?: string;
+  syncTrigger?: 'manual' | 'schedule' | 'retry';
+  toolName?: string;
+}
+
 interface PaperclipLabelCreationAttempt {
   label: PaperclipIssueLabel | null;
   failure?: PaperclipApiOperationFailure;
@@ -2186,6 +2194,105 @@ function getErrorResponseDataMessage(error: unknown): string | undefined {
 
   const message = (data as { message?: unknown }).message;
   return typeof message === 'string' && message.trim() ? message.trim() : undefined;
+}
+
+function getGitHubRequestId(error: unknown): string | undefined {
+  const requestId = getErrorResponseHeaders(error)['x-github-request-id']?.trim();
+  return requestId || undefined;
+}
+
+function buildGitHubOctokitLogMetadata(context: GitHubOctokitLogContext): Record<string, unknown> {
+  const metadata: Record<string, unknown> = {};
+  const companyId = normalizeCompanyId(context.companyId);
+  const operation = normalizeOptionalString(context.operation);
+  const repositoryUrl = normalizeOptionalString(context.repositoryUrl);
+  const toolName = normalizeOptionalString(context.toolName);
+
+  if (companyId) {
+    metadata.companyId = companyId;
+  }
+
+  if (operation) {
+    metadata.operation = operation;
+  }
+
+  if (repositoryUrl) {
+    metadata.repositoryUrl = repositoryUrl;
+  }
+
+  if (context.syncTrigger) {
+    metadata.syncTrigger = context.syncTrigger;
+  }
+
+  if (toolName) {
+    metadata.toolName = toolName;
+  }
+
+  return metadata;
+}
+
+function getGitHubOctokitRequestPath(url: unknown, baseUrl: unknown): string | undefined {
+  if (typeof url !== 'string' || !url.trim()) {
+    return undefined;
+  }
+
+  const trimmedUrl = url.trim();
+  if (typeof baseUrl === 'string' && baseUrl.trim() && trimmedUrl.startsWith(baseUrl.trim())) {
+    return trimmedUrl.slice(baseUrl.trim().length) || '/';
+  }
+
+  try {
+    const parsed = new URL(trimmedUrl);
+    return `${parsed.pathname}${parsed.search}`;
+  } catch {
+    return trimmedUrl;
+  }
+}
+
+function createGitHubOctokit(
+  ctx: Pick<PluginSetupContext, 'logger'>,
+  token: string,
+  context: GitHubOctokitLogContext = {}
+): Octokit {
+  const metadata = buildGitHubOctokitLogMetadata(context);
+  const octokit = new Octokit({
+    auth: token,
+    log: {
+      debug: () => undefined,
+      info: () => undefined,
+      warn: (message) => {
+        ctx.logger.warn('GitHub Octokit warning.', {
+          ...metadata,
+          message
+        });
+      },
+      error: () => undefined
+    }
+  });
+
+  octokit.hook.wrap('request', async (request, options) => {
+    const start = Date.now();
+    const requestOptions = octokit.request.endpoint.parse(options);
+
+    try {
+      return await request(options);
+    } catch (error) {
+      const responseMessage = getErrorResponseDataMessage(error);
+      ctx.logger.warn('GitHub API request failed.', {
+        ...metadata,
+        method: requestOptions.method,
+        path: getGitHubOctokitRequestPath(requestOptions.url, options.baseUrl),
+        status: getErrorStatus(error) ?? null,
+        requestId: getGitHubRequestId(error) ?? null,
+        durationMs: Date.now() - start,
+        error: getErrorMessage(error),
+        ...(responseMessage ? { responseMessage } : {})
+      });
+      throw error;
+    }
+  });
+
+  return octokit;
 }
 
 function getErrorResponseDataErrors(error: unknown): unknown[] {
@@ -14167,7 +14274,10 @@ async function createGitHubToolOctokit(ctx: PluginSetupContext, companyId?: stri
     throw new Error(MISSING_GITHUB_TOKEN_SYNC_MESSAGE);
   }
 
-  return new Octokit({ auth: token });
+  return createGitHubOctokit(ctx, token, {
+    companyId,
+    operation: 'github-api'
+  });
 }
 
 async function listGitHubRepositoryOpenPullRequestNumbers(
@@ -18146,8 +18256,10 @@ function mergeNamedValues(
   return [...values.values()];
 }
 
-async function validateGithubToken(token: string): Promise<TokenValidationResult> {
-  const octokit = new Octokit({ auth: token.trim() });
+async function validateGithubToken(ctx: PluginSetupContext, token: string): Promise<TokenValidationResult> {
+  const octokit = createGitHubOctokit(ctx, token.trim(), {
+    operation: 'settings.validateToken'
+  });
 
   try {
     const response = await octokit.rest.users.getAuthenticated();
@@ -18292,7 +18404,11 @@ async function performSync(
 
   activePaperclipApiAuthTokensByCompanyId = await resolvePaperclipApiAuthTokens(ctx, settings, config, mappings);
 
-  const octokit = new Octokit({ auth: token });
+  const octokit = createGitHubOctokit(ctx, token, {
+    companyId: targetCompanyId,
+    operation: 'sync.github-issues',
+    syncTrigger: trigger
+  });
   let syncedIssuesCount = 0;
   let createdIssuesCount = 0;
   let skippedIssuesCount = 0;
@@ -20116,6 +20232,7 @@ export function shouldStartWorkerHost(moduleUrl: string, entry = process.argv[1]
 
 export const __testing = {
   buildSyncFallbackExecutionStatePatch,
+  createGitHubToolOctokit,
   hasUnresolvedPaperclipIssueBlocker,
   isHealthyMaintainerWaitTransition,
   resolveSyncTransitionAssignee
@@ -20504,7 +20621,7 @@ const plugin = definePlugin({
         throw new Error('Enter a GitHub token.');
       }
 
-      return validateGithubToken(trimmedToken);
+      return validateGithubToken(ctx, trimmedToken);
     });
 
     ctx.actions.register('project.pullRequests.createIssue', async (input) => {

@@ -211,6 +211,75 @@ test('issue blocker relation checks propagate unrelated relation read failures',
   );
 });
 
+test('GitHub request failures are logged through the plugin logger instead of stderr', async () => {
+  const workerModule = await importFreshWorkerModule();
+  const testing = workerModule.__testing as typeof workerModule.__testing & {
+    createGitHubToolOctokit?: (ctx: unknown, companyId?: string) => Promise<{
+      graphql: (query: string, variables?: Record<string, unknown>) => Promise<unknown>;
+    }>;
+  };
+
+  assert.equal(typeof testing.createGitHubToolOctokit, 'function');
+
+  const harness = createTestHarness({
+    manifest,
+    config: {
+      githubToken: TEST_GITHUB_TOKEN
+    }
+  });
+  const warnings: Array<{ message: string; metadata: Record<string, unknown> }> = [];
+  const stderrCalls: unknown[][] = [];
+  const originalFetch = globalThis.fetch;
+  const originalConsoleError = console.error;
+
+  harness.ctx.logger.warn = (message: string, metadata?: unknown) => {
+    warnings.push({
+      message,
+      metadata: metadata && typeof metadata === 'object' ? metadata as Record<string, unknown> : {}
+    });
+  };
+
+  console.error = (...args: unknown[]) => {
+    stderrCalls.push(args);
+  };
+
+  globalThis.fetch = async (input) => {
+    if (getRequestUrl(input) === 'https://api.github.com/graphql') {
+      return jsonResponse({ message: 'Bad credentials' }, 401);
+    }
+
+    throw new Error(`Unexpected request: ${getRequestUrl(input)}`);
+  };
+
+  try {
+    const octokit = await testing.createGitHubToolOctokit(harness.ctx, 'company-1');
+
+    await assert.rejects(
+      octokit.graphql('query { viewer { login } }'),
+      /Bad credentials/
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+    console.error = originalConsoleError;
+  }
+
+  assert.deepEqual(stderrCalls, []);
+  assert.equal(warnings.length, 1);
+  assert.equal(warnings[0]?.message, 'GitHub API request failed.');
+  assert.deepEqual(warnings[0]?.metadata, {
+    companyId: 'company-1',
+    durationMs: warnings[0]?.metadata.durationMs,
+    error: 'Bad credentials',
+    method: 'POST',
+    operation: 'github-api',
+    path: '/graphql',
+    requestId: null,
+    responseMessage: 'Bad credentials',
+    status: 401
+  });
+  assert.equal(typeof warnings[0]?.metadata.durationMs, 'number');
+});
+
 async function importManifestWithPluginVersion(pluginVersion?: string): Promise<typeof manifest> {
   const previousPluginVersion = process.env.PLUGIN_VERSION;
   const manifestModuleUrl = new URL(
@@ -13099,6 +13168,31 @@ test('worker refreshes Paperclip labels before creating a missing label so newly
         ]);
       }
 
+      if (query.includes('query GitHubRepositoryOpenIssueLinkedPullRequests')) {
+        return graphqlResponse({
+          repository: {
+            issues: {
+              pageInfo: {
+                hasNextPage: false,
+                endCursor: null
+              },
+              nodes: [
+                {
+                  number: 22,
+                  closedByPullRequestsReferences: {
+                    pageInfo: {
+                      hasNextPage: false,
+                      endCursor: null
+                    },
+                    nodes: []
+                  }
+                }
+              ]
+            }
+          }
+        });
+      }
+
       if (query.includes('query GitHubIssueStatusSnapshot') && issueNumber === 22) {
         return graphqlResponse({
           repository: {
@@ -13258,6 +13352,31 @@ test('worker resolves duplicate label create races by refreshing labels without 
             issueNumber: 23
           }
         ]);
+      }
+
+      if (query.includes('query GitHubRepositoryOpenIssueLinkedPullRequests')) {
+        return graphqlResponse({
+          repository: {
+            issues: {
+              pageInfo: {
+                hasNextPage: false,
+                endCursor: null
+              },
+              nodes: [
+                {
+                  number: 23,
+                  closedByPullRequestsReferences: {
+                    pageInfo: {
+                      hasNextPage: false,
+                      endCursor: null
+                    },
+                    nodes: []
+                  }
+                }
+              ]
+            }
+          }
+        });
       }
 
       if (query.includes('query GitHubIssueStatusSnapshot') && issueNumber === 23) {
