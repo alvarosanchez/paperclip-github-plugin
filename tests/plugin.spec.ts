@@ -214,7 +214,11 @@ test('issue blocker relation checks propagate unrelated relation read failures',
 test('GitHub request failures are logged through the plugin logger instead of stderr', async () => {
   const workerModule = await importFreshWorkerModule();
   const testing = workerModule.__testing as typeof workerModule.__testing & {
-    createGitHubToolOctokit?: (ctx: unknown, companyId?: string) => Promise<{
+    createGitHubToolOctokit?: (
+      ctx: unknown,
+      companyId?: string,
+      context?: { repositoryUrl?: string; toolName?: string }
+    ) => Promise<{
       graphql: (query: string, variables?: Record<string, unknown>) => Promise<unknown>;
     }>;
   };
@@ -252,7 +256,10 @@ test('GitHub request failures are logged through the plugin logger instead of st
   };
 
   try {
-    const octokit = await testing.createGitHubToolOctokit(harness.ctx, 'company-1');
+    const octokit = await testing.createGitHubToolOctokit(harness.ctx, 'company-1', {
+      repositoryUrl: 'https://github.com/paperclipai/example-repo',
+      toolName: 'list_pull_request_review_threads'
+    });
 
     await assert.rejects(
       octokit.graphql('query { viewer { login } }'),
@@ -274,8 +281,10 @@ test('GitHub request failures are logged through the plugin logger instead of st
     operation: 'github-api',
     path: '/graphql',
     requestId: null,
+    repositoryUrl: 'https://github.com/paperclipai/example-repo',
     responseMessage: 'Bad credentials',
-    status: 401
+    status: 401,
+    toolName: 'list_pull_request_review_threads'
   });
   assert.equal(typeof warnings[0]?.metadata.durationMs, 'number');
 });
@@ -10517,6 +10526,42 @@ test('worker validates a GitHub token by reaching the GitHub API', async () => {
     assert.deepEqual(result, {
       login: 'octocat'
     });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('worker keeps expected GitHub token validation failures out of warning logs', async () => {
+  const harness = createTestHarness({ manifest });
+  await plugin.definition.setup(harness.ctx);
+
+  const warnings: Array<{ message: string; data: unknown }> = [];
+  harness.ctx.logger.warn = (message, data) => {
+    warnings.push({
+      message,
+      data
+    });
+  };
+
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+    assert.equal(url, 'https://api.github.com/user');
+
+    return jsonResponse({
+      message: 'Bad credentials'
+    }, 401);
+  };
+
+  try {
+    await assert.rejects(
+      harness.performAction('settings.validateToken', {
+        token: 'ghp_rejected_token'
+      }),
+      /GitHub rejected this token/
+    );
+
+    assert.deepEqual(warnings, []);
   } finally {
     globalThis.fetch = originalFetch;
   }

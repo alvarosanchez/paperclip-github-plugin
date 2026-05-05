@@ -148,6 +148,7 @@ interface PaperclipApiJsonReadResult<T> {
 
 interface GitHubOctokitLogContext {
   companyId?: string;
+  logFailures?: boolean;
   operation?: string;
   repositoryUrl?: string;
   syncTrigger?: 'manual' | 'schedule' | 'retry';
@@ -2254,7 +2255,6 @@ function createGitHubOctokit(
   token: string,
   context: GitHubOctokitLogContext = {}
 ): Octokit {
-  const metadata = buildGitHubOctokitLogMetadata(context);
   const octokit = new Octokit({
     auth: token,
     log: {
@@ -2262,13 +2262,17 @@ function createGitHubOctokit(
       info: () => undefined,
       warn: (message) => {
         ctx.logger.warn('GitHub Octokit warning.', {
-          ...metadata,
+          ...buildGitHubOctokitLogMetadata(context),
           message
         });
       },
       error: () => undefined
     }
   });
+
+  if (context.logFailures === false) {
+    return octokit;
+  }
 
   octokit.hook.wrap('request', async (request, options) => {
     const start = Date.now();
@@ -2279,7 +2283,7 @@ function createGitHubOctokit(
     } catch (error) {
       const responseMessage = getErrorResponseDataMessage(error);
       ctx.logger.warn('GitHub API request failed.', {
-        ...metadata,
+        ...buildGitHubOctokitLogMetadata(context),
         method: requestOptions.method,
         path: getGitHubOctokitRequestPath(requestOptions.url, options.baseUrl),
         status: getErrorStatus(error) ?? null,
@@ -14268,7 +14272,11 @@ async function handleCompanyMetricApiRoute(
   };
 }
 
-async function createGitHubToolOctokit(ctx: PluginSetupContext, companyId?: string): Promise<Octokit> {
+async function createGitHubToolOctokit(
+  ctx: PluginSetupContext,
+  companyId?: string,
+  context: Pick<GitHubOctokitLogContext, 'repositoryUrl' | 'toolName'> = {}
+): Promise<Octokit> {
   const token = (await resolveGithubToken(ctx, { companyId })).trim();
   if (!token) {
     throw new Error(MISSING_GITHUB_TOKEN_SYNC_MESSAGE);
@@ -14276,7 +14284,8 @@ async function createGitHubToolOctokit(ctx: PluginSetupContext, companyId?: stri
 
   return createGitHubOctokit(ctx, token, {
     companyId,
-    operation: 'github-api'
+    operation: 'github-api',
+    ...context
   });
 }
 
@@ -18258,6 +18267,7 @@ function mergeNamedValues(
 
 async function validateGithubToken(ctx: PluginSetupContext, token: string): Promise<TokenValidationResult> {
   const octokit = createGitHubOctokit(ctx, token.trim(), {
+    logFailures: false,
     operation: 'settings.validateToken'
   });
 
@@ -18404,11 +18414,12 @@ async function performSync(
 
   activePaperclipApiAuthTokensByCompanyId = await resolvePaperclipApiAuthTokens(ctx, settings, config, mappings);
 
-  const octokit = createGitHubOctokit(ctx, token, {
+  const octokitLogContext: GitHubOctokitLogContext = {
     companyId: targetCompanyId,
     operation: 'sync.github-issues',
     syncTrigger: trigger
-  });
+  };
+  const octokit = createGitHubOctokit(ctx, token, octokitLogContext);
   let syncedIssuesCount = 0;
   let createdIssuesCount = 0;
   let skippedIssuesCount = 0;
@@ -18590,6 +18601,7 @@ async function performSync(
 
       try {
         const repository = requireRepositoryReference(mapping.repositoryUrl);
+        octokitLogContext.repositoryUrl = repository.url;
         const importedIssueRecords = nextRegistry
           .filter((entry) => doesImportedIssueRecordMatchMapping(entry, mapping))
           .filter((entry) => doesImportedIssueMatchTarget(entry, options.target));
@@ -18725,6 +18737,7 @@ async function performSync(
 
       try {
         const { mapping, advancedSettings, repository, repositoryIndex, allIssuesById, issues, pullRequestLinks } = plan;
+        octokitLogContext.repositoryUrl = repository.url;
         const companyId = mapping.companyId;
         let availableLabels = companyId ? companyLabelDirectoryCache.get(companyId) : undefined;
         if (!availableLabels) {
@@ -19242,13 +19255,24 @@ async function startSync(
 }
 
 function registerGitHubAgentTools(ctx: PluginSetupContext): void {
+  async function createAgentToolOctokit(
+    runCtx: ToolRunContext,
+    toolName: string,
+    repository?: ParsedRepositoryReference
+  ): Promise<Octokit> {
+    return createGitHubToolOctokit(ctx, runCtx.companyId, {
+      toolName,
+      ...(repository ? { repositoryUrl: repository.url } : {})
+    });
+  }
+
   ctx.tools.register(
     'search_repository_items',
     getGitHubAgentToolDeclaration('search_repository_items'),
     async (params, runCtx) => executeGitHubTool(async () => {
       const input = getToolInputRecord(params);
-      const octokit = await createGitHubToolOctokit(ctx, runCtx.companyId);
       const repository = await resolveGitHubToolRepository(ctx, runCtx, input);
+      const octokit = await createAgentToolOctokit(runCtx, 'search_repository_items', repository);
       const rawQuery = normalizeOptionalToolString(input.query);
       if (!rawQuery) {
         throw new Error('query is required.');
@@ -19324,7 +19348,7 @@ function registerGitHubAgentTools(ctx: PluginSetupContext): void {
     async (params, runCtx) => executeGitHubTool(async () => {
       const input = getToolInputRecord(params);
       const target = await resolveGitHubIssueToolTarget(ctx, runCtx, input);
-      const octokit = await createGitHubToolOctokit(ctx, runCtx.companyId);
+      const octokit = await createAgentToolOctokit(runCtx, 'get_issue', target.repository);
       const response = await octokit.rest.issues.get({
         owner: target.repository.owner,
         repo: target.repository.repo,
@@ -19377,7 +19401,7 @@ function registerGitHubAgentTools(ctx: PluginSetupContext): void {
     async (params, runCtx) => executeGitHubTool(async () => {
       const input = getToolInputRecord(params);
       const target = await resolveGitHubIssueToolTarget(ctx, runCtx, input);
-      const octokit = await createGitHubToolOctokit(ctx, runCtx.companyId);
+      const octokit = await createAgentToolOctokit(runCtx, 'list_issue_comments', target.repository);
       const comments = await listAllGitHubIssueComments(octokit, target.repository, target.issueNumber);
 
       return buildToolSuccessResult(
@@ -19397,7 +19421,7 @@ function registerGitHubAgentTools(ctx: PluginSetupContext): void {
     async (params, runCtx) => executeGitHubTool(async () => {
       const input = getToolInputRecord(params);
       const target = await resolveGitHubIssueToolTarget(ctx, runCtx, input);
-      const octokit = await createGitHubToolOctokit(ctx, runCtx.companyId);
+      const octokit = await createAgentToolOctokit(runCtx, 'update_issue', target.repository);
       const currentResponse = await octokit.rest.issues.get({
         owner: target.repository.owner,
         repo: target.repository.repo,
@@ -19500,7 +19524,7 @@ function registerGitHubAgentTools(ctx: PluginSetupContext): void {
     async (params, runCtx) => executeGitHubTool(async () => {
       const input = getToolInputRecord(params);
       const target = await resolveGitHubIssueToolTarget(ctx, runCtx, input);
-      const octokit = await createGitHubToolOctokit(ctx, runCtx.companyId);
+      const octokit = await createAgentToolOctokit(runCtx, 'assign_to_current_user', target.repository);
       const [currentResponse, authenticatedUserResponse] = await Promise.all([
         octokit.rest.issues.get({
           owner: target.repository.owner,
@@ -19570,7 +19594,7 @@ function registerGitHubAgentTools(ctx: PluginSetupContext): void {
     async (params, runCtx) => executeGitHubTool(async () => {
       const input = getToolInputRecord(params);
       const target = await resolveGitHubIssueToolTarget(ctx, runCtx, input);
-      const octokit = await createGitHubToolOctokit(ctx, runCtx.companyId);
+      const octokit = await createAgentToolOctokit(runCtx, 'add_issue_comment', target.repository);
       const body = appendAiAuthorshipFooter(String(input.body ?? ''), 'comment', normalizeOptionalToolString(input.llmModel));
       const response = await octokit.rest.issues.createComment({
         owner: target.repository.owner,
@@ -19627,7 +19651,7 @@ function registerGitHubAgentTools(ctx: PluginSetupContext): void {
             normalizeOptionalToolString(input.llmModel)
           )
         : undefined;
-      const octokit = await createGitHubToolOctokit(ctx, runCtx.companyId);
+      const octokit = await createAgentToolOctokit(runCtx, 'create_pull_request', repository);
       const response = await octokit.rest.pulls.create({
         owner: repository.owner,
         repo: repository.repo,
@@ -19710,7 +19734,7 @@ function registerGitHubAgentTools(ctx: PluginSetupContext): void {
     async (params, runCtx) => executeGitHubTool(async () => {
       const input = getToolInputRecord(params);
       const target = await resolveGitHubPullRequestToolTarget(ctx, runCtx, input);
-      const octokit = await createGitHubToolOctokit(ctx, runCtx.companyId);
+      const octokit = await createAgentToolOctokit(runCtx, 'get_pull_request', target.repository);
       const response = await octokit.rest.pulls.get({
         owner: target.repository.owner,
         repo: target.repository.repo,
@@ -19760,7 +19784,7 @@ function registerGitHubAgentTools(ctx: PluginSetupContext): void {
     async (params, runCtx) => executeGitHubTool(async () => {
       const input = getToolInputRecord(params);
       const target = await resolveGitHubPullRequestToolTarget(ctx, runCtx, input);
-      const octokit = await createGitHubToolOctokit(ctx, runCtx.companyId);
+      const octokit = await createAgentToolOctokit(runCtx, 'update_pull_request', target.repository);
       let currentResponse = await octokit.rest.pulls.get({
         owner: target.repository.owner,
         repo: target.repository.repo,
@@ -19835,7 +19859,7 @@ function registerGitHubAgentTools(ctx: PluginSetupContext): void {
     async (params, runCtx) => executeGitHubTool(async () => {
       const input = getToolInputRecord(params);
       const target = await resolveGitHubPullRequestToolTarget(ctx, runCtx, input);
-      const octokit = await createGitHubToolOctokit(ctx, runCtx.companyId);
+      const octokit = await createAgentToolOctokit(runCtx, 'list_pull_request_files', target.repository);
       const files = await listAllPullRequestFiles(octokit, target.repository, target.pullRequestNumber);
 
       return buildToolSuccessResult(
@@ -19855,7 +19879,7 @@ function registerGitHubAgentTools(ctx: PluginSetupContext): void {
     async (params, runCtx) => executeGitHubTool(async () => {
       const input = getToolInputRecord(params);
       const target = await resolveGitHubPullRequestToolTarget(ctx, runCtx, input);
-      const octokit = await createGitHubToolOctokit(ctx, runCtx.companyId);
+      const octokit = await createAgentToolOctokit(runCtx, 'get_pull_request_checks', target.repository);
       const pullRequestResponse = await octokit.rest.pulls.get({
         owner: target.repository.owner,
         repo: target.repository.repo,
@@ -19964,7 +19988,7 @@ function registerGitHubAgentTools(ctx: PluginSetupContext): void {
     async (params, runCtx) => executeGitHubTool(async () => {
       const input = getToolInputRecord(params);
       const target = await resolveGitHubPullRequestToolTarget(ctx, runCtx, input);
-      const octokit = await createGitHubToolOctokit(ctx, runCtx.companyId);
+      const octokit = await createAgentToolOctokit(runCtx, 'list_pull_request_review_threads', target.repository);
       const threads = await listDetailedPullRequestReviewThreads(octokit, target.repository, target.pullRequestNumber);
 
       return buildToolSuccessResult(
@@ -19989,7 +20013,7 @@ function registerGitHubAgentTools(ctx: PluginSetupContext): void {
       }
 
       const body = appendAiAuthorshipFooter(String(input.body ?? ''), 'comment', normalizeOptionalToolString(input.llmModel));
-      const octokit = await createGitHubToolOctokit(ctx, runCtx.companyId);
+      const octokit = await createAgentToolOctokit(runCtx, 'reply_to_review_thread');
       const response = await octokit.graphql<GitHubAddPullRequestReviewThreadReplyMutationResult>(
         GITHUB_ADD_PULL_REQUEST_REVIEW_THREAD_REPLY_MUTATION,
         {
@@ -20027,7 +20051,7 @@ function registerGitHubAgentTools(ctx: PluginSetupContext): void {
         throw new Error('threadId is required.');
       }
 
-      const octokit = await createGitHubToolOctokit(ctx, runCtx.companyId);
+      const octokit = await createAgentToolOctokit(runCtx, 'resolve_review_thread');
       const response = await octokit.graphql<GitHubResolveReviewThreadMutationResult>(
         GITHUB_RESOLVE_REVIEW_THREAD_MUTATION,
         {
@@ -20061,7 +20085,7 @@ function registerGitHubAgentTools(ctx: PluginSetupContext): void {
         throw new Error('threadId is required.');
       }
 
-      const octokit = await createGitHubToolOctokit(ctx, runCtx.companyId);
+      const octokit = await createAgentToolOctokit(runCtx, 'unresolve_review_thread');
       const response = await octokit.graphql<GitHubUnresolveReviewThreadMutationResult>(
         GITHUB_UNRESOLVE_REVIEW_THREAD_MUTATION,
         {
@@ -20097,7 +20121,7 @@ function registerGitHubAgentTools(ctx: PluginSetupContext): void {
         throw new Error('Provide at least one user reviewer or team reviewer.');
       }
 
-      const octokit = await createGitHubToolOctokit(ctx, runCtx.companyId);
+      const octokit = await createAgentToolOctokit(runCtx, 'request_pull_request_reviewers', target.repository);
       const response = await octokit.rest.pulls.requestReviewers({
         owner: target.repository.owner,
         repo: target.repository.repo,
@@ -20131,7 +20155,7 @@ function registerGitHubAgentTools(ctx: PluginSetupContext): void {
         throw new Error('organization is required.');
       }
 
-      const octokit = await createGitHubToolOctokit(ctx, runCtx.companyId);
+      const octokit = await createAgentToolOctokit(runCtx, 'list_organization_projects');
       const projects = await listGitHubOrganizationProjects(octokit, organization, {
         includeClosed: input.includeClosed === true,
         query: normalizeOptionalToolString(input.query),
@@ -20154,7 +20178,7 @@ function registerGitHubAgentTools(ctx: PluginSetupContext): void {
     async (params, runCtx) => executeGitHubTool(async () => {
       const input = getToolInputRecord(params);
       const target = await resolveGitHubPullRequestToolTarget(ctx, runCtx, input);
-      const octokit = await createGitHubToolOctokit(ctx, runCtx.companyId);
+      const octokit = await createAgentToolOctokit(runCtx, 'add_pull_request_to_project', target.repository);
       const projectTarget = await resolveGitHubProjectToolTarget(octokit, input);
       const pullRequest = await getGitHubPullRequestProjectItems(
         octokit,
