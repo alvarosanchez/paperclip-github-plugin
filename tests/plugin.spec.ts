@@ -16625,24 +16625,58 @@ test('worker routes non-review-ready GitHub merge state statuses back to active 
       githubIssueId: 4501,
       githubIssueNumber: 45,
       pullRequestNumber: 450,
+      title: 'Blocked merge requirements with pending checks',
+      initialStatus: 'blocked' as const,
+      mergeable: 'UNKNOWN' as const,
+      mergeStateStatus: 'BLOCKED',
+      ciContexts: [
+        {
+          __typename: 'CheckRun',
+          status: 'IN_PROGRESS',
+          conclusion: null
+        }
+      ],
+      expectedStatus: 'blocked' as const
+    },
+    {
+      githubIssueId: 4601,
+      githubIssueNumber: 46,
+      pullRequestNumber: 460,
+      title: 'Unstable merge requirements with pending checks',
+      initialStatus: 'blocked' as const,
+      mergeable: 'UNKNOWN' as const,
+      mergeStateStatus: 'UNSTABLE',
+      ciContexts: [
+        {
+          __typename: 'CheckRun',
+          status: 'QUEUED',
+          conclusion: null
+        }
+      ],
+      expectedStatus: 'blocked' as const
+    },
+    {
+      githubIssueId: 4701,
+      githubIssueNumber: 47,
+      pullRequestNumber: 470,
       title: 'Unknown mergeability',
       mergeable: 'UNKNOWN' as const,
       mergeStateStatus: 'UNKNOWN',
       expectedStatus: 'in_review' as const
     },
     {
-      githubIssueId: 4601,
-      githubIssueNumber: 46,
-      pullRequestNumber: 460,
+      githubIssueId: 4801,
+      githubIssueNumber: 48,
+      pullRequestNumber: 480,
       title: 'Merge state still resolving',
       mergeable: 'MERGEABLE' as const,
       mergeStateStatus: 'UNKNOWN',
       expectedStatus: 'in_review' as const
     },
     {
-      githubIssueId: 4701,
-      githubIssueNumber: 47,
-      pullRequestNumber: 470,
+      githubIssueId: 4901,
+      githubIssueNumber: 49,
+      pullRequestNumber: 490,
       title: 'Completed merge state still resolving',
       initialStatus: 'done' as const,
       mergeable: 'MERGEABLE' as const,
@@ -16780,7 +16814,7 @@ test('worker routes non-review-ready GitHub merge state statuses back to active 
                     hasNextPage: false,
                     endCursor: null
                   },
-                  nodes: [
+                  nodes: scenario.ciContexts ?? [
                     {
                       __typename: 'StatusContext',
                       state: 'SUCCESS'
@@ -19093,8 +19127,15 @@ test('worker clears pending review and approval execution state before closing a
           }, 422);
         }
 
+        if (!Object.prototype.hasOwnProperty.call(body, 'executionPolicy') || body.executionPolicy !== null) {
+          return jsonResponse({
+            error: 'Clear the execution policy before closing the issue.'
+          }, 422);
+        }
+
         await originalUpdate(importedIssue.id, {
           status: 'done',
+          executionPolicy: null,
           executionState: null
         } as never, 'company-1');
       }
@@ -19145,12 +19186,15 @@ test('worker clears pending review and approval execution state before closing a
     assert.equal(statusPatchRequests.length, 1);
     assert.equal(statusPatchRequests[0]?.issueId, importedIssue.id);
     assert.equal(statusPatchRequests[0]?.body?.status, 'done');
+    assert.equal(Object.prototype.hasOwnProperty.call(statusPatchRequests[0]?.body ?? {}, 'executionPolicy'), true);
+    assert.equal(statusPatchRequests[0]?.body?.executionPolicy, null);
     assert.equal(Object.prototype.hasOwnProperty.call(statusPatchRequests[0]?.body ?? {}, 'executionState'), true);
     assert.equal(statusPatchRequests[0]?.body?.executionState, null);
     assert.equal(directStatusUpdateCalls.length, 0);
 
     const updatedIssue = await harness.ctx.issues.get(importedIssue.id, 'company-1') as Record<string, any> | null;
     assert.equal(updatedIssue?.status, 'done');
+    assert.equal(updatedIssue?.executionPolicy ?? null, null);
     assert.equal(updatedIssue?.executionState ?? null, null);
   } finally {
     globalThis.fetch = originalFetch;

@@ -62,7 +62,7 @@ If a company already has a Paperclip project bound to a GitHub repository worksp
 
 ### Status sync with delivery context
 
-The plugin does more than mirror issue text. It looks at linked pull requests, mergeability, CI, review decisions, review threads, and trusted new GitHub comments so imported Paperclip issues can reflect where the work actually is. When GitHub links an issue to a pull request in another repository, GitHub Sync now follows that pull request's actual repository for status checks, review state, and deep links instead of assuming the issue repository. When sync closes an imported issue as `done` or `cancelled`, it also clears any pending Paperclip review or approval execution state so the host accepts the terminal transition cleanly.
+The plugin does more than mirror issue text. It looks at linked pull requests, mergeability, CI, review decisions, review threads, and trusted new GitHub comments so imported Paperclip issues can reflect where the work actually is. When GitHub links an issue to a pull request in another repository, GitHub Sync now follows that pull request's actual repository for status checks, review state, and deep links instead of assuming the issue repository. When sync closes an imported issue as `done` or `cancelled`, it also clears any pending Paperclip review or approval execution policy/state so the host accepts the terminal transition cleanly and does not keep waking stale review participants.
 
 ### Company KPI dashboard
 
@@ -158,7 +158,7 @@ When the local Paperclip API is available, the plugin also syncs labels by name,
 | --- | --- |
 | Open issue with no linked pull request, created by a repository maintainer | `todo` on first import |
 | Open issue with no linked pull request | Configured default status, which defaults to `backlog` |
-| Open issue with a linked pull request and unfinished CI | `in_progress` |
+| Open issue with a linked pull request and unfinished CI | `in_progress`; already-blocked pending-only PR waits remain `blocked` |
 | Open issue with failing CI, a non-mergeable linked pull request, or unresolved review threads | `todo`, or `in_progress` when GitHub Sync can hand the work back to an executor |
 | Open issue with green CI, a merge-ready linked pull request, and all review threads resolved | `in_review` |
 | Closed issue completed as finished work | `done` |
@@ -170,7 +170,7 @@ Additional behavior:
 - If the Paperclip host initially creates that imported maintainer issue in `backlog`, GitHub Sync promotes it to `todo` without replacing the configured default assignee with the executor handoff assignee, so triage ownership stays intact.
 - When Paperclip board access is connected for a company, the advanced assignee dropdowns list both company agents and `Me` for the connected board user.
 - Newly imported issues that finish sync in `todo` and are assigned to an agent enqueue an assignee wakeup so the agent can pick them up promptly.
-- For linked pull requests, GitHub Sync treats merge-conflict, behind-branch, blocked, draft, unstable merge states, and unresolved review threads as executor work, while merge-ready states such as `CLEAN` and `HAS_HOOKS` can move work into `in_review` when CI is green and review threads are resolved. A stale aggregate `CHANGES_REQUESTED` review decision alone does not move that maintainer wait back to active execution. Transient `UNKNOWN` mergeability also does not move an already `in_review` maintainer wait back to active execution when CI is green and review threads are resolved.
+- For linked pull requests, GitHub Sync treats merge-conflict, behind-branch, blocked, draft, unstable merge states, and unresolved review threads as executor work, while merge-ready states such as `CLEAN` and `HAS_HOOKS` can move work into `in_review` when CI is green and review threads are resolved. If an issue is already `blocked` and GitHub reports only pending external merge requirements while CI is unfinished, sync preserves the external wait instead of waking an executor. A stale aggregate `CHANGES_REQUESTED` review decision alone does not move that maintainer wait back to active execution. Transient `UNKNOWN` mergeability also does not move an already `in_review` maintainer wait back to active execution when CI is green and review threads are resolved.
 - Imported issues that are already `blocked` stay `blocked` while any first-class `blockedBy` issue is still non-terminal, even if the linked GitHub pull request is otherwise green and review-ready.
 - When sync moves work into `in_review`, GitHub Sync first follows the Paperclip issue execution policy's current reviewer or approver when that stage is visible on the issue. If Paperclip exposes an internal review or approval stage but not yet the participant, the plugin falls back to the configured reviewer or approver handoff assignee. If the transition is only a healthy linked-PR wait with no visible internal review or approval stage, GitHub Sync leaves the issue unassigned so it can wait on normal maintainer review without waking an internal owner.
 - When sync moves work back into active execution, GitHub Sync first follows the Paperclip issue execution policy `returnAssignee` when it is available. Otherwise it falls back to the configured executor handoff assignee and then to the default imported assignee.

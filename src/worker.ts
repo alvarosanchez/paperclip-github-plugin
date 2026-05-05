@@ -7794,6 +7794,17 @@ function isHealthyMaintainerWaitTransition(params: {
     && syncContext.executionPolicy !== null;
 }
 
+function shouldClearCompletedSyncExecutionPolicy(params: {
+  nextStatus: PaperclipIssueStatus;
+  syncContext: PaperclipIssueSyncContext;
+}): boolean {
+  return (params.nextStatus === 'done' || params.nextStatus === 'cancelled')
+    && (
+      params.syncContext.executionPolicy !== null
+      || params.syncContext.executionState !== null
+    );
+}
+
 function shouldPreserveImportedTriageAssignee(params: {
   currentStatus: PaperclipIssueStatus;
   nextStatus: PaperclipIssueStatus;
@@ -8084,6 +8095,13 @@ function resolvePaperclipIssueStatus(params: {
   }
 
   if (snapshot.linkedPullRequests.length > 0) {
+    if (shouldPreserveBlockedExternalPullRequestWait({
+      currentStatus,
+      linkedPullRequests: snapshot.linkedPullRequests
+    })) {
+      return 'blocked';
+    }
+
     return resolvePaperclipStatusFromLinkedPullRequests(snapshot.linkedPullRequests, {
       preferInProgress: hasExecutorHandoffTarget,
       preserveTransientUnknownMergeabilityWait: currentStatus === 'done' || currentStatus === 'in_review'
@@ -8110,6 +8128,13 @@ function resolvePaperclipPullRequestIssueStatus(params: {
 
   if (currentStatus === 'done' || currentStatus === 'cancelled') {
     return currentStatus;
+  }
+
+  if (shouldPreserveBlockedExternalPullRequestWait({
+    currentStatus,
+    linkedPullRequests: [pullRequest]
+  })) {
+    return 'blocked';
   }
 
   return resolvePaperclipStatusFromLinkedPullRequests([pullRequest], {
@@ -8331,6 +8356,24 @@ function isGitHubPullRequestActionRequiredForSync(
 ): boolean {
   return pullRequest.mergeability === 'conflicting'
     || ACTION_REQUIRED_GITHUB_PULL_REQUEST_MERGE_STATE_STATUSES.has(pullRequest.mergeStateStatus);
+}
+
+function isGitHubPullRequestPendingExternalWaitForSync(
+  pullRequest: Pick<GitHubPullRequestStatusSnapshot, 'ciState' | 'hasUnresolvedReviewThreads' | 'mergeability' | 'mergeStateStatus'>
+): boolean {
+  return pullRequest.ciState === 'unfinished'
+    && !pullRequest.hasUnresolvedReviewThreads
+    && pullRequest.mergeability !== 'conflicting'
+    && (pullRequest.mergeStateStatus === 'blocked' || pullRequest.mergeStateStatus === 'unstable');
+}
+
+function shouldPreserveBlockedExternalPullRequestWait(params: {
+  currentStatus: PaperclipIssueStatus;
+  linkedPullRequests: GitHubPullRequestStatusSnapshot[];
+}): boolean {
+  return params.currentStatus === 'blocked'
+    && params.linkedPullRequests.length > 0
+    && params.linkedPullRequests.every((pullRequest) => isGitHubPullRequestPendingExternalWaitForSync(pullRequest));
 }
 
 function isGitHubPullRequestTransientUnknownMergeabilityWait(
@@ -13326,6 +13369,10 @@ async function synchronizePaperclipIssueStatuses(
         nextStatus,
         syncContext: paperclipIssueSyncContext
       });
+      const shouldClearCompletedExecutionPolicy = shouldClearCompletedSyncExecutionPolicy({
+        nextStatus,
+        syncContext: paperclipIssueSyncContext
+      });
       const shouldPreserveImportedTriageRouting = shouldPreserveImportedTriageAssignee({
         currentStatus: paperclipIssue.status,
         nextStatus,
@@ -13364,7 +13411,7 @@ async function synchronizePaperclipIssueStatuses(
       importedIssue.linkedPullRequestCommentCounts = currentLinkedPullRequestCommentCounts;
 
       if (paperclipIssue.status === nextStatus) {
-        if (shouldClearTransitionAssignee) {
+        if (shouldClearTransitionAssignee || shouldClearCompletedExecutionPolicy) {
           updateSyncFailureContext(syncFailureContext, {
             phase: 'updating_paperclip_status',
             repositoryUrl: repository.url,
@@ -13377,7 +13424,7 @@ async function synchronizePaperclipIssueStatuses(
             syncContext: paperclipIssueSyncContext,
             nextStatus,
             clearAssignee: true,
-            ...(shouldPreserveMaintainerWaitRouting ? { clearExecutionPolicy: true } : {}),
+            ...(shouldPreserveMaintainerWaitRouting || shouldClearCompletedExecutionPolicy ? { clearExecutionPolicy: true } : {}),
             transitionComment: '',
             paperclipApiBaseUrl
           });
@@ -13416,7 +13463,7 @@ async function synchronizePaperclipIssueStatuses(
         nextStatus,
         ...(nextTransitionAssignee ? { nextAssignee: nextTransitionAssignee.principal } : {}),
         ...(shouldClearTransitionAssignee ? { clearAssignee: true } : {}),
-        ...(shouldPreserveMaintainerWaitRouting ? { clearExecutionPolicy: true } : {}),
+        ...(shouldPreserveMaintainerWaitRouting || shouldClearCompletedExecutionPolicy ? { clearExecutionPolicy: true } : {}),
         transitionComment: transitionComment.body,
         transitionCommentAnnotation: transitionComment.annotation,
         paperclipApiBaseUrl
@@ -13609,6 +13656,10 @@ async function synchronizePaperclipPullRequestIssueStatuses(
         nextStatus,
         syncContext: paperclipIssueSyncContext
       });
+      const shouldClearCompletedExecutionPolicy = shouldClearCompletedSyncExecutionPolicy({
+        nextStatus,
+        syncContext: paperclipIssueSyncContext
+      });
       const nextTransitionAssignee = resolveSyncTransitionAssignee({
         currentStatus: paperclipIssue.status,
         nextStatus,
@@ -13629,7 +13680,7 @@ async function synchronizePaperclipPullRequestIssueStatuses(
         && (nextAssigneeChanged || paperclipIssue.status !== nextStatus);
 
       if (paperclipIssue.status === nextStatus) {
-        if (shouldClearTransitionAssignee) {
+        if (shouldClearTransitionAssignee || shouldClearCompletedExecutionPolicy) {
           updateSyncFailureContext(syncFailureContext, {
             phase: 'updating_paperclip_status',
             repositoryUrl: pullRequestRepository.url,
@@ -13642,7 +13693,7 @@ async function synchronizePaperclipPullRequestIssueStatuses(
             syncContext: paperclipIssueSyncContext,
             nextStatus,
             clearAssignee: true,
-            ...(shouldPreserveMaintainerWaitRouting ? { clearExecutionPolicy: true } : {}),
+            ...(shouldPreserveMaintainerWaitRouting || shouldClearCompletedExecutionPolicy ? { clearExecutionPolicy: true } : {}),
             transitionComment: '',
             paperclipApiBaseUrl
           });
@@ -13669,7 +13720,7 @@ async function synchronizePaperclipPullRequestIssueStatuses(
         nextStatus,
         ...(nextTransitionAssignee ? { nextAssignee: nextTransitionAssignee.principal } : {}),
         ...(shouldClearTransitionAssignee ? { clearAssignee: true } : {}),
-        ...(shouldPreserveMaintainerWaitRouting ? { clearExecutionPolicy: true } : {}),
+        ...(shouldPreserveMaintainerWaitRouting || shouldClearCompletedExecutionPolicy ? { clearExecutionPolicy: true } : {}),
         transitionComment,
         paperclipApiBaseUrl
       });
