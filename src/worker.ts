@@ -8358,13 +8358,15 @@ function isGitHubPullRequestActionRequiredForSync(
     || ACTION_REQUIRED_GITHUB_PULL_REQUEST_MERGE_STATE_STATUSES.has(pullRequest.mergeStateStatus);
 }
 
-function isGitHubPullRequestPendingExternalWaitForSync(
-  pullRequest: Pick<GitHubPullRequestStatusSnapshot, 'ciState' | 'hasUnresolvedReviewThreads' | 'mergeability' | 'mergeStateStatus'>
+function isGitHubPullRequestBlockedExternalWaitForSync(
+  pullRequest: Pick<GitHubPullRequestStatusSnapshot, 'ciState' | 'hasUnresolvedReviewThreads' | 'mergeability' | 'mergeStateStatus' | 'reviewDecision'>
 ): boolean {
-  return pullRequest.ciState === 'unfinished'
+  return !isGitHubPullRequestReviewReadyForSync(pullRequest)
     && !pullRequest.hasUnresolvedReviewThreads
     && pullRequest.mergeability !== 'conflicting'
-    && (pullRequest.mergeStateStatus === 'blocked' || pullRequest.mergeStateStatus === 'unstable');
+    && pullRequest.mergeStateStatus !== 'behind'
+    && pullRequest.mergeStateStatus !== 'dirty'
+    && pullRequest.mergeStateStatus !== 'draft';
 }
 
 function shouldPreserveBlockedExternalPullRequestWait(params: {
@@ -8373,7 +8375,7 @@ function shouldPreserveBlockedExternalPullRequestWait(params: {
 }): boolean {
   return params.currentStatus === 'blocked'
     && params.linkedPullRequests.length > 0
-    && params.linkedPullRequests.every((pullRequest) => isGitHubPullRequestPendingExternalWaitForSync(pullRequest));
+    && params.linkedPullRequests.every((pullRequest) => isGitHubPullRequestBlockedExternalWaitForSync(pullRequest));
 }
 
 function isGitHubPullRequestTransientUnknownMergeabilityWait(

@@ -16872,6 +16872,23 @@ test('worker routes non-review-ready GitHub merge state statuses back to active 
       expectedStatus: 'blocked' as const
     },
     {
+      githubIssueId: 4651,
+      githubIssueNumber: 465,
+      pullRequestNumber: 4650,
+      title: 'Blocked maintainer wait with failing checks',
+      initialStatus: 'blocked' as const,
+      mergeable: 'MERGEABLE' as const,
+      mergeStateStatus: 'BLOCKED',
+      ciContexts: [
+        {
+          __typename: 'CheckRun',
+          status: 'COMPLETED',
+          conclusion: 'FAILURE'
+        }
+      ],
+      expectedStatus: 'blocked' as const
+    },
+    {
       githubIssueId: 4701,
       githubIssueNumber: 47,
       pullRequestNumber: 470,
