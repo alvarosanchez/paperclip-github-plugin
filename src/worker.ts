@@ -8204,10 +8204,6 @@ function resolvePaperclipPullRequestIssueStatus(params: {
 }): PaperclipIssueStatus {
   const { currentStatus, pullRequest, hasExecutorHandoffTarget } = params;
 
-  if (currentStatus === 'done' || currentStatus === 'cancelled') {
-    return currentStatus;
-  }
-
   if (shouldPreserveBlockedExternalPullRequestWait({
     currentStatus,
     linkedPullRequests: [pullRequest]
@@ -8217,7 +8213,7 @@ function resolvePaperclipPullRequestIssueStatus(params: {
 
   return resolvePaperclipStatusFromLinkedPullRequests([pullRequest], {
     preferInProgress: hasExecutorHandoffTarget,
-    preserveTransientUnknownMergeabilityWait: currentStatus === 'in_review'
+    preserveTransientUnknownMergeabilityWait: currentStatus === 'done' || currentStatus === 'in_review'
   });
 }
 

@@ -6654,16 +6654,23 @@ test('sync.runNow keeps directly linked pull request issues in review when only 
   }
 });
 
-test('sync.runNow preserves manually closed directly linked pull request issue workflow metadata while the pull request remains open', async () => {
+test('sync.runNow reopens directly linked pull request issues when the pull request remains open', async () => {
   const harness = await createProjectPullRequestsHarness();
   const originalFetch = globalThis.fetch;
   const originalUpdate = harness.ctx.issues.update;
+  const originalCreateComment = harness.ctx.issues.createComment;
+  const statusTransitionComments: Array<{ issueId: string; body: string }> = [];
   const issue = await harness.ctx.issues.create({
     companyId: 'company-1',
     projectId: 'project-1',
-    title: 'Manually closed PR link',
-    description: 'This Paperclip issue was closed manually while the GitHub PR is still open.'
+    title: 'Accidentally closed PR link',
+    description: 'This Paperclip issue was closed while the GitHub PR is still open.'
   });
+
+  harness.ctx.issues.createComment = async (issueId, body, companyId) => {
+    statusTransitionComments.push({ issueId, body });
+    return originalCreateComment(issueId, body, companyId);
+  };
 
   await harness.ctx.entities.upsert({
     entityType: 'paperclip-github-plugin.pull-request-link',
@@ -6679,7 +6686,7 @@ test('sync.runNow preserves manually closed directly linked pull request issue w
       githubPullRequestNumber: 44,
       githubPullRequestUrl: 'https://github.com/paperclipai/example-repo/pull/44',
       githubPullRequestState: 'open',
-      title: 'Manually closed PR link',
+      title: 'Accidentally closed PR link',
       syncedAt: '2026-04-27T09:30:00.000Z'
     }
   });
@@ -6731,7 +6738,7 @@ test('sync.runNow preserves manually closed directly linked pull request issue w
     if (requestPathname === '/repos/paperclipai/example-repo/pulls/44') {
       return jsonResponse({
         number: 44,
-        title: 'Manually closed PR link',
+        title: 'Accidentally closed PR link',
         body: 'GitHub PR is still open.',
         html_url: 'https://github.com/paperclipai/example-repo/pull/44',
         state: 'open',
@@ -6843,7 +6850,7 @@ test('sync.runNow preserves manually closed directly linked pull request issue w
       }
     }
 
-    throw new Error(`Unexpected fetch during manually closed PR link sync test: ${requestUrl}`);
+    throw new Error(`Unexpected fetch during directly linked PR reopen sync test: ${requestUrl}`);
   };
 
   try {
@@ -6857,14 +6864,21 @@ test('sync.runNow preserves manually closed directly linked pull request issue w
 
     assert.equal(sync.syncState.status, 'success');
     assert.equal(sync.syncState.syncedIssuesCount, 1);
-    assert.equal(directStatusUpdateCalls.length, 0);
+    assert.equal(directStatusUpdateCalls.length, 1);
+    assert.equal(directStatusUpdateCalls[0]?.patch.status, 'in_review');
+    assert.equal(directStatusUpdateCalls[0]?.patch.assigneeAgentId, 'agent-2');
+    assert.equal(directStatusUpdateCalls[0]?.patch.executionState, null);
 
     const updatedIssue = await harness.ctx.issues.get(issue.id, 'company-1') as Record<string, any> | null;
-    assert.equal(updatedIssue?.status, 'done');
-    assert.equal(updatedIssue?.assigneeAgentId, 'agent-3');
+    assert.equal(updatedIssue?.status, 'in_review');
+    assert.equal(updatedIssue?.assigneeAgentId, 'agent-2');
     assert.notEqual(updatedIssue?.executionPolicy ?? null, null);
-    assert.notEqual(updatedIssue?.executionState ?? null, null);
+    assert.equal(updatedIssue?.executionState ?? null, null);
+    assert.equal(statusTransitionComments.length, 1);
+    assert.match(statusTransitionComments[0]?.body ?? '', /from `done` to `in review`/);
+    assert.match(statusTransitionComments[0]?.body ?? '', /green CI with all review threads resolved/);
   } finally {
+    harness.ctx.issues.createComment = originalCreateComment;
     harness.ctx.issues.update = originalUpdate;
     globalThis.fetch = originalFetch;
   }
