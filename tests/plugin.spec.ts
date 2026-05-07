@@ -2165,6 +2165,8 @@ test('issue-link API route links third-party pull requests to Paperclip issues f
     statusTransitionComments.push({ issueId, body });
     return originalCreateComment(issueId, body, companyId);
   };
+  const originalEntityList = harness.ctx.entities.list.bind(harness.ctx.entities);
+  let linkEntityListCalls = 0;
 
   globalThis.fetch = async (input, init) => {
     const requestUrl = getRequestUrl(input);
@@ -2259,6 +2261,17 @@ test('issue-link API route links third-party pull requests to Paperclip issues f
       githubPullRequestState: 'open'
     });
 
+    harness.ctx.entities.list = async (query) => {
+      if (
+        query.entityType === 'paperclip-github-plugin.issue-link'
+        || query.entityType === 'paperclip-github-plugin.pull-request-link'
+      ) {
+        linkEntityListCalls += 1;
+      }
+
+      return originalEntityList(query);
+    };
+
     const sync = await harness.performAction('sync.runNow', {
       companyId: 'company-1',
       waitForCompletion: true
@@ -2268,6 +2281,7 @@ test('issue-link API route links third-party pull requests to Paperclip issues f
 
     assert.equal(sync.syncState.status, 'success');
     assert.equal(sync.syncState.syncedIssuesCount, 1);
+    assert.equal(linkEntityListCalls, 2);
 
     const updatedIssue = await harness.ctx.issues.get(issue.id, 'company-1');
     assert.equal(updatedIssue?.status, 'todo');
@@ -2275,6 +2289,7 @@ test('issue-link API route links third-party pull requests to Paperclip issues f
     assert.match(statusTransitionComments[0]?.body ?? '', /from `in review` to `todo`/);
     assert.match(statusTransitionComments[0]?.body ?? '', /failing CI/);
   } finally {
+    harness.ctx.entities.list = originalEntityList;
     harness.ctx.issues.createComment = originalCreateComment;
     globalThis.fetch = originalFetch;
   }
@@ -24212,6 +24227,71 @@ test('scheduled job skips runs that are not yet due for the configured cadence',
     trigger: 'schedule',
     scheduledAt: '2026-04-09T10:30:00.000Z'
   });
+
+  const state = harness.getState({
+    scopeKind: 'instance',
+    stateKey: 'paperclip-github-plugin-settings'
+  }) as {
+    scheduleFrequencyMinutes: number;
+    syncState: { status: string; checkedAt?: string; message?: string };
+  };
+
+  assert.equal(state.scheduleFrequencyMinutes, 60);
+  assert.equal(state.syncState.status, 'idle');
+  assert.equal(state.syncState.checkedAt, '2026-04-09T10:00:00.000Z');
+  assert.equal(state.syncState.message, undefined);
+});
+
+test('scheduled job uses the external link company index without scanning link entities when cadence is not due', async () => {
+  const harness = createTestHarness({ manifest });
+  await plugin.definition.setup(harness.ctx);
+  const originalEntityList = harness.ctx.entities.list.bind(harness.ctx.entities);
+
+  await harness.ctx.state.set(
+    {
+      scopeKind: 'instance',
+      stateKey: 'paperclip-github-plugin-settings'
+    },
+    {
+      mappings: [],
+      syncState: {
+        status: 'idle',
+        checkedAt: '2026-04-09T10:00:00.000Z'
+      },
+      scheduleFrequencyMinutes: 60,
+      updatedAt: '2026-04-09T10:00:00.000Z'
+    }
+  );
+  await harness.ctx.state.set(
+    {
+      scopeKind: 'instance',
+      stateKey: 'paperclip-github-plugin-external-link-companies'
+    },
+    {
+      companyIds: ['company-1'],
+      updatedAt: '2026-04-09T10:00:00.000Z'
+    }
+  );
+
+  harness.ctx.entities.list = async (query) => {
+    if (
+      query.entityType === 'paperclip-github-plugin.issue-link'
+      || query.entityType === 'paperclip-github-plugin.pull-request-link'
+    ) {
+      throw new Error('Scheduled target selection should not scan link entities.');
+    }
+
+    return originalEntityList(query);
+  };
+
+  try {
+    await harness.runJob('sync.github-issues', {
+      trigger: 'schedule',
+      scheduledAt: '2026-04-09T10:30:00.000Z'
+    });
+  } finally {
+    harness.ctx.entities.list = originalEntityList;
+  }
 
   const state = harness.getState({
     scopeKind: 'instance',

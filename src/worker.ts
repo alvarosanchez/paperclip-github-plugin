@@ -54,6 +54,11 @@ const COMPANY_KPI_SCOPE = {
   stateKey: 'paperclip-github-plugin-company-kpis'
 };
 
+const EXTERNAL_LINK_COMPANY_INDEX_SCOPE = {
+  scopeKind: 'instance' as const,
+  stateKey: 'paperclip-github-plugin-external-link-companies'
+};
+
 const DEFAULT_SCHEDULE_FREQUENCY_MINUTES = 15;
 const DEFAULT_IMPORTED_ISSUE_STATUS: PaperclipIssueStatus = 'backlog';
 const DEFAULT_IGNORED_GITHUB_ISSUE_USERNAMES = ['renovate'];
@@ -668,6 +673,11 @@ interface RepositorySyncPlan {
 interface ExternalGitHubLinkSyncWork {
   issueLinks: GitHubIssueLinkRecord[];
   pullRequestLinks: GitHubPullRequestLinkRecord[];
+}
+
+interface ExternalGitHubLinkCompanyIndex {
+  companyIds: string[];
+  updatedAt?: string;
 }
 
 interface GitHubIssueLabelRecord {
@@ -6471,6 +6481,82 @@ function normalizeImportRegistry(value: unknown): ImportedIssueRecord[] {
     .filter((entry): entry is ImportedIssueRecord => entry !== null);
 }
 
+function normalizeExternalGitHubLinkCompanyIndex(value: unknown): ExternalGitHubLinkCompanyIndex {
+  const rawCompanyIds = Array.isArray(value)
+    ? value
+    : value && typeof value === 'object' && Array.isArray((value as Record<string, unknown>).companyIds)
+      ? (value as { companyIds: unknown[] }).companyIds
+      : [];
+  const companyIds = [
+    ...new Set(
+      rawCompanyIds
+        .map((entry) => normalizeCompanyId(entry))
+        .filter((companyId): companyId is string => Boolean(companyId))
+    )
+  ].sort();
+  const updatedAt =
+    value && typeof value === 'object' && typeof (value as Record<string, unknown>).updatedAt === 'string'
+      ? ((value as Record<string, unknown>).updatedAt as string).trim()
+      : undefined;
+
+  return {
+    companyIds,
+    ...(updatedAt ? { updatedAt } : {})
+  };
+}
+
+async function getExternalGitHubLinkCompanyIds(ctx: PluginSetupContext): Promise<string[]> {
+  return normalizeExternalGitHubLinkCompanyIndex(await ctx.state.get(EXTERNAL_LINK_COMPANY_INDEX_SCOPE)).companyIds;
+}
+
+async function rememberExternalGitHubLinkCompany(ctx: PluginSetupContext, companyId: string | undefined): Promise<void> {
+  const normalizedCompanyId = normalizeCompanyId(companyId);
+  if (!normalizedCompanyId) {
+    return;
+  }
+
+  const index = normalizeExternalGitHubLinkCompanyIndex(await ctx.state.get(EXTERNAL_LINK_COMPANY_INDEX_SCOPE));
+  if (index.companyIds.includes(normalizedCompanyId)) {
+    return;
+  }
+
+  await ctx.state.set(EXTERNAL_LINK_COMPANY_INDEX_SCOPE, {
+    companyIds: [...index.companyIds, normalizedCompanyId].sort(),
+    updatedAt: new Date().toISOString()
+  });
+}
+
+async function forgetExternalGitHubLinkCompanyIfEmpty(
+  ctx: PluginSetupContext,
+  companyId: string | undefined
+): Promise<void> {
+  const normalizedCompanyId = normalizeCompanyId(companyId);
+  if (!normalizedCompanyId) {
+    return;
+  }
+
+  const [issueLinks, pullRequestLinks] = await Promise.all([
+    listGitHubIssueLinkRecords(ctx),
+    listGitHubPullRequestLinkRecords(ctx)
+  ]);
+  const hasRemainingLinks =
+    issueLinks.some((record) => record.data.companyId === normalizedCompanyId)
+    || pullRequestLinks.some((record) => record.data.companyId === normalizedCompanyId);
+  if (hasRemainingLinks) {
+    return;
+  }
+
+  const index = normalizeExternalGitHubLinkCompanyIndex(await ctx.state.get(EXTERNAL_LINK_COMPANY_INDEX_SCOPE));
+  if (!index.companyIds.includes(normalizedCompanyId)) {
+    return;
+  }
+
+  await ctx.state.set(EXTERNAL_LINK_COMPANY_INDEX_SCOPE, {
+    companyIds: index.companyIds.filter((entry) => entry !== normalizedCompanyId),
+    updatedAt: new Date().toISOString()
+  });
+}
+
 function requireRepositoryReference(repositoryInput: string): ParsedRepositoryReference {
   const parsed = parseRepositoryReference(repositoryInput);
   if (!parsed) {
@@ -10902,6 +10988,7 @@ async function linkPaperclipIssueToGitHubIssue(
     repositoryUrl: scope.repository.url
   };
   await upsertGitHubIssueLinkRecord(ctx, linkTarget, issueId, githubIssue, linkedPullRequests);
+  await rememberExternalGitHubLinkCompany(ctx, companyId);
 
   if (scope.mapping) {
     const importRegistry = normalizeImportRegistry(await ctx.state.get(IMPORT_REGISTRY_SCOPE));
@@ -10997,6 +11084,7 @@ async function linkPaperclipIssueToGitHubPullRequest(
     pullRequestTitle: response.data.title || `Pull request #${reference.pullRequestNumber}`,
     pullRequestState
   });
+  await rememberExternalGitHubLinkCompany(ctx, companyId);
 
   const projectIdForCacheInvalidation = scope.mapping?.paperclipProjectId ?? scope.projectId;
   if (projectIdForCacheInvalidation) {
@@ -11168,6 +11256,8 @@ async function unlinkPaperclipIssueFromGitHub(
   if (Object.keys(issuePatch).length > 0) {
     await ctx.issues.update(issueId, issuePatch, companyId);
   }
+
+  await forgetExternalGitHubLinkCompanyIfEmpty(ctx, companyId);
 
   return {
     paperclipIssueId: issueId,
@@ -18719,15 +18809,14 @@ async function listScheduledSyncTargets(
   ctx: PluginSetupContext,
   settings: GitHubSyncSettings
 ): Promise<Array<ResolvedSyncTarget | undefined>> {
+  const externalLinkCompanyIds = await getExternalGitHubLinkCompanyIds(ctx);
   const companyIds = [
     ...new Set(
       [
         ...settings.mappings
           .map((mapping) => normalizeCompanyId(mapping.companyId))
           .filter((companyId): companyId is string => Boolean(companyId)),
-        ...buildExternalLinkAuthMappings(await listExternalGitHubLinkSyncWork(ctx, settings.mappings))
-          .map((mapping) => normalizeCompanyId(mapping.companyId))
-          .filter((companyId): companyId is string => Boolean(companyId))
+        ...externalLinkCompanyIds
       ]
     )
   ];
@@ -18745,6 +18834,7 @@ async function performSync(
   options: {
     resolvedToken?: string;
     target?: ResolvedSyncTarget;
+    externalSyncWork?: ExternalGitHubLinkSyncWork;
   } = {}
 ) {
   const targetCompanyId = normalizeCompanyId(options.target?.companyId);
@@ -18759,7 +18849,7 @@ async function performSync(
     : await resolveGithubToken(ctx, { companyId: targetCompanyId });
   const paperclipApiBaseUrl = getConfiguredPaperclipApiBaseUrl(baseSettings, config, targetCompanyId);
   const mappings = getSyncableMappingsForTarget(settings.mappings, options.target);
-  const externalSyncWork = await listExternalGitHubLinkSyncWork(ctx, settings.mappings, options.target);
+  const externalSyncWork = options.externalSyncWork ?? await listExternalGitHubLinkSyncWork(ctx, settings.mappings, options.target);
   const externalLinkAuthMappings = buildExternalLinkAuthMappings(externalSyncWork);
   const externalLinkCount = externalSyncWork.issueLinks.length + externalSyncWork.pullRequestLinks.length;
   activePaperclipApiAuthTokensByCompanyId = null;
@@ -19816,6 +19906,10 @@ async function startSync(
     return currentSettings;
   }
 
+  if (trigger !== 'manual' && !token.trim()) {
+    return currentSettings;
+  }
+
   const externalSyncWork = await listExternalGitHubLinkSyncWork(ctx, currentSettings.mappings, options.target);
   const externalLinkCount = externalSyncWork.issueLinks.length + externalSyncWork.pullRequestLinks.length;
 
@@ -19824,10 +19918,6 @@ async function startSync(
     && getSyncableMappingsForTarget(currentSettings.mappings, options.target).length === 0
     && externalLinkCount === 0
   ) {
-    return currentSettings;
-  }
-
-  if (trigger !== 'manual' && !token.trim()) {
     return currentSettings;
   }
 
@@ -19859,7 +19949,8 @@ async function startSync(
       await runningStatePromise;
       return await performSync(ctx, trigger, {
         resolvedToken: token,
-        target: options.target
+        target: options.target,
+        externalSyncWork
       });
     } catch (error) {
       return await createUnexpectedSyncErrorResult(ctx, trigger, error, targetCompanyId);
