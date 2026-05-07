@@ -531,6 +531,55 @@ export const GITHUB_AGENT_TOOLS: PluginToolDeclaration[] = [
         projectNumber: projectNumberProperty
       }
     }
+  },
+  {
+    name: 'link_github_item',
+    displayName: 'Link GitHub Item',
+    description: 'Link a Paperclip issue to a GitHub issue or pull request so GitHub Sync can monitor status even when the repository is not mapped to a Paperclip project.',
+    parametersSchema: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['kind', 'paperclipIssueId'],
+      anyOf: [
+        {
+          required: ['reference']
+        },
+        {
+          required: ['issueNumber']
+        },
+        {
+          required: ['pullRequestNumber']
+        },
+        {
+          required: ['pullRequestUrl']
+        }
+      ],
+      properties: {
+        kind: {
+          type: 'string',
+          enum: ['issue', 'pull_request'],
+          description: 'Whether to link a GitHub issue or pull request.'
+        },
+        paperclipIssueId: {
+          type: 'string',
+          description: 'Paperclip issue id that should receive the GitHub link.'
+        },
+        repository: {
+          type: 'string',
+          description: 'GitHub repository as owner/repo or https://github.com/owner/repo. Required when using a number instead of a full GitHub URL and the Paperclip issue project is not mapped to that repository.'
+        },
+        reference: {
+          type: 'string',
+          description: 'GitHub issue or pull request number, or a full GitHub issue or pull request URL.'
+        },
+        issueNumber: issueNumberProperty,
+        pullRequestNumber: pullRequestNumberProperty,
+        pullRequestUrl: {
+          type: 'string',
+          description: 'Full GitHub pull request URL.'
+        }
+      }
+    }
   }
 ];
 

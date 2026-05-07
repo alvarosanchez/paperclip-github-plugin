@@ -607,6 +607,38 @@ async function postCompanyMetricApiRoute(
   } as Parameters<NonNullable<typeof plugin.definition.onApiRequest>>[0]);
 }
 
+async function postIssueLinkApiRoute(
+  payload: Record<string, unknown>,
+  options: {
+    companyId?: string;
+    actorType?: 'agent' | 'user';
+  } = {}
+): Promise<Awaited<ReturnType<NonNullable<typeof plugin.definition.onApiRequest>>>> {
+  const onApiRequest = plugin.definition.onApiRequest;
+  if (typeof onApiRequest !== 'function') {
+    throw new Error('Plugin API route handler is not registered.');
+  }
+  const actorType = options.actorType ?? 'agent';
+
+  return await onApiRequest({
+    routeKey: 'link-github-item',
+    method: 'POST',
+    path: '/issue-link',
+    params: {},
+    query: {},
+    body: payload,
+    companyId: options.companyId ?? 'company-1',
+    actor: {
+      actorType,
+      actorId: actorType === 'agent' ? 'agent-1' : 'user-1',
+      agentId: actorType === 'agent' ? 'agent-1' : null,
+      userId: actorType === 'user' ? 'user-1' : null,
+      runId: actorType === 'agent' ? 'run-1' : null
+    },
+    headers: {}
+  } as Parameters<NonNullable<typeof plugin.definition.onApiRequest>>[0]);
+}
+
 function createProjectFixture(params: {
   id: string;
   companyId: string;
@@ -1530,7 +1562,8 @@ test('manifest declares the GitHub agent tools, KPI API route, and capabilities'
       'unresolve_review_thread',
       'request_pull_request_reviewers',
       'list_organization_projects',
-      'add_pull_request_to_project'
+      'add_pull_request_to_project',
+      'link_github_item'
     ]
   );
   assert.deepEqual(
@@ -1547,6 +1580,14 @@ test('manifest declares the GitHub agent tools, KPI API route, and capabilities'
         routeKey: COMPANY_METRIC_API_ROUTE_KEY,
         method: 'POST',
         path: COMPANY_METRIC_API_ROUTE_PATH,
+        auth: 'agent',
+        capability: 'api.routes.register',
+        companyResolution: null
+      },
+      {
+        routeKey: 'link-github-item',
+        method: 'POST',
+        path: '/issue-link',
         auth: 'agent',
         capability: 'api.routes.register',
         companyResolution: null
@@ -2096,6 +2137,205 @@ test('company metric API route resolves a gh-created pull request repository fro
     });
     assert.equal(pullRequestLinks.length, 1);
     assert.equal(pullRequestLinks[0]?.externalId, 'https://github.com/paperclipai/example-repo/pull/25');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('issue-link API route links third-party pull requests to Paperclip issues for later sync', async () => {
+  const harness = createTestHarness({
+    manifest,
+    config: {
+      githubToken: TEST_GITHUB_TOKEN
+    }
+  });
+  await plugin.definition.setup(harness.ctx);
+  const originalFetch = globalThis.fetch;
+  const originalCreateComment = harness.ctx.issues.createComment;
+  const statusTransitionComments: Array<{ issueId: string; body: string }> = [];
+  const issue = await harness.ctx.issues.create({
+    companyId: 'company-1',
+    projectId: 'project-1',
+    title: 'Third-party repository PR',
+    description: 'An agent created a PR in a repository that is not mapped to this Paperclip project.'
+  });
+  await harness.ctx.issues.update(issue.id, { status: 'in_review' }, 'company-1');
+
+  harness.ctx.issues.createComment = async (issueId, body, companyId) => {
+    statusTransitionComments.push({ issueId, body });
+    return originalCreateComment(issueId, body, companyId);
+  };
+
+  globalThis.fetch = async (input, init) => {
+    const requestUrl = getRequestUrl(input);
+    const requestPathname = getDecodedRequestPathname(input);
+
+    if (requestPathname === '/repos/third-party/external/pulls/77') {
+      return jsonResponse({
+        number: 77,
+        title: 'Fix Paperclip issue from a third-party repo',
+        body: 'Created outside the mapped sync repositories.',
+        html_url: 'https://github.com/third-party/external/pull/77',
+        state: 'open',
+        merged: false
+      });
+    }
+
+    if (requestPathname === '/repos/third-party/external/issues') {
+      throw new Error('Third-party issue-link sync should not list every issue in the repository.');
+    }
+
+    if (requestPathname === '/graphql') {
+      const { query, variables } = getGraphqlRequest(init);
+      const pullRequestNumber =
+        typeof variables.pullRequestNumber === 'number' ? variables.pullRequestNumber : undefined;
+
+      if (query.includes('query GitHubRepositoryOpenIssueLinkedPullRequests')) {
+        throw new Error('Third-party issue-link sync should not scan repository-wide issue links.');
+      }
+
+      if (query.includes('query GitHubPullRequestReviewThreads') && pullRequestNumber === 77) {
+        return graphqlResponse({
+          repository: {
+            pullRequest: {
+              reviewThreads: {
+                pageInfo: {
+                  hasNextPage: false,
+                  endCursor: null
+                },
+                nodes: []
+              }
+            }
+          }
+        });
+      }
+
+      if (query.includes('query GitHubPullRequestCiContexts') && pullRequestNumber === 77) {
+        return graphqlResponse({
+          repository: {
+            pullRequest: {
+              mergeable: 'CONFLICTING',
+              mergeStateStatus: 'DIRTY',
+              statusCheckRollup: {
+                contexts: {
+                  pageInfo: {
+                    hasNextPage: false,
+                    endCursor: null
+                  },
+                  nodes: [
+                    {
+                      __typename: 'CheckRun',
+                      status: 'COMPLETED',
+                      conclusion: 'FAILURE'
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        });
+      }
+    }
+
+    throw new Error(`Unexpected fetch during third-party issue-link route test: ${requestUrl}`);
+  };
+
+  try {
+    const routeResponse = await postIssueLinkApiRoute({
+      kind: 'pull_request',
+      paperclipIssueId: issue.id,
+      pullRequestUrl: 'https://github.com/third-party/external/pull/77'
+    });
+
+    assert.equal(routeResponse.status, 201);
+    assert.deepEqual(routeResponse.body, {
+      status: 'linked',
+      companyId: 'company-1',
+      kind: 'pull_request',
+      paperclipIssueId: issue.id,
+      repositoryUrl: 'https://github.com/third-party/external',
+      githubPullRequestNumber: 77,
+      githubPullRequestUrl: 'https://github.com/third-party/external/pull/77',
+      githubPullRequestState: 'open'
+    });
+
+    const sync = await harness.performAction('sync.runNow', {
+      companyId: 'company-1',
+      waitForCompletion: true
+    }) as {
+      syncState: { status: string; syncedIssuesCount?: number };
+    };
+
+    assert.equal(sync.syncState.status, 'success');
+    assert.equal(sync.syncState.syncedIssuesCount, 1);
+
+    const updatedIssue = await harness.ctx.issues.get(issue.id, 'company-1');
+    assert.equal(updatedIssue?.status, 'todo');
+    assert.equal(statusTransitionComments.length, 1);
+    assert.match(statusTransitionComments[0]?.body ?? '', /from `in review` to `todo`/);
+    assert.match(statusTransitionComments[0]?.body ?? '', /failing CI/);
+  } finally {
+    harness.ctx.issues.createComment = originalCreateComment;
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('link_github_item agent tool links third-party pull requests to Paperclip issues', async () => {
+  const harness = createTestHarness({
+    manifest,
+    config: {
+      githubToken: TEST_GITHUB_TOKEN
+    }
+  });
+  await plugin.definition.setup(harness.ctx);
+  const originalFetch = globalThis.fetch;
+  const issue = await harness.ctx.issues.create({
+    companyId: 'company-1',
+    projectId: 'project-1',
+    title: 'Local trusted third-party PR link',
+    description: 'A local-trusted agent can use plugin tools to record the link.'
+  });
+
+  globalThis.fetch = async (input) => {
+    const requestUrl = getRequestUrl(input);
+    const requestPathname = getDecodedRequestPathname(input);
+
+    if (requestPathname === '/repos/third-party/external/pulls/78') {
+      return jsonResponse({
+        number: 78,
+        title: 'Tool-created external PR link',
+        body: 'Created from a local-trusted agent flow.',
+        html_url: 'https://github.com/third-party/external/pull/78',
+        state: 'open',
+        merged: false
+      });
+    }
+
+    throw new Error(`Unexpected fetch during link_github_item tool test: ${requestUrl}`);
+  };
+
+  try {
+    const result = await harness.executeTool('link_github_item', {
+      kind: 'pull_request',
+      paperclipIssueId: issue.id,
+      reference: 'https://github.com/third-party/external/pull/78'
+    }, {
+      companyId: 'company-1'
+    });
+
+    assert.ok(!result.error);
+    assert.equal((result.data as { githubPullRequestNumber?: unknown }).githubPullRequestNumber, 78);
+    assert.equal((result.data as { repositoryUrl?: unknown }).repositoryUrl, 'https://github.com/third-party/external');
+
+    const pullRequestLinks = await harness.ctx.entities.list({
+      entityType: 'paperclip-github-plugin.pull-request-link',
+      scopeKind: 'issue',
+      scopeId: issue.id
+    });
+    assert.equal(pullRequestLinks.length, 1);
+    assert.equal(pullRequestLinks[0]?.externalId, 'https://github.com/third-party/external/pull/78');
+    assert.equal((pullRequestLinks[0]?.data as { companyId?: unknown }).companyId, 'company-1');
+    assert.equal((pullRequestLinks[0]?.data as { paperclipProjectId?: unknown }).paperclipProjectId, 'project-1');
   } finally {
     globalThis.fetch = originalFetch;
   }

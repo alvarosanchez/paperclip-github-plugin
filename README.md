@@ -72,6 +72,12 @@ Because GitHub alone cannot tell which pull requests came from a Paperclip compa
 
 That API route path matters on authenticated Paperclip deployments today because a current host bug blocks agents from calling plugin tools unless the instance runs in `local_trusted` mode. Those agents can still use `gh` with the propagated `GITHUB_TOKEN`, then call the agent-authenticated plugin API route from the shell after they create a PR. The Paperclip host authenticates `Authorization: Bearer <PAPERCLIP_API_KEY>`, scopes the request to the calling agent's company, and rejects anonymous or non-agent calls before dispatching to the worker.
 
+### Third-party issue links
+
+Sometimes a Paperclip issue is implemented through a GitHub issue or pull request in a repository that is not mapped to any Paperclip project. GitHub Sync can now track those targeted links without enrolling the whole repository in sync. The `link_github_item` agent tool records the durable link on local-trusted Paperclip instances, and authenticated agent runs can post the same link to `/api/plugins/paperclip-github-plugin/api/issue-link` with `PAPERCLIP_API_KEY` when plugin tools are blocked by host board-auth gates.
+
+Third-party links are company-scoped and sync only the linked GitHub issue or pull request. Future manual or scheduled company sync runs refresh those external records and update the Paperclip issue status from the same CI, mergeability, review, thread, and issue-state rules used for mapped repositories.
+
 ### Project pull request command center
 
 Each mapped project can expose a **Pull Requests** entry in the sidebar that opens a live GitHub queue page for that repository. The sidebar badge uses a lightweight total-count read, while the queue keeps the default view fast by loading only the current 10-row page, uses a repo-wide metrics read for the summary cards, reuses that cached metrics scan to keep filtered views fast by fetching only the visible filtered rows, keeps repo-scoped count, metrics, and per-PR review/check insight caches warm for repeat visits, lets operators explicitly bust those caches with Refresh when they want a live reread, shows total, mergeable, reviewable, and failing cards that filter the table, only treats a pull request as mergeable when it targets the current default branch with green checks, at least one approval, no outstanding change requests, and no unresolved review threads, includes an **Up to date** column that distinguishes current branches, clean update candidates, conflict cases, and unknown freshness when GitHub cannot confirm the comparison, shows the PR target branch with a highlighted default-branch badge, keeps the list sorted by most recently updated first, paginates larger repositories, keeps a compact bottom detail pane with markdown-and-HTML-rendered conversation plus an inline comment composer, supports deterministic **Update branch** actions for clean behind-base pull requests, adds Copilot quick actions that post `@copilot` requests for **Fix CI**, **Rebase**, and **Address review feedback**, requests Copilot through GitHub’s native reviewer flow for **Review**, keeps comment, review, quick approve/request-changes, re-run CI, merge, and close actions available, lets the review modal submit comment-only, approve, or request-changes reviews, hides any pull request action whose required GitHub permission is not verified for the saved token, and opens linked Paperclip issues in a plugin-provided right drawer so operators can stay on the queue page.
@@ -93,6 +99,7 @@ Linked Paperclip issues can also be unlinked from the GitHub detail surface. Unl
 ### Agent workflows built in
 
 Paperclip agents can search GitHub for duplicates, read and update issues, assign issues to the saved token owner, post comments, create pull requests, inspect changed files and CI, reply to review threads, resolve or unresolve threads, request reviewers, search org-level GitHub Projects, and associate pull requests with those projects without leaving the Paperclip plugin surface.
+They can also link a Paperclip issue to a GitHub issue or pull request in any accessible repository with `link_github_item`, including third-party repositories that are not mapped to a Paperclip project.
 
 ## Requirements
 
@@ -259,10 +266,33 @@ Current host caveat: on authenticated Paperclip deployments, the Paperclip host 
 
 Because the KPI attribution endpoint is a native plugin JSON route rather than a plugin tool, authenticated agent runs can still call it directly with `PAPERCLIP_API_KEY` even while that host bug blocks the GitHub Sync tool surface.
 
+### Issue link API route
+
+Authenticated agent runs can link the current Paperclip issue to a GitHub issue or pull request by posting to `/api/plugins/paperclip-github-plugin/api/issue-link`. This is useful after creating a PR with `gh` in a repository that is not mapped to a Paperclip project.
+
+Supported payload fields:
+
+- `paperclipIssueId` required: the Paperclip issue id to link
+- `kind` optional: `issue` or `pull_request`; omitted values are inferred from full GitHub URLs when possible
+- `reference` optional: a GitHub issue or pull request number, or a full GitHub URL
+- `repository` optional: `owner/repo` or `https://github.com/owner/repo`, required for number-only references when the issue project is not mapped to that repository
+- `issueNumber`, `pullRequestNumber`, or `pullRequestUrl` optional alternatives to `reference`
+
+Example:
+
+```bash
+payload='{"paperclipIssueId":"iss_123","pullRequestUrl":"https://github.com/third-party/external/pull/77"}'
+
+curl -X POST "${PAPERCLIP_API_URL%/}/api/plugins/paperclip-github-plugin/api/issue-link" \
+  -H "content-type: application/json" \
+  -H "authorization: Bearer ${PAPERCLIP_API_KEY}" \
+  -d "${payload}"
+```
+
 ## Troubleshooting
 
 - If an older GitHub Sync build fails upgrade with `requires host version 2026.427.0 or newer, but this server is running 0.0.0`, upgrade to a build that removes the strict manifest host-version gate. The host is reporting a development-version sentinel, so the plugin now relies on declared capabilities and runtime fallbacks instead.
-- If setup is reported as incomplete, confirm that a GitHub token has been saved or that `${PAPERCLIP_HOME:-~/.paperclip}/plugins/github-sync/config.json` contains `githubToken`, and make sure at least one mapping has a created Paperclip project.
+- If setup is reported as incomplete, confirm that a GitHub token has been saved or that `${PAPERCLIP_HOME:-~/.paperclip}/plugins/github-sync/config.json` contains `githubToken`, and make sure at least one mapping has a created Paperclip project or at least one Paperclip issue has been linked to GitHub.
 - If Paperclip says board access is required, open plugin settings inside the affected company and complete the Paperclip board access flow before retrying sync.
 - If GitHub Sync agent tools fail with `403 {"error":"Board access required"}` on `/api/plugins/tools` or `/api/plugins/tools/execute`, the current Paperclip host rejected the request before the plugin worker ran. Re-run from a board-authenticated session or agent run that has board access to the target company.
 - If a KPI API route call is rejected, make sure the request includes `Authorization: Bearer ${PAPERCLIP_API_KEY}`, that the token is still valid for the current run, and that any `companyId` in the payload matches the calling agent's company.
