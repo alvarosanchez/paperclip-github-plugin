@@ -215,6 +215,12 @@ Notes:
 - The raw token is never persisted back into plugin state or plugin config.
 - A GitHub token secret saved through the settings UI takes precedence over the local file.
 
+### Worker-facing Paperclip API URL
+
+GitHub Sync uses direct worker-side Paperclip REST calls for host paths that are not fully covered by the plugin SDK, such as label reconciliation and some issue repair paths. By default, manual setup and sync actions use the current browser origin. If that origin is not reachable from the plugin worker, set **Worker Paperclip API URL** in GitHub Sync settings; the value is saved internally as plugin config `paperclipApiBaseUrl`.
+
+For private LAN, Docker, Kubernetes, custom DNS, or self-signed-certificate deployments, set that field to a local route the plugin worker can reach, such as `http://localhost:3100`, and port-forward or route that address to the Paperclip API when needed. Do not rely on exporting a process environment variable named `PAPERCLIP_API_URL` to Paperclip; Paperclip `2026.428.0` does not pass that value through to plugin worker runtime.
+
 ## GitHub agent tools
 
 The plugin exposes GitHub workflow tools to Paperclip agents, including:
@@ -296,9 +302,10 @@ curl -X POST "${PAPERCLIP_API_URL%/}/api/plugins/paperclip-github-plugin/api/iss
 - If Paperclip says board access is required, open plugin settings inside the affected company and complete the Paperclip board access flow before retrying sync.
 - If GitHub Sync agent tools fail with `403 {"error":"Board access required"}` on `/api/plugins/tools` or `/api/plugins/tools/execute`, the current Paperclip host rejected the request before the plugin worker ran. Re-run from a board-authenticated session or agent run that has board access to the target company.
 - If a KPI API route call is rejected, make sure the request includes `Authorization: Bearer ${PAPERCLIP_API_KEY}`, that the token is still valid for the current run, and that any `companyId` in the payload matches the calling agent's company.
-- If the worker reaches an authenticated HTML page instead of the Paperclip API JSON responses it expects, connect Paperclip board access for that company or set `PAPERCLIP_API_URL` to a worker-accessible Paperclip API origin.
+- If the worker reaches an authenticated HTML page instead of the Paperclip API JSON responses it expects, connect Paperclip board access for that company or set **Worker Paperclip API URL** in GitHub Sync settings to a worker-accessible Paperclip API origin.
+- If a Paperclip API fetch fails before any HTTP response is returned, the saved diagnostics include the method, URL, primary error, nested cause, and cause code when Node exposes them.
 - If a sync run finishes with partial failures, open the saved troubleshooting panel in GitHub Sync to inspect the repository, issue number, raw error, and suggested fix for each recorded failure.
-- If sync says the Paperclip API URL is not trusted, reopen the plugin from the current Paperclip host so the settings UI can refresh the saved origin, or set `PAPERCLIP_API_URL` for the worker.
+- If sync says the Paperclip API URL is not trusted, set **Worker Paperclip API URL** in GitHub Sync settings to the worker-accessible Paperclip API origin and retry.
 - If a pull request comment or review action is rejected, read the full toast message. Fine-grained GitHub tokens need write access to that repository, and GitHub requires a review summary when requesting changes.
 - If a GitHub-linked project does not show the **Pull requests** sidebar entry, reopen the plugin settings and re-save the mapping. The project pull request surfaces also recover older mappings when saved ids are missing, and they can fall back to the active project's bound GitHub repository when the project already has a GitHub workspace configured.
 - If GitHub rate limiting is hit, the plugin pauses sync until the reported reset time instead of retrying pointlessly.

@@ -18,7 +18,11 @@ import { requiresPaperclipBoardAccess } from '../src/paperclip-health.ts';
 import { normalizeCompanyAssigneeOptionsResponse } from '../src/ui/assignees.ts';
 import { fetchJson, fetchPaperclipHealth, resolveCliAuthPollUrl } from '../src/ui/http.ts';
 import { resolveInstalledGitHubSyncPluginId, resolvePluginSettingsHref } from '../src/ui/plugin-installation.ts';
-import { mergePluginConfig, normalizePluginConfig } from '../src/ui/plugin-config.ts';
+import {
+  mergePluginConfig,
+  normalizePluginConfig,
+  resolvePaperclipApiBaseUrlForPluginAction
+} from '../src/ui/plugin-config.ts';
 import {
   discoverExistingProjectSyncCandidates,
   filterExistingProjectSyncCandidates
@@ -4021,6 +4025,59 @@ test('normalizePluginConfig canonicalizes the trusted Paperclip API origin and d
   );
 });
 
+test('plugin actions use the configured Paperclip API URL instead of the browser origin', () => {
+  assert.equal(
+    resolvePaperclipApiBaseUrlForPluginAction({
+      paperclipApiBaseUrl: ' http://localhost:3100/api/health '
+    }, 'https://paperclip.example.test'),
+    'http://localhost:3100'
+  );
+
+  assert.equal(
+    resolvePaperclipApiBaseUrlForPluginAction({
+      paperclipApiBaseUrl: 'https://paperclip.example.test'
+    }, 'https://browser.example.test'),
+    'https://paperclip.example.test'
+  );
+
+  assert.equal(
+    resolvePaperclipApiBaseUrlForPluginAction({}, 'https://browser.example.test/path'),
+    'https://browser.example.test'
+  );
+
+  assert.equal(resolvePaperclipApiBaseUrlForPluginAction({}), undefined);
+});
+
+test('Paperclip API fetch diagnostics include nested network causes', async () => {
+  const workerModule = await importFreshWorkerModule();
+  const testing = workerModule.__testing as typeof workerModule.__testing & {
+    formatPaperclipApiFetchErrorMessage?: (
+      error: unknown,
+      url: string,
+      init?: RequestInit
+    ) => string;
+  };
+
+  assert.equal(typeof testing.formatPaperclipApiFetchErrorMessage, 'function');
+
+  const cause = Object.assign(
+    new Error('self-signed certificate; if the root CA is installed locally, try running Node.js with --use-system-ca'),
+    { code: 'DEPTH_ZERO_SELF_SIGNED_CERT' }
+  );
+  const fetchError = new TypeError('fetch failed', { cause });
+
+  const message = testing.formatPaperclipApiFetchErrorMessage(
+    fetchError,
+    'https://paperclip.example.test/api/health',
+    { method: 'GET' }
+  );
+
+  assert.match(message, /GET https:\/\/paperclip\.example\.test\/api\/health/);
+  assert.match(message, /fetch failed/);
+  assert.match(message, /self-signed certificate/);
+  assert.match(message, /DEPTH_ZERO_SELF_SIGNED_CERT/);
+});
+
 test('manifest exposes GitHub Sync page, sidebar, dashboard widgets, and settings UI metadata, config schema, and job', async () => {
   const uiModule = await importFreshUiModule() as {
     GitHubSyncDashboardWidget?: unknown;
@@ -4047,6 +4104,11 @@ test('manifest exposes GitHub Sync page, sidebar, dashboard widgets, and setting
   assert.ok(manifest.capabilities.includes('agents.read'));
   assert.equal((manifest.instanceConfigSchema as { properties?: Record<string, unknown> }).properties?.githubTokenRefs ? 'present' : 'missing', 'present');
   assert.equal((manifest.instanceConfigSchema as { properties?: Record<string, unknown> }).properties?.paperclipBoardApiTokenRefs ? 'present' : 'missing', 'present');
+  assert.equal(
+    ((manifest.instanceConfigSchema as { properties?: Record<string, { default?: unknown }> }).properties?.paperclipApiBaseUrl)?.default,
+    undefined
+  );
+  assert.equal('PAPERCLIP_API_URL' in ((manifest.instanceConfigSchema as { properties?: Record<string, unknown> }).properties ?? {}), false);
   const pullRequestsPageSlot = manifest.ui?.slots?.find((slot) => slot.id === 'paperclip-github-plugin-project-pull-requests-page');
   const projectSidebarItemSlot = manifest.ui?.slots?.find((slot) => slot.id === 'paperclip-github-plugin-project-pull-requests-sidebar-item');
   const settingsSlot = manifest.ui?.slots?.find((slot) => slot.type === 'settingsPage');
@@ -10917,6 +10979,22 @@ test('worker normalizes and saves the Paperclip API base URL alongside setup', a
   assert.equal(result.paperclipApiBaseUrl, 'http://127.0.0.1:63675');
 });
 
+test('settings.registration reads the paperclipApiBaseUrl plugin config in the worker', async () => {
+  const harness = createTestHarness({
+    manifest,
+    config: {
+      paperclipApiBaseUrl: 'http://127.0.0.1:63675/api/health'
+    }
+  });
+  await plugin.definition.setup(harness.ctx);
+
+  const result = await harness.getData<{
+    paperclipApiBaseUrl?: string;
+  }>('settings.registration', {});
+
+  assert.equal(result.paperclipApiBaseUrl, 'http://127.0.0.1:63675');
+});
+
 test('worker scopes the saved Paperclip API base URL to the requested company', async () => {
   const harness = createTestHarness({
     manifest,
@@ -14247,8 +14325,8 @@ test('worker surfaces an actionable sync error when the Paperclip label API retu
     assert.equal(sync.syncState.createdIssuesCount, 1);
     assert.equal(sync.syncState.errorDetails?.phase, 'syncing_labels');
     assert.match(sync.syncState.errorDetails?.rawMessage ?? '', /authenticated Paperclip API response/);
-    assert.match(sync.syncState.errorDetails?.rawMessage ?? '', /PAPERCLIP_API_URL/);
-    assert.match(sync.syncState.errorDetails?.suggestedAction ?? '', /PAPERCLIP_API_URL/);
+    assert.match(sync.syncState.errorDetails?.rawMessage ?? '', /Worker Paperclip API URL/);
+    assert.match(sync.syncState.errorDetails?.suggestedAction ?? '', /Worker Paperclip API URL/);
     assert.ok((sync.syncState.erroredIssuesCount ?? 0) >= 1);
     assert.ok((sync.syncState.recentFailures?.length ?? 0) >= 1);
     const labelFailure = sync.syncState.recentFailures?.find((entry) =>
@@ -14257,7 +14335,7 @@ test('worker surfaces an actionable sync error when the Paperclip label API retu
     assert.ok(labelFailure);
     assert.match(labelFailure?.message ?? '', /syncing issue labels/i);
     assert.match(labelFailure?.rawMessage ?? '', /authenticated Paperclip API response/);
-    assert.match(labelFailure?.suggestedAction ?? '', /PAPERCLIP_API_URL/);
+    assert.match(labelFailure?.suggestedAction ?? '', /Worker Paperclip API URL/);
     assert.ok(
       harness.logs.find((entry) =>
         entry.level === 'warn'

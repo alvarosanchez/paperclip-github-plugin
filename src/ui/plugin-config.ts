@@ -11,7 +11,7 @@ function normalizeOptionalString(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim() ? value.trim() : undefined;
 }
 
-function normalizePaperclipApiBaseUrl(value: unknown): string | undefined {
+export function normalizePaperclipApiBaseUrl(value: unknown): string | undefined {
   const normalizedValue = normalizeOptionalString(value);
   if (!normalizedValue) {
     return undefined;
@@ -97,6 +97,10 @@ export function normalizePluginConfig(value: unknown): GitHubSyncPluginConfig {
   }
 
   return record as GitHubSyncPluginConfig;
+}
+
+export function resolvePaperclipApiBaseUrlForPluginAction(value: unknown, fallbackOrigin?: unknown): string | undefined {
+  return normalizePluginConfig(value).paperclipApiBaseUrl ?? normalizePaperclipApiBaseUrl(fallbackOrigin);
 }
 
 export function mergePluginConfig(

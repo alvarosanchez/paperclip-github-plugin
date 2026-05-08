@@ -16,7 +16,12 @@ import { requiresPaperclipBoardAccess } from '../paperclip-health.ts';
 import { normalizeCompanyAssigneeOptionsResponse, type GitHubSyncAssigneeOption } from './assignees.ts';
 import { buildPaperclipUrl, fetchJson, fetchPaperclipHealth, resolveCliAuthPollUrl } from './http.ts';
 import { resolveInstalledGitHubSyncPluginId, resolvePluginSettingsHref } from './plugin-installation.ts';
-import { mergePluginConfig, normalizePluginConfig } from './plugin-config.ts';
+import {
+  mergePluginConfig,
+  normalizePaperclipApiBaseUrl,
+  normalizePluginConfig,
+  resolvePaperclipApiBaseUrlForPluginAction
+} from './plugin-config.ts';
 import {
   discoverExistingProjectSyncCandidates,
   filterExistingProjectSyncCandidates,
@@ -263,6 +268,7 @@ interface GitHubSyncSettings {
   advancedSettings: GitHubSyncAdvancedSettings;
   availableAssignees?: GitHubSyncAssigneeOption[];
   paperclipApiBaseUrl?: string;
+  paperclipApiBaseUrlConfigured?: boolean;
   githubTokenConfigured?: boolean;
   githubTokenLogin?: string;
   paperclipBoardAccessConfigured?: boolean;
@@ -5779,7 +5785,7 @@ function shouldAutofillProjectName(mapping: RepositoryMapping): boolean {
   return previousSuggestedProjectName !== '' && currentProjectName === previousSuggestedProjectName;
 }
 
-function getPaperclipApiBaseUrl(): string | undefined {
+function getPaperclipApiBrowserOrigin(): string | undefined {
   if (typeof window === 'undefined' || !window.location?.origin) {
     return undefined;
   }
@@ -5835,11 +5841,6 @@ async function fetchPluginDataResult<T>(params: {
 }
 
 async function syncTrustedPaperclipApiBaseUrl(pluginId: string | null): Promise<string | undefined> {
-  const paperclipApiBaseUrl = getPaperclipApiBaseUrl();
-  if (!paperclipApiBaseUrl) {
-    return undefined;
-  }
-
   const resolvedPluginId = await resolveCurrentPluginId(pluginId);
   if (!resolvedPluginId) {
     throw new Error(
@@ -5847,14 +5848,17 @@ async function syncTrustedPaperclipApiBaseUrl(pluginId: string | null): Promise<
     );
   }
 
+  const currentConfigResponse = await fetchJson<PluginConfigResponse | null>(`/api/plugins/${resolvedPluginId}/config`);
+  const currentConfig = normalizePluginConfig(currentConfigResponse?.configJson);
+  const paperclipApiBaseUrl = resolvePaperclipApiBaseUrlForPluginAction(currentConfig, getPaperclipApiBrowserOrigin());
+  if (!paperclipApiBaseUrl) {
+    return undefined;
+  }
   const lastSyncedPaperclipApiBaseUrl = syncedPaperclipApiBaseUrlsByPluginId.get(resolvedPluginId);
   if (lastSyncedPaperclipApiBaseUrl === paperclipApiBaseUrl) {
     return paperclipApiBaseUrl;
   }
 
-  await patchPluginConfig(resolvedPluginId, {
-    paperclipApiBaseUrl
-  });
   syncedPaperclipApiBaseUrlsByPluginId.set(resolvedPluginId, paperclipApiBaseUrl);
 
   return paperclipApiBaseUrl;
@@ -11268,6 +11272,7 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
   const [cancellingSync, setCancellingSync] = useState(false);
   const [manualSyncRequestError, setManualSyncRequestError] = useState<string | null>(null);
   const [scheduleFrequencyDraft, setScheduleFrequencyDraft] = useState(String(DEFAULT_SCHEDULE_FREQUENCY_MINUTES));
+  const [paperclipApiBaseUrlDraft, setPaperclipApiBaseUrlDraft] = useState('');
   const [ignoredAuthorsDraft, setIgnoredAuthorsDraft] = useState(DEFAULT_ADVANCED_SETTINGS.ignoredIssueAuthorUsernames.join(', '));
   const [tokenStatusOverride, setTokenStatusOverride] = useState<TokenStatus | null>(null);
   const [validatedLogin, setValidatedLogin] = useState<string | null>(null);
@@ -11323,6 +11328,11 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
       updatedAt: settings.data.updatedAt
     });
     setScheduleFrequencyDraft(String(nextScheduleFrequencyMinutes));
+    setPaperclipApiBaseUrlDraft(
+      settings.data.paperclipApiBaseUrlConfigured
+        ? settings.data.paperclipApiBaseUrl ?? ''
+        : getPaperclipApiBrowserOrigin() ?? ''
+    );
     setIgnoredAuthorsDraft(normalizeAdvancedSettings(settings.data.advancedSettings).ignoredIssueAuthorUsernames.join(', '));
     setTokenDraft('');
     setValidatedLogin(tokenUiState.validatedLogin);
@@ -11678,6 +11688,18 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
   const scheduleFrequencyMinutes = parseScheduleFrequencyDraft(scheduleFrequencyDraft) ?? form.scheduleFrequencyMinutes;
   const savedScheduleFrequencyMinutes = normalizeScheduleFrequencyMinutes(currentSettings?.scheduleFrequencyMinutes);
   const scheduleDirty = scheduleFrequencyError === null && scheduleFrequencyMinutes !== savedScheduleFrequencyMinutes;
+  const browserPaperclipApiBaseUrl = getPaperclipApiBrowserOrigin();
+  const normalizedPaperclipApiBaseUrlDraft = normalizePaperclipApiBaseUrl(paperclipApiBaseUrlDraft);
+  const paperclipApiBaseUrlError =
+    paperclipApiBaseUrlDraft.trim() && !normalizedPaperclipApiBaseUrlDraft
+      ? 'Enter a valid URL.'
+      : null;
+  const effectivePaperclipApiBaseUrl = normalizedPaperclipApiBaseUrlDraft ?? browserPaperclipApiBaseUrl;
+  const savedPaperclipApiBaseUrl = currentSettings?.paperclipApiBaseUrlConfigured
+    ? currentSettings.paperclipApiBaseUrl ?? ''
+    : browserPaperclipApiBaseUrl ?? '';
+  const paperclipApiBaseUrlDirty =
+    paperclipApiBaseUrlError === null && (normalizedPaperclipApiBaseUrlDraft ?? '') !== savedPaperclipApiBaseUrl;
   const mappings = form.mappings.length > 0 ? form.mappings : [createEmptyMapping(0)];
   const settingsMutationsLocked = syncInFlight;
   const settingsMutationsLockReason = settingsMutationsLocked
@@ -11697,7 +11719,8 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
     !submittingSetup &&
     !showInitialLoadingState &&
     scheduleFrequencyError === null &&
-    (mappingsDirty || advancedSettingsDirty || scheduleDirty);
+    paperclipApiBaseUrlError === null &&
+    (mappingsDirty || advancedSettingsDirty || scheduleDirty || paperclipApiBaseUrlDirty);
   const canConnectBoardAccess =
     hasCompanyContext &&
     !settingsMutationsLocked &&
@@ -12225,6 +12248,10 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
         throw new Error(scheduleFrequencyError);
       }
 
+      if (paperclipApiBaseUrlError) {
+        throw new Error(paperclipApiBaseUrlError);
+      }
+
       const resolvedMappings: RepositoryMapping[] = [];
       for (const mapping of form.mappings) {
         const repositoryInput = mapping.repositoryUrl.trim();
@@ -12258,7 +12285,19 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
         });
       }
 
-      const trustedPaperclipApiBaseUrl = await syncTrustedPaperclipApiBaseUrl(pluginIdFromLocation);
+      const pluginId = await resolveCurrentPluginId(pluginIdFromLocation);
+      if (!pluginId) {
+        throw new Error('Plugin id is required to save setup.');
+      }
+
+      const trustedPaperclipApiBaseUrl = effectivePaperclipApiBaseUrl;
+      if (!trustedPaperclipApiBaseUrl) {
+        throw new Error('Could not resolve the current browser origin for Paperclip API calls.');
+      }
+
+      await patchPluginConfig(pluginId, {
+        paperclipApiBaseUrl: normalizedPaperclipApiBaseUrlDraft ?? ''
+      });
       const result = await saveRegistration({
         companyId,
         mappings: resolvedMappings,
@@ -12286,9 +12325,11 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
         advancedSettings: normalizeAdvancedSettings(result.advancedSettings),
         availableAssignees: result.availableAssignees ?? current.availableAssignees,
         paperclipApiBaseUrl: result.paperclipApiBaseUrl,
+        paperclipApiBaseUrlConfigured: Boolean(normalizedPaperclipApiBaseUrlDraft),
         updatedAt: result.updatedAt
       }));
       setScheduleFrequencyDraft(String(normalizeScheduleFrequencyMinutes(result.scheduleFrequencyMinutes)));
+      setPaperclipApiBaseUrlDraft(normalizedPaperclipApiBaseUrlDraft ? result.paperclipApiBaseUrl ?? trustedPaperclipApiBaseUrl : '');
 
       toast({
         title: 'GitHub sync setup saved',
@@ -13101,6 +13142,33 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
                   </div>
                 </div>
 
+                <div className="ghsync__schedule-card">
+                  <div className="ghsync__field">
+                    <label htmlFor="paperclip-api-base-url">Worker Paperclip API URL</label>
+                    <input
+                      id="paperclip-api-base-url"
+                      className="ghsync__input"
+                      type="url"
+                      value={paperclipApiBaseUrlDraft}
+                      disabled={settingsMutationsLocked || !hasCompanyContext}
+                      onChange={(event) => {
+                        setPaperclipApiBaseUrlDraft(event.currentTarget.value);
+                      }}
+                      placeholder={browserPaperclipApiBaseUrl ?? 'https://paperclip.example.com'}
+                      autoComplete="off"
+                    />
+                    <p className={`ghsync__hint${paperclipApiBaseUrlError ? ' ghsync__hint--error' : ''}`}>
+                      {paperclipApiBaseUrlError ?? 'Leave blank to use the current browser origin.'}
+                    </p>
+                  </div>
+
+                  <div className="ghsync__schedule-meta">
+                    <span className="ghsync__scope-pill ghsync__scope-pill--global">Worker</span>
+                    <strong>{effectivePaperclipApiBaseUrl ?? 'Browser origin unavailable'}</strong>
+                    <span>{normalizedPaperclipApiBaseUrlDraft ? 'Configured override.' : 'Using browser origin.'}</span>
+                  </div>
+                </div>
+
                 {!syncUnlocked ? (
                   <div className="ghsync__locked">
                     <div>
@@ -13282,6 +13350,10 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
               <div className="ghsync__detail">
                 <span className="ghsync__detail-label">Auto-sync</span>
                 <strong className="ghsync__detail-value">{scheduleDescription}</strong>
+              </div>
+              <div className="ghsync__detail">
+                <span className="ghsync__detail-label">Worker API</span>
+                <strong className="ghsync__detail-value">{effectivePaperclipApiBaseUrl}</strong>
               </div>
               <div className="ghsync__detail">
                 <span className="ghsync__detail-label">Last sync</span>

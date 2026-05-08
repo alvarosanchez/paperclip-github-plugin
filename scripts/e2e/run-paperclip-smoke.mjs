@@ -31,8 +31,10 @@ const paperclipaiPackageSpec = paperclipaiVersion.startsWith('paperclipai@')
 const requestedPort = process.env.PAPERCLIP_E2E_PORT ? Number(process.env.PAPERCLIP_E2E_PORT) : 3100;
 const requestedDbPort = process.env.PAPERCLIP_E2E_DB_PORT ? Number(process.env.PAPERCLIP_E2E_DB_PORT) : 54329;
 const defaultTimeoutMs = 30000;
+const ignoredWorkerEnvPaperclipApiUrl = process.env.PAPERCLIP_E2E_IGNORED_WORKER_ENV_PAPERCLIP_API_URL?.trim() || '';
+const { PAPERCLIP_API_URL: _ignoredPaperclipApiUrl, ...processEnvForHarness } = process.env;
 const env = {
-  ...process.env,
+  ...processEnvForHarness,
   CI: 'true',
   BROWSER: 'none',
   DO_NOT_TRACK: '1',
@@ -42,6 +44,9 @@ const env = {
   PAPERCLIP_INSTANCE_ID: instanceId,
   FORCE_COLOR: '0'
 };
+const serverEnv = ignoredWorkerEnvPaperclipApiUrl
+  ? { ...env, PAPERCLIP_API_URL: ignoredWorkerEnvPaperclipApiUrl }
+  : env;
 
 let serverProcess;
 let cleanedUp = false;
@@ -201,6 +206,62 @@ async function fetchJson(url, init = {}) {
   }
 
   return body;
+}
+
+async function readSettingsRegistration(installedPluginId, companyId) {
+  const response = await fetchJson(new URL(`/api/plugins/${installedPluginId}/data/settings.registration`, baseUrl).toString(), {
+    method: 'POST',
+    body: JSON.stringify({
+      companyId,
+      params: {
+        companyId
+      }
+    })
+  });
+
+  const data = response?.data;
+  if (!data || typeof data !== 'object') {
+    throw new Error(`Expected settings.registration to return a data object, received ${JSON.stringify(response)}.`);
+  }
+
+  return data;
+}
+
+async function assertWorkerPaperclipApiUrlFromSettingsUi(page, installedPluginId, companyId) {
+  const apiUrlInput = page.getByLabel('Worker Paperclip API URL', { exact: true });
+  await apiUrlInput.waitFor({ timeout: 120000 });
+  const initialValue = await apiUrlInput.inputValue();
+  if (initialValue !== baseUrl) {
+    throw new Error(`Expected Worker Paperclip API URL field to be prefilled with browser origin ${baseUrl}, received ${initialValue || '<empty>'}.`);
+  }
+
+  const configuredUrl = `http://localhost:${serverPort}`;
+  await apiUrlInput.fill(configuredUrl);
+  await page.getByRole('button', { name: 'Save settings', exact: true }).click();
+
+  const settings = await readSettingsRegistration(installedPluginId, companyId);
+  if (settings.paperclipApiBaseUrl !== configuredUrl) {
+    throw new Error(
+      `Expected worker settings.registration to read paperclipApiBaseUrl from settings UI as ${configuredUrl}, received ${settings.paperclipApiBaseUrl ?? 'undefined'}.`
+    );
+  }
+
+  log(`Verified settings UI prefills browser origin, saves paperclipApiBaseUrl, and the worker reads it as ${configuredUrl}.`);
+}
+
+async function assertWorkerDoesNotReadPaperclipApiUrlFromRuntimeEnv(installedPluginId, companyId) {
+  if (!ignoredWorkerEnvPaperclipApiUrl) {
+    return;
+  }
+
+  const settings = await readSettingsRegistration(installedPluginId, companyId);
+  if (settings.paperclipApiBaseUrl === ignoredWorkerEnvPaperclipApiUrl) {
+    throw new Error(
+      `Expected plugin worker runtime to ignore process.env.PAPERCLIP_API_URL, but settings.registration returned ${ignoredWorkerEnvPaperclipApiUrl}.`
+    );
+  }
+
+  log(`Verified process.env.PAPERCLIP_API_URL is not visible to the plugin worker as ${ignoredWorkerEnvPaperclipApiUrl}.`);
 }
 
 async function ensureConfigFile(configPath) {
@@ -709,7 +770,7 @@ async function main() {
 
   serverProcess = spawn('npx', getPaperclipCommandArgs(['run', '--config', configPath, '--data-dir', dataDir]), {
     cwd: pluginRoot,
-    env,
+    env: serverEnv,
     detached: true,
     stdio: ['ignore', 'pipe', 'pipe']
   });
@@ -779,6 +840,8 @@ async function main() {
     }
     await page.getByRole('heading', { name: 'Repositories', exact: true }).waitFor({ timeout: 120000 });
     await page.getByRole('heading', { name: 'Sync', exact: true }).waitFor({ timeout: 120000 });
+    await assertWorkerDoesNotReadPaperclipApiUrlFromRuntimeEnv(installedPluginId, company.id);
+    await assertWorkerPaperclipApiUrlFromSettingsUi(page, installedPluginId, company.id);
 
     const dashboardUrl = company?.prefix ? new URL(`/${company.prefix}`, baseUrl).toString() : baseUrl;
     await gotoWithTimeout(page, dashboardUrl);

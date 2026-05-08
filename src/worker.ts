@@ -608,11 +608,11 @@ class PaperclipLabelSyncError extends Error {
     if (failure?.requiresAuthentication) {
       message =
         `Could not map ${labelSubject} because the worker reached an authenticated Paperclip API response${location} instead of JSON. `
-        + 'Connect Paperclip board access in plugin settings, set `PAPERCLIP_API_URL` to a worker-accessible Paperclip API origin, or expose the local Paperclip API to the worker without browser-session auth.';
+        + 'Connect Paperclip board access in plugin settings, set Worker Paperclip API URL to a worker-accessible Paperclip API origin, or expose the local Paperclip API to the worker without browser-session auth.';
     } else if (failure?.status === 404 || failure?.status === 405) {
       message =
         `Could not map ${labelSubject} because the Paperclip label API${location} is not available to the worker. `
-        + 'Set `PAPERCLIP_API_URL` to a worker-accessible Paperclip API origin, then retry sync.';
+        + 'Set Worker Paperclip API URL to a worker-accessible Paperclip API origin, then retry sync.';
     } else if (failure?.errorMessage) {
       message = `Could not map ${labelSubject} because the Paperclip label API${location} failed: ${failure.errorMessage}`;
     } else if (params.paperclipApiBaseUrl) {
@@ -620,7 +620,7 @@ class PaperclipLabelSyncError extends Error {
     } else {
       message =
         `Could not map ${labelSubject} because no worker-accessible Paperclip label API is configured. `
-        + 'Set `PAPERCLIP_API_URL` to a worker-accessible Paperclip API origin, then retry sync.';
+        + 'Set Worker Paperclip API URL to a worker-accessible Paperclip API origin, then retry sync.';
     }
 
     super(message);
@@ -2160,6 +2160,50 @@ function getErrorMessage(error: unknown): string {
   return String(error);
 }
 
+function getErrorCause(error: unknown): unknown {
+  if (!error || typeof error !== 'object' || !('cause' in error)) {
+    return undefined;
+  }
+
+  return (error as { cause?: unknown }).cause;
+}
+
+function getErrorCode(error: unknown): string | undefined {
+  if (!error || typeof error !== 'object' || !('code' in error)) {
+    return undefined;
+  }
+
+  const code = (error as { code?: unknown }).code;
+  return typeof code === 'string' && code.trim() ? code.trim() : undefined;
+}
+
+function getErrorDiagnosticMessage(error: unknown): string {
+  const primaryMessage = getErrorMessage(error).trim();
+  const cause = getErrorCause(error);
+  const causeMessage = cause ? getErrorMessage(cause).trim() : '';
+  const errorCode = getErrorCode(error);
+  const causeCode = cause ? getErrorCode(cause) : undefined;
+  const code = errorCode ?? causeCode;
+  const parts = [primaryMessage || String(error)];
+
+  if (causeMessage && causeMessage !== primaryMessage) {
+    parts.push(`cause: ${causeMessage}`);
+  }
+
+  if (code) {
+    parts.push(`code: ${code}`);
+  }
+
+  return parts.join(' | ');
+}
+
+function formatPaperclipApiFetchErrorMessage(error: unknown, url: string, init?: RequestInit): string {
+  const method = typeof init?.method === 'string' && init.method.trim()
+    ? init.method.trim().toUpperCase()
+    : 'GET';
+  return `Paperclip API fetch failed (${method} ${url}): ${getErrorDiagnosticMessage(error)}`;
+}
+
 function isPaperclipLabelSyncError(error: unknown): error is PaperclipLabelSyncError {
   return error instanceof PaperclipLabelSyncError;
 }
@@ -3084,14 +3128,14 @@ function getSyncFailureSuggestedAction(error: unknown, context: SyncFailureConte
 
   if (isPaperclipLabelSyncError(error)) {
     if (error.requiresAuthentication || error.status === 401 || error.status === 403) {
-      return 'The worker could not reuse the board login session for the Paperclip label API. Connect Paperclip board access in settings, or set `PAPERCLIP_API_URL` to a worker-accessible Paperclip API origin, then retry sync.';
+      return 'The worker could not reuse the board login session for the Paperclip label API. Connect Paperclip board access in settings, or set Worker Paperclip API URL to a worker-accessible Paperclip API origin, then retry sync.';
     }
 
     if (error.paperclipApiBaseUrl) {
       return `Confirm that the Paperclip label API at ${error.paperclipApiBaseUrl} is reachable from the plugin worker and returns JSON, then retry sync.`;
     }
 
-    return 'Set `PAPERCLIP_API_URL` to a worker-accessible Paperclip API origin, then retry sync.';
+    return 'Set Worker Paperclip API URL to a worker-accessible Paperclip API origin, then retry sync.';
   }
 
   const rawMessage = getErrorMessage(error).trim().toLowerCase();
@@ -5659,20 +5703,7 @@ function normalizePaperclipApiBaseUrlByCompanyId(value: unknown): PaperclipApiBa
   return entries.length > 0 ? Object.fromEntries(entries) : undefined;
 }
 
-function getRuntimePaperclipApiBaseUrl(): string | undefined {
-  if (typeof process === 'undefined' || !process?.env) {
-    return undefined;
-  }
-
-  return normalizePaperclipApiBaseUrl(process.env.PAPERCLIP_API_URL);
-}
-
 function resolvePaperclipApiBaseUrl(...values: unknown[]): string | undefined {
-  const runtimePaperclipApiBaseUrl = getRuntimePaperclipApiBaseUrl();
-  if (runtimePaperclipApiBaseUrl) {
-    return runtimePaperclipApiBaseUrl;
-  }
-
   for (const value of values) {
     const normalizedValue = normalizePaperclipApiBaseUrl(value);
     if (normalizedValue) {
@@ -5706,11 +5737,6 @@ function resolveTrustedPaperclipApiBaseUrlInput(
   ,
   companyId?: string
 ): string | undefined {
-  const runtimePaperclipApiBaseUrl = getRuntimePaperclipApiBaseUrl();
-  if (runtimePaperclipApiBaseUrl) {
-    return runtimePaperclipApiBaseUrl;
-  }
-
   const requestedPaperclipApiBaseUrl = normalizePaperclipApiBaseUrl(value);
   const configuredPaperclipApiBaseUrl = normalizePaperclipApiBaseUrl(config?.paperclipApiBaseUrl);
   const normalizedCompanyId = normalizeCompanyId(companyId);
@@ -11417,7 +11443,14 @@ async function fetchPaperclipApi(
   // Use direct worker-side fetch here. The host-managed `ctx.http.fetch(...)`
   // proxy rejects loopback/private IPs such as `127.0.0.1`, but the local
   // Paperclip REST API is intentionally served from the host machine.
-  return fetch(url, applyPaperclipApiAuthentication(init, options?.companyId));
+  const authenticatedInit = applyPaperclipApiAuthentication(init, options?.companyId);
+  try {
+    return await fetch(url, authenticatedInit);
+  } catch (error) {
+    throw new Error(formatPaperclipApiFetchErrorMessage(error, url, authenticatedInit), {
+      cause: error
+    });
+  }
 }
 
 async function detectPaperclipBoardAccessRequirement(paperclipApiBaseUrl?: string): Promise<boolean> {
@@ -21031,6 +21064,7 @@ export function shouldStartWorkerHost(moduleUrl: string, entry = process.argv[1]
 export const __testing = {
   buildSyncFallbackExecutionStatePatch,
   createGitHubToolOctokit,
+  formatPaperclipApiFetchErrorMessage,
   hasUnresolvedPaperclipIssueBlocker,
   isHealthyMaintainerWaitTransition,
   resolveSyncTransitionAssignee
@@ -21076,6 +21110,7 @@ const plugin = definePlugin({
         ...getPublicSettingsForScope(settingsForResponse, requestedCompanyId),
         ...(includeAssignees ? { availableAssignees } : {}),
         totalSyncedIssuesCount: countImportedIssuesForMappings(importRegistry, scopedMappings),
+        paperclipApiBaseUrlConfigured: Boolean(normalizePaperclipApiBaseUrl(config.paperclipApiBaseUrl)),
         githubTokenConfigured,
         paperclipBoardAccessConfigured: requestedCompanyId
           ? hasConfiguredPaperclipBoardAccess(settingsForResponse, config, requestedCompanyId)
