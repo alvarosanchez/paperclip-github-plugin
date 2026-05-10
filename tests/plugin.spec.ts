@@ -13,8 +13,8 @@ import {
   COMPANY_METRIC_API_ROUTE_KEY,
   COMPANY_METRIC_API_ROUTE_PATH,
   GITHUB_SYNC_PLUGIN_ID,
-  PULL_REQUEST_SCREENSHOT_API_ROUTE_KEY,
-  PULL_REQUEST_SCREENSHOT_API_ROUTE_PATH
+  PULL_REQUEST_ASSET_API_ROUTE_KEY,
+  PULL_REQUEST_ASSET_API_ROUTE_PATH
 } from '../src/kpi-contract.ts';
 import { requiresPaperclipBoardAccess } from '../src/paperclip-health.ts';
 import { normalizeCompanyAssigneeOptionsResponse } from '../src/ui/assignees.ts';
@@ -645,7 +645,7 @@ async function postIssueLinkApiRoute(
   } as Parameters<NonNullable<typeof plugin.definition.onApiRequest>>[0]);
 }
 
-async function postPullRequestScreenshotApiRoute(
+async function postPullRequestAssetApiRoute(
   payload: Record<string, unknown>,
   options: {
     companyId?: string;
@@ -659,9 +659,9 @@ async function postPullRequestScreenshotApiRoute(
   const actorType = options.actorType ?? 'agent';
 
   return await onApiRequest({
-    routeKey: PULL_REQUEST_SCREENSHOT_API_ROUTE_KEY,
+    routeKey: PULL_REQUEST_ASSET_API_ROUTE_KEY,
     method: 'POST',
-    path: PULL_REQUEST_SCREENSHOT_API_ROUTE_PATH,
+    path: PULL_REQUEST_ASSET_API_ROUTE_PATH,
     params: {},
     query: {},
     body: payload,
@@ -1601,7 +1601,7 @@ test('manifest declares the GitHub agent tools, KPI API route, and capabilities'
       'request_pull_request_reviewers',
       'list_organization_projects',
       'add_pull_request_to_project',
-      'upload_pull_request_screenshot',
+      'upload_pull_request_asset',
       'link_github_item'
     ]
   );
@@ -1632,9 +1632,9 @@ test('manifest declares the GitHub agent tools, KPI API route, and capabilities'
         companyResolution: null
       },
       {
-        routeKey: PULL_REQUEST_SCREENSHOT_API_ROUTE_KEY,
+        routeKey: PULL_REQUEST_ASSET_API_ROUTE_KEY,
         method: 'POST',
-        path: PULL_REQUEST_SCREENSHOT_API_ROUTE_PATH,
+        path: PULL_REQUEST_ASSET_API_ROUTE_PATH,
         auth: 'agent',
         capability: 'api.routes.register',
         companyResolution: null
@@ -1647,7 +1647,7 @@ test('manifest declares the GitHub agent tools, KPI API route, and capabilities'
   );
 });
 
-test('upload_pull_request_screenshot publishes an artifact branch image and returns markdown', async () => {
+test('upload_pull_request_asset publishes an image asset with embeddable markdown', async () => {
   const harness = await createGitHubAgentToolHarness();
   const originalFetch = globalThis.fetch;
   const imageBase64 = Buffer.from('fake png bytes').toString('base64');
@@ -1682,12 +1682,12 @@ test('upload_pull_request_screenshot publishes an artifact branch image and retu
       return jsonResponse({ ref: 'refs/heads/paperclip-artifacts-pr-42' }, 201);
     }
 
-    if (getDecodedRequestPathname(input) === '/repos/paperclipai/example-repo/contents/screenshots/pr-42/abcdef123456/metrics-dashboard.png') {
+    if (getDecodedRequestPathname(input) === '/repos/paperclipai/example-repo/contents/assets/pr-42/abcdef123456/metrics-dashboard.png') {
       if (init?.method === 'PUT') {
         uploadedBody = getJsonRequestBody(init);
         return jsonResponse({
           content: {
-            path: 'screenshots/pr-42/abcdef123456/metrics-dashboard.png'
+            path: 'assets/pr-42/abcdef123456/metrics-dashboard.png'
           },
           commit: {
             sha: '2222222222222222222222222222222222222222'
@@ -1702,7 +1702,7 @@ test('upload_pull_request_screenshot publishes an artifact branch image and retu
   };
 
   try {
-    const result = await harness.executeTool('upload_pull_request_screenshot', {
+    const result = await harness.executeTool('upload_pull_request_asset', {
       repository: 'paperclipai/example-repo',
       pullRequestNumber: 42,
       fileName: 'metrics dashboard.png',
@@ -1715,17 +1715,17 @@ test('upload_pull_request_screenshot publishes an artifact branch image and retu
     });
 
     assert.ok(!result.error);
-    const screenshot = (result.data as { screenshot: Record<string, unknown> }).screenshot;
-    assert.equal(screenshot.fileName, 'metrics-dashboard.png');
-    assert.equal(screenshot.artifactBranch, 'paperclip-artifacts-pr-42');
-    assert.equal(screenshot.path, 'screenshots/pr-42/abcdef123456/metrics-dashboard.png');
+    const asset = (result.data as { asset: Record<string, unknown> }).asset;
+    assert.equal(asset.fileName, 'metrics-dashboard.png');
+    assert.equal(asset.artifactBranch, 'paperclip-artifacts-pr-42');
+    assert.equal(asset.path, 'assets/pr-42/abcdef123456/metrics-dashboard.png');
     assert.equal(
-      screenshot.rawUrl,
-      'https://raw.githubusercontent.com/paperclipai/example-repo/2222222222222222222222222222222222222222/screenshots/pr-42/abcdef123456/metrics-dashboard.png'
+      asset.rawUrl,
+      'https://raw.githubusercontent.com/paperclipai/example-repo/2222222222222222222222222222222222222222/assets/pr-42/abcdef123456/metrics-dashboard.png'
     );
     assert.equal(
-      screenshot.markdown,
-      '![Metrics dashboard](https://raw.githubusercontent.com/paperclipai/example-repo/2222222222222222222222222222222222222222/screenshots/pr-42/abcdef123456/metrics-dashboard.png)'
+      asset.markdown,
+      '![Metrics dashboard](https://raw.githubusercontent.com/paperclipai/example-repo/2222222222222222222222222222222222222222/assets/pr-42/abcdef123456/metrics-dashboard.png)'
     );
     const capturedUploadBody = uploadedBody as Record<string, unknown> | null;
     assert.equal(capturedUploadBody?.content, imageBase64);
@@ -1736,10 +1736,10 @@ test('upload_pull_request_screenshot publishes an artifact branch image and retu
   }
 });
 
-test('pull request screenshot API route uploads screenshots for authenticated agents', async () => {
+test('pull request asset API route uploads PDF assets for authenticated agents', async () => {
   const harness = await createGitHubAgentToolHarness();
   const originalFetch = globalThis.fetch;
-  const imageBase64 = Buffer.from('fake webp bytes').toString('base64');
+  const pdfBase64 = Buffer.from('%PDF-1.4 fake pdf bytes').toString('base64');
 
   globalThis.fetch = async (input, init) => {
     const url = new URL(getRequestUrl(input));
@@ -1764,11 +1764,11 @@ test('pull request screenshot API route uploads screenshots for authenticated ag
       });
     }
 
-    if (getDecodedRequestPathname(input) === '/repos/paperclipai/example-repo/contents/screenshots/pr-43/fedcba987654/detail-view.webp') {
+    if (getDecodedRequestPathname(input) === '/repos/paperclipai/example-repo/contents/assets/pr-43/fedcba987654/review-report.pdf') {
       if (init?.method === 'PUT') {
         return jsonResponse({
           content: {
-            path: 'screenshots/pr-43/fedcba987654/detail-view.webp'
+            path: 'assets/pr-43/fedcba987654/review-report.pdf'
           },
           commit: {
             sha: '5555555555555555555555555555555555555555'
@@ -1783,22 +1783,23 @@ test('pull request screenshot API route uploads screenshots for authenticated ag
   };
 
   try {
-    const response = await postPullRequestScreenshotApiRoute({
+    const response = await postPullRequestAssetApiRoute({
       repository: 'paperclipai/example-repo',
       pullRequestNumber: 43,
-      fileName: 'detail view.webp',
-      alt: 'Detail view',
-      dataUrl: `data:image/webp;base64,${imageBase64}`
+      fileName: 'review report.pdf',
+      label: 'Review report PDF',
+      dataUrl: `data:application/pdf;base64,${pdfBase64}`
     });
 
     assert.equal(response?.status, 201);
-    const body = response?.body as { status: string; screenshot: Record<string, unknown> };
+    const body = response?.body as { status: string; asset: Record<string, unknown> };
     assert.equal(body.status, 'uploaded');
-    assert.equal(body.screenshot.fileName, 'detail-view.webp');
-    assert.equal(body.screenshot.artifactBranch, 'paperclip-artifacts-pr-43');
+    assert.equal(body.asset.fileName, 'review-report.pdf');
+    assert.equal(body.asset.artifactBranch, 'paperclip-artifacts-pr-43');
+    assert.equal(body.asset.mimeType, 'application/pdf');
     assert.equal(
-      body.screenshot.markdown,
-      '![Detail view](https://raw.githubusercontent.com/paperclipai/example-repo/5555555555555555555555555555555555555555/screenshots/pr-43/fedcba987654/detail-view.webp)'
+      body.asset.markdown,
+      '[Review report PDF](https://raw.githubusercontent.com/paperclipai/example-repo/5555555555555555555555555555555555555555/assets/pr-43/fedcba987654/review-report.pdf)'
     );
   } finally {
     globalThis.fetch = originalFetch;

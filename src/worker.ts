@@ -23,7 +23,7 @@ import {
   COMPANY_METRIC_API_ROUTE_KEY,
   GITHUB_SYNC_PLUGIN_ID,
   ISSUE_LINK_API_ROUTE_KEY,
-  PULL_REQUEST_SCREENSHOT_API_ROUTE_KEY,
+  PULL_REQUEST_ASSET_API_ROUTE_KEY,
 } from './kpi-contract.ts';
 import { normalizePaperclipHealthResponse, requiresPaperclipBoardAccess } from './paperclip-health.ts';
 
@@ -116,21 +116,39 @@ const AI_AUTHORED_MARKDOWN_FOOTER_PATTERN =
 const HIDDEN_GITHUB_IMPORT_MARKER_PREFIX = '<!-- paperclip-github-plugin-imported-from: ';
 const HIDDEN_GITHUB_IMPORT_MARKER_SUFFIX = ' -->';
 const EMPTY_GITHUB_ISSUE_DESCRIPTION_PLACEHOLDER = '_No description provided on GitHub._';
-const MAX_PULL_REQUEST_SCREENSHOT_BYTES = 10 * 1024 * 1024;
-const SUPPORTED_PULL_REQUEST_SCREENSHOT_MIME_TYPES = ['image/png', 'image/jpeg', 'image/webp', 'image/gif'] as const;
-type PullRequestScreenshotMimeType = (typeof SUPPORTED_PULL_REQUEST_SCREENSHOT_MIME_TYPES)[number];
-const PULL_REQUEST_SCREENSHOT_EXTENSION_BY_MIME_TYPE: Record<PullRequestScreenshotMimeType, string> = {
-  'image/png': 'png',
-  'image/jpeg': 'jpg',
-  'image/webp': 'webp',
-  'image/gif': 'gif'
-};
-const PULL_REQUEST_SCREENSHOT_MIME_TYPE_BY_EXTENSION: Record<string, PullRequestScreenshotMimeType> = {
+const MAX_PULL_REQUEST_ASSET_BYTES = 10 * 1024 * 1024;
+const DEFAULT_PULL_REQUEST_ASSET_MIME_TYPE = 'application/octet-stream';
+const PULL_REQUEST_ASSET_MIME_TYPE_BY_EXTENSION: Record<string, string> = {
   png: 'image/png',
   jpg: 'image/jpeg',
   jpeg: 'image/jpeg',
   webp: 'image/webp',
-  gif: 'image/gif'
+  gif: 'image/gif',
+  pdf: 'application/pdf',
+  txt: 'text/plain',
+  md: 'text/markdown',
+  markdown: 'text/markdown',
+  json: 'application/json',
+  csv: 'text/csv',
+  xml: 'application/xml',
+  zip: 'application/zip',
+  gz: 'application/gzip',
+  tgz: 'application/gzip'
+};
+const PULL_REQUEST_ASSET_EXTENSION_BY_MIME_TYPE: Record<string, string> = {
+  'image/png': 'png',
+  'image/jpeg': 'jpg',
+  'image/webp': 'webp',
+  'image/gif': 'gif',
+  'application/pdf': 'pdf',
+  'text/plain': 'txt',
+  'text/markdown': 'md',
+  'application/json': 'json',
+  'text/csv': 'csv',
+  'application/xml': 'xml',
+  'application/zip': 'zip',
+  'application/gzip': 'gz',
+  'application/octet-stream': 'bin'
 };
 
 type PluginSetupContext = Parameters<Parameters<typeof definePlugin>[0]['setup']>[0];
@@ -14476,28 +14494,39 @@ function buildToolSuccessResult(content: string, data: unknown): ToolResult {
   };
 }
 
-function normalizePullRequestScreenshotMimeType(value: unknown): PullRequestScreenshotMimeType | undefined {
+function normalizePullRequestAssetMimeType(value: unknown): string | undefined {
   if (typeof value !== 'string') {
     return undefined;
   }
 
   const normalized = value.trim().toLowerCase();
-  return SUPPORTED_PULL_REQUEST_SCREENSHOT_MIME_TYPES.find((mimeType) => mimeType === normalized);
+  if (!/^[a-z0-9][a-z0-9!#$&^_.+-]*\/[a-z0-9][a-z0-9!#$&^_.+-]*(?:;\s*[a-z0-9!#$&^_.+-]+=[a-z0-9!#$&^_.+-]+)*$/.test(normalized)) {
+    return undefined;
+  }
+
+  return normalized.split(';', 1)[0];
 }
 
-function getPullRequestScreenshotMimeTypeFromFileName(fileName: string): PullRequestScreenshotMimeType | undefined {
+function getPullRequestAssetMimeTypeFromFileName(fileName: string): string | undefined {
   const extensionMatch = fileName.trim().toLowerCase().match(/\.([a-z0-9]+)$/);
   if (!extensionMatch) {
     return undefined;
   }
 
-  return PULL_REQUEST_SCREENSHOT_MIME_TYPE_BY_EXTENSION[extensionMatch[1]];
+  return PULL_REQUEST_ASSET_MIME_TYPE_BY_EXTENSION[extensionMatch[1]];
 }
 
-function sanitizePullRequestScreenshotFileName(fileNameInput: unknown, mimeType: PullRequestScreenshotMimeType): string {
-  const fallbackBaseName = `screenshot.${PULL_REQUEST_SCREENSHOT_EXTENSION_BY_MIME_TYPE[mimeType]}`;
+function getPullRequestAssetExtension(fileName: string): string | undefined {
+  const extensionMatch = fileName.trim().toLowerCase().match(/\.([a-z0-9]+)$/);
+  return extensionMatch?.[1];
+}
+
+function sanitizePullRequestAssetFileName(fileNameInput: unknown, mimeType: string): string {
+  const inferredExtension = PULL_REQUEST_ASSET_EXTENSION_BY_MIME_TYPE[mimeType] ?? 'bin';
+  const fallbackBaseName = `asset.${inferredExtension}`;
   const rawFileName = normalizeOptionalString(fileNameInput) ?? fallbackBaseName;
   const lastSegment = rawFileName.split(/[\\/]+/).filter(Boolean).at(-1) ?? fallbackBaseName;
+  const extension = getPullRequestAssetExtension(lastSegment) ?? inferredExtension;
   const withoutExtension = lastSegment.replace(/\.[A-Za-z0-9]+$/, '');
   const sanitizedBaseName = withoutExtension
     .normalize('NFKD')
@@ -14505,17 +14534,17 @@ function sanitizePullRequestScreenshotFileName(fileNameInput: unknown, mimeType:
     .replace(/[-_.]+$/g, '')
     .replace(/^[-_.]+/g, '')
     .slice(0, 80)
-    || 'screenshot';
+    || 'asset';
 
-  return `${sanitizedBaseName}.${PULL_REQUEST_SCREENSHOT_EXTENSION_BY_MIME_TYPE[mimeType]}`;
+  return `${sanitizedBaseName}.${extension}`;
 }
 
-function sanitizePullRequestScreenshotAltText(value: unknown, fallbackFileName: string): string {
+function sanitizePullRequestAssetLabel(value: unknown, fallbackFileName: string): string {
   const normalized = normalizeOptionalString(value);
   return (normalized ?? fallbackFileName.replace(/[-_.]+/g, ' ')).slice(0, 200);
 }
 
-function sanitizePullRequestScreenshotArtifactBranch(value: unknown, pullRequestNumber: number): string {
+function sanitizePullRequestAssetArtifactBranch(value: unknown, pullRequestNumber: number): string {
   const normalized = normalizeOptionalString(value);
   const candidate = normalized ?? `paperclip-artifacts-pr-${pullRequestNumber}`;
   const sanitized = candidate
@@ -14530,23 +14559,23 @@ function sanitizePullRequestScreenshotArtifactBranch(value: unknown, pullRequest
   return sanitized;
 }
 
-function decodePullRequestScreenshotContent(payload: Record<string, unknown>): {
+function decodePullRequestAssetContent(payload: Record<string, unknown>): {
   bytes: Buffer;
-  mimeType: PullRequestScreenshotMimeType;
+  mimeType: string;
 } {
   const dataUrl = normalizeOptionalString(payload.dataUrl);
   let contentBase64 = normalizeOptionalString(payload.contentBase64);
-  let mimeType = normalizePullRequestScreenshotMimeType(payload.mimeType);
+  let mimeType = normalizePullRequestAssetMimeType(payload.mimeType);
 
   if (dataUrl) {
-    const match = dataUrl.match(/^data:([^;,]+);base64,(.+)$/is);
+    const match = dataUrl.match(/^data:([^;,]+(?:;[^,]+)?);base64,(.+)$/is);
     if (!match) {
-      throw new Error('dataUrl must be a base64 image data URL.');
+      throw new Error('dataUrl must be a base64 data URL.');
     }
 
-    const dataUrlMimeType = normalizePullRequestScreenshotMimeType(match[1]);
+    const dataUrlMimeType = normalizePullRequestAssetMimeType(match[1]);
     if (!dataUrlMimeType) {
-      throw new Error('dataUrl MIME type must be image/png, image/jpeg, image/webp, or image/gif.');
+      throw new Error('dataUrl MIME type must be a valid MIME type such as image/png or application/pdf.');
     }
 
     mimeType = dataUrlMimeType;
@@ -14557,22 +14586,19 @@ function decodePullRequestScreenshotContent(payload: Record<string, unknown>): {
     throw new Error('contentBase64 or dataUrl is required.');
   }
 
-  mimeType = mimeType ?? getPullRequestScreenshotMimeTypeFromFileName(normalizeOptionalString(payload.fileName) ?? '');
-  if (!mimeType) {
-    throw new Error('mimeType is required unless fileName has a supported image extension.');
-  }
+  mimeType = mimeType ?? getPullRequestAssetMimeTypeFromFileName(normalizeOptionalString(payload.fileName) ?? '') ?? DEFAULT_PULL_REQUEST_ASSET_MIME_TYPE;
 
   const normalizedBase64 = contentBase64.replace(/\s+/g, '');
-  if (!/^[A-Za-z0-9+/]*={0,2}$/.test(normalizedBase64)) {
-    throw new Error('Screenshot content must be valid base64.');
+  if (!/^[A-Za-z0-9+/]*={0,2}$/.test(normalizedBase64) || normalizedBase64.length % 4 === 1) {
+    throw new Error('Asset content must be valid base64.');
   }
 
   const bytes = Buffer.from(normalizedBase64, 'base64');
   if (bytes.length === 0) {
-    throw new Error('Screenshot content must not be empty.');
+    throw new Error('Asset content must not be empty.');
   }
-  if (bytes.length > MAX_PULL_REQUEST_SCREENSHOT_BYTES) {
-    throw new Error(`Screenshot content exceeds the ${MAX_PULL_REQUEST_SCREENSHOT_BYTES} byte limit.`);
+  if (bytes.length > MAX_PULL_REQUEST_ASSET_BYTES) {
+    throw new Error(`Asset content exceeds the ${MAX_PULL_REQUEST_ASSET_BYTES} byte limit.`);
   }
 
   return {
@@ -14581,21 +14607,26 @@ function decodePullRequestScreenshotContent(payload: Record<string, unknown>): {
   };
 }
 
-function buildPullRequestScreenshotMarkdown(alt: string, rawUrl: string): string {
-  return `![${alt.replace(/[\]\n\r]/g, ' ').trim()}](${rawUrl})`;
+function buildPullRequestAssetMarkdown(label: string, rawUrl: string, mimeType: string): string {
+  const normalizedLabel = label.replace(/[\]\n\r]/g, ' ').trim();
+  if (mimeType.startsWith('image/')) {
+    return `![${normalizedLabel}](${rawUrl})`;
+  }
+
+  return `[${normalizedLabel}](${rawUrl})`;
 }
 
-async function uploadPullRequestScreenshotArtifact(params: {
+async function uploadPullRequestAssetArtifact(params: {
   octokit: Octokit;
   repository: ParsedRepositoryReference;
   pullRequestNumber: number;
   payload: Record<string, unknown>;
 }): Promise<Record<string, unknown>> {
-  const { bytes, mimeType } = decodePullRequestScreenshotContent(params.payload);
-  const fileName = sanitizePullRequestScreenshotFileName(params.payload.fileName, mimeType);
-  const alt = sanitizePullRequestScreenshotAltText(params.payload.alt, fileName);
+  const { bytes, mimeType } = decodePullRequestAssetContent(params.payload);
+  const fileName = sanitizePullRequestAssetFileName(params.payload.fileName, mimeType);
+  const label = sanitizePullRequestAssetLabel(params.payload.label ?? params.payload.alt, fileName);
   const caption = normalizeOptionalString(params.payload.caption);
-  const artifactBranch = sanitizePullRequestScreenshotArtifactBranch(params.payload.artifactBranch, params.pullRequestNumber);
+  const artifactBranch = sanitizePullRequestAssetArtifactBranch(params.payload.artifactBranch, params.pullRequestNumber);
   const pullRequestResponse = await params.octokit.rest.pulls.get({
     owner: params.repository.owner,
     repo: params.repository.repo,
@@ -14606,7 +14637,7 @@ async function uploadPullRequestScreenshotArtifact(params: {
   });
   const headSha = pullRequestResponse.data.head.sha;
   const shortHeadSha = headSha.slice(0, 12);
-  const contentPath = `screenshots/pr-${params.pullRequestNumber}/${shortHeadSha}/${fileName}`;
+  const contentPath = `assets/pr-${params.pullRequestNumber}/${shortHeadSha}/${fileName}`;
 
   let branchSha: string | undefined;
   try {
@@ -14661,7 +14692,7 @@ async function uploadPullRequestScreenshotArtifact(params: {
     owner: params.repository.owner,
     repo: params.repository.repo,
     path: contentPath,
-    message: `Add screenshot for PR #${params.pullRequestNumber}`,
+    message: `Add asset for PR #${params.pullRequestNumber}`,
     content: bytes.toString('base64'),
     branch: artifactBranch,
     ...(existingFileSha ? { sha: existingFileSha } : {}),
@@ -14671,7 +14702,7 @@ async function uploadPullRequestScreenshotArtifact(params: {
   });
   const commitSha = updateResponse.data.commit.sha;
   const rawUrl = `https://raw.githubusercontent.com/${params.repository.owner}/${params.repository.repo}/${commitSha}/${contentPath}`;
-  const markdown = buildPullRequestScreenshotMarkdown(alt, rawUrl);
+  const markdown = buildPullRequestAssetMarkdown(label, rawUrl, mimeType);
 
   return {
     repository: params.repository.url,
@@ -14684,7 +14715,8 @@ async function uploadPullRequestScreenshotArtifact(params: {
     commitSha,
     rawUrl,
     markdown,
-    alt,
+    label,
+    ...(mimeType.startsWith('image/') ? { alt: label } : {}),
     ...(caption ? { caption } : {})
   };
 }
@@ -14949,12 +14981,12 @@ function normalizeIssueLinkApiRouteKind(payload: Record<string, unknown>): 'issu
   return null;
 }
 
-async function handlePullRequestScreenshotApiRoute(
+async function handlePullRequestAssetApiRoute(
   ctx: PluginSetupContext,
   input: PluginApiRequestInput
 ): Promise<PluginApiResponse> {
   if (input.actor.actorType !== 'agent') {
-    throw new Error('Pull request screenshots must be uploaded by an authenticated Paperclip agent.');
+    throw new Error('Pull request assets must be uploaded by an authenticated Paperclip agent.');
   }
 
   const payload = parseIssueLinkApiRouteBody(input);
@@ -14975,10 +15007,10 @@ async function handlePullRequestScreenshotApiRoute(
   }
 
   const octokit = await createGitHubToolOctokit(ctx, input.companyId, {
-    toolName: PULL_REQUEST_SCREENSHOT_API_ROUTE_KEY,
+    toolName: PULL_REQUEST_ASSET_API_ROUTE_KEY,
     repositoryUrl: repository.url
   });
-  const screenshot = await uploadPullRequestScreenshotArtifact({
+  const asset = await uploadPullRequestAssetArtifact({
     octokit,
     repository,
     pullRequestNumber,
@@ -14989,7 +15021,7 @@ async function handlePullRequestScreenshotApiRoute(
     status: 201,
     body: {
       status: 'uploaded',
-      screenshot
+      asset
     }
   };
 }
@@ -21278,13 +21310,13 @@ function registerGitHubAgentTools(ctx: PluginSetupContext): void {
   );
 
   ctx.tools.register(
-    'upload_pull_request_screenshot',
-    getGitHubAgentToolDeclaration('upload_pull_request_screenshot'),
+    'upload_pull_request_asset',
+    getGitHubAgentToolDeclaration('upload_pull_request_asset'),
     async (params, runCtx) => executeGitHubTool(async () => {
       const input = getToolInputRecord(params);
       const target = await resolveGitHubPullRequestToolTarget(ctx, runCtx, input);
-      const octokit = await createAgentToolOctokit(runCtx, 'upload_pull_request_screenshot', target.repository);
-      const screenshot = await uploadPullRequestScreenshotArtifact({
+      const octokit = await createAgentToolOctokit(runCtx, 'upload_pull_request_asset', target.repository);
+      const asset = await uploadPullRequestAssetArtifact({
         octokit,
         repository: target.repository,
         pullRequestNumber: target.pullRequestNumber,
@@ -21292,9 +21324,9 @@ function registerGitHubAgentTools(ctx: PluginSetupContext): void {
       });
 
       return buildToolSuccessResult(
-        `Uploaded screenshot ${screenshot.fileName} for pull request #${target.pullRequestNumber}.`,
+        `Uploaded asset ${asset.fileName} for pull request #${target.pullRequestNumber}.`,
         {
-          screenshot
+          asset
         }
       );
     })
@@ -21917,8 +21949,8 @@ const plugin = definePlugin({
       return handleIssueLinkApiRoute(pluginRuntimeContext, input);
     }
 
-    if (input.routeKey === PULL_REQUEST_SCREENSHOT_API_ROUTE_KEY) {
-      return handlePullRequestScreenshotApiRoute(pluginRuntimeContext, input);
+    if (input.routeKey === PULL_REQUEST_ASSET_API_ROUTE_KEY) {
+      return handlePullRequestAssetApiRoute(pluginRuntimeContext, input);
     }
 
     return {

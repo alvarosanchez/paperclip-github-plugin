@@ -227,7 +227,7 @@ The plugin exposes GitHub workflow tools to Paperclip agents, including:
 
 - repository-scoped search for issues and pull requests
 - issue reads, comment reads, comment writes, metadata updates, and `assign_to_current_user` assignment to the saved token owner
-- pull request creation, reads, updates, changed-file inspection, CI-check inspection, and screenshot upload for PR visual evidence
+- pull request creation, reads, updates, changed-file inspection, CI-check inspection, and asset upload for PR visual evidence
 - review-thread reads, replies, resolve and unresolve actions, and `request_pull_request_reviewers` reviewer requests
 - organization-level GitHub Project search/listing and pull-request-to-project association
 
@@ -272,31 +272,33 @@ Current host caveat: on authenticated Paperclip deployments, the Paperclip host 
 
 Because the KPI attribution endpoint is a native plugin JSON route rather than a plugin tool, authenticated agent runs can still call it directly with `PAPERCLIP_API_KEY` even while that host bug blocks the GitHub Sync tool surface.
 
-### Pull request screenshot upload
+### Pull request asset upload
 
-For PRs that need durable visual evidence, agents can call the `upload_pull_request_screenshot` tool. The tool accepts a PR target plus `fileName`, `alt`, and either `contentBase64` or a `dataUrl`. Supported image types are PNG, JPEG, WebP, and GIF. The plugin writes the image to a non-merge artifact branch named `paperclip-artifacts-pr-<number>` by default, stores it under `screenshots/pr-<number>/<head-sha>/`, and returns immutable raw GitHub URLs plus Markdown suitable for a PR description.
+For PRs that need durable assets in the description, agents can call the `upload_pull_request_asset` tool. The tool accepts a PR target plus `fileName` and either `contentBase64` or a `dataUrl`; optional fields include `label`, `alt` (an alias for image alt text), `caption`, `mimeType`, and `artifactBranch`. Common MIME types are inferred from filenames, including images and PDFs. Unknown types are stored as `application/octet-stream`. Assets are limited to 10 MiB.
 
-Authenticated agent runs that cannot call plugin tools can post the same JSON payload to `/api/plugins/paperclip-github-plugin/api/pull-request-screenshots` with `Authorization: Bearer <PAPER...EY>`. The native plugin route is agent-authenticated by the Paperclip host before worker dispatch.
+The plugin writes the asset to a non-merge artifact branch named `paperclip-artifacts-pr-<number>` by default, stores it under `assets/pr-<number>/<head-sha>/`, and returns immutable raw GitHub URLs plus Markdown suitable for a PR description. Images return image Markdown; PDFs and other files return normal Markdown links.
+
+Authenticated agent runs that cannot call plugin tools can post the same JSON payload to `/api/plugins/paperclip-github-plugin/api/pull-request-assets` with `Authorization: Bearer ${PAPERCLIP_API_KEY}`. The native plugin route is agent-authenticated by the Paperclip host before worker dispatch.
 
 Example:
 
 ```bash
-contentBase64="$(base64 -w0 /tmp/metrics-dashboard.png)"
+contentBase64="$(base64 -w0 /tmp/review-report.pdf)"
 payload="$(jq -n \
   --arg repository paperclipai/example-repo \
   --argjson pullRequestNumber 21 \
-  --arg fileName metrics-dashboard.png \
-  --arg alt 'Metrics dashboard' \
+  --arg fileName review-report.pdf \
+  --arg label 'Review report PDF' \
   --arg contentBase64 "$contentBase64" \
-  '{repository:$repository,pullRequestNumber:$pullRequestNumber,fileName:$fileName,alt:$alt,contentBase64:$contentBase64,mimeType:"image/png"}')"
+  '{repository:$repository,pullRequestNumber:$pullRequestNumber,fileName:$fileName,label:$label,contentBase64:$contentBase64,mimeType:"application/pdf"}')"
 
-curl -X POST "${PAPERCLIP_API_URL%/}/api/plugins/paperclip-github-plugin/api/pull-request-screenshots" \
+curl -X POST "${PAPERCLIP_API_URL%/}/api/plugins/paperclip-github-plugin/api/pull-request-assets" \
   -H "content-type: application/json" \
-  -H "authorization: Bearer ${PAPE...EY}" \
+  -H "authorization: Bearer ${PAPERCLIP_API_KEY}" \
   -d "${payload}"
 ```
 
-The response body contains `screenshot.markdown`, `screenshot.rawUrl`, `screenshot.artifactBranch`, `screenshot.path`, and `screenshot.commitSha`.
+The response body contains `asset.markdown`, `asset.rawUrl`, `asset.artifactBranch`, `asset.path`, and `asset.commitSha`.
 
 ### Issue link API route
 

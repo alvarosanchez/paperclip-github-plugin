@@ -533,9 +533,9 @@ export const GITHUB_AGENT_TOOLS: PluginToolDeclaration[] = [
     }
   },
   {
-    name: 'upload_pull_request_screenshot',
-    displayName: 'Upload Pull Request Screenshot',
-    description: 'Upload a PNG, JPEG, WebP, or GIF screenshot for a pull request to a non-merge artifact branch and return durable markdown that can be embedded in the PR body.',
+    name: 'upload_pull_request_asset',
+    displayName: 'Upload Pull Request Asset',
+    description: 'Upload a PR-visible asset such as an image, PDF, log, archive, or report to a non-merge artifact branch and return durable markdown that can be embedded in the PR body.',
     parametersSchema: {
       type: 'object',
       additionalProperties: false,
@@ -551,28 +551,31 @@ export const GITHUB_AGENT_TOOLS: PluginToolDeclaration[] = [
         paperclipIssueId: paperclipIssueIdProperty,
         fileName: {
           type: 'string',
-          description: 'Screenshot filename. The plugin sanitizes it and preserves a safe image extension.'
+          description: 'Asset filename. The plugin sanitizes it and preserves a safe extension.'
+        },
+        label: {
+          type: 'string',
+          description: 'Human-readable link text for the returned Markdown. Defaults to the sanitized filename.'
         },
         alt: {
           type: 'string',
-          description: 'Alt text for the returned markdown image. Defaults to the sanitized filename.'
+          description: 'Backward-compatible alias for label, useful as image alt text.'
         },
         caption: {
           type: 'string',
-          description: 'Optional human-facing caption returned with the uploaded screenshot metadata.'
+          description: 'Optional human-facing caption returned with the uploaded asset metadata.'
         },
         contentBase64: {
           type: 'string',
-          description: 'Base64-encoded image bytes. Supported MIME types are image/png, image/jpeg, image/webp, and image/gif.'
+          description: 'Base64-encoded asset bytes. Assets are limited to 10 MiB.'
         },
         dataUrl: {
           type: 'string',
-          description: 'Alternative data URL input such as data:image/png;base64,... .'
+          description: 'Alternative base64 data URL input such as data:application/pdf;base64,... or data:image/png;base64,... .'
         },
         mimeType: {
           type: 'string',
-          enum: ['image/png', 'image/jpeg', 'image/webp', 'image/gif'],
-          description: 'Image MIME type. Required with contentBase64 unless the filename extension identifies the type.'
+          description: 'Optional MIME type such as application/pdf or image/png. If omitted, the plugin infers common types from fileName and otherwise uses application/octet-stream.'
         },
         artifactBranch: {
           type: 'string',
