@@ -12,7 +12,9 @@ import manifest from '../src/manifest.ts';
 import {
   COMPANY_METRIC_API_ROUTE_KEY,
   COMPANY_METRIC_API_ROUTE_PATH,
-  GITHUB_SYNC_PLUGIN_ID
+  GITHUB_SYNC_PLUGIN_ID,
+  PULL_REQUEST_SCREENSHOT_API_ROUTE_KEY,
+  PULL_REQUEST_SCREENSHOT_API_ROUTE_PATH
 } from '../src/kpi-contract.ts';
 import { requiresPaperclipBoardAccess } from '../src/paperclip-health.ts';
 import { normalizeCompanyAssigneeOptionsResponse } from '../src/ui/assignees.ts';
@@ -628,6 +630,38 @@ async function postIssueLinkApiRoute(
     routeKey: 'link-github-item',
     method: 'POST',
     path: '/issue-link',
+    params: {},
+    query: {},
+    body: payload,
+    companyId: options.companyId ?? 'company-1',
+    actor: {
+      actorType,
+      actorId: actorType === 'agent' ? 'agent-1' : 'user-1',
+      agentId: actorType === 'agent' ? 'agent-1' : null,
+      userId: actorType === 'user' ? 'user-1' : null,
+      runId: actorType === 'agent' ? 'run-1' : null
+    },
+    headers: {}
+  } as Parameters<NonNullable<typeof plugin.definition.onApiRequest>>[0]);
+}
+
+async function postPullRequestScreenshotApiRoute(
+  payload: Record<string, unknown>,
+  options: {
+    companyId?: string;
+    actorType?: 'agent' | 'user';
+  } = {}
+): Promise<Awaited<ReturnType<NonNullable<typeof plugin.definition.onApiRequest>>>> {
+  const onApiRequest = plugin.definition.onApiRequest;
+  if (typeof onApiRequest !== 'function') {
+    throw new Error('Plugin API route handler is not registered.');
+  }
+  const actorType = options.actorType ?? 'agent';
+
+  return await onApiRequest({
+    routeKey: PULL_REQUEST_SCREENSHOT_API_ROUTE_KEY,
+    method: 'POST',
+    path: PULL_REQUEST_SCREENSHOT_API_ROUTE_PATH,
     params: {},
     query: {},
     body: payload,
@@ -1567,6 +1601,7 @@ test('manifest declares the GitHub agent tools, KPI API route, and capabilities'
       'request_pull_request_reviewers',
       'list_organization_projects',
       'add_pull_request_to_project',
+      'upload_pull_request_screenshot',
       'link_github_item'
     ]
   );
@@ -1595,6 +1630,14 @@ test('manifest declares the GitHub agent tools, KPI API route, and capabilities'
         auth: 'agent',
         capability: 'api.routes.register',
         companyResolution: null
+      },
+      {
+        routeKey: PULL_REQUEST_SCREENSHOT_API_ROUTE_KEY,
+        method: 'POST',
+        path: PULL_REQUEST_SCREENSHOT_API_ROUTE_PATH,
+        auth: 'agent',
+        capability: 'api.routes.register',
+        companyResolution: null
       }
     ]
   );
@@ -1602,6 +1645,164 @@ test('manifest declares the GitHub agent tools, KPI API route, and capabilities'
     manifest.tools?.find((tool) => tool.name === 'add_issue_comment')?.description ?? '',
     /AI-authorship footer/
   );
+});
+
+test('upload_pull_request_screenshot publishes an artifact branch image and returns markdown', async () => {
+  const harness = await createGitHubAgentToolHarness();
+  const originalFetch = globalThis.fetch;
+  const imageBase64 = Buffer.from('fake png bytes').toString('base64');
+  const seenPaths: string[] = [];
+  let uploadedBody: Record<string, unknown> | null = null;
+
+  globalThis.fetch = async (input, init) => {
+    const url = new URL(getRequestUrl(input));
+    seenPaths.push(`${init?.method ?? 'GET'} ${url.pathname}`);
+
+    if (url.pathname === '/repos/paperclipai/example-repo/pulls/42') {
+      return jsonResponse({
+        number: 42,
+        head: {
+          sha: 'abcdef1234567890abcdef1234567890abcdef12'
+        },
+        base: {
+          sha: '1111111111111111111111111111111111111111'
+        }
+      });
+    }
+
+    if (getDecodedRequestPathname(input) === '/repos/paperclipai/example-repo/git/ref/heads/paperclip-artifacts-pr-42') {
+      return jsonResponse({ message: 'Not Found' }, 404);
+    }
+
+    if (url.pathname === '/repos/paperclipai/example-repo/git/refs' && init?.method === 'POST') {
+      assert.deepEqual(getJsonRequestBody(init), {
+        ref: 'refs/heads/paperclip-artifacts-pr-42',
+        sha: '1111111111111111111111111111111111111111'
+      });
+      return jsonResponse({ ref: 'refs/heads/paperclip-artifacts-pr-42' }, 201);
+    }
+
+    if (getDecodedRequestPathname(input) === '/repos/paperclipai/example-repo/contents/screenshots/pr-42/abcdef123456/metrics-dashboard.png') {
+      if (init?.method === 'PUT') {
+        uploadedBody = getJsonRequestBody(init);
+        return jsonResponse({
+          content: {
+            path: 'screenshots/pr-42/abcdef123456/metrics-dashboard.png'
+          },
+          commit: {
+            sha: '2222222222222222222222222222222222222222'
+          }
+        });
+      }
+
+      return jsonResponse({ message: 'Not Found' }, 404);
+    }
+
+    throw new Error(`Unexpected GitHub request: ${init?.method ?? 'GET'} ${url.toString()}`);
+  };
+
+  try {
+    const result = await harness.executeTool('upload_pull_request_screenshot', {
+      repository: 'paperclipai/example-repo',
+      pullRequestNumber: 42,
+      fileName: 'metrics dashboard.png',
+      alt: 'Metrics dashboard',
+      contentBase64: imageBase64,
+      mimeType: 'image/png'
+    }, {
+      companyId: 'company-1',
+      projectId: 'project-1'
+    });
+
+    assert.ok(!result.error);
+    const screenshot = (result.data as { screenshot: Record<string, unknown> }).screenshot;
+    assert.equal(screenshot.fileName, 'metrics-dashboard.png');
+    assert.equal(screenshot.artifactBranch, 'paperclip-artifacts-pr-42');
+    assert.equal(screenshot.path, 'screenshots/pr-42/abcdef123456/metrics-dashboard.png');
+    assert.equal(
+      screenshot.rawUrl,
+      'https://raw.githubusercontent.com/paperclipai/example-repo/2222222222222222222222222222222222222222/screenshots/pr-42/abcdef123456/metrics-dashboard.png'
+    );
+    assert.equal(
+      screenshot.markdown,
+      '![Metrics dashboard](https://raw.githubusercontent.com/paperclipai/example-repo/2222222222222222222222222222222222222222/screenshots/pr-42/abcdef123456/metrics-dashboard.png)'
+    );
+    const capturedUploadBody = uploadedBody as Record<string, unknown> | null;
+    assert.equal(capturedUploadBody?.content, imageBase64);
+    assert.equal(capturedUploadBody?.branch, 'paperclip-artifacts-pr-42');
+    assert.ok(seenPaths.includes('POST /repos/paperclipai/example-repo/git/refs'));
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('pull request screenshot API route uploads screenshots for authenticated agents', async () => {
+  const harness = await createGitHubAgentToolHarness();
+  const originalFetch = globalThis.fetch;
+  const imageBase64 = Buffer.from('fake webp bytes').toString('base64');
+
+  globalThis.fetch = async (input, init) => {
+    const url = new URL(getRequestUrl(input));
+
+    if (url.pathname === '/repos/paperclipai/example-repo/pulls/43') {
+      return jsonResponse({
+        number: 43,
+        head: {
+          sha: 'fedcba9876543210fedcba9876543210fedcba98'
+        },
+        base: {
+          sha: '3333333333333333333333333333333333333333'
+        }
+      });
+    }
+
+    if (getDecodedRequestPathname(input) === '/repos/paperclipai/example-repo/git/ref/heads/paperclip-artifacts-pr-43') {
+      return jsonResponse({
+        object: {
+          sha: '4444444444444444444444444444444444444444'
+        }
+      });
+    }
+
+    if (getDecodedRequestPathname(input) === '/repos/paperclipai/example-repo/contents/screenshots/pr-43/fedcba987654/detail-view.webp') {
+      if (init?.method === 'PUT') {
+        return jsonResponse({
+          content: {
+            path: 'screenshots/pr-43/fedcba987654/detail-view.webp'
+          },
+          commit: {
+            sha: '5555555555555555555555555555555555555555'
+          }
+        });
+      }
+
+      return jsonResponse({ message: 'Not Found' }, 404);
+    }
+
+    throw new Error(`Unexpected GitHub request: ${init?.method ?? 'GET'} ${url.toString()}`);
+  };
+
+  try {
+    const response = await postPullRequestScreenshotApiRoute({
+      repository: 'paperclipai/example-repo',
+      pullRequestNumber: 43,
+      fileName: 'detail view.webp',
+      alt: 'Detail view',
+      dataUrl: `data:image/webp;base64,${imageBase64}`
+    });
+
+    assert.equal(response?.status, 201);
+    const body = response?.body as { status: string; screenshot: Record<string, unknown> };
+    assert.equal(body.status, 'uploaded');
+    assert.equal(body.screenshot.fileName, 'detail-view.webp');
+    assert.equal(body.screenshot.artifactBranch, 'paperclip-artifacts-pr-43');
+    assert.equal(
+      body.screenshot.markdown,
+      '![Detail view](https://raw.githubusercontent.com/paperclipai/example-repo/5555555555555555555555555555555555555555/screenshots/pr-43/fedcba987654/detail-view.webp)'
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test('search_repository_items infers the mapped repository from the tool run context', async () => {

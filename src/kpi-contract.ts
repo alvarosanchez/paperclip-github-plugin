@@ -7,5 +7,9 @@ export const ISSUE_LINK_API_ROUTE_KEY = 'link-github-item';
 export const ISSUE_LINK_API_ROUTE_PATH = '/issue-link';
 export const ISSUE_LINK_API_ROUTE_URL_PATH =
   `/api/plugins/${GITHUB_SYNC_PLUGIN_ID}/api${ISSUE_LINK_API_ROUTE_PATH}`;
+export const PULL_REQUEST_SCREENSHOT_API_ROUTE_KEY = 'upload-pull-request-screenshot';
+export const PULL_REQUEST_SCREENSHOT_API_ROUTE_PATH = '/pull-request-screenshots';
+export const PULL_REQUEST_SCREENSHOT_API_ROUTE_URL_PATH =
+  `/api/plugins/${GITHUB_SYNC_PLUGIN_ID}/api${PULL_REQUEST_SCREENSHOT_API_ROUTE_PATH}`;
 
 export type CompanyMetricApiRouteMetric = 'pull_request_created';

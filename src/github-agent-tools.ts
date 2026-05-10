@@ -533,6 +533,55 @@ export const GITHUB_AGENT_TOOLS: PluginToolDeclaration[] = [
     }
   },
   {
+    name: 'upload_pull_request_screenshot',
+    displayName: 'Upload Pull Request Screenshot',
+    description: 'Upload a PNG, JPEG, WebP, or GIF screenshot for a pull request to a non-merge artifact branch and return durable markdown that can be embedded in the PR body.',
+    parametersSchema: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['fileName'],
+      allOf: [pullRequestTargetSchema],
+      anyOf: [
+        { required: ['contentBase64'] },
+        { required: ['dataUrl'] }
+      ],
+      properties: {
+        repository: repositoryProperty,
+        pullRequestNumber: pullRequestNumberProperty,
+        paperclipIssueId: paperclipIssueIdProperty,
+        fileName: {
+          type: 'string',
+          description: 'Screenshot filename. The plugin sanitizes it and preserves a safe image extension.'
+        },
+        alt: {
+          type: 'string',
+          description: 'Alt text for the returned markdown image. Defaults to the sanitized filename.'
+        },
+        caption: {
+          type: 'string',
+          description: 'Optional human-facing caption returned with the uploaded screenshot metadata.'
+        },
+        contentBase64: {
+          type: 'string',
+          description: 'Base64-encoded image bytes. Supported MIME types are image/png, image/jpeg, image/webp, and image/gif.'
+        },
+        dataUrl: {
+          type: 'string',
+          description: 'Alternative data URL input such as data:image/png;base64,... .'
+        },
+        mimeType: {
+          type: 'string',
+          enum: ['image/png', 'image/jpeg', 'image/webp', 'image/gif'],
+          description: 'Image MIME type. Required with contentBase64 unless the filename extension identifies the type.'
+        },
+        artifactBranch: {
+          type: 'string',
+          description: 'Optional artifact branch name. Defaults to paperclip-artifacts-pr-<pullRequestNumber>.'
+        }
+      }
+    }
+  },
+  {
     name: 'link_github_item',
     displayName: 'Link GitHub Item',
     description: 'Link a Paperclip issue to a GitHub issue or pull request so GitHub Sync can monitor status even when the repository is not mapped to a Paperclip project.',

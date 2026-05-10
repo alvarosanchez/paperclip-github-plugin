@@ -7,7 +7,9 @@ import {
   COMPANY_METRIC_API_ROUTE_PATH,
   GITHUB_SYNC_PLUGIN_ID,
   ISSUE_LINK_API_ROUTE_KEY,
-  ISSUE_LINK_API_ROUTE_PATH
+  ISSUE_LINK_API_ROUTE_PATH,
+  PULL_REQUEST_SCREENSHOT_API_ROUTE_KEY,
+  PULL_REQUEST_SCREENSHOT_API_ROUTE_PATH
 } from './kpi-contract.ts';
 
 const require = createRequire(import.meta.url);
@@ -95,6 +97,13 @@ export const manifest: PaperclipPluginManifestV1 = {
       routeKey: ISSUE_LINK_API_ROUTE_KEY,
       method: 'POST',
       path: ISSUE_LINK_API_ROUTE_PATH,
+      auth: 'agent',
+      capability: 'api.routes.register'
+    },
+    {
+      routeKey: PULL_REQUEST_SCREENSHOT_API_ROUTE_KEY,
+      method: 'POST',
+      path: PULL_REQUEST_SCREENSHOT_API_ROUTE_PATH,
       auth: 'agent',
       capability: 'api.routes.register'
     }

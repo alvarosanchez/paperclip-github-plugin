@@ -227,7 +227,7 @@ The plugin exposes GitHub workflow tools to Paperclip agents, including:
 
 - repository-scoped search for issues and pull requests
 - issue reads, comment reads, comment writes, metadata updates, and `assign_to_current_user` assignment to the saved token owner
-- pull request creation, reads, updates, changed-file inspection, and CI-check inspection
+- pull request creation, reads, updates, changed-file inspection, CI-check inspection, and screenshot upload for PR visual evidence
 - review-thread reads, replies, resolve and unresolve actions, and `request_pull_request_reviewers` reviewer requests
 - organization-level GitHub Project search/listing and pull-request-to-project association
 
@@ -271,6 +271,32 @@ The worker deduplicates repeated PR events by preferring the pull request URL, t
 Current host caveat: on authenticated Paperclip deployments, the Paperclip host currently guards `GET /api/plugins/tools` and `POST /api/plugins/tools/execute` with board authentication before dispatching to any plugin worker. If an agent run does not have board access for the target company, GitHub Sync tool discovery and execution fail with `403 {"error":"Board access required"}` before this plugin's worker code runs.
 
 Because the KPI attribution endpoint is a native plugin JSON route rather than a plugin tool, authenticated agent runs can still call it directly with `PAPERCLIP_API_KEY` even while that host bug blocks the GitHub Sync tool surface.
+
+### Pull request screenshot upload
+
+For PRs that need durable visual evidence, agents can call the `upload_pull_request_screenshot` tool. The tool accepts a PR target plus `fileName`, `alt`, and either `contentBase64` or a `dataUrl`. Supported image types are PNG, JPEG, WebP, and GIF. The plugin writes the image to a non-merge artifact branch named `paperclip-artifacts-pr-<number>` by default, stores it under `screenshots/pr-<number>/<head-sha>/`, and returns immutable raw GitHub URLs plus Markdown suitable for a PR description.
+
+Authenticated agent runs that cannot call plugin tools can post the same JSON payload to `/api/plugins/paperclip-github-plugin/api/pull-request-screenshots` with `Authorization: Bearer <PAPER...EY>`. The native plugin route is agent-authenticated by the Paperclip host before worker dispatch.
+
+Example:
+
+```bash
+contentBase64="$(base64 -w0 /tmp/metrics-dashboard.png)"
+payload="$(jq -n \
+  --arg repository paperclipai/example-repo \
+  --argjson pullRequestNumber 21 \
+  --arg fileName metrics-dashboard.png \
+  --arg alt 'Metrics dashboard' \
+  --arg contentBase64 "$contentBase64" \
+  '{repository:$repository,pullRequestNumber:$pullRequestNumber,fileName:$fileName,alt:$alt,contentBase64:$contentBase64,mimeType:"image/png"}')"
+
+curl -X POST "${PAPERCLIP_API_URL%/}/api/plugins/paperclip-github-plugin/api/pull-request-screenshots" \
+  -H "content-type: application/json" \
+  -H "authorization: Bearer ${PAPE...EY}" \
+  -d "${payload}"
+```
+
+The response body contains `screenshot.markdown`, `screenshot.rawUrl`, `screenshot.artifactBranch`, `screenshot.path`, and `screenshot.commitSha`.
 
 ### Issue link API route
 
