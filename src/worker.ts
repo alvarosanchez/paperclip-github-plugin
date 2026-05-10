@@ -14948,12 +14948,16 @@ async function handleCompanyMetricApiRoute(
   };
 }
 
-function parseIssueLinkApiRouteBody(input: PluginApiRequestInput): Record<string, unknown> {
+function parsePluginApiRouteJsonObjectBody(input: PluginApiRequestInput, routeLabel: string): Record<string, unknown> {
   if (!input.body || typeof input.body !== 'object' || Array.isArray(input.body)) {
-    throw new Error('Issue link route body must be a JSON object.');
+    throw new Error(`${routeLabel} body must be a JSON object.`);
   }
 
   return input.body as Record<string, unknown>;
+}
+
+function parseIssueLinkApiRouteBody(input: PluginApiRequestInput): Record<string, unknown> {
+  return parsePluginApiRouteJsonObjectBody(input, 'Issue link route');
 }
 
 function normalizeIssueLinkApiRouteKind(payload: Record<string, unknown>): 'issue' | 'pull_request' | null {
@@ -14989,8 +14993,12 @@ async function handlePullRequestAssetApiRoute(
     throw new Error('Pull request assets must be uploaded by an authenticated Paperclip agent.');
   }
 
-  const payload = parseIssueLinkApiRouteBody(input);
-  const pullRequestUrl = normalizeGitHubPullRequestHtmlUrl(normalizeOptionalString(payload.pullRequestUrl));
+  const payload = parsePluginApiRouteJsonObjectBody(input, 'Pull request asset route');
+  const rawPullRequestUrl = normalizeOptionalString(payload.pullRequestUrl);
+  const pullRequestUrl = normalizeGitHubPullRequestHtmlUrl(rawPullRequestUrl);
+  if (rawPullRequestUrl && !pullRequestUrl) {
+    throw new Error('pullRequestUrl must be a valid GitHub pull request URL.');
+  }
   const parsedPullRequestUrl = pullRequestUrl ? parseGitHubPullRequestHtmlUrl(pullRequestUrl) : undefined;
   const repositoryInput = normalizeOptionalString(payload.repository) ?? parsedPullRequestUrl?.repositoryUrl;
   if (!repositoryInput) {

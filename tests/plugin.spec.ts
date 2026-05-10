@@ -1806,6 +1806,44 @@ test('pull request asset API route uploads PDF assets for authenticated agents',
   }
 });
 
+test('pull request asset API route reports route-specific body and URL validation errors', async () => {
+  await createGitHubAgentToolHarness();
+  const onApiRequest = plugin.definition.onApiRequest;
+  if (typeof onApiRequest !== 'function') {
+    throw new Error('Plugin API route handler is not registered.');
+  }
+
+  await assert.rejects(
+    () => onApiRequest({
+      routeKey: PULL_REQUEST_ASSET_API_ROUTE_KEY,
+      method: 'POST',
+      path: PULL_REQUEST_ASSET_API_ROUTE_PATH,
+      params: {},
+      query: {},
+      body: 'not an object',
+      companyId: 'company-1',
+      actor: {
+        actorType: 'agent',
+        actorId: 'agent-1',
+        agentId: 'agent-1',
+        userId: null,
+        runId: 'run-1'
+      },
+      headers: {}
+    } as Parameters<NonNullable<typeof plugin.definition.onApiRequest>>[0]),
+    /Pull request asset route body must be a JSON object\./
+  );
+
+  await assert.rejects(
+    () => postPullRequestAssetApiRoute({
+      pullRequestUrl: 'https://example.com/not-github',
+      fileName: 'review-report.pdf',
+      contentBase64: Buffer.from('report').toString('base64')
+    }),
+    /pullRequestUrl must be a valid GitHub pull request URL\./
+  );
+});
+
 test('search_repository_items infers the mapped repository from the tool run context', async () => {
   const harness = await createGitHubAgentToolHarness();
   const originalFetch = globalThis.fetch;
