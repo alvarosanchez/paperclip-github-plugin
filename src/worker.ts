@@ -8503,13 +8503,26 @@ function isGitHubPullRequestPendingExternalWaitForSync(
     && (pullRequest.mergeStateStatus === 'blocked' || pullRequest.mergeStateStatus === 'unstable');
 }
 
+function isGitHubPullRequestBlockedMaintainerApprovalWaitForSync(
+  pullRequest: Pick<GitHubPullRequestStatusSnapshot, 'ciState' | 'hasUnresolvedReviewThreads' | 'mergeability' | 'mergeStateStatus' | 'reviewDecision'>
+): boolean {
+  return pullRequest.ciState === 'green'
+    && !pullRequest.hasUnresolvedReviewThreads
+    && pullRequest.mergeability !== 'conflicting'
+    && pullRequest.mergeStateStatus === 'blocked'
+    && (pullRequest.reviewDecision === 'unknown' || pullRequest.reviewDecision === 'review_required');
+}
+
 function shouldPreserveBlockedExternalPullRequestWait(params: {
   currentStatus: PaperclipIssueStatus;
   linkedPullRequests: GitHubPullRequestStatusSnapshot[];
 }): boolean {
   return params.currentStatus === 'blocked'
     && params.linkedPullRequests.length > 0
-    && params.linkedPullRequests.every((pullRequest) => isGitHubPullRequestPendingExternalWaitForSync(pullRequest));
+    && params.linkedPullRequests.every((pullRequest) =>
+      isGitHubPullRequestPendingExternalWaitForSync(pullRequest)
+      || isGitHubPullRequestBlockedMaintainerApprovalWaitForSync(pullRequest)
+    );
 }
 
 function isGitHubPullRequestTransientUnknownMergeabilityWait(
@@ -21406,6 +21419,7 @@ export const __testing = {
   formatPaperclipApiFetchErrorMessage,
   hasUnresolvedPaperclipIssueBlocker,
   isHealthyMaintainerWaitTransition,
+  resolvePaperclipPullRequestIssueStatus,
   resolveSyncTransitionAssignee
 };
 

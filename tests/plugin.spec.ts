@@ -137,6 +137,124 @@ test('sync still starts internal review for active implementation handoffs', asy
   );
 });
 
+test('sync preserves blocked maintainer approval waits for green mergeable pull requests', async () => {
+  const workerModule = await importFreshWorkerModule();
+  const testing = workerModule.__testing as typeof workerModule.__testing & {
+    resolvePaperclipPullRequestIssueStatus?: (params: {
+      currentStatus: string;
+      pullRequest: {
+        number: number;
+        repositoryUrl: string;
+        hasUnresolvedReviewThreads: boolean;
+        ciState: string;
+        mergeability: string;
+        mergeStateStatus: string;
+        reviewDecision: string;
+      };
+      hasExecutorHandoffTarget?: boolean;
+    }) => string;
+  };
+
+  assert.equal(typeof testing.resolvePaperclipPullRequestIssueStatus, 'function');
+
+  const basePullRequest = {
+    number: 1305,
+    repositoryUrl: 'https://github.com/micronaut-projects/micronaut-gradle-plugin',
+    hasUnresolvedReviewThreads: false,
+    ciState: 'green',
+    mergeability: 'mergeable',
+    mergeStateStatus: 'blocked',
+    reviewDecision: 'review_required'
+  };
+
+  assert.equal(
+    testing.resolvePaperclipPullRequestIssueStatus({
+      currentStatus: 'blocked',
+      pullRequest: basePullRequest
+    }),
+    'blocked'
+  );
+
+  assert.equal(
+    testing.resolvePaperclipPullRequestIssueStatus({
+      currentStatus: 'blocked',
+      pullRequest: {
+        ...basePullRequest,
+        reviewDecision: 'unknown'
+      }
+    }),
+    'blocked'
+  );
+});
+
+test('sync still routes blocked pull requests with actionable PR work to an executor', async () => {
+  const workerModule = await importFreshWorkerModule();
+  const testing = workerModule.__testing as typeof workerModule.__testing & {
+    resolvePaperclipPullRequestIssueStatus?: (params: {
+      currentStatus: string;
+      pullRequest: {
+        number: number;
+        repositoryUrl: string;
+        hasUnresolvedReviewThreads: boolean;
+        ciState: string;
+        mergeability: string;
+        mergeStateStatus: string;
+        reviewDecision: string;
+      };
+      hasExecutorHandoffTarget?: boolean;
+    }) => string;
+  };
+
+  assert.equal(typeof testing.resolvePaperclipPullRequestIssueStatus, 'function');
+
+  const basePullRequest = {
+    number: 1305,
+    repositoryUrl: 'https://github.com/micronaut-projects/micronaut-gradle-plugin',
+    hasUnresolvedReviewThreads: false,
+    ciState: 'green',
+    mergeability: 'mergeable',
+    mergeStateStatus: 'blocked',
+    reviewDecision: 'review_required'
+  };
+
+  assert.equal(
+    testing.resolvePaperclipPullRequestIssueStatus({
+      currentStatus: 'blocked',
+      pullRequest: {
+        ...basePullRequest,
+        ciState: 'red'
+      },
+      hasExecutorHandoffTarget: true
+    }),
+    'in_progress'
+  );
+
+  assert.equal(
+    testing.resolvePaperclipPullRequestIssueStatus({
+      currentStatus: 'blocked',
+      pullRequest: {
+        ...basePullRequest,
+        mergeability: 'conflicting',
+        mergeStateStatus: 'dirty'
+      },
+      hasExecutorHandoffTarget: true
+    }),
+    'in_progress'
+  );
+
+  assert.equal(
+    testing.resolvePaperclipPullRequestIssueStatus({
+      currentStatus: 'blocked',
+      pullRequest: {
+        ...basePullRequest,
+        hasUnresolvedReviewThreads: true
+      },
+      hasExecutorHandoffTarget: true
+    }),
+    'in_progress'
+  );
+});
+
 test('issue blocker relation checks tolerate stale host capability denials', async () => {
   const workerModule = await importFreshWorkerModule();
   const testing = workerModule.__testing as typeof workerModule.__testing & {
@@ -19001,6 +19119,290 @@ test('worker keeps blocked issues blocked and treats stale aggregate changes-req
   } finally {
     harness.ctx.issues.createComment = originalCreateComment;
     harness.ctx.state.set = originalStateSet;
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('worker preserves blocked maintainer-approval waits for linked pull requests with green checks', async () => {
+  const harness = createTestHarness({
+    manifest,
+    config: {
+      githubTokenRef: 'github-secret-ref'
+    }
+  });
+  await plugin.definition.setup(harness.ctx);
+  harness.seed({
+    agents: [
+      createAgentFixture({
+        id: 'agent-1',
+        companyId: 'company-1',
+        name: 'Elliot',
+        title: 'Executor'
+      }),
+      createAgentFixture({
+        id: 'qa-agent',
+        companyId: 'company-1',
+        name: 'Quinn',
+        title: 'QA'
+      })
+    ]
+  });
+
+  await harness.performAction('settings.saveRegistration', {
+    mappings: [
+      {
+        id: 'mapping-a',
+        repositoryUrl: 'paperclipai/example-repo',
+        paperclipProjectName: 'Engineering',
+        paperclipProjectId: 'project-1',
+        companyId: 'company-1'
+      }
+    ],
+    advancedSettings: {
+      executorAssigneeAgentId: 'agent-1',
+      defaultStatus: 'backlog'
+    },
+    syncState: {
+      status: 'idle'
+    }
+  });
+
+  const maintainerWaitIssue = await harness.ctx.issues.create({
+    companyId: 'company-1',
+    projectId: 'project-1',
+    title: 'Blocked on maintainer approval'
+  });
+  const dirtyIssue = await harness.ctx.issues.create({
+    companyId: 'company-1',
+    projectId: 'project-1',
+    title: 'Blocked but dirty'
+  });
+  const failingIssue = await harness.ctx.issues.create({
+    companyId: 'company-1',
+    projectId: 'project-1',
+    title: 'Blocked but failing'
+  });
+
+  await harness.ctx.issues.update(maintainerWaitIssue.id, {
+    status: 'blocked',
+    assigneeAgentId: 'qa-agent'
+  }, 'company-1');
+  await harness.ctx.issues.update(dirtyIssue.id, {
+    status: 'blocked',
+    assigneeAgentId: 'qa-agent'
+  }, 'company-1');
+  await harness.ctx.issues.update(failingIssue.id, {
+    status: 'blocked',
+    assigneeAgentId: 'qa-agent'
+  }, 'company-1');
+
+  await harness.ctx.state.set(
+    {
+      scopeKind: 'instance',
+      stateKey: 'paperclip-github-plugin-import-registry'
+    },
+    [
+      {
+        mappingId: 'mapping-a',
+        githubIssueId: 6001,
+        githubIssueNumber: 601,
+        paperclipIssueId: maintainerWaitIssue.id,
+        importedAt: '2026-04-09T09:00:00.000Z',
+        lastSeenCommentCount: 0,
+        repositoryUrl: 'https://github.com/paperclipai/example-repo',
+        paperclipProjectId: 'project-1',
+        companyId: 'company-1'
+      },
+      {
+        mappingId: 'mapping-a',
+        githubIssueId: 6002,
+        githubIssueNumber: 602,
+        paperclipIssueId: dirtyIssue.id,
+        importedAt: '2026-04-09T09:00:00.000Z',
+        lastSeenCommentCount: 0,
+        repositoryUrl: 'https://github.com/paperclipai/example-repo',
+        paperclipProjectId: 'project-1',
+        companyId: 'company-1'
+      },
+      {
+        mappingId: 'mapping-a',
+        githubIssueId: 6003,
+        githubIssueNumber: 603,
+        paperclipIssueId: failingIssue.id,
+        importedAt: '2026-04-09T09:00:00.000Z',
+        lastSeenCommentCount: 0,
+        repositoryUrl: 'https://github.com/paperclipai/example-repo',
+        paperclipProjectId: 'project-1',
+        companyId: 'company-1'
+      }
+    ]
+  );
+
+  const statusTransitionComments: Array<{ issueId: string; body: string }> = [];
+  const originalCreateComment = harness.ctx.issues.createComment;
+  harness.ctx.issues.createComment = async (issueId, body, companyId) => {
+    statusTransitionComments.push({ issueId, body });
+    return originalCreateComment(issueId, body, companyId);
+  };
+
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input, init) => {
+    const rawUrl = getRequestUrl(input);
+    const url = new URL(rawUrl);
+
+    if (url.pathname === '/repos/paperclipai/example-repo/issues' && ['all', 'open'].includes(url.searchParams.get('state') ?? '')) {
+      return jsonResponse([
+        {
+          id: 6001,
+          number: 601,
+          title: 'Blocked on maintainer approval',
+          body: null,
+          html_url: 'https://github.com/paperclipai/example-repo/issues/601',
+          state: 'open',
+          comments: 0
+        },
+        {
+          id: 6002,
+          number: 602,
+          title: 'Blocked but dirty',
+          body: null,
+          html_url: 'https://github.com/paperclipai/example-repo/issues/602',
+          state: 'open',
+          comments: 0
+        },
+        {
+          id: 6003,
+          number: 603,
+          title: 'Blocked but failing',
+          body: null,
+          html_url: 'https://github.com/paperclipai/example-repo/issues/603',
+          state: 'open',
+          comments: 0
+        }
+      ]);
+    }
+
+    if (url.pathname === '/graphql') {
+      const { query, variables } = getGraphqlRequest(init);
+      const issueNumber = typeof variables.issueNumber === 'number' ? variables.issueNumber : undefined;
+      const pullRequestNumber =
+        typeof variables.pullRequestNumber === 'number' ? variables.pullRequestNumber : undefined;
+
+      if (query.includes('query GitHubIssueParentRelationships')) {
+        return graphqlIssueParentRelationshipsResponse([
+          { issueNumber: 601 },
+          { issueNumber: 602 },
+          { issueNumber: 603 }
+        ]);
+      }
+
+      if (query.includes('query GitHubIssueStatusSnapshot') && issueNumber !== undefined) {
+        return graphqlResponse({
+          repository: {
+            issue: {
+              number: issueNumber,
+              state: 'OPEN',
+              stateReason: null,
+              comments: {
+                totalCount: 0
+              },
+              closedByPullRequestsReferences: {
+                pageInfo: {
+                  hasNextPage: false,
+                  endCursor: null
+                },
+                nodes: [
+                  {
+                    number: issueNumber * 10,
+                    state: 'OPEN'
+                  }
+                ]
+              }
+            }
+          }
+        });
+      }
+
+      if (query.includes('query GitHubPullRequestReviewThreads') && pullRequestNumber !== undefined) {
+        return graphqlResponse({
+          repository: {
+            pullRequest: {
+              reviewThreads: {
+                pageInfo: {
+                  hasNextPage: false,
+                  endCursor: null
+                },
+                nodes: [{ isResolved: true }]
+              }
+            }
+          }
+        });
+      }
+
+      if (query.includes('query GitHubPullRequestCiContexts') && pullRequestNumber !== undefined) {
+        const isDirty = pullRequestNumber === 6020;
+        const isFailing = pullRequestNumber === 6030;
+        return graphqlResponse({
+          repository: {
+            pullRequest: {
+              mergeable: isDirty ? 'CONFLICTING' : 'MERGEABLE',
+              mergeStateStatus: isDirty ? 'DIRTY' : 'BLOCKED',
+              reviewDecision: null,
+              statusCheckRollup: {
+                contexts: {
+                  pageInfo: {
+                    hasNextPage: false,
+                    endCursor: null
+                  },
+                  nodes: [
+                    isFailing
+                      ? {
+                          __typename: 'CheckRun',
+                          status: 'COMPLETED',
+                          conclusion: 'FAILURE'
+                        }
+                      : {
+                          __typename: 'StatusContext',
+                          state: 'SUCCESS'
+                        }
+                  ]
+                }
+              }
+            }
+          }
+        });
+      }
+    }
+
+    throw new Error(`Unexpected GitHub request: ${url.toString()}`);
+  };
+
+  try {
+    const sync = await harness.performAction('sync.runNow', {}) as {
+      syncState: { status: string };
+    };
+
+    assert.equal(sync.syncState.status, 'success');
+
+    const updatedMaintainerWaitIssue = await harness.ctx.issues.get(maintainerWaitIssue.id, 'company-1');
+    const updatedDirtyIssue = await harness.ctx.issues.get(dirtyIssue.id, 'company-1');
+    const updatedFailingIssue = await harness.ctx.issues.get(failingIssue.id, 'company-1');
+
+    assert.equal(updatedMaintainerWaitIssue?.status, 'blocked');
+    assert.equal(updatedMaintainerWaitIssue?.assigneeAgentId, 'qa-agent');
+    assert.notEqual(updatedDirtyIssue?.status, 'blocked');
+    assert.notEqual(updatedFailingIssue?.status, 'blocked');
+    assert.equal(statusTransitionComments.some((comment) => comment.issueId === maintainerWaitIssue.id), false);
+    assert.match(
+      statusTransitionComments.find((comment) => comment.issueId === dirtyIssue.id)?.body ?? '',
+      /merge conflicts/
+    );
+    assert.match(
+      statusTransitionComments.find((comment) => comment.issueId === failingIssue.id)?.body ?? '',
+      /failing CI/
+    );
+  } finally {
+    harness.ctx.issues.createComment = originalCreateComment;
     globalThis.fetch = originalFetch;
   }
 });
