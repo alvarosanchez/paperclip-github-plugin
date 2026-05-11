@@ -19149,6 +19149,7 @@ test('worker preserves blocked maintainer-approval waits for linked pull request
   });
 
   await harness.performAction('settings.saveRegistration', {
+    companyId: 'company-1',
     mappings: [
       {
         id: 'mapping-a',
@@ -19390,8 +19391,10 @@ test('worker preserves blocked maintainer-approval waits for linked pull request
 
     assert.equal(updatedMaintainerWaitIssue?.status, 'blocked');
     assert.equal(updatedMaintainerWaitIssue?.assigneeAgentId, 'qa-agent');
-    assert.notEqual(updatedDirtyIssue?.status, 'blocked');
-    assert.notEqual(updatedFailingIssue?.status, 'blocked');
+    assert.equal(updatedDirtyIssue?.status, 'in_progress');
+    assert.equal(updatedDirtyIssue?.assigneeAgentId, 'agent-1');
+    assert.equal(updatedFailingIssue?.status, 'in_progress');
+    assert.equal(updatedFailingIssue?.assigneeAgentId, 'agent-1');
     assert.equal(statusTransitionComments.some((comment) => comment.issueId === maintainerWaitIssue.id), false);
     assert.match(
       statusTransitionComments.find((comment) => comment.issueId === dirtyIssue.id)?.body ?? '',
