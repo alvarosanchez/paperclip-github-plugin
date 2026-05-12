@@ -699,6 +699,39 @@ async function createProjectPullRequestsHarness() {
   return harness;
 }
 
+async function upsertDirectPullRequestLink(
+  harness: Awaited<ReturnType<typeof createProjectPullRequestsHarness>>,
+  issueId: string,
+  pullRequestNumber: number,
+  options: {
+    state?: 'open' | 'closed';
+    repositoryUrl?: string;
+    title?: string;
+  } = {}
+): Promise<void> {
+  const repositoryUrl = options.repositoryUrl ?? 'https://github.com/paperclipai/example-repo';
+  const title = options.title ?? `Direct PR #${pullRequestNumber}`;
+
+  await harness.ctx.entities.upsert({
+    entityType: 'paperclip-github-plugin.pull-request-link',
+    scopeKind: 'issue',
+    scopeId: issueId,
+    externalId: `${repositoryUrl}/pull/${pullRequestNumber}`,
+    title: `GitHub pull request #${pullRequestNumber}`,
+    status: options.state ?? 'open',
+    data: {
+      companyId: 'company-1',
+      paperclipProjectId: 'project-1',
+      repositoryUrl,
+      githubPullRequestNumber: pullRequestNumber,
+      githubPullRequestUrl: `${repositoryUrl}/pull/${pullRequestNumber}`,
+      githubPullRequestState: options.state ?? 'open',
+      title,
+      syncedAt: '2026-04-27T09:30:00.000Z'
+    }
+  });
+}
+
 async function postCompanyMetricApiRoute(
   payload: Record<string, unknown>,
   options: {
@@ -7304,6 +7337,545 @@ test('sync.runNow reopens directly linked pull request issues when the pull requ
   } finally {
     harness.ctx.issues.createComment = originalCreateComment;
     harness.ctx.issues.update = originalUpdate;
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('sync.runNow completes directly linked pull request issues when the pull request is merged', async () => {
+  const harness = await createProjectPullRequestsHarness();
+  const originalFetch = globalThis.fetch;
+  const originalUpdate = harness.ctx.issues.update;
+  const originalCreateComment = harness.ctx.issues.createComment;
+  const statusTransitionComments: Array<{ issueId: string; body: string }> = [];
+  const directStatusUpdateCalls: Array<{ issueId: string; patch: Record<string, unknown> }> = [];
+  const issue = await harness.ctx.issues.create({
+    companyId: 'company-1',
+    projectId: 'project-1',
+    title: 'Merged direct PR link',
+    description: 'This issue should complete when the linked PR merges.'
+  });
+
+  await upsertDirectPullRequestLink(harness, issue.id, 45, {
+    title: 'Merged direct PR link'
+  });
+  await originalUpdate(issue.id, {
+    status: 'in_review',
+    assigneeAgentId: 'agent-2',
+    executionPolicy: {
+      mode: 'normal',
+      commentRequired: true,
+      stages: [
+        {
+          id: 'review-stage',
+          type: 'review',
+          participants: [{ type: 'agent', agentId: 'agent-2' }]
+        }
+      ]
+    },
+    executionState: {
+      status: 'pending',
+      currentStageId: 'review-stage',
+      currentStageIndex: 0,
+      currentStageType: 'review',
+      currentParticipant: { type: 'agent', agentId: 'agent-2' },
+      returnAssignee: { type: 'agent', agentId: 'agent-1' },
+      completedStageIds: []
+    }
+  } as never, 'company-1');
+
+  harness.ctx.issues.createComment = async (issueId, body, companyId) => {
+    statusTransitionComments.push({ issueId, body });
+    return originalCreateComment(issueId, body, companyId);
+  };
+  harness.ctx.issues.update = async (issueId, patch, companyId) => {
+    if (issueId === issue.id && patch && typeof patch === 'object' && 'status' in patch) {
+      directStatusUpdateCalls.push({
+        issueId,
+        patch: (patch ?? {}) as Record<string, unknown>
+      });
+    }
+
+    return originalUpdate(issueId, patch, companyId);
+  };
+
+  globalThis.fetch = async (input, init) => {
+    const requestUrl = getRequestUrl(input);
+    const requestPathname = getDecodedRequestPathname(input);
+
+    if (requestPathname === '/repos/paperclipai/example-repo/pulls/45') {
+      return jsonResponse({
+        number: 45,
+        title: 'Merged direct PR link',
+        body: 'The work landed.',
+        html_url: 'https://github.com/paperclipai/example-repo/pull/45',
+        state: 'closed',
+        merged: true
+      });
+    }
+
+    if (requestPathname === '/graphql') {
+      const { query } = getGraphqlRequest(init);
+      if (query.includes('query GitHubRepositoryOpenPullRequestStatuses')) {
+        return graphqlResponse({
+          repository: {
+            pullRequests: {
+              pageInfo: {
+                hasNextPage: false,
+                endCursor: null
+              },
+              nodes: []
+            }
+          }
+        });
+      }
+    }
+
+    throw new Error(`Unexpected fetch during merged direct PR sync test: ${requestUrl}`);
+  };
+
+  try {
+    const sync = await harness.performAction('sync.runNow', {
+      companyId: 'company-1',
+      issueId: issue.id,
+      waitForCompletion: true
+    }) as {
+      syncState: { status: string; syncedIssuesCount?: number };
+    };
+
+    assert.equal(sync.syncState.status, 'success');
+    assert.equal(sync.syncState.syncedIssuesCount, 1);
+    assert.equal(directStatusUpdateCalls.length, 1);
+    assert.equal(directStatusUpdateCalls[0]?.patch.status, 'done');
+    assert.equal(directStatusUpdateCalls[0]?.patch.executionPolicy, null);
+    assert.equal(directStatusUpdateCalls[0]?.patch.executionState, null);
+
+    const updatedIssue = await harness.ctx.issues.get(issue.id, 'company-1') as Record<string, any> | null;
+    assert.equal(updatedIssue?.status, 'done');
+    assert.equal(updatedIssue?.executionPolicy ?? null, null);
+    assert.equal(updatedIssue?.executionState ?? null, null);
+    assert.equal(statusTransitionComments.length, 1);
+    assert.match(statusTransitionComments[0]?.body ?? '', /from `in review` to `done`/);
+    assert.match(statusTransitionComments[0]?.body ?? '', /pull request was merged/);
+
+    const pullRequestLinks = await harness.ctx.entities.list({
+      entityType: 'paperclip-github-plugin.pull-request-link',
+      scopeKind: 'issue',
+      scopeId: issue.id
+    });
+    assert.equal((pullRequestLinks[0]?.data as { githubPullRequestState?: unknown } | undefined)?.githubPullRequestState, 'closed');
+  } finally {
+    harness.ctx.issues.createComment = originalCreateComment;
+    harness.ctx.issues.update = originalUpdate;
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('sync.runNow cancels directly linked pull request issues when every linked PR is closed without merge', async () => {
+  const harness = await createProjectPullRequestsHarness();
+  const originalFetch = globalThis.fetch;
+  const originalCreateComment = harness.ctx.issues.createComment;
+  const statusTransitionComments: Array<{ issueId: string; body: string }> = [];
+  const issue = await harness.ctx.issues.create({
+    companyId: 'company-1',
+    projectId: 'project-1',
+    title: 'Closed direct PR links',
+    description: 'Every linked PR was closed without merge.'
+  });
+
+  await upsertDirectPullRequestLink(harness, issue.id, 46, {
+    title: 'Closed direct PR link A'
+  });
+  await upsertDirectPullRequestLink(harness, issue.id, 47, {
+    title: 'Closed direct PR link B'
+  });
+  await harness.ctx.issues.update(issue.id, { status: 'in_review' }, 'company-1');
+
+  harness.ctx.issues.createComment = async (issueId, body, companyId) => {
+    statusTransitionComments.push({ issueId, body });
+    return originalCreateComment(issueId, body, companyId);
+  };
+
+  globalThis.fetch = async (input, init) => {
+    const requestUrl = getRequestUrl(input);
+    const requestPathname = getDecodedRequestPathname(input);
+
+    if (requestPathname === '/repos/paperclipai/example-repo/pulls/46') {
+      return jsonResponse({
+        number: 46,
+        title: 'Closed direct PR link A',
+        body: 'Closed without merge.',
+        html_url: 'https://github.com/paperclipai/example-repo/pull/46',
+        state: 'closed',
+        merged: false
+      });
+    }
+
+    if (requestPathname === '/repos/paperclipai/example-repo/pulls/47') {
+      return jsonResponse({
+        number: 47,
+        title: 'Closed direct PR link B',
+        body: 'Closed without merge.',
+        html_url: 'https://github.com/paperclipai/example-repo/pull/47',
+        state: 'closed',
+        merged: false
+      });
+    }
+
+    if (requestPathname === '/graphql') {
+      const { query } = getGraphqlRequest(init);
+      if (query.includes('query GitHubRepositoryOpenPullRequestStatuses')) {
+        return graphqlResponse({
+          repository: {
+            pullRequests: {
+              pageInfo: {
+                hasNextPage: false,
+                endCursor: null
+              },
+              nodes: []
+            }
+          }
+        });
+      }
+    }
+
+    throw new Error(`Unexpected fetch during closed direct PR sync test: ${requestUrl}`);
+  };
+
+  try {
+    const sync = await harness.performAction('sync.runNow', {
+      companyId: 'company-1',
+      issueId: issue.id,
+      waitForCompletion: true
+    }) as {
+      syncState: { status: string; syncedIssuesCount?: number };
+    };
+
+    assert.equal(sync.syncState.status, 'success');
+    assert.equal(sync.syncState.syncedIssuesCount, 2);
+
+    const updatedIssue = await harness.ctx.issues.get(issue.id, 'company-1');
+    assert.equal(updatedIssue?.status, 'cancelled');
+    assert.equal(statusTransitionComments.length, 1);
+    assert.match(statusTransitionComments[0]?.body ?? '', /from `in review` to `cancelled`/);
+    assert.match(statusTransitionComments[0]?.body ?? '', /all linked pull requests were closed without merge/);
+  } finally {
+    harness.ctx.issues.createComment = originalCreateComment;
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('sync.runNow lets open direct PRs drive status when another linked PR is already merged', async () => {
+  const harness = await createProjectPullRequestsHarness();
+  const originalFetch = globalThis.fetch;
+  const originalCreateComment = harness.ctx.issues.createComment;
+  const statusTransitionComments: Array<{ issueId: string; body: string }> = [];
+  const issue = await harness.ctx.issues.create({
+    companyId: 'company-1',
+    projectId: 'project-1',
+    title: 'Mixed direct PR links',
+    description: 'One linked PR is still actionable and one already merged.'
+  });
+
+  await upsertDirectPullRequestLink(harness, issue.id, 48, {
+    title: 'Failing direct PR link'
+  });
+  await upsertDirectPullRequestLink(harness, issue.id, 49, {
+    title: 'Merged direct PR link'
+  });
+  await harness.ctx.issues.update(issue.id, { status: 'in_review' }, 'company-1');
+
+  harness.ctx.issues.createComment = async (issueId, body, companyId) => {
+    statusTransitionComments.push({ issueId, body });
+    return originalCreateComment(issueId, body, companyId);
+  };
+
+  globalThis.fetch = async (input, init) => {
+    const requestUrl = getRequestUrl(input);
+    const requestPathname = getDecodedRequestPathname(input);
+
+    if (requestPathname === '/repos/paperclipai/example-repo/pulls/48') {
+      return jsonResponse({
+        number: 48,
+        title: 'Failing direct PR link',
+        body: 'Still needs work.',
+        html_url: 'https://github.com/paperclipai/example-repo/pull/48',
+        state: 'open',
+        merged: false
+      });
+    }
+
+    if (requestPathname === '/repos/paperclipai/example-repo/pulls/49') {
+      return jsonResponse({
+        number: 49,
+        title: 'Merged direct PR link',
+        body: 'Already landed.',
+        html_url: 'https://github.com/paperclipai/example-repo/pull/49',
+        state: 'closed',
+        merged: true
+      });
+    }
+
+    if (requestPathname === '/graphql') {
+      const { query, variables } = getGraphqlRequest(init);
+      const pullRequestNumber =
+        typeof variables.pullRequestNumber === 'number' ? variables.pullRequestNumber : undefined;
+
+      if (query.includes('query GitHubRepositoryOpenPullRequestStatuses')) {
+        return graphqlResponse({
+          repository: {
+            pullRequests: {
+              pageInfo: {
+                hasNextPage: false,
+                endCursor: null
+              },
+              nodes: []
+            }
+          }
+        });
+      }
+
+      if (query.includes('query GitHubPullRequestReviewThreads') && pullRequestNumber === 48) {
+        return graphqlResponse({
+          repository: {
+            pullRequest: {
+              reviewThreads: {
+                pageInfo: {
+                  hasNextPage: false,
+                  endCursor: null
+                },
+                nodes: []
+              }
+            }
+          }
+        });
+      }
+
+      if (query.includes('query GitHubPullRequestCiContexts') && pullRequestNumber === 48) {
+        return graphqlResponse({
+          repository: {
+            pullRequest: {
+              mergeable: 'MERGEABLE',
+              mergeStateStatus: 'CLEAN',
+              statusCheckRollup: {
+                contexts: {
+                  pageInfo: {
+                    hasNextPage: false,
+                    endCursor: null
+                  },
+                  nodes: [
+                    {
+                      __typename: 'CheckRun',
+                      status: 'COMPLETED',
+                      conclusion: 'FAILURE'
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        });
+      }
+    }
+
+    throw new Error(`Unexpected fetch during mixed direct PR sync test: ${requestUrl}`);
+  };
+
+  try {
+    const sync = await harness.performAction('sync.runNow', {
+      companyId: 'company-1',
+      issueId: issue.id,
+      waitForCompletion: true
+    }) as {
+      syncState: { status: string; syncedIssuesCount?: number };
+    };
+
+    assert.equal(sync.syncState.status, 'success');
+    assert.equal(sync.syncState.syncedIssuesCount, 2);
+
+    const updatedIssue = await harness.ctx.issues.get(issue.id, 'company-1');
+    assert.equal(updatedIssue?.status, 'todo');
+    assert.equal(statusTransitionComments.length, 1);
+    assert.match(statusTransitionComments[0]?.body ?? '', /from `in review` to `todo`/);
+    assert.match(statusTransitionComments[0]?.body ?? '', /failing CI/);
+  } finally {
+    harness.ctx.issues.createComment = originalCreateComment;
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('sync.runNow completes all-terminal direct PR groups when any linked PR merged', async () => {
+  const harness = await createProjectPullRequestsHarness();
+  const originalFetch = globalThis.fetch;
+  const issue = await harness.ctx.issues.create({
+    companyId: 'company-1',
+    projectId: 'project-1',
+    title: 'All terminal direct PR links',
+    description: 'One terminal PR merged and another closed without merge.'
+  });
+
+  await upsertDirectPullRequestLink(harness, issue.id, 50, {
+    title: 'Closed unmerged direct PR link'
+  });
+  await upsertDirectPullRequestLink(harness, issue.id, 51, {
+    title: 'Merged direct PR link'
+  });
+  await harness.ctx.issues.update(issue.id, { status: 'in_review' }, 'company-1');
+
+  globalThis.fetch = async (input, init) => {
+    const requestUrl = getRequestUrl(input);
+    const requestPathname = getDecodedRequestPathname(input);
+
+    if (requestPathname === '/repos/paperclipai/example-repo/pulls/50') {
+      return jsonResponse({
+        number: 50,
+        title: 'Closed unmerged direct PR link',
+        body: 'Closed without merge.',
+        html_url: 'https://github.com/paperclipai/example-repo/pull/50',
+        state: 'closed',
+        merged: false
+      });
+    }
+
+    if (requestPathname === '/repos/paperclipai/example-repo/pulls/51') {
+      return jsonResponse({
+        number: 51,
+        title: 'Merged direct PR link',
+        body: 'Landed.',
+        html_url: 'https://github.com/paperclipai/example-repo/pull/51',
+        state: 'closed',
+        merged: true
+      });
+    }
+
+    if (requestPathname === '/graphql') {
+      const { query } = getGraphqlRequest(init);
+      if (query.includes('query GitHubRepositoryOpenPullRequestStatuses')) {
+        return graphqlResponse({
+          repository: {
+            pullRequests: {
+              pageInfo: {
+                hasNextPage: false,
+                endCursor: null
+              },
+              nodes: []
+            }
+          }
+        });
+      }
+    }
+
+    throw new Error(`Unexpected fetch during all-terminal direct PR sync test: ${requestUrl}`);
+  };
+
+  try {
+    const sync = await harness.performAction('sync.runNow', {
+      companyId: 'company-1',
+      issueId: issue.id,
+      waitForCompletion: true
+    }) as {
+      syncState: { status: string; syncedIssuesCount?: number };
+    };
+
+    assert.equal(sync.syncState.status, 'success');
+    assert.equal(sync.syncState.syncedIssuesCount, 2);
+
+    const updatedIssue = await harness.ctx.issues.get(issue.id, 'company-1');
+    assert.equal(updatedIssue?.status, 'done');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('sync.runNow keeps GitHub issue-linked terminal status mapping independent from direct PR links', async () => {
+  const harness = await createProjectPullRequestsHarness();
+  const originalFetch = globalThis.fetch;
+  const issue = await harness.ctx.issues.create({
+    companyId: 'company-1',
+    projectId: 'project-1',
+    title: 'Closed issue link',
+    description: 'This Paperclip issue is linked directly to a GitHub issue.'
+  });
+
+  globalThis.fetch = async (input, init) => {
+    const requestUrl = getRequestUrl(input);
+    const requestPathname = getDecodedRequestPathname(input);
+
+    if (requestPathname === '/repos/paperclipai/example-repo/pulls/90') {
+      throw new Error('Issue-linked sync should not treat the linked GitHub issue as a pull request.');
+    }
+
+    if (requestPathname === '/repos/paperclipai/example-repo/issues/90') {
+      return jsonResponse({
+        id: 9000,
+        number: 90,
+        title: 'Closed GitHub issue link',
+        body: 'Closed as completed work.',
+        html_url: 'https://github.com/paperclipai/example-repo/issues/90',
+        state: 'closed',
+        state_reason: 'completed',
+        comments: 0,
+        user: {
+          login: 'octocat',
+          html_url: 'https://github.com/octocat',
+          avatar_url: 'https://avatars.githubusercontent.com/u/583231?v=4'
+        },
+        labels: []
+      });
+    }
+
+    if (requestPathname === '/graphql') {
+      const { query, variables } = getGraphqlRequest(init);
+      if (query.includes('query GitHubIssueStatusSnapshot') && variables.issueNumber === 90) {
+        return graphqlResponse({
+          repository: {
+            issue: {
+              closedByPullRequestsReferences: {
+                pageInfo: {
+                  hasNextPage: false,
+                  endCursor: null
+                },
+                nodes: []
+              },
+              comments: {
+                pageInfo: {
+                  hasNextPage: false,
+                  endCursor: null
+                },
+                nodes: []
+              }
+            }
+          }
+        });
+      }
+    }
+
+    throw new Error(`Unexpected fetch during issue-linked terminal sync test: ${requestUrl}`);
+  };
+
+  try {
+    await harness.performAction('issue.linkGitHubItem', {
+      companyId: 'company-1',
+      issueId: issue.id,
+      kind: 'issue',
+      reference: '90'
+    });
+
+    await harness.ctx.issues.update(issue.id, { status: 'in_review' }, 'company-1');
+
+    const sync = await harness.performAction('sync.runNow', {
+      companyId: 'company-1',
+      issueId: issue.id,
+      waitForCompletion: true
+    }) as {
+      syncState: { status: string; syncedIssuesCount?: number };
+    };
+
+    assert.equal(sync.syncState.status, 'success');
+    assert.equal(sync.syncState.syncedIssuesCount, 1);
+
+    const updatedIssue = await harness.ctx.issues.get(issue.id, 'company-1');
+    assert.equal(updatedIssue?.status, 'done');
+  } finally {
     globalThis.fetch = originalFetch;
   }
 });

@@ -798,6 +798,15 @@ interface GitHubPullRequestStatusSnapshot extends GitHubPullRequestReference {
   reviewDecision: GitHubPullRequestReviewDecision;
 }
 
+type GitHubDirectPullRequestLifecycleState = 'open' | 'closed' | 'merged';
+
+interface GitHubDirectPullRequestSyncSnapshot {
+  pullRequestLink: GitHubPullRequestLinkRecord;
+  repository: ParsedRepositoryReference;
+  lifecycleState: GitHubDirectPullRequestLifecycleState;
+  pullRequest?: GitHubPullRequestStatusSnapshot;
+}
+
 interface GitHubIssueStatusSnapshot {
   issueNumber: number;
   state: 'open' | 'closed';
@@ -8170,10 +8179,31 @@ function buildPaperclipIssueStatusTransitionComment(params: {
 function buildPaperclipPullRequestIssueStatusTransitionComment(params: {
   previousStatus: PaperclipIssueStatus;
   nextStatus: PaperclipIssueStatus;
-  pullRequest: GitHubPullRequestStatusSnapshot;
+  pullRequests: GitHubDirectPullRequestSyncSnapshot[];
 }): string {
-  const reason = describeGitHubLinkedPullRequestsStatusReason([params.pullRequest]);
+  const reason = describeGitHubDirectPullRequestIssueStatusReason(params.pullRequests);
   return `GitHub Sync updated the status from \`${formatPaperclipIssueStatus(params.previousStatus)}\` to \`${formatPaperclipIssueStatus(params.nextStatus)}\` because ${reason}.`;
+}
+
+function describeGitHubDirectPullRequestIssueStatusReason(
+  pullRequests: GitHubDirectPullRequestSyncSnapshot[]
+): string {
+  const openPullRequests = pullRequests
+    .map((entry) => entry.pullRequest)
+    .filter((pullRequest): pullRequest is GitHubPullRequestStatusSnapshot => Boolean(pullRequest));
+  if (openPullRequests.length > 0) {
+    return describeGitHubLinkedPullRequestsStatusReason(openPullRequests);
+  }
+
+  if (pullRequests.some((entry) => entry.lifecycleState === 'merged')) {
+    return pullRequests.length === 1
+      ? 'the linked pull request was merged'
+      : 'at least one linked pull request was merged';
+  }
+
+  return pullRequests.length === 1
+    ? 'the linked pull request was closed without merge'
+    : 'all linked pull requests were closed without merge';
 }
 
 function resolvePaperclipIssueStatus(params: {
@@ -8253,6 +8283,33 @@ function resolvePaperclipPullRequestIssueStatus(params: {
     preferInProgress: hasExecutorHandoffTarget,
     preserveTransientUnknownMergeabilityWait: currentStatus === 'done' || currentStatus === 'in_review'
   });
+}
+
+function resolvePaperclipDirectPullRequestIssueStatus(params: {
+  currentStatus: PaperclipIssueStatus;
+  pullRequests: GitHubDirectPullRequestSyncSnapshot[];
+  hasExecutorHandoffTarget?: boolean;
+}): PaperclipIssueStatus {
+  const { currentStatus, pullRequests, hasExecutorHandoffTarget } = params;
+  const openPullRequests = pullRequests
+    .map((entry) => entry.pullRequest)
+    .filter((pullRequest): pullRequest is GitHubPullRequestStatusSnapshot => Boolean(pullRequest));
+
+  if (openPullRequests.length > 0) {
+    if (shouldPreserveBlockedExternalPullRequestWait({
+      currentStatus,
+      linkedPullRequests: openPullRequests
+    })) {
+      return 'blocked';
+    }
+
+    return resolvePaperclipStatusFromLinkedPullRequests(openPullRequests, {
+      preferInProgress: hasExecutorHandoffTarget,
+      preserveTransientUnknownMergeabilityWait: currentStatus === 'done' || currentStatus === 'in_review'
+    });
+  }
+
+  return pullRequests.some((entry) => entry.lifecycleState === 'merged') ? 'done' : 'cancelled';
 }
 
 async function listLinkedPullRequestsForIssue(
@@ -13933,6 +13990,25 @@ async function synchronizePaperclipIssueStatuses(
   };
 }
 
+function groupGitHubPullRequestLinksByPaperclipIssue(
+  pullRequestLinks: GitHubPullRequestLinkRecord[]
+): Map<string, GitHubPullRequestLinkRecord[]> {
+  const groups = new Map<string, GitHubPullRequestLinkRecord[]>();
+  const sortedLinks = [...pullRequestLinks].sort((left, right) =>
+    left.paperclipIssueId.localeCompare(right.paperclipIssueId)
+    || left.data.repositoryUrl.localeCompare(right.data.repositoryUrl)
+    || left.data.githubPullRequestNumber - right.data.githubPullRequestNumber
+  );
+
+  for (const pullRequestLink of sortedLinks) {
+    const group = groups.get(pullRequestLink.paperclipIssueId) ?? [];
+    group.push(pullRequestLink);
+    groups.set(pullRequestLink.paperclipIssueId, group);
+  }
+
+  return groups;
+}
+
 async function synchronizePaperclipPullRequestIssueStatuses(
   ctx: PluginSetupContext,
   octokit: Octokit,
@@ -13968,6 +14044,7 @@ async function synchronizePaperclipPullRequestIssueStatuses(
   const mappingCompanyId = mapping.companyId;
   const mappingProjectId = mapping.paperclipProjectId;
   const totalIssueCount = pullRequestLinks.length;
+  const pullRequestLinkGroups = groupGitHubPullRequestLinksByPaperclipIssue(pullRequestLinks);
   const queuedIssueWakeups: Array<{
     assigneeAgentId?: string | null;
     paperclipIssueId: string;
@@ -13977,82 +14054,130 @@ async function synchronizePaperclipPullRequestIssueStatuses(
     nextStatus?: PaperclipIssueStatus;
   }> = [];
 
-  for (const pullRequestLink of pullRequestLinks) {
-    if (assertNotCancelled) {
-      await assertNotCancelled();
+  for (const [paperclipIssueId, issuePullRequestLinks] of pullRequestLinkGroups.entries()) {
+    const pullRequestSnapshots: GitHubDirectPullRequestSyncSnapshot[] = [];
+    let groupHadFailure = false;
+
+    for (const pullRequestLink of issuePullRequestLinks) {
+      if (assertNotCancelled) {
+        await assertNotCancelled();
+      }
+
+      try {
+        const pullRequestRepository = requireRepositoryReference(pullRequestLink.data.repositoryUrl);
+        updateSyncFailureContext(syncFailureContext, {
+          phase: 'evaluating_github_status',
+          repositoryUrl: pullRequestRepository.url,
+          githubIssueNumber: undefined
+        });
+        const pullRequestResponse = await octokit.rest.pulls.get({
+          owner: pullRequestRepository.owner,
+          repo: pullRequestRepository.repo,
+          pull_number: pullRequestLink.data.githubPullRequestNumber,
+          headers: {
+            'X-GitHub-Api-Version': GITHUB_API_VERSION
+          }
+        });
+        const livePullRequestLifecycleState = getPullRequestApiState({
+          state: pullRequestResponse.data.state,
+          merged: pullRequestResponse.data.merged
+        });
+        const livePullRequestLinkState = livePullRequestLifecycleState === 'open' ? 'open' : 'closed';
+        if (
+          livePullRequestLinkState !== pullRequestLink.data.githubPullRequestState
+          || pullRequestResponse.data.html_url !== pullRequestLink.data.githubPullRequestUrl
+          || pullRequestResponse.data.title !== pullRequestLink.data.title
+        ) {
+          await upsertGitHubPullRequestLinkRecord(ctx, {
+            companyId: pullRequestLink.data.companyId ?? mappingCompanyId,
+            projectId: pullRequestLink.data.paperclipProjectId ?? mappingProjectId,
+            issueId: pullRequestLink.paperclipIssueId,
+            repositoryUrl: pullRequestRepository.url,
+            pullRequestNumber: pullRequestLink.data.githubPullRequestNumber,
+            pullRequestUrl: pullRequestResponse.data.html_url ?? pullRequestLink.data.githubPullRequestUrl,
+            pullRequestTitle: pullRequestResponse.data.title || pullRequestLink.data.title || `Pull request #${pullRequestLink.data.githubPullRequestNumber}`,
+            pullRequestState: livePullRequestLinkState
+          });
+        }
+
+        if (livePullRequestLifecycleState === 'open') {
+          const pullRequest = await getGitHubPullRequestStatusSnapshot(
+            octokit,
+            pullRequestRepository,
+            pullRequestLink.data.githubPullRequestNumber,
+            pullRequestStatusCache
+          );
+          pullRequestSnapshots.push({
+            pullRequestLink,
+            repository: pullRequestRepository,
+            lifecycleState: 'open',
+            pullRequest
+          });
+        } else {
+          pullRequestSnapshots.push({
+            pullRequestLink,
+            repository: pullRequestRepository,
+            lifecycleState: livePullRequestLifecycleState
+          });
+        }
+      } catch (error) {
+        if (isGitHubRateLimitError(error)) {
+          throw error;
+        }
+
+        groupHadFailure = true;
+        recordRecoverableSyncFailure(ctx, failures, error, syncFailureContext);
+      } finally {
+        completedIssueCount += 1;
+
+        if (onProgress) {
+          await onProgress({
+            pullRequestLink,
+            completedIssueCount,
+            totalIssueCount
+          });
+        }
+      }
     }
 
+    if (groupHadFailure || pullRequestSnapshots.length === 0) {
+      continue;
+    }
+
+    const primaryRepository = pullRequestSnapshots[0]?.repository;
     try {
-      const pullRequestRepository = requireRepositoryReference(pullRequestLink.data.repositoryUrl);
-      updateSyncFailureContext(syncFailureContext, {
-        phase: 'evaluating_github_status',
-        repositoryUrl: pullRequestRepository.url,
-        githubIssueNumber: undefined
-      });
-      const pullRequestResponse = await octokit.rest.pulls.get({
-        owner: pullRequestRepository.owner,
-        repo: pullRequestRepository.repo,
-        pull_number: pullRequestLink.data.githubPullRequestNumber,
-        headers: {
-          'X-GitHub-Api-Version': GITHUB_API_VERSION
-        }
-      });
-      const livePullRequestState = getPullRequestApiState({
-        state: pullRequestResponse.data.state,
-        merged: pullRequestResponse.data.merged
-      }) === 'open'
-        ? 'open'
-        : 'closed';
-      if (
-        livePullRequestState !== pullRequestLink.data.githubPullRequestState
-        || pullRequestResponse.data.html_url !== pullRequestLink.data.githubPullRequestUrl
-        || pullRequestResponse.data.title !== pullRequestLink.data.title
-      ) {
-        await upsertGitHubPullRequestLinkRecord(ctx, {
-          companyId: pullRequestLink.data.companyId ?? mappingCompanyId,
-          projectId: pullRequestLink.data.paperclipProjectId ?? mappingProjectId,
-          issueId: pullRequestLink.paperclipIssueId,
-          repositoryUrl: pullRequestRepository.url,
-          pullRequestNumber: pullRequestLink.data.githubPullRequestNumber,
-          pullRequestUrl: pullRequestResponse.data.html_url ?? pullRequestLink.data.githubPullRequestUrl,
-          pullRequestTitle: pullRequestResponse.data.title || pullRequestLink.data.title || `Pull request #${pullRequestLink.data.githubPullRequestNumber}`,
-          pullRequestState: livePullRequestState
-        });
-      }
-      if (livePullRequestState !== 'open') {
-        continue;
+      if (assertNotCancelled) {
+        await assertNotCancelled();
       }
 
-      const pullRequest = await getGitHubPullRequestStatusSnapshot(
-        octokit,
-        pullRequestRepository,
-        pullRequestLink.data.githubPullRequestNumber,
-        pullRequestStatusCache
-      );
-      const paperclipIssue = await ctx.issues.get(pullRequestLink.paperclipIssueId, mapping.companyId);
+      const paperclipIssue = await ctx.issues.get(paperclipIssueId, mapping.companyId);
       if (!paperclipIssue) {
         continue;
       }
-
       const paperclipIssueSyncContext = getPaperclipIssueSyncContext(paperclipIssue);
       const executorTransitionAssignee = resolvePaperclipIssueExecutorAssignee(
         paperclipIssueSyncContext,
         advancedSettings
       );
-      let nextStatus = resolvePaperclipPullRequestIssueStatus({
+      let nextStatus = resolvePaperclipDirectPullRequestIssueStatus({
         currentStatus: paperclipIssue.status,
-        pullRequest,
+        pullRequests: pullRequestSnapshots,
         hasExecutorHandoffTarget: Boolean(executorTransitionAssignee)
       });
       if (
         paperclipIssue.status === 'blocked'
         && nextStatus !== 'blocked'
+        && pullRequestSnapshots.some((entry) => entry.lifecycleState === 'open')
         && await hasUnresolvedPaperclipIssueBlocker(ctx, paperclipIssue, mapping.companyId)
       ) {
         nextStatus = 'blocked';
       }
       const shouldPreserveMaintainerWaitRouting = isHealthyMaintainerWaitTransition({
         currentStatus: paperclipIssue.status,
+        nextStatus,
+        syncContext: paperclipIssueSyncContext
+      });
+      const shouldClearCompletedExecutionPolicy = shouldClearCompletedSyncExecutionPolicy({
         nextStatus,
         syncContext: paperclipIssueSyncContext
       });
@@ -14076,20 +14201,20 @@ async function synchronizePaperclipPullRequestIssueStatuses(
         && (nextAssigneeChanged || paperclipIssue.status !== nextStatus);
 
       if (paperclipIssue.status === nextStatus) {
-        if (shouldClearTransitionAssignee) {
+        if (shouldClearTransitionAssignee || shouldClearCompletedExecutionPolicy) {
           updateSyncFailureContext(syncFailureContext, {
             phase: 'updating_paperclip_status',
-            repositoryUrl: pullRequestRepository.url,
+            repositoryUrl: primaryRepository?.url,
             githubIssueNumber: undefined
           });
           await updatePaperclipIssueState(ctx, {
             companyId: mapping.companyId,
-            issueId: pullRequestLink.paperclipIssueId,
+            issueId: paperclipIssueId,
             currentStatus: paperclipIssue.status,
             syncContext: paperclipIssueSyncContext,
             nextStatus,
-            clearAssignee: true,
-            ...(shouldPreserveMaintainerWaitRouting ? { clearExecutionPolicy: true } : {}),
+            ...(shouldClearTransitionAssignee ? { clearAssignee: true } : {}),
+            ...(shouldPreserveMaintainerWaitRouting || shouldClearCompletedExecutionPolicy ? { clearExecutionPolicy: true } : {}),
             transitionComment: '',
             paperclipApiBaseUrl
           });
@@ -14101,22 +14226,22 @@ async function synchronizePaperclipPullRequestIssueStatuses(
       const transitionComment = buildPaperclipPullRequestIssueStatusTransitionComment({
         previousStatus: paperclipIssue.status,
         nextStatus,
-        pullRequest
+        pullRequests: pullRequestSnapshots
       });
       updateSyncFailureContext(syncFailureContext, {
         phase: 'updating_paperclip_status',
-        repositoryUrl: pullRequestRepository.url,
+        repositoryUrl: primaryRepository?.url,
         githubIssueNumber: undefined
       });
       await updatePaperclipIssueState(ctx, {
         companyId: mapping.companyId,
-        issueId: pullRequestLink.paperclipIssueId,
+        issueId: paperclipIssueId,
         currentStatus: paperclipIssue.status,
         syncContext: paperclipIssueSyncContext,
         nextStatus,
         ...(nextTransitionAssignee ? { nextAssignee: nextTransitionAssignee.principal } : {}),
         ...(shouldClearTransitionAssignee ? { clearAssignee: true } : {}),
-        ...(shouldPreserveMaintainerWaitRouting ? { clearExecutionPolicy: true } : {}),
+        ...(shouldPreserveMaintainerWaitRouting || shouldClearCompletedExecutionPolicy ? { clearExecutionPolicy: true } : {}),
         transitionComment,
         paperclipApiBaseUrl
       });
@@ -14125,7 +14250,7 @@ async function synchronizePaperclipPullRequestIssueStatuses(
       if (shouldWakeTransitionAssignee && nextTransitionAssignee?.principal.kind === 'agent') {
         queuedIssueWakeups.push({
           assigneeAgentId: nextTransitionAssignee.principal.id,
-          paperclipIssueId: pullRequestLink.paperclipIssueId,
+          paperclipIssueId,
           reason: STATUS_TRANSITION_WAKE_REASON,
           mutation: 'status_transition',
           previousStatus: paperclipIssue.status,
@@ -14138,17 +14263,6 @@ async function synchronizePaperclipPullRequestIssueStatuses(
       }
 
       recordRecoverableSyncFailure(ctx, failures, error, syncFailureContext);
-      continue;
-    } finally {
-      completedIssueCount += 1;
-
-      if (onProgress) {
-        await onProgress({
-          pullRequestLink,
-          completedIssueCount,
-          totalIssueCount
-        });
-      }
     }
   }
 
