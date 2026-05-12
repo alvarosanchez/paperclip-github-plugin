@@ -12992,6 +12992,22 @@ async function assignImportedPaperclipIssueToUser(
   }
 }
 
+async function ensurePaperclipIssueStandardWorkMode(
+  ctx: PluginSetupContext,
+  issue: Issue,
+  companyId: string
+): Promise<Issue> {
+  if (!('workMode' in issue) || issue.workMode === 'standard') {
+    return issue;
+  }
+
+  return ctx.issues.update(
+    issue.id,
+    { workMode: 'standard' } as unknown as Parameters<PluginSetupContext['issues']['update']>[1],
+    companyId
+  );
+}
+
 async function createPaperclipIssue(
   ctx: PluginSetupContext,
   mapping: RepositoryMapping,
@@ -13008,19 +13024,24 @@ async function createPaperclipIssue(
   const title = issue.title;
   const description = buildPaperclipIssueDescription(issue);
   const defaultAssignee = getConfiguredAdvancedAssigneePrincipal(advancedSettings, 'default');
-  const createdIssue = await ctx.issues.create({
-    companyId: mapping.companyId,
-    projectId: mapping.paperclipProjectId,
-    title,
-    ...(description ? { description } : {}),
-    originKind: GITHUB_ISSUE_ORIGIN_KIND,
-    originId: normalizeGitHubIssueHtmlUrl(issue.htmlUrl) ?? issue.htmlUrl,
-    ...(defaultAssignee?.kind === 'agent'
-      ? { assigneeAgentId: defaultAssignee.id }
-      : defaultAssignee?.kind === 'user'
-        ? { assigneeUserId: defaultAssignee.id }
-      : {})
-  });
+  const createdIssue = await ensurePaperclipIssueStandardWorkMode(
+    ctx,
+    await ctx.issues.create({
+      companyId: mapping.companyId,
+      projectId: mapping.paperclipProjectId,
+      title,
+      ...(description ? { description } : {}),
+      status: advancedSettings.defaultStatus,
+      originKind: GITHUB_ISSUE_ORIGIN_KIND,
+      originId: normalizeGitHubIssueHtmlUrl(issue.htmlUrl) ?? issue.htmlUrl,
+      ...(defaultAssignee?.kind === 'agent'
+        ? { assigneeAgentId: defaultAssignee.id }
+        : defaultAssignee?.kind === 'user'
+          ? { assigneeUserId: defaultAssignee.id }
+        : {})
+    }),
+    mapping.companyId
+  );
   const ensuredCreatedIssueId = createdIssue.id;
   const normalizedCreatedIssueDescription = createdIssue.description ?? undefined;
   const createPath: IssueDescriptionUpdatePath = 'sdk';
@@ -18401,19 +18422,24 @@ async function createProjectPullRequestPaperclipIssue(
   }
 
   const requestedTitle = typeof input.title === 'string' && input.title.trim() ? input.title.trim() : pullRequest.title.trim();
-  const createdIssue = await ctx.issues.create({
-    companyId: scope.companyId,
-    projectId: scope.projectId,
-    title: requestedTitle,
-    originKind: GITHUB_PULL_REQUEST_ORIGIN_KIND,
-    originId: pullRequestUrl,
-    description: buildPaperclipIssueDescriptionFromPullRequest({
-      repository: scope.repository,
-      pullRequestNumber,
-      pullRequestUrl,
-      body: pullRequest.body
-    })
-  });
+  const createdIssue = await ensurePaperclipIssueStandardWorkMode(
+    ctx,
+    await ctx.issues.create({
+      companyId: scope.companyId,
+      projectId: scope.projectId,
+      title: requestedTitle,
+      status: 'todo',
+      originKind: GITHUB_PULL_REQUEST_ORIGIN_KIND,
+      originId: pullRequestUrl,
+      description: buildPaperclipIssueDescriptionFromPullRequest({
+        repository: scope.repository,
+        pullRequestNumber,
+        pullRequestUrl,
+        body: pullRequest.body
+      })
+    }),
+    scope.companyId
+  );
   const resolvedIssue = await ctx.issues.get(createdIssue.id, scope.companyId) ?? createdIssue;
 
   await upsertGitHubPullRequestLinkRecord(ctx, {
