@@ -60,6 +60,7 @@ test('GitHub workflows use the same pnpm version as packageManager', async () =>
   const packageJson = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'));
   const ciWorkflow = await readFile(new URL('../.github/workflows/ci.yml', import.meta.url), 'utf8');
   const releaseWorkflow = await readFile(new URL('../.github/workflows/release.yml', import.meta.url), 'utf8');
+  const pnpmWorkspace = await readFile(new URL('../pnpm-workspace.yaml', import.meta.url), 'utf8');
   const escapedPnpmVersion = PNPM_UNDER_TEST.replaceAll('.', '\\.');
 
   assert.equal(packageJson.packageManager, `pnpm@${PNPM_UNDER_TEST}`);
@@ -67,4 +68,5 @@ test('GitHub workflows use the same pnpm version as packageManager', async () =>
   assert.match(releaseWorkflow, new RegExp(`pnpm/action-setup@${PNPM_ACTION_SETUP_SHA}`));
   assert.match(ciWorkflow, new RegExp(`version: ${escapedPnpmVersion}`));
   assert.match(releaseWorkflow, new RegExp(`version: ${escapedPnpmVersion}`));
+  assert.match(pnpmWorkspace, /^allowBuilds:\n  esbuild: true\n?$/);
 });
