@@ -1723,6 +1723,10 @@ test('manifest declares the GitHub agent tools, KPI API route, and capabilities'
       'link_github_item'
     ]
   );
+  assert.equal(
+    manifest.tools?.some((tool) => /unlink/i.test(tool.name)),
+    false
+  );
   assert.deepEqual(
     manifest.apiRoutes?.map((route) => ({
       routeKey: route.routeKey,
@@ -9535,6 +9539,53 @@ test('worker issue toolbar sync state supports Paperclip issues linked directly 
   assert.equal(toolbarState.canRun, true);
   assert.equal(toolbarState.label, 'Sync PR #89');
   assert.equal(toolbarState.message, 'Sync paperclipai/example-repo pull request #89.');
+});
+
+test('worker issue toolbar sync state can run for direct links in unmapped repositories', async () => {
+  const harness = await createProjectPullRequestsHarness();
+  const issue = await harness.ctx.issues.create({
+    companyId: 'company-1',
+    projectId: 'project-1',
+    title: 'Manual external PR-linked issue',
+    description: 'This Paperclip issue is linked directly to an external GitHub PR.'
+  });
+
+  await harness.ctx.entities.upsert({
+    entityType: 'paperclip-github-plugin.pull-request-link',
+    scopeKind: 'issue',
+    scopeId: issue.id,
+    externalId: 'https://github.com/paperclipai/other-repo/pull/117',
+    title: 'GitHub pull request #117',
+    status: 'open',
+    data: {
+      companyId: 'company-1',
+      paperclipProjectId: 'project-1',
+      repositoryUrl: 'https://github.com/paperclipai/other-repo',
+      githubPullRequestNumber: 117,
+      githubPullRequestUrl: 'https://github.com/paperclipai/other-repo/pull/117',
+      githubPullRequestState: 'open',
+      title: 'GitHub PR linked from another repository',
+      syncedAt: '2026-04-27T09:30:00.000Z'
+    }
+  });
+
+  const toolbarState = await harness.getData<{
+    kind: string;
+    visible: boolean;
+    canRun: boolean;
+    label: string;
+    message?: string;
+  }>('sync.toolbarState', {
+    companyId: 'company-1',
+    entityType: 'issue',
+    entityId: issue.id
+  });
+
+  assert.equal(toolbarState.kind, 'issue');
+  assert.equal(toolbarState.visible, false);
+  assert.equal(toolbarState.canRun, true);
+  assert.equal(toolbarState.label, 'Sync PR #117');
+  assert.equal(toolbarState.message, 'Sync paperclipai/other-repo pull request #117.');
 });
 
 test('sync.runNow can target a Paperclip issue linked to a GitHub issue without listing the whole repository', async () => {

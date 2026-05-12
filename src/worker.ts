@@ -4012,22 +4012,10 @@ async function buildToolbarSyncState(
   if (entityType === 'issue' && entityId && companyId) {
     const link = await resolvePaperclipIssueGitHubLink(ctx, entityId, companyId);
     if (link) {
-      const mappings = getSyncableMappingsForTarget(settings.mappings, {
-        kind: 'issue',
-        companyId,
-        projectId: link.paperclipProjectId,
-        issueId: entityId,
-        repositoryUrl: link.repositoryUrl,
-        githubIssueId: link.githubIssueId,
-        githubIssueNumber: link.githubIssueNumber,
-        githubIssueUrl: link.githubIssueUrl,
-        displayLabel: `issue #${link.githubIssueNumber}`
-      });
-
       return {
         kind: 'issue',
         visible: false,
-        canRun: githubTokenConfigured && mappings.length > 0,
+        canRun: githubTokenConfigured,
         label: `Sync #${link.githubIssueNumber}`,
         message: `Sync ${link.repositoryUrl.replace(/^https:\/\/github\.com\//, '')} issue #${link.githubIssueNumber}.`,
         syncState: settings.syncState,
@@ -4037,23 +4025,11 @@ async function buildToolbarSyncState(
     }
 
     const pullRequestLink = await resolvePaperclipIssueGitHubPullRequestLink(ctx, entityId, companyId);
-    const mappings = pullRequestLink
-      ? getSyncableMappingsForTarget(settings.mappings, {
-          kind: 'issue',
-          companyId,
-          projectId: pullRequestLink.data.paperclipProjectId,
-          issueId: entityId,
-          repositoryUrl: pullRequestLink.data.repositoryUrl,
-          githubPullRequestNumber: pullRequestLink.data.githubPullRequestNumber,
-          githubPullRequestUrl: pullRequestLink.data.githubPullRequestUrl,
-          displayLabel: `pull request #${pullRequestLink.data.githubPullRequestNumber}`
-        })
-      : [];
 
     return {
       kind: 'issue',
       visible: false,
-      canRun: githubTokenConfigured && mappings.length > 0,
+      canRun: githubTokenConfigured && Boolean(pullRequestLink),
       label: pullRequestLink?.data.githubPullRequestNumber
         ? `Sync PR #${pullRequestLink.data.githubPullRequestNumber}`
         : 'Sync issue',
