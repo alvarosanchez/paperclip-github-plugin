@@ -11838,6 +11838,7 @@ test('worker imports GitHub issues as top-level Paperclip issues and skips them 
     assert.ok(!importedChild?.parentId);
     assert.equal(importedParent?.status, 'backlog');
     assert.equal(importedChild?.status, 'backlog');
+    assert.deepEqual(createIssueInputs.map((input) => input.status), ['backlog', 'backlog']);
     assert.equal(parentRelationshipQueryCount, 0);
     assert.equal(statusTransitionComments.length, 0);
 
