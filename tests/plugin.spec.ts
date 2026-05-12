@@ -6329,10 +6329,16 @@ test('project.pullRequests.detail returns the GitHub conversation in timeline or
 test('project.pullRequests.createIssue creates and then reuses the linked Paperclip issue', async () => {
   const harness = await createProjectPullRequestsHarness();
   const originalCreateIssue = harness.ctx.issues.create.bind(harness.ctx.issues);
+  const originalUpdateIssue = harness.ctx.issues.update.bind(harness.ctx.issues);
   const createIssueInputs: Array<Parameters<typeof originalCreateIssue>[0]> = [];
   harness.ctx.issues.create = async (input) => {
     createIssueInputs.push(input);
-    return originalCreateIssue(input);
+    const created = await originalCreateIssue(input);
+    return originalUpdateIssue(
+      created.id,
+      { workMode: 'planning' } as unknown as Parameters<typeof originalUpdateIssue>[1],
+      input.companyId
+    );
   };
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (input) => {
