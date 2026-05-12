@@ -394,7 +394,10 @@ test('GitHub request failures are logged through the plugin logger instead of st
     console.error = originalConsoleError;
   }
 
-  assert.deepEqual(stderrCalls, []);
+  assert.deepEqual(
+    stderrCalls.filter((args) => !String(args[0] ?? '').includes('[DEP0205]')),
+    []
+  );
   assert.equal(warnings.length, 1);
   assert.equal(warnings[0]?.message, 'GitHub API request failed.');
   assert.deepEqual(warnings[0]?.metadata, {
@@ -6325,6 +6328,12 @@ test('project.pullRequests.detail returns the GitHub conversation in timeline or
 
 test('project.pullRequests.createIssue creates and then reuses the linked Paperclip issue', async () => {
   const harness = await createProjectPullRequestsHarness();
+  const originalCreateIssue = harness.ctx.issues.create.bind(harness.ctx.issues);
+  const createIssueInputs: Array<Parameters<typeof originalCreateIssue>[0]> = [];
+  harness.ctx.issues.create = async (input) => {
+    createIssueInputs.push(input);
+    return originalCreateIssue(input);
+  };
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (input) => {
     const requestUrl = new URL(getRequestUrl(input));
@@ -6365,6 +6374,9 @@ test('project.pullRequests.createIssue creates and then reuses the linked Paperc
 
     assert.ok(createdIssue);
     assert.equal(createdIssue?.projectId, 'project-1');
+    assert.equal(createIssueInputs[0]?.status, 'todo');
+    assert.equal(createdIssue?.status, 'todo');
+    assert.equal(createdIssue?.workMode, 'standard');
     assert.equal(createdIssue?.originKind, 'plugin:paperclip-github-plugin:github-pull-request');
     assert.equal(createdIssue?.originId, 'https://github.com/paperclipai/example-repo/pull/42');
     assert.match(createdIssue?.description ?? '', /Imported from GitHub pull request \[#42\]/);
@@ -11697,6 +11709,12 @@ test('worker imports GitHub issues as top-level Paperclip issues and skips them 
     statusTransitionComments.push({ issueId, body });
     return originalCreateComment(issueId, body, companyId);
   };
+  const originalCreateIssue = harness.ctx.issues.create.bind(harness.ctx.issues);
+  const createIssueInputs: Array<Parameters<typeof originalCreateIssue>[0]> = [];
+  harness.ctx.issues.create = async (input) => {
+    createIssueInputs.push(input);
+    return originalCreateIssue(input);
+  };
 
   const originalFetch = globalThis.fetch;
   const parentIssue = {
@@ -11815,27 +11833,7 @@ test('worker imports GitHub issues as top-level Paperclip issues and skips them 
     assert.equal(importedParent?.status, 'backlog');
     assert.equal(importedChild?.status, 'backlog');
     assert.equal(parentRelationshipQueryCount, 0);
-    assert.equal(statusTransitionComments.length, 2);
-    assert.match(
-      statusTransitionComments.find((comment) => comment.issueId === importedParent?.id)?.body ?? '',
-      /from `todo` to `backlog`/
-    );
-    assert.match(
-      statusTransitionComments.find((comment) => comment.issueId === importedParent?.id)?.body ?? '',
-      /the GitHub issue is open with no linked pull requests/
-    );
-    assert.doesNotMatch(
-      statusTransitionComments.find((comment) => comment.issueId === importedParent?.id)?.body ?? '',
-      /paperclipai\/example-repo#10/
-    );
-    assert.match(
-      statusTransitionComments.find((comment) => comment.issueId === importedChild?.id)?.body ?? '',
-      /from `todo` to `backlog`/
-    );
-    assert.match(
-      statusTransitionComments.find((comment) => comment.issueId === importedChild?.id)?.body ?? '',
-      /the GitHub issue is open with no linked pull requests/
-    );
+    assert.equal(statusTransitionComments.length, 0);
 
     const importRegistryAfterFirstSync = harness.getState({
       scopeKind: 'instance',
@@ -11868,7 +11866,7 @@ test('worker imports GitHub issues as top-level Paperclip issues and skips them 
     assert.equal(importedParentAfterSecondSync?.status, 'backlog');
     assert.equal(importedChildAfterSecondSync?.status, 'backlog');
     assert.equal(parentRelationshipQueryCount, 0);
-    assert.equal(statusTransitionComments.length, 2);
+    assert.equal(statusTransitionComments.length, 0);
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -12050,6 +12048,12 @@ test('worker imports maintainer-authored open issues without linked pull request
     statusTransitionComments.push({ issueId, body });
     return originalCreateComment(issueId, body, companyId);
   };
+  const originalCreateIssue = harness.ctx.issues.create.bind(harness.ctx.issues);
+  const createIssueInputs: Array<Parameters<typeof originalCreateIssue>[0]> = [];
+  harness.ctx.issues.create = async (input) => {
+    createIssueInputs.push(input);
+    return originalCreateIssue(input);
+  };
 
   const originalFetch = globalThis.fetch;
 
@@ -12160,13 +12164,14 @@ test('worker imports maintainer-authored open issues without linked pull request
       companyId: 'company-1'
     });
 
+    assert.deepEqual(createIssueInputs.map((input) => input.status), ['backlog', 'backlog']);
     assert.equal(importedIssues.find((issue) => issue.title === 'Maintainer-authored issue')?.status, 'todo');
     assert.equal(importedIssues.find((issue) => issue.title === 'Reporter-authored issue')?.status, 'backlog');
     assert.equal(statusTransitionComments.length, 1);
-    assert.match(statusTransitionComments[0]?.body ?? '', /from `todo` to `backlog`/);
+    assert.match(statusTransitionComments[0]?.body ?? '', /from `backlog` to `todo`/);
     assert.match(
       statusTransitionComments[0]?.body ?? '',
-      /the GitHub issue is open with no linked pull requests/
+      /created by a repository maintainer/
     );
   } finally {
     globalThis.fetch = originalFetch;
@@ -13079,7 +13084,9 @@ test('worker imports admin-authored open issues as todo when collaborator permis
     });
 
     assert.equal(importedIssues.find((issue) => issue.title === 'Admin-authored issue')?.status, 'todo');
-    assert.equal(statusTransitionComments.length, 0);
+    assert.equal(statusTransitionComments.length, 1);
+    assert.match(statusTransitionComments[0]?.body ?? '', /from `backlog` to `todo`/);
+    assert.match(statusTransitionComments[0]?.body ?? '', /created by a repository maintainer/);
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -13754,14 +13761,7 @@ test('worker maps GitHub labels onto existing Paperclip labels, creates missing 
     assert.ok(importedIssue);
     assert.deepEqual(importedIssue?.labelIds, [existingLabel.id, createdLabel.id]);
     assert.equal(importedIssue?.status, 'backlog');
-    assert.equal(statusTransitionComments.length, 1);
-    assert.equal(statusTransitionComments[0]?.issueId, importedIssue?.id);
-    assert.match(statusTransitionComments[0]?.body ?? '', /from `todo` to `backlog`/);
-    assert.match(
-      statusTransitionComments[0]?.body ?? '',
-      /the GitHub issue is open with no linked pull requests/
-    );
-    assert.doesNotMatch(statusTransitionComments[0]?.body ?? '', /paperclipai\/example-repo#20/);
+    assert.equal(statusTransitionComments.length, 0);
     assert.doesNotMatch(importedIssue?.description ?? '', /^\*\s+GitHub issue:/m);
     assert.match(importedIssue?.description ?? '', /Imported body/);
     assert.doesNotMatch(importedIssue?.description ?? '', /GitHub labels:/);
@@ -13955,6 +13955,10 @@ test('worker authenticates direct Paperclip REST label and issue update sync cal
   const originalCreate = harness.ctx.issues.create;
   const originalUpdate = harness.ctx.issues.update;
   const paperclipApiAuthHeaders: Array<{ path: string; authorization: string | null }> = [];
+  harness.ctx.issues.create = async (input) => originalCreate({
+    ...input,
+    description: undefined
+  });
 
   globalThis.fetch = async (input, init) => {
     const rawUrl = getRequestUrl(input);
@@ -14071,6 +14075,7 @@ test('worker authenticates direct Paperclip REST label and issue update sync cal
     );
   } finally {
     globalThis.fetch = originalFetch;
+    harness.ctx.issues.create = originalCreate;
   }
 });
 
@@ -14587,7 +14592,7 @@ test('worker resyncs labels for already-imported issues when GitHub labels chang
 
     assert.ok(importedIssue);
     assert.deepEqual(importedIssue?.labelIds, [bugLabel.id, enhancementLabel.id]);
-    assert.equal(statusTransitionComments.length, 1);
+    assert.equal(statusTransitionComments.length, 0);
 
     syncRun = 1;
 
@@ -14604,7 +14609,7 @@ test('worker resyncs labels for already-imported issues when GitHub labels chang
 
     assert.ok(importedIssueAfterSecondSync);
     assert.deepEqual(importedIssueAfterSecondSync?.labelIds, [docsLabel.id]);
-    assert.equal(statusTransitionComments.length, 1);
+    assert.equal(statusTransitionComments.length, 0);
   } finally {
     globalThis.fetch = originalFetch;
   }

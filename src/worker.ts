@@ -12956,6 +12956,7 @@ async function createPaperclipIssue(
     projectId: mapping.paperclipProjectId,
     title,
     ...(description ? { description } : {}),
+    status: advancedSettings.defaultStatus,
     originKind: GITHUB_ISSUE_ORIGIN_KIND,
     originId: normalizeGitHubIssueHtmlUrl(issue.htmlUrl) ?? issue.htmlUrl,
     ...(defaultAssignee?.kind === 'agent'
@@ -18291,6 +18292,7 @@ async function createProjectPullRequestPaperclipIssue(
     companyId: scope.companyId,
     projectId: scope.projectId,
     title: requestedTitle,
+    status: 'todo',
     originKind: GITHUB_PULL_REQUEST_ORIGIN_KIND,
     originId: pullRequestUrl,
     description: buildPaperclipIssueDescriptionFromPullRequest({
