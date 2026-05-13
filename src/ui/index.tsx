@@ -7092,6 +7092,34 @@ export async function syncGitHubTokenPropagationForAgents(params: {
   }
 }
 
+function normalizeGitHubTokenSecretRefCandidate(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim() ? value.trim() : undefined;
+}
+
+export function resolveGitHubTokenSecretRefForPropagation(params: {
+  explicitSecretRef?: unknown;
+  settingsSecretRef?: unknown;
+  companyId?: string | null;
+  pluginConfig?: GitHubSyncPluginConfig | null;
+}): string | undefined {
+  const explicitSecretRef = normalizeGitHubTokenSecretRefCandidate(params.explicitSecretRef);
+  if (explicitSecretRef) {
+    return explicitSecretRef;
+  }
+
+  const settingsSecretRef = normalizeGitHubTokenSecretRefCandidate(params.settingsSecretRef);
+  if (settingsSecretRef) {
+    return settingsSecretRef;
+  }
+
+  const companyId = normalizeGitHubTokenSecretRefCandidate(params.companyId);
+  if (!companyId || !params.pluginConfig) {
+    return undefined;
+  }
+
+  return normalizePluginConfig(params.pluginConfig).githubTokenRefs?.[companyId];
+}
+
 function normalizeCliAuthPollIntervalMs(value: unknown): number {
   if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) {
     return CLI_AUTH_POLL_INTERVAL_FALLBACK_MS;
@@ -12170,11 +12198,12 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
       return;
     }
 
-    let githubTokenSecretRef =
-      typeof options.githubTokenSecretRef === 'string' && options.githubTokenSecretRef.trim()
-        ? options.githubTokenSecretRef.trim()
-        : undefined;
     const companyId = hostContext.companyId;
+    let githubTokenSecretRef = resolveGitHubTokenSecretRefForPropagation({
+      explicitSecretRef: options.githubTokenSecretRef,
+      settingsSecretRef: currentSettings?.githubTokenConfigSyncRef ?? settings.data?.githubTokenConfigSyncRef,
+      companyId
+    });
 
     if (!githubTokenSecretRef) {
       if (!companyId) {
@@ -12187,8 +12216,10 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
       }
 
       const currentConfigResponse = await fetchJson<PluginConfigResponse | null>(`/api/plugins/${pluginId}/config`);
-      const normalizedConfig = normalizePluginConfig(currentConfigResponse?.configJson);
-      githubTokenSecretRef = normalizedConfig.githubTokenRefs?.[companyId];
+      githubTokenSecretRef = resolveGitHubTokenSecretRefForPropagation({
+        companyId,
+        pluginConfig: normalizePluginConfig(currentConfigResponse?.configJson)
+      });
     }
 
     if (!githubTokenSecretRef) {
@@ -12505,9 +12536,15 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
 
       let propagationError: unknown = null;
       try {
+        const githubTokenSecretRef = resolveGitHubTokenSecretRefForPropagation({
+          explicitSecretRef: result.githubTokenConfigSyncRef,
+          settingsSecretRef: currentSettings?.githubTokenConfigSyncRef ?? settings.data?.githubTokenConfigSyncRef,
+          companyId
+        });
         await propagateGitHubTokenToSelectedAgents({
           selectedAgentIds: normalizeAgentIds(normalizeAdvancedSettings(result.advancedSettings).githubTokenPropagationAgentIds),
-          previousAgentIds: normalizeAgentIds(currentSettings?.advancedSettings?.githubTokenPropagationAgentIds)
+          previousAgentIds: normalizeAgentIds(currentSettings?.advancedSettings?.githubTokenPropagationAgentIds),
+          githubTokenSecretRef
         });
       } catch (error) {
         propagationError = error;
