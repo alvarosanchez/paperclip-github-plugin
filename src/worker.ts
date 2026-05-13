@@ -8133,8 +8133,30 @@ function isHealthyMaintainerWaitTransition(params: {
 
   return nextStatus === 'in_review'
     && (currentStatus === 'done' || currentStatus === 'in_review')
-    && syncContext.executionState === null
-    && syncContext.executionPolicy !== null;
+    && isClearableMaintainerWaitExecutionState(syncContext.executionState);
+}
+
+function isClearableMaintainerWaitExecutionState(
+  executionState: PaperclipIssueExecutionState | null
+): boolean {
+  if (executionState === null) {
+    return true;
+  }
+
+  if (
+    executionState.currentParticipant !== null ||
+    executionState.returnAssignee !== null ||
+    executionState.currentStageId !== null ||
+    executionState.currentStageIndex !== null ||
+    executionState.currentStageType !== null ||
+    executionState.completedStageIds.length > 0 ||
+    executionState.lastDecisionId ||
+    executionState.lastDecisionOutcome
+  ) {
+    return false;
+  }
+
+  return !executionState.status || executionState.status === 'idle' || executionState.status === 'completed';
 }
 
 function shouldClearCompletedSyncExecutionPolicy(params: {
@@ -12967,6 +12989,17 @@ async function updatePaperclipIssueState(
 
       if (!payloadResult.failure) {
         issueUpdated = true;
+        if (
+          issuePatch.executionState === null &&
+          ctx.issues &&
+          typeof ctx.issues.update === 'function'
+        ) {
+          await ctx.issues.update(
+            issueId,
+            { executionState: null } as PaperclipIssueUpdatePatchWithLabels,
+            companyId
+          );
+        }
       }
 
       if (payloadResult.failure && (payloadResult.failure.status ?? response.status) !== 404 && (payloadResult.failure.status ?? response.status) !== 405) {
