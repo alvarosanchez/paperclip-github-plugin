@@ -18,6 +18,7 @@ import { buildPaperclipUrl, fetchJson, fetchPaperclipHealth, resolveCliAuthPollU
 import { resolveInstalledGitHubSyncPluginId, resolvePluginSettingsHref } from './plugin-installation.ts';
 import {
   mergePluginConfig,
+  type GitHubSyncPluginConfig,
   normalizePaperclipApiBaseUrl,
   normalizePluginConfig,
   resolvePaperclipApiBaseUrlForPluginAction
@@ -6850,7 +6851,29 @@ async function resolveOrCreateCompanySecret(companyId: string, name: string, val
   });
 }
 
-async function patchPluginConfig(pluginId: string, patch: Record<string, unknown>): Promise<void> {
+function isPluginSecretReferencesDisabledError(error: unknown): boolean {
+  return getActionErrorMessage(error, '').toLowerCase().includes('plugin secret references are disabled');
+}
+
+function stripPluginSecretRefConfig(config: GitHubSyncPluginConfig): GitHubSyncPluginConfig {
+  const {
+    githubTokenRefs: _githubTokenRefs,
+    paperclipBoardApiTokenRefs: _paperclipBoardApiTokenRefs,
+    ...safeConfig
+  } = config;
+  return safeConfig;
+}
+
+async function writePluginConfig(pluginId: string, config: GitHubSyncPluginConfig): Promise<void> {
+  await fetchJson(`/api/plugins/${pluginId}/config`, {
+    method: 'POST',
+    body: JSON.stringify({
+      configJson: config
+    })
+  });
+}
+
+export async function patchPluginConfig(pluginId: string, patch: Record<string, unknown>): Promise<void> {
   const currentConfigResponse = await fetchJson<PluginConfigResponse | null>(`/api/plugins/${pluginId}/config`);
   const currentConfig = normalizePluginConfig(currentConfigResponse?.configJson);
   const nextConfig = mergePluginConfig(currentConfig, patch);
@@ -6859,12 +6882,20 @@ async function patchPluginConfig(pluginId: string, patch: Record<string, unknown
     return;
   }
 
-  await fetchJson(`/api/plugins/${pluginId}/config`, {
-    method: 'POST',
-    body: JSON.stringify({
-      configJson: nextConfig
-    })
-  });
+  try {
+    await writePluginConfig(pluginId, nextConfig);
+  } catch (error) {
+    if (!isPluginSecretReferencesDisabledError(error)) {
+      throw error;
+    }
+
+    const safeConfig = stripPluginSecretRefConfig(nextConfig);
+    if (JSON.stringify(safeConfig) === JSON.stringify(nextConfig)) {
+      throw error;
+    }
+
+    await writePluginConfig(pluginId, safeConfig);
+  }
 }
 
 const GITHUB_TOKEN_PROPAGATION_CONCURRENCY_LIMIT = 4;
@@ -12318,6 +12349,7 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
       await updateBoardAccess({
         companyId,
         paperclipBoardApiTokenRef: secret.id,
+        paperclipBoardApiToken: boardApiToken,
         paperclipBoardAccessIdentity: boardIdentity.label ?? '',
         paperclipBoardAccessUserId: boardIdentity.userId ?? ''
       });
