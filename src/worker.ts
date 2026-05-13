@@ -12994,11 +12994,22 @@ async function updatePaperclipIssueState(
           ctx.issues &&
           typeof ctx.issues.update === 'function'
         ) {
-          await ctx.issues.update(
-            issueId,
-            { executionState: null } as PaperclipIssueUpdatePatchWithLabels,
-            companyId
-          );
+          try {
+            await ctx.issues.update(
+              issueId,
+              { executionState: null } as PaperclipIssueUpdatePatchWithLabels,
+              companyId
+            );
+          } catch (error) {
+            issueUpdated = false;
+            ctx.logger.warn('GitHub sync could not clear Paperclip issue execution state after the local API update. Falling back to direct issue mutation.', {
+              companyId,
+              issueId,
+              paperclipApiBaseUrl,
+              nextStatus,
+              error: getErrorMessage(error)
+            });
+          }
         }
       }
 

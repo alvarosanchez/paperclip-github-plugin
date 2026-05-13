@@ -18881,17 +18881,16 @@ test('worker routes non-review-ready GitHub merge state statuses back to active 
       });
 
       const initialStatus = scenario.initialStatus ?? 'in_review';
-      return harness.ctx.issues.update(
-        created.id,
-        {
-          ...(created.status === initialStatus ? {} : { status: initialStatus }),
-          ...(scenario.initialExecutionState ? {
-            assigneeAgentId: 'agent-1',
-            executionState: scenario.initialExecutionState
-          } : {})
-        } as never,
-        'company-1'
-      );
+      const patch: Record<string, unknown> = {
+        ...(created.status === initialStatus ? {} : { status: initialStatus }),
+        ...(scenario.initialExecutionState ? {
+          assigneeAgentId: 'agent-1',
+          executionState: scenario.initialExecutionState
+        } : {})
+      };
+      return Object.keys(patch).length === 0
+        ? created
+        : harness.ctx.issues.update(created.id, patch as never, 'company-1');
     })
   );
 
