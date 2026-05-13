@@ -163,6 +163,7 @@ type PaperclipLabelDirectory = Map<string, PaperclipIssueLabel[]>;
 type GitHubTokenRefs = Record<string, string>;
 type GitHubTokensByCompanyId = Record<string, string>;
 type PaperclipBoardApiTokenRefs = Record<string, string>;
+type PaperclipBoardApiTokensByCompanyId = Record<string, string>;
 type GitHubTokenLoginByCompanyId = Record<string, string>;
 type PaperclipBoardAccessIdentityByCompanyId = Record<string, string>;
 type PaperclipBoardAccessUserIdByCompanyId = Record<string, string>;
@@ -515,6 +516,7 @@ interface GitHubSyncConfig {
   githubToken?: string;
   githubTokensByCompanyId?: GitHubTokensByCompanyId;
   paperclipBoardApiTokenRefs?: PaperclipBoardApiTokenRefs;
+  paperclipBoardApiTokensByCompanyId?: PaperclipBoardApiTokensByCompanyId;
   paperclipApiBaseUrl?: string;
 }
 
@@ -2766,6 +2768,28 @@ function normalizeGitHubTokenRefs(value: unknown): GitHubTokenRefs | undefined {
 }
 
 function normalizeGitHubTokensByCompanyId(value: unknown): GitHubTokensByCompanyId | undefined {
+  if (!value || typeof value !== 'object') {
+    return undefined;
+  }
+
+  const entries = Object.entries(value as Record<string, unknown>)
+    .map(([companyId, token]) => {
+      const normalizedCompanyId = normalizeCompanyId(companyId);
+      const normalizedToken = normalizeGitHubToken(token);
+      return normalizedCompanyId && normalizedToken
+        ? [normalizedCompanyId, normalizedToken] as const
+        : null;
+    })
+    .filter((entry): entry is readonly [string, string] => entry !== null);
+
+  if (entries.length === 0) {
+    return undefined;
+  }
+
+  return Object.fromEntries(entries);
+}
+
+function normalizePaperclipBoardApiTokensByCompanyId(value: unknown): PaperclipBoardApiTokensByCompanyId | undefined {
   if (!value || typeof value !== 'object') {
     return undefined;
   }
@@ -5249,6 +5273,7 @@ function normalizeConfig(value: unknown): GitHubSyncConfig {
   const githubToken = normalizeGitHubToken(record.githubToken);
   const githubTokensByCompanyId = normalizeGitHubTokensByCompanyId(record.githubTokensByCompanyId);
   const paperclipBoardApiTokenRefs = normalizePaperclipBoardApiTokenRefs(record.paperclipBoardApiTokenRefs);
+  const paperclipBoardApiTokensByCompanyId = normalizePaperclipBoardApiTokensByCompanyId(record.paperclipBoardApiTokensByCompanyId);
   const paperclipApiBaseUrl = normalizePaperclipApiBaseUrl(record.paperclipApiBaseUrl);
 
   return {
@@ -5257,6 +5282,7 @@ function normalizeConfig(value: unknown): GitHubSyncConfig {
     ...(githubToken ? { githubToken } : {}),
     ...(githubTokensByCompanyId ? { githubTokensByCompanyId } : {}),
     ...(paperclipBoardApiTokenRefs ? { paperclipBoardApiTokenRefs } : {}),
+    ...(paperclipBoardApiTokensByCompanyId ? { paperclipBoardApiTokensByCompanyId } : {}),
     ...(paperclipApiBaseUrl ? { paperclipApiBaseUrl } : {})
   };
 }
@@ -5411,6 +5437,99 @@ async function writeExternalCompanyGitHubTokenFallback(
       filePath: externalConfigFilePath,
       error: getErrorMessage(error)
     });
+  }
+}
+
+async function writeExternalCompanyPaperclipBoardApiTokenFallback(
+  ctx: PluginSetupContext,
+  companyId: string,
+  token: string
+): Promise<void> {
+  const externalConfigFilePath = getExternalConfigFilePath();
+  if (!externalConfigFilePath) {
+    throw new Error('Could not resolve a Paperclip home directory for the GitHub Sync fallback token config.');
+  }
+
+  const currentRecord = await readExternalConfigRecordForWrite(ctx, externalConfigFilePath);
+  const currentCompanyTokens = normalizePaperclipBoardApiTokensByCompanyId(currentRecord.paperclipBoardApiTokensByCompanyId) ?? {};
+  const nextRecord = {
+    ...currentRecord,
+    paperclipBoardApiTokensByCompanyId: {
+      ...currentCompanyTokens,
+      [companyId]: token
+    }
+  };
+
+  await mkdir(dirname(externalConfigFilePath), { recursive: true });
+  await writeFile(externalConfigFilePath, `${JSON.stringify(nextRecord, null, 2)}\n`, {
+    encoding: 'utf8',
+    mode: 0o600
+  });
+
+  try {
+    await chmod(externalConfigFilePath, 0o600);
+  } catch (error) {
+    ctx.logger.warn('GitHub Sync could not tighten permissions on the worker-local token fallback file.', {
+      filePath: externalConfigFilePath,
+      error: getErrorMessage(error)
+    });
+  }
+}
+
+async function clearExternalCompanyPaperclipBoardApiTokenFallback(
+  ctx: PluginSetupContext,
+  companyId: string
+): Promise<void> {
+  const externalConfigFilePath = getExternalConfigFilePath();
+  if (!externalConfigFilePath) {
+    return;
+  }
+
+  const currentRecord = await readExternalConfigRecordForWrite(ctx, externalConfigFilePath);
+  const currentCompanyTokens = normalizePaperclipBoardApiTokensByCompanyId(currentRecord.paperclipBoardApiTokensByCompanyId) ?? {};
+  if (!(companyId in currentCompanyTokens)) {
+    return;
+  }
+
+  const nextCompanyTokens = { ...currentCompanyTokens };
+  delete nextCompanyTokens[companyId];
+  const nextRecord = { ...currentRecord };
+  if (Object.keys(nextCompanyTokens).length > 0) {
+    nextRecord.paperclipBoardApiTokensByCompanyId = nextCompanyTokens;
+  } else {
+    delete nextRecord.paperclipBoardApiTokensByCompanyId;
+  }
+
+  await mkdir(dirname(externalConfigFilePath), { recursive: true });
+  await writeFile(externalConfigFilePath, `${JSON.stringify(nextRecord, null, 2)}\n`, {
+    encoding: 'utf8',
+    mode: 0o600
+  });
+
+  try {
+    await chmod(externalConfigFilePath, 0o600);
+  } catch (error) {
+    ctx.logger.warn('GitHub Sync could not tighten permissions on the worker-local token fallback file.', {
+      filePath: externalConfigFilePath,
+      error: getErrorMessage(error)
+    });
+  }
+}
+
+async function shouldSeedExternalPaperclipBoardTokenFallback(
+  ctx: PluginSetupContext,
+  companyId: string,
+  secretRef: string
+): Promise<boolean> {
+  try {
+    return !(await ctx.secrets.resolve(secretRef)).trim();
+  } catch (error) {
+    ctx.logger.warn('Unable to resolve the saved Paperclip board API token while checking worker fallback necessity.', {
+      companyId,
+      secretRef,
+      error: getErrorMessage(error)
+    });
+    return true;
   }
 }
 
@@ -14587,7 +14706,7 @@ function getMappingsMissingPaperclipBoardAccess(
 async function resolvePaperclipApiAuthTokens(
   ctx: PluginSetupContext,
   settings: Pick<GitHubSyncSettings, 'paperclipBoardApiTokenRefs'>,
-  config: Pick<GitHubSyncConfig, 'paperclipBoardApiTokenRefs'>,
+  config: Pick<GitHubSyncConfig, 'paperclipBoardApiTokenRefs' | 'paperclipBoardApiTokensByCompanyId'>,
   mappings: RepositoryMapping[]
 ): Promise<Map<string, string>> {
   const companyIds = [
@@ -14602,12 +14721,18 @@ async function resolvePaperclipApiAuthTokens(
   for (const companyId of companyIds) {
     const configuredSecretRef = getConfiguredPaperclipBoardApiTokenRef(config, companyId);
     const savedSecretRef = getSavedPaperclipBoardApiTokenRef(settings, companyId);
+    const fallbackToken = normalizeGitHubToken(config.paperclipBoardApiTokensByCompanyId?.[companyId]);
     const secretRef = configuredSecretRef ?? savedSecretRef;
     if (!secretRef) {
       continue;
     }
 
     if (!configuredSecretRef && savedSecretRef) {
+      if (fallbackToken) {
+        tokensByCompanyId.set(companyId, fallbackToken);
+        continue;
+      }
+
       ctx.logger.warn(
         'Paperclip board access is saved in plugin state but has not been mirrored into plugin config yet. Open plugin settings to finish migrating it, or reconnect board access, before retrying sync.',
         {
@@ -14624,6 +14749,16 @@ async function resolvePaperclipApiAuthTokens(
         tokensByCompanyId.set(companyId, token);
       }
     } catch (error) {
+      if (fallbackToken && isPluginSecretReferenceDisabledError(error)) {
+        ctx.logger.warn('GitHub Sync is using a worker-local Paperclip board token fallback because plugin secret refs are unavailable in this host.', {
+          companyId,
+          secretRef,
+          error: getErrorMessage(error)
+        });
+        tokensByCompanyId.set(companyId, fallbackToken);
+        continue;
+      }
+
       ctx.logger.warn('Unable to resolve the saved Paperclip board API token. Direct REST calls will continue without it.', {
         companyId,
         secretRef,
@@ -21681,6 +21816,7 @@ export const __testing = {
   formatPaperclipApiFetchErrorMessage,
   hasUnresolvedPaperclipIssueBlocker,
   isHealthyMaintainerWaitTransition,
+  resolvePaperclipApiAuthTokens,
   resolveGithubToken,
   resolvePaperclipPullRequestIssueStatus,
   resolveSyncTransitionAssignee
@@ -21997,6 +22133,7 @@ const plugin = definePlugin({
       }
 
       const nextSecretRef = normalizeSecretRef(record.paperclipBoardApiTokenRef);
+      const nextBoardApiToken = normalizeGitHubToken(record.paperclipBoardApiToken);
       const nextPaperclipBoardApiTokenRefs = {
         ...(previous.paperclipBoardApiTokenRefs ?? {})
       };
@@ -22009,10 +22146,18 @@ const plugin = definePlugin({
 
       if (nextSecretRef) {
         nextPaperclipBoardApiTokenRefs[companyId] = nextSecretRef;
+        if (nextBoardApiToken) {
+          if (await shouldSeedExternalPaperclipBoardTokenFallback(ctx, companyId, nextSecretRef)) {
+            await writeExternalCompanyPaperclipBoardApiTokenFallback(ctx, companyId, nextBoardApiToken);
+          } else {
+            await clearExternalCompanyPaperclipBoardApiTokenFallback(ctx, companyId);
+          }
+        }
       } else {
         delete nextPaperclipBoardApiTokenRefs[companyId];
         delete nextPaperclipBoardAccessIdentityByCompanyId[companyId];
         delete nextPaperclipBoardAccessUserIdByCompanyId[companyId];
+        await clearExternalCompanyPaperclipBoardApiTokenFallback(ctx, companyId);
       }
 
       if ('paperclipBoardAccessIdentity' in record) {

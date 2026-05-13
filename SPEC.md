@@ -36,8 +36,9 @@ The settings page MUST allow saving mappings and triggering a manual sync.
 
 - The raw GitHub token MUST NOT be persisted in plugin state.
 - Saving a token from the settings UI MUST create or reuse a company secret through the Paperclip host API.
-- The plugin MUST persist only the resulting secret UUID, keyed by company, in plugin instance config.
+- The plugin MUST persist only the resulting secret UUID, keyed by company, in plugin state and SHOULD mirror it into plugin instance config when the host allows plugin secret refs there.
 - The worker MUST resolve that secret UUID at runtime via `ctx.secrets.resolve(...)`.
+- UI-side plugin config writes MUST recover from the known plugin-secret-reference-disabled failure by retrying without plugin secret-ref maps, so saving non-secret settings cannot be blocked by stale secret-ref config.
 - If a Paperclip host rejects plugin secret-ref resolution with the known plugin-secret-reference-disabled failure while company-scoped plugin config is unavailable, the settings UI MAY ask the worker to persist the validated raw token in a worker-local company-scoped fallback map at `${PAPERCLIP_HOME:-~/.paperclip}/plugins/github-sync/config.json` so production sync can continue without writing the raw token to plugin state or plugin config.
 - The plugin MAY persist lightweight non-secret display metadata such as the validated GitHub login alongside the saved GitHub token secret ref so hosted UI can keep connected-state copy consistent across refreshes without resolving the secret.
 - When authenticated deployment settings select agents for GitHub token propagation, the hosted settings UI MUST patch those agents through the host API so `adapterConfig.env.GITHUB_TOKEN` points at that same secret UUID with a latest-version secret-ref binding instead of copying the raw token value.
@@ -45,9 +46,10 @@ The settings page MUST allow saving mappings and triggering a manual sync.
 - Agent token propagation updates MUST send `replaceAdapterConfig: true` when patching agent adapter config so newer Paperclip hosts persist the merged `env` map.
 - If `${PAPERCLIP_HOME:-~/.paperclip}/plugins/github-sync/config.json` exists and contains either a string `githubToken` or a `githubTokensByCompanyId` map, the worker MUST treat those values as worker-only fallback sources for the GitHub token without persisting or returning those raw tokens.
 - The raw Paperclip board API token MUST NOT be persisted in plugin state.
-- Connecting Paperclip board access from the settings UI MUST create or reuse a company secret through the Paperclip host API and MUST persist only the resulting secret UUID, keyed by company in plugin state and mirrored into plugin instance config so the worker can resolve it.
+- Connecting Paperclip board access from the settings UI MUST create or reuse a company secret through the Paperclip host API and MUST persist only the resulting secret UUID, keyed by company in plugin state and mirrored into plugin instance config when the host allows plugin secret refs there.
+- If the host cannot resolve saved board-access secret refs for plugin workers, the settings UI MAY pass the approved raw board token to a worker action that persists a company-scoped worker-local fallback in `${PAPERCLIP_HOME:-~/.paperclip}/plugins/github-sync/config.json` so direct Paperclip REST sync calls can continue without storing the raw board token in plugin state or plugin config.
 - The plugin MAY persist lightweight company-scoped non-secret display metadata such as the connected board identity label alongside the saved board token secret ref so hosted UI can keep connected-state copy consistent across refreshes without resolving the secret.
-- The worker MUST resolve the saved Paperclip board token secret at runtime via `ctx.secrets.resolve(...)` before making direct Paperclip REST calls for that company, and MUST treat plugin config as the worker-readable source of truth for those secret refs.
+- The worker MUST resolve the saved Paperclip board token secret at runtime via `ctx.secrets.resolve(...)` before making direct Paperclip REST calls for that company, falling back to the company-scoped worker-local board token only when host secret-ref resolution is unavailable.
 
 ## Synchronization behavior
 
@@ -92,7 +94,7 @@ The plugin MUST persist repository mappings, company-scoped advanced issue defau
 - The worker MUST NOT rely on a Paperclip process environment variable named `PAPERCLIP_API_URL`; release-target e2e verification uses an explicit Worker Paperclip API URL because plugin worker runtime environments do not guarantee that process variable.
 - Direct Paperclip REST fetch failures MUST preserve method, URL, primary error, nested cause message, and cause code in diagnostics when available so TLS and routing problems remain actionable.
 - Before a manual or scheduled sync touches any mapping whose company is missing board access, the worker MUST probe `/api/health` on the resolved Paperclip API origin and fail fast with configuration guidance when that deployment reports `deploymentMode: "authenticated"`.
-- When a company has connected Paperclip board access, the worker MUST attach `Authorization: Bearer <board-token>` to direct Paperclip REST issue and label calls for that company.
+- When a company has connected Paperclip board access, the worker MUST attach `Authorization: Bearer <board-token>` to direct Paperclip REST issue and label calls for that company, using the saved secret ref when resolvable and the company-scoped worker-local board-token fallback when plugin secret refs are disabled.
 - When the Paperclip runtime exposes existing issue labels for the target company, the sync flow MUST map GitHub labels onto matching Paperclip labels by name and SHOULD prefer an exact color match when multiple Paperclip labels share the same name.
 - When no matching Paperclip label exists and the local Paperclip label API is reachable, the sync flow MUST create the missing Paperclip label using the GitHub label color when available before attaching it to the imported issue.
 - When a local Paperclip REST call returns an unexpected non-JSON success payload, such as an authenticated HTML sign-in page, the worker MUST treat that response as unavailable, fall back to SDK-based issue mutation when possible, and surface an actionable sync error that points operators to Paperclip board access or the Worker Paperclip API URL setting when labels still cannot be reconciled.
