@@ -1041,6 +1041,13 @@ export function resolveToolbarButtonState(params: {
   };
 }
 
+export function clearGitHubTokenConfigSyncAttemptOnFailure(
+  currentAttemptKey: string | null,
+  failedAttemptKey: string
+): string | null {
+  return currentAttemptKey === failedAttemptKey ? null : currentAttemptKey;
+}
+
 function getSyncToastTitle(syncState: SyncRunState): string {
   if (getActiveRateLimitPause(syncState)) {
     return 'GitHub sync is paused';
@@ -11490,6 +11497,11 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
           return;
         }
       } catch (error) {
+        githubTokenConfigSyncAttemptRef.current = clearGitHubTokenConfigSyncAttemptOnFailure(
+          githubTokenConfigSyncAttemptRef.current,
+          attemptKey
+        );
+
         if (cancelled) {
           return;
         }

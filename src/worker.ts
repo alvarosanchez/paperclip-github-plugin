@@ -5350,7 +5350,10 @@ async function readExternalConfig(ctx: PluginSetupContext): Promise<GitHubSyncCo
   }
 }
 
-async function readExternalConfigRecordForWrite(filePath: string): Promise<Record<string, unknown>> {
+async function readExternalConfigRecordForWrite(
+  ctx: PluginSetupContext,
+  filePath: string
+): Promise<Record<string, unknown>> {
   try {
     const rawConfig = await readFile(filePath, 'utf8');
     const parsedConfig = JSON.parse(rawConfig) as unknown;
@@ -5360,6 +5363,14 @@ async function readExternalConfigRecordForWrite(filePath: string): Promise<Recor
   } catch (error) {
     const errorCode = error && typeof error === 'object' && 'code' in error ? (error as { code?: unknown }).code : undefined;
     if (errorCode === 'ENOENT') {
+      return {};
+    }
+
+    if (error instanceof SyntaxError) {
+      ctx.logger.warn('Ignoring the GitHub Sync worker-local token fallback config file because it is not valid JSON.', {
+        filePath,
+        error: error.message
+      });
       return {};
     }
 
@@ -5377,7 +5388,7 @@ async function writeExternalCompanyGitHubTokenFallback(
     throw new Error('Could not resolve a Paperclip home directory for the GitHub Sync fallback token config.');
   }
 
-  const currentRecord = await readExternalConfigRecordForWrite(externalConfigFilePath);
+  const currentRecord = await readExternalConfigRecordForWrite(ctx, externalConfigFilePath);
   const currentCompanyTokens = normalizeGitHubTokensByCompanyId(currentRecord.githubTokensByCompanyId) ?? {};
   const nextRecord = {
     ...currentRecord,
@@ -14637,7 +14648,12 @@ async function resolveGithubToken(
   const configuredTokenSource = getConfiguredGithubTokenSource(settings, config, options.companyId);
   if (configuredTokenSource.secretRef) {
     try {
-      return await ctx.secrets.resolve(configuredTokenSource.secretRef);
+      const token = (await ctx.secrets.resolve(configuredTokenSource.secretRef)).trim();
+      if (token) {
+        return token;
+      }
+
+      return configuredTokenSource.fallbackToken ?? '';
     } catch (error) {
       if (configuredTokenSource.fallbackToken && isPluginSecretReferenceDisabledError(error)) {
         ctx.logger.warn('GitHub Sync is using a worker-local company token fallback because plugin secret refs are unavailable in this host.', {
@@ -21665,6 +21681,7 @@ export const __testing = {
   formatPaperclipApiFetchErrorMessage,
   hasUnresolvedPaperclipIssueBlocker,
   isHealthyMaintainerWaitTransition,
+  resolveGithubToken,
   resolvePaperclipPullRequestIssueStatus,
   resolveSyncTransitionAssignee
 };
@@ -21717,7 +21734,7 @@ const plugin = definePlugin({
           ? hasConfiguredPaperclipBoardAccess(settingsForResponse, config, requestedCompanyId)
           : hasConfiguredPaperclipBoardAccessForMappings(settingsForResponse, config, scopedMappings),
         ...(savedGitHubTokenRef ? { githubTokenConfigSyncRef: savedGitHubTokenRef } : {}),
-        githubTokenNeedsConfigSync: Boolean(savedGitHubTokenRef && !configuredGitHubTokenRef),
+        githubTokenNeedsConfigSync: Boolean(savedGitHubTokenRef && configuredGitHubTokenRef !== savedGitHubTokenRef),
         ...(savedBoardTokenRef ? { paperclipBoardAccessConfigSyncRef: savedBoardTokenRef } : {}),
         paperclipBoardAccessNeedsConfigSync: Boolean(savedBoardTokenRef && !configuredBoardTokenRef)
       };

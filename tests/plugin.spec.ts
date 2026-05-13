@@ -1,7 +1,7 @@
 import { strict as assert } from 'node:assert';
 import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import test from 'node:test';
 
@@ -1208,6 +1208,28 @@ test('resolveToolbarButtonState keeps the global toolbar on syncing instead of l
       syncPersistedRunning: true,
       syncStartPending: false
     }
+  );
+});
+
+test('clearGitHubTokenConfigSyncAttemptOnFailure allows the same settings repair to retry after a failed attempt', async () => {
+  const uiModule = await importFreshUiModule() as {
+    clearGitHubTokenConfigSyncAttemptOnFailure?: unknown;
+  };
+
+  assert.equal(typeof uiModule.clearGitHubTokenConfigSyncAttemptOnFailure, 'function');
+
+  const clearGitHubTokenConfigSyncAttemptOnFailure = uiModule.clearGitHubTokenConfigSyncAttemptOnFailure as (
+    currentAttemptKey: string | null,
+    failedAttemptKey: string
+  ) => string | null;
+
+  assert.equal(
+    clearGitHubTokenConfigSyncAttemptOnFailure('company-1:secret-a', 'company-1:secret-a'),
+    null
+  );
+  assert.equal(
+    clearGitHubTokenConfigSyncAttemptOnFailure('company-1:secret-b', 'company-1:secret-a'),
+    'company-1:secret-b'
   );
 });
 
@@ -11779,6 +11801,37 @@ test('settings.registration clears the GitHub token config repair signal when pl
   assert.equal(result.githubTokenConfigSyncRef, 'github-secret-ref-1');
 });
 
+test('settings.registration asks the UI to repair stale GitHub token plugin config refs', async () => {
+  const harness = createTestHarness({
+    manifest,
+    config: {
+      githubTokenRefs: {
+        'company-1': 'stale-github-secret-ref'
+      }
+    }
+  });
+  await plugin.definition.setup(harness.ctx);
+
+  await harness.performAction('settings.saveRegistration', {
+    companyId: 'company-1',
+    githubTokenRefs: {
+      'company-1': 'fresh-github-secret-ref'
+    }
+  });
+
+  const result = await harness.getData<{
+    githubTokenConfigured?: boolean;
+    githubTokenNeedsConfigSync?: boolean;
+    githubTokenConfigSyncRef?: string;
+  }>('settings.registration', {
+    companyId: 'company-1'
+  });
+
+  assert.equal(result.githubTokenConfigured, true);
+  assert.equal(result.githubTokenNeedsConfigSync, true);
+  assert.equal(result.githubTokenConfigSyncRef, 'fresh-github-secret-ref');
+});
+
 test('settings.saveRegistration persists the saved GitHub login label for later settings reads', async () => {
   const harness = createTestHarness({ manifest });
   await plugin.definition.setup(harness.ctx);
@@ -11918,6 +11971,55 @@ test('settings.ensureGitHubTokenAvailable writes a company-scoped fallback when 
   });
 });
 
+test('settings.ensureGitHubTokenAvailable overwrites invalid worker-local config with the company fallback token', { concurrency: false }, async () => {
+  await withTemporaryPaperclipHome(async ({ configFilePath }) => {
+    await mkdir(dirname(configFilePath), { recursive: true });
+    await writeFile(configFilePath, '{not valid json', 'utf8');
+
+    const harness = createTestHarness({
+      manifest,
+      config: {
+        githubTokenRefs: {
+          'company-1': TEST_GITHUB_SECRET_ID
+        }
+      }
+    });
+    await plugin.definition.setup(harness.ctx);
+
+    harness.ctx.secrets.resolve = async () => {
+      throw new Error('Plugin secret references are disabled until company-scoped plugin config lands');
+    };
+
+    const result = await harness.performAction('settings.ensureGitHubTokenAvailable', {
+      companyId: 'company-1',
+      githubTokenRef: TEST_GITHUB_SECRET_ID,
+      token: 'ghp_company_fallback_token'
+    }) as {
+      secretResolvable?: boolean;
+      fallbackStored?: boolean;
+    };
+
+    assert.deepEqual(result, {
+      secretResolvable: false,
+      fallbackStored: true
+    });
+
+    const storedConfig = JSON.parse(await readFile(configFilePath, 'utf8')) as {
+      githubTokensByCompanyId?: Record<string, string>;
+    };
+
+    assert.deepEqual(storedConfig.githubTokensByCompanyId, {
+      'company-1': 'ghp_company_fallback_token'
+    });
+    assert.ok(
+      harness.logs.some((entry) =>
+        entry.level === 'warn'
+        && entry.message.includes('worker-local token fallback config file because it is not valid JSON')
+      )
+    );
+  });
+});
+
 test('sync.runNow falls back to a company-scoped external config token when plugin secret refs are disabled', { concurrency: false }, async () => {
   await withExternalPluginConfig(
     {
@@ -11953,6 +12055,41 @@ test('sync.runNow falls back to a company-scoped external config token when plug
       assert.equal(result.syncState.message, 'Save at least one mapping with a created Paperclip project before running sync.');
       assert.equal(result.syncState.lastRunTrigger, 'manual');
     }
+  );
+});
+
+test('resolveGithubToken trims secret-backed GitHub tokens before returning them', async () => {
+  const workerModule = await importFreshWorkerModule();
+  const testing = workerModule.__testing as typeof workerModule.__testing & {
+    resolveGithubToken?: (
+      ctx: unknown,
+      options?: {
+        companyId?: string;
+        settings?: unknown;
+        config?: unknown;
+      }
+    ) => Promise<string>;
+  };
+
+  assert.equal(typeof testing.resolveGithubToken, 'function');
+
+  const harness = createTestHarness({
+    manifest,
+    config: {
+      githubTokenRefs: {
+        'company-1': TEST_GITHUB_SECRET_ID
+      }
+    }
+  });
+  await plugin.definition.setup(harness.ctx);
+
+  harness.ctx.secrets.resolve = async () => '  ghp_secret_token\n';
+
+  assert.equal(
+    await testing.resolveGithubToken(harness.ctx, {
+      companyId: 'company-1'
+    }),
+    'ghp_secret_token'
   );
 });
 
