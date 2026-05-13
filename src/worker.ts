@@ -5505,6 +5505,32 @@ async function clearExternalCompanyPaperclipBoardApiTokenFallback(
     encoding: 'utf8',
     mode: 0o600
   });
+
+  try {
+    await chmod(externalConfigFilePath, 0o600);
+  } catch (error) {
+    ctx.logger.warn('GitHub Sync could not tighten permissions on the worker-local token fallback file.', {
+      filePath: externalConfigFilePath,
+      error: getErrorMessage(error)
+    });
+  }
+}
+
+async function shouldSeedExternalPaperclipBoardTokenFallback(
+  ctx: PluginSetupContext,
+  companyId: string,
+  secretRef: string
+): Promise<boolean> {
+  try {
+    return !(await ctx.secrets.resolve(secretRef)).trim();
+  } catch (error) {
+    ctx.logger.warn('Unable to resolve the saved Paperclip board API token while checking worker fallback necessity.', {
+      companyId,
+      secretRef,
+      error: getErrorMessage(error)
+    });
+    return true;
+  }
 }
 
 function normalizePaperclipBoardApiTokenRefs(value: unknown): PaperclipBoardApiTokenRefs | undefined {
@@ -22121,7 +22147,11 @@ const plugin = definePlugin({
       if (nextSecretRef) {
         nextPaperclipBoardApiTokenRefs[companyId] = nextSecretRef;
         if (nextBoardApiToken) {
-          await writeExternalCompanyPaperclipBoardApiTokenFallback(ctx, companyId, nextBoardApiToken);
+          if (await shouldSeedExternalPaperclipBoardTokenFallback(ctx, companyId, nextSecretRef)) {
+            await writeExternalCompanyPaperclipBoardApiTokenFallback(ctx, companyId, nextBoardApiToken);
+          } else {
+            await clearExternalCompanyPaperclipBoardApiTokenFallback(ctx, companyId);
+          }
         }
       } else {
         delete nextPaperclipBoardApiTokenRefs[companyId];

@@ -1,5 +1,5 @@
 import { strict as assert } from 'node:assert';
-import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -12100,10 +12100,41 @@ test('settings.ensureGitHubTokenAvailable overwrites invalid worker-local config
   });
 });
 
-test('settings.updateBoardAccess writes a company-scoped board token fallback for worker-side REST calls', { concurrency: false }, async () => {
+test('settings.updateBoardAccess skips the board token fallback when the saved secret ref resolves', { concurrency: false }, async () => {
   await withTemporaryPaperclipHome(async ({ configFilePath }) => {
     const harness = createTestHarness({ manifest });
     await plugin.definition.setup(harness.ctx);
+
+    let resolveCount = 0;
+    harness.ctx.secrets.resolve = async (secretRef) => {
+      resolveCount += 1;
+      assert.equal(secretRef, 'board-secret-ref');
+      return 'paperclip-board-token';
+    };
+
+    await harness.performAction('settings.updateBoardAccess', {
+      companyId: 'company-1',
+      paperclipBoardApiTokenRef: 'board-secret-ref',
+      paperclipBoardApiToken: 'paperclip-board-token',
+      paperclipBoardAccessIdentity: 'Jane Operator'
+    });
+
+    await assert.rejects(readFile(configFilePath, 'utf8'), {
+      code: 'ENOENT'
+    });
+    assert.equal(resolveCount, 1);
+  });
+});
+
+test('settings.updateBoardAccess writes a company-scoped board token fallback when secret refs are disabled', { concurrency: false }, async () => {
+  await withTemporaryPaperclipHome(async ({ configFilePath }) => {
+    const harness = createTestHarness({ manifest });
+    await plugin.definition.setup(harness.ctx);
+
+    harness.ctx.secrets.resolve = async (secretRef) => {
+      assert.equal(secretRef, 'board-secret-ref');
+      throw new Error('Plugin secret references are disabled until company-scoped plugin config lands');
+    };
 
     await harness.performAction('settings.updateBoardAccess', {
       companyId: 'company-1',
@@ -12119,6 +12150,39 @@ test('settings.updateBoardAccess writes a company-scoped board token fallback fo
     assert.deepEqual(storedConfig.paperclipBoardApiTokensByCompanyId, {
       'company-1': 'paperclip-board-token'
     });
+  });
+});
+
+test('settings.updateBoardAccess tightens worker-local config permissions when clearing board token fallbacks', { concurrency: false }, async () => {
+  await withTemporaryPaperclipHome(async ({ configFilePath }) => {
+    const harness = createTestHarness({ manifest });
+    await plugin.definition.setup(harness.ctx);
+
+    await mkdir(dirname(configFilePath), { recursive: true });
+    await writeFile(
+      configFilePath,
+      JSON.stringify({
+        paperclipBoardApiTokensByCompanyId: {
+          'company-1': 'paperclip-board-token'
+        }
+      }),
+      {
+        encoding: 'utf8',
+        mode: 0o666
+      }
+    );
+    await chmod(configFilePath, 0o666);
+
+    await harness.performAction('settings.updateBoardAccess', {
+      companyId: 'company-1'
+    });
+
+    const storedConfig = JSON.parse(await readFile(configFilePath, 'utf8')) as {
+      paperclipBoardApiTokensByCompanyId?: Record<string, string>;
+    };
+
+    assert.equal(storedConfig.paperclipBoardApiTokensByCompanyId, undefined);
+    assert.equal((await stat(configFilePath)).mode & 0o777, 0o600);
   });
 });
 
