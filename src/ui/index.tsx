@@ -6876,9 +6876,7 @@ function shouldStripPluginConfigValue(key: string, value: unknown): boolean {
 
 function stripPluginSecretRefValue(value: unknown): unknown {
   if (Array.isArray(value)) {
-    return value
-      .map((entry) => stripPluginSecretRefValue(entry))
-      .filter((entry) => entry !== undefined);
+    return value.map((entry) => stripPluginSecretRefValue(entry));
   }
 
   if (!isPlainConfigRecord(value)) {
@@ -6892,9 +6890,7 @@ function stripPluginSecretRefValue(value: unknown): unknown {
     }
 
     const nextValue = stripPluginSecretRefValue(entryValue);
-    if (nextValue !== undefined) {
-      nextEntries.push([key, nextValue] as const);
-    }
+    nextEntries.push([key, nextValue] as const);
   }
 
   return Object.fromEntries(nextEntries);
