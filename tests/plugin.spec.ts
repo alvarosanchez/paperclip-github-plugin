@@ -1465,6 +1465,56 @@ test('syncGitHubTokenPropagationForAgents batches propagation updates with a sma
   }
 });
 
+test('resolveGitHubTokenSecretRefForPropagation uses saved settings ref when plugin config refs are stripped', async () => {
+  const uiModule = await importFreshUiModule() as {
+    resolveGitHubTokenSecretRefForPropagation?: unknown;
+  };
+
+  assert.equal(typeof uiModule.resolveGitHubTokenSecretRefForPropagation, 'function');
+
+  const resolveGitHubTokenSecretRefForPropagation = uiModule.resolveGitHubTokenSecretRefForPropagation as (params: {
+    explicitSecretRef?: unknown;
+    settingsSecretRef?: unknown;
+    companyId?: string | null;
+    pluginConfig?: GitHubSyncPluginConfig | null;
+  }) => string | undefined;
+
+  assert.equal(
+    resolveGitHubTokenSecretRefForPropagation({
+      explicitSecretRef: ' explicit-secret-ref ',
+      settingsSecretRef: 'settings-secret-ref',
+      companyId: 'company-1',
+      pluginConfig: {
+        githubTokenRefs: {
+          'company-1': 'config-secret-ref'
+        }
+      }
+    }),
+    'explicit-secret-ref'
+  );
+
+  assert.equal(
+    resolveGitHubTokenSecretRefForPropagation({
+      settingsSecretRef: 'settings-secret-ref',
+      companyId: 'company-1',
+      pluginConfig: {}
+    }),
+    'settings-secret-ref'
+  );
+
+  assert.equal(
+    resolveGitHubTokenSecretRefForPropagation({
+      companyId: 'company-1',
+      pluginConfig: {
+        githubTokenRefs: {
+          'company-1': 'config-secret-ref'
+        }
+      }
+    }),
+    'config-secret-ref'
+  );
+});
+
 test('resolveInstalledGitHubSyncPluginId finds the GitHub Sync installation id from plugin listings', () => {
   const records = [
     {
