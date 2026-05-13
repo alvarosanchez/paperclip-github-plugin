@@ -271,6 +271,8 @@ interface GitHubSyncSettings {
   paperclipApiBaseUrlConfigured?: boolean;
   githubTokenConfigured?: boolean;
   githubTokenLogin?: string;
+  githubTokenNeedsConfigSync?: boolean;
+  githubTokenConfigSyncRef?: string;
   paperclipBoardAccessConfigured?: boolean;
   paperclipBoardAccessIdentity?: string;
   paperclipBoardAccessNeedsConfigSync?: boolean;
@@ -1037,6 +1039,13 @@ export function resolveToolbarButtonState(params: {
     syncPersistedRunning,
     syncStartPending
   };
+}
+
+export function clearGitHubTokenConfigSyncAttemptOnFailure(
+  currentAttemptKey: string | null,
+  failedAttemptKey: string
+): string | null {
+  return currentAttemptKey === failedAttemptKey ? null : currentAttemptKey;
 }
 
 function getSyncToastTitle(syncState: SyncRunState): string {
@@ -6894,7 +6903,8 @@ function getAgentPropagationPatch(params: {
       ...currentEnv,
       GITHUB_TOKEN: {
         type: 'secret_ref',
-        secretId: params.githubTokenSecretRef
+        secretId: params.githubTokenSecretRef,
+        version: 'latest'
       }
     };
 
@@ -6970,7 +6980,8 @@ async function applyGitHubTokenPropagationUpdate(params: {
   await fetchJson(`/api/agents/${params.agentId}`, {
     method: 'PATCH',
     body: JSON.stringify({
-      adapterConfig: nextAdapterConfig
+      adapterConfig: nextAdapterConfig,
+      replaceAdapterConfig: true
     })
   });
 }
@@ -11262,6 +11273,7 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
   const saveRegistration = usePluginAction('settings.saveRegistration');
   const updateBoardAccess = usePluginAction('settings.updateBoardAccess');
   const validateToken = usePluginAction('settings.validateToken');
+  const ensureGitHubTokenAvailable = usePluginAction('settings.ensureGitHubTokenAvailable');
   const runSyncNow = usePluginAction('sync.runNow');
   const cancelSync = usePluginAction('sync.cancel');
   const [form, setForm] = useState<GitHubSyncSettings>(EMPTY_SETTINGS);
@@ -11289,6 +11301,7 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
   const themeMode = useResolvedThemeMode();
   const boardAccessRequirement = usePaperclipBoardAccessRequirement();
   const armSyncCompletionToast = useSyncCompletionToast(form.syncState, toast);
+  const githubTokenConfigSyncAttemptRef = useRef<string | null>(null);
   const boardAccessConfigSyncAttemptRef = useRef<string | null>(null);
   const assigneeFallbackAttemptRef = useRef<string | null>(null);
 
@@ -11430,6 +11443,92 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
       cancelled = true;
     };
   }, [currentSettings?.availableAssignees?.length, currentSettings?.updatedAt, hostContext.companyId]);
+
+  useEffect(() => {
+    const companyId = hostContext.companyId;
+    const secretRef =
+      settings.data?.githubTokenNeedsConfigSync
+        ? settings.data.githubTokenConfigSyncRef
+        : undefined;
+
+    if (!companyId || !secretRef) {
+      return;
+    }
+
+    const attemptKey = `${companyId}:${secretRef}`;
+    if (githubTokenConfigSyncAttemptRef.current === attemptKey) {
+      return;
+    }
+    githubTokenConfigSyncAttemptRef.current = attemptKey;
+
+    let cancelled = false;
+
+    void (async () => {
+      try {
+        const pluginId = await resolveCurrentPluginId(pluginIdFromLocation);
+        if (!pluginId) {
+          throw new Error('Plugin id is required to finish syncing the GitHub token into plugin config.');
+        }
+
+        await patchPluginConfig(pluginId, {
+          githubTokenRefs: {
+            [companyId]: secretRef
+          }
+        });
+
+        const selectedAgentIds = normalizeAgentIds(settings.data?.advancedSettings?.githubTokenPropagationAgentIds);
+        if (selectedAgentIds.length > 0) {
+          await propagateGitHubTokenToSelectedAgents({
+            selectedAgentIds,
+            previousAgentIds: selectedAgentIds,
+            githubTokenSecretRef: secretRef
+          });
+        }
+
+        if (cancelled) {
+          return;
+        }
+
+        notifyGitHubSyncSettingsChanged();
+
+        try {
+          await settings.refresh();
+        } catch {
+          return;
+        }
+      } catch (error) {
+        githubTokenConfigSyncAttemptRef.current = clearGitHubTokenConfigSyncAttemptOnFailure(
+          githubTokenConfigSyncAttemptRef.current,
+          attemptKey
+        );
+
+        if (cancelled) {
+          return;
+        }
+
+        toast({
+          title: 'GitHub token needs reconnection',
+          body: getActionErrorMessage(
+            error,
+            'GitHub Sync could not finish migrating the saved GitHub token into plugin config.'
+          ),
+          tone: 'error'
+        });
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    hostContext.companyId,
+    pluginIdFromLocation,
+    settings.data?.advancedSettings?.githubTokenPropagationAgentIds,
+    settings.data?.githubTokenNeedsConfigSync,
+    settings.data?.githubTokenConfigSyncRef,
+    settings.refresh,
+    toast
+  ]);
 
   useEffect(() => {
     const companyId = hostContext.companyId;
@@ -12096,6 +12195,17 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
         githubTokenLogin: validation.login
       });
 
+      let availabilityWarning: unknown = null;
+      try {
+        await ensureGitHubTokenAvailable({
+          companyId,
+          githubTokenRef: secret.id,
+          token: trimmedToken
+        });
+      } catch (error) {
+        availabilityWarning = error;
+      }
+
       const selectedAgentIds = normalizeAgentIds(currentSettings?.advancedSettings?.githubTokenPropagationAgentIds);
       let propagationError: unknown = null;
       try {
@@ -12128,6 +12238,16 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
           body: getActionErrorMessage(
             propagationError,
             'GitHub Sync could not update the selected agents with the saved token.'
+          ),
+          tone: 'error'
+        });
+      }
+      if (availabilityWarning) {
+        toast({
+          title: 'GitHub token saved, but worker token access needs attention',
+          body: getActionErrorMessage(
+            availabilityWarning,
+            'GitHub Sync could not verify worker access to the saved token.'
           ),
           tone: 'error'
         });

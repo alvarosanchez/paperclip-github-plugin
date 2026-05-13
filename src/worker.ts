@@ -1,8 +1,8 @@
 import { Buffer } from 'node:buffer';
 import { realpathSync } from 'node:fs';
-import { readFile } from 'node:fs/promises';
+import { chmod, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Octokit } from '@octokit/rest';
 import {
@@ -161,6 +161,7 @@ type PaperclipIssueUpdatePatchWithLabels = Parameters<PluginSetupContext['issues
 };
 type PaperclipLabelDirectory = Map<string, PaperclipIssueLabel[]>;
 type GitHubTokenRefs = Record<string, string>;
+type GitHubTokensByCompanyId = Record<string, string>;
 type PaperclipBoardApiTokenRefs = Record<string, string>;
 type GitHubTokenLoginByCompanyId = Record<string, string>;
 type PaperclipBoardAccessIdentityByCompanyId = Record<string, string>;
@@ -512,6 +513,7 @@ interface GitHubSyncConfig {
   githubTokenRefs?: GitHubTokenRefs;
   githubTokenRef?: string;
   githubToken?: string;
+  githubTokensByCompanyId?: GitHubTokensByCompanyId;
   paperclipBoardApiTokenRefs?: PaperclipBoardApiTokenRefs;
   paperclipApiBaseUrl?: string;
 }
@@ -557,6 +559,7 @@ type PaperclipApiBaseUrlByCompanyId = Record<string, string>;
 interface ResolvedGitHubTokenSource {
   secretRef?: string;
   token?: string;
+  fallbackToken?: string;
 }
 
 interface GitHubRepositoryTokenCapabilityAudit {
@@ -2205,6 +2208,14 @@ function getErrorMessage(error: unknown): string {
   return String(error);
 }
 
+function isPluginSecretReferenceDisabledError(error: unknown): boolean {
+  const message = getErrorMessage(error).toLowerCase();
+  return (
+    message.includes('plugin secret reference')
+    && message.includes('disabled')
+  ) || message.includes('company-scoped plugin config lands');
+}
+
 function getErrorCause(error: unknown): unknown {
   if (!error || typeof error !== 'object' || !('cause' in error)) {
     return undefined;
@@ -2743,6 +2754,28 @@ function normalizeGitHubTokenRefs(value: unknown): GitHubTokenRefs | undefined {
       const normalizedSecretRef = normalizeGitHubTokenRef(secretRef);
       return normalizedCompanyId && normalizedSecretRef
         ? [normalizedCompanyId, normalizedSecretRef] as const
+        : null;
+    })
+    .filter((entry): entry is readonly [string, string] => entry !== null);
+
+  if (entries.length === 0) {
+    return undefined;
+  }
+
+  return Object.fromEntries(entries);
+}
+
+function normalizeGitHubTokensByCompanyId(value: unknown): GitHubTokensByCompanyId | undefined {
+  if (!value || typeof value !== 'object') {
+    return undefined;
+  }
+
+  const entries = Object.entries(value as Record<string, unknown>)
+    .map(([companyId, token]) => {
+      const normalizedCompanyId = normalizeCompanyId(companyId);
+      const normalizedToken = normalizeGitHubToken(token);
+      return normalizedCompanyId && normalizedToken
+        ? [normalizedCompanyId, normalizedToken] as const
         : null;
     })
     .filter((entry): entry is readonly [string, string] => entry !== null);
@@ -5214,6 +5247,7 @@ function normalizeConfig(value: unknown): GitHubSyncConfig {
   const githubTokenRefs = normalizeGitHubTokenRefs(record.githubTokenRefs);
   const githubTokenRef = normalizeGitHubTokenRef(record.githubTokenRef);
   const githubToken = normalizeGitHubToken(record.githubToken);
+  const githubTokensByCompanyId = normalizeGitHubTokensByCompanyId(record.githubTokensByCompanyId);
   const paperclipBoardApiTokenRefs = normalizePaperclipBoardApiTokenRefs(record.paperclipBoardApiTokenRefs);
   const paperclipApiBaseUrl = normalizePaperclipApiBaseUrl(record.paperclipApiBaseUrl);
 
@@ -5221,6 +5255,7 @@ function normalizeConfig(value: unknown): GitHubSyncConfig {
     ...(githubTokenRefs ? { githubTokenRefs } : {}),
     ...(githubTokenRef ? { githubTokenRef } : {}),
     ...(githubToken ? { githubToken } : {}),
+    ...(githubTokensByCompanyId ? { githubTokensByCompanyId } : {}),
     ...(paperclipBoardApiTokenRefs ? { paperclipBoardApiTokenRefs } : {}),
     ...(paperclipApiBaseUrl ? { paperclipApiBaseUrl } : {})
   };
@@ -5312,6 +5347,70 @@ async function readExternalConfig(ctx: PluginSetupContext): Promise<GitHubSyncCo
       }
     );
     return {};
+  }
+}
+
+async function readExternalConfigRecordForWrite(
+  ctx: PluginSetupContext,
+  filePath: string
+): Promise<Record<string, unknown>> {
+  try {
+    const rawConfig = await readFile(filePath, 'utf8');
+    const parsedConfig = JSON.parse(rawConfig) as unknown;
+    return parsedConfig && typeof parsedConfig === 'object' && !Array.isArray(parsedConfig)
+      ? { ...(parsedConfig as Record<string, unknown>) }
+      : {};
+  } catch (error) {
+    const errorCode = error && typeof error === 'object' && 'code' in error ? (error as { code?: unknown }).code : undefined;
+    if (errorCode === 'ENOENT') {
+      return {};
+    }
+
+    if (error instanceof SyntaxError) {
+      ctx.logger.warn('Ignoring the GitHub Sync worker-local token fallback config file because it is not valid JSON.', {
+        filePath,
+        error: error.message
+      });
+      return {};
+    }
+
+    throw error;
+  }
+}
+
+async function writeExternalCompanyGitHubTokenFallback(
+  ctx: PluginSetupContext,
+  companyId: string,
+  token: string
+): Promise<void> {
+  const externalConfigFilePath = getExternalConfigFilePath();
+  if (!externalConfigFilePath) {
+    throw new Error('Could not resolve a Paperclip home directory for the GitHub Sync fallback token config.');
+  }
+
+  const currentRecord = await readExternalConfigRecordForWrite(ctx, externalConfigFilePath);
+  const currentCompanyTokens = normalizeGitHubTokensByCompanyId(currentRecord.githubTokensByCompanyId) ?? {};
+  const nextRecord = {
+    ...currentRecord,
+    githubTokensByCompanyId: {
+      ...currentCompanyTokens,
+      [companyId]: token
+    }
+  };
+
+  await mkdir(dirname(externalConfigFilePath), { recursive: true });
+  await writeFile(externalConfigFilePath, `${JSON.stringify(nextRecord, null, 2)}\n`, {
+    encoding: 'utf8',
+    mode: 0o600
+  });
+
+  try {
+    await chmod(externalConfigFilePath, 0o600);
+  } catch (error) {
+    ctx.logger.warn('GitHub Sync could not tighten permissions on the worker-local token fallback file.', {
+      filePath: externalConfigFilePath,
+      error: getErrorMessage(error)
+    });
   }
 }
 
@@ -14325,6 +14424,9 @@ function getConfiguredGithubTokenSource(
   companyId?: string
 ): ResolvedGitHubTokenSource {
   const normalizedCompanyId = normalizeCompanyId(companyId);
+  const companyFallbackToken = normalizedCompanyId
+    ? normalizeGitHubToken(config.githubTokensByCompanyId?.[normalizedCompanyId])
+    : undefined;
   const hasScopedGitHubTokenRefs =
     hasAnyScopedValue(settings?.githubTokenRefs)
     || hasAnyScopedValue(config.githubTokenRefs);
@@ -14348,12 +14450,16 @@ function getConfiguredGithubTokenSource(
         return uniqueRefs.length === 1 ? uniqueRefs[0] : undefined;
       })();
   if (secretRef) {
-    return { secretRef };
+    return {
+      secretRef,
+      ...(companyFallbackToken ? { fallbackToken: companyFallbackToken } : {})
+    };
   }
 
-  const token = !normalizedCompanyId || !hasScopedGitHubTokenRefs
-    ? normalizeGitHubToken(config.githubToken)
-    : undefined;
+  const token = companyFallbackToken
+    ?? (!normalizedCompanyId || !hasScopedGitHubTokenRefs
+      ? normalizeGitHubToken(config.githubToken)
+      : undefined);
   return token ? { token } : {};
 }
 
@@ -14371,7 +14477,7 @@ function hasConfiguredGithubToken(
   companyId?: string
 ): boolean {
   const configuredTokenSource = getConfiguredGithubTokenSource(settings, config, companyId);
-  if (configuredTokenSource.secretRef ?? configuredTokenSource.token) {
+  if (configuredTokenSource.secretRef ?? configuredTokenSource.token ?? configuredTokenSource.fallbackToken) {
     return true;
   }
 
@@ -14383,6 +14489,28 @@ function hasConfiguredGithubToken(
     (settings?.githubTokenRefs && Object.keys(settings.githubTokenRefs).length > 0)
     || (config.githubTokenRefs && Object.keys(config.githubTokenRefs).length > 0)
   );
+}
+
+function getSavedGitHubTokenRef(
+  settings: Pick<GitHubSyncSettings, 'githubTokenRefs'> | null | undefined,
+  companyId?: string
+): string | undefined {
+  if (!companyId) {
+    return undefined;
+  }
+
+  return normalizeSecretRef(settings?.githubTokenRefs?.[companyId]);
+}
+
+function getConfiguredGitHubTokenRef(
+  config: Pick<GitHubSyncConfig, 'githubTokenRefs'> | null | undefined,
+  companyId?: string
+): string | undefined {
+  if (!companyId) {
+    return undefined;
+  }
+
+  return normalizeSecretRef(config?.githubTokenRefs?.[companyId]);
 }
 
 function getSavedPaperclipBoardApiTokenRef(
@@ -14519,7 +14647,25 @@ async function resolveGithubToken(
   const config = options.config ?? await getResolvedConfig(ctx);
   const configuredTokenSource = getConfiguredGithubTokenSource(settings, config, options.companyId);
   if (configuredTokenSource.secretRef) {
-    return ctx.secrets.resolve(configuredTokenSource.secretRef);
+    try {
+      const token = (await ctx.secrets.resolve(configuredTokenSource.secretRef)).trim();
+      if (token) {
+        return token;
+      }
+
+      return configuredTokenSource.fallbackToken ?? '';
+    } catch (error) {
+      if (configuredTokenSource.fallbackToken && isPluginSecretReferenceDisabledError(error)) {
+        ctx.logger.warn('GitHub Sync is using a worker-local company token fallback because plugin secret refs are unavailable in this host.', {
+          companyId: normalizeCompanyId(options.companyId),
+          secretRef: configuredTokenSource.secretRef,
+          error: getErrorMessage(error)
+        });
+        return configuredTokenSource.fallbackToken;
+      }
+
+      throw error;
+    }
   }
 
   return configuredTokenSource.token ?? '';
@@ -21535,6 +21681,7 @@ export const __testing = {
   formatPaperclipApiFetchErrorMessage,
   hasUnresolvedPaperclipIssueBlocker,
   isHealthyMaintainerWaitTransition,
+  resolveGithubToken,
   resolvePaperclipPullRequestIssueStatus,
   resolveSyncTransitionAssignee
 };
@@ -21553,6 +21700,8 @@ const plugin = definePlugin({
       const normalizedSettings = normalizeSettings(saved);
       const config = await getResolvedConfig(ctx);
       const githubTokenConfigured = hasConfiguredGithubToken(normalizedSettings, config, requestedCompanyId);
+      const configuredGitHubTokenRef = getConfiguredGitHubTokenRef(config, requestedCompanyId);
+      const savedGitHubTokenRef = getSavedGitHubTokenRef(normalizedSettings, requestedCompanyId);
       const configuredBoardTokenRef = getConfiguredPaperclipBoardApiTokenRef(config, requestedCompanyId);
       const savedBoardTokenRef = getSavedPaperclipBoardApiTokenRef(normalizedSettings, requestedCompanyId);
       const settingsForResponse = sanitizeSettingsForCurrentSetup(
@@ -21584,6 +21733,8 @@ const plugin = definePlugin({
         paperclipBoardAccessConfigured: requestedCompanyId
           ? hasConfiguredPaperclipBoardAccess(settingsForResponse, config, requestedCompanyId)
           : hasConfiguredPaperclipBoardAccessForMappings(settingsForResponse, config, scopedMappings),
+        ...(savedGitHubTokenRef ? { githubTokenConfigSyncRef: savedGitHubTokenRef } : {}),
+        githubTokenNeedsConfigSync: Boolean(savedGitHubTokenRef && configuredGitHubTokenRef !== savedGitHubTokenRef),
         ...(savedBoardTokenRef ? { paperclipBoardAccessConfigSyncRef: savedBoardTokenRef } : {}),
         paperclipBoardAccessNeedsConfigSync: Boolean(savedBoardTokenRef && !configuredBoardTokenRef)
       };
@@ -21924,6 +22075,51 @@ const plugin = definePlugin({
       }
 
       return validateGithubToken(ctx, trimmedToken);
+    });
+
+    ctx.actions.register('settings.ensureGitHubTokenAvailable', async (input) => {
+      const record = input && typeof input === 'object' ? input as Record<string, unknown> : {};
+      const companyId = normalizeCompanyId(record.companyId);
+      const githubTokenRef = normalizeSecretRef(record.githubTokenRef);
+      const token = normalizeGitHubToken(record.token);
+
+      if (!companyId) {
+        throw new Error('Company context is required to verify worker access to the GitHub token.');
+      }
+
+      if (!githubTokenRef) {
+        throw new Error('A GitHub token secret ref is required to verify worker token access.');
+      }
+
+      if (!token) {
+        throw new Error('A validated GitHub token is required to prepare the worker token fallback.');
+      }
+
+      try {
+        const resolvedToken = (await ctx.secrets.resolve(githubTokenRef)).trim();
+        if (resolvedToken) {
+          return {
+            secretResolvable: true,
+            fallbackStored: false
+          };
+        }
+      } catch (error) {
+        if (!isPluginSecretReferenceDisabledError(error)) {
+          throw error;
+        }
+
+        await writeExternalCompanyGitHubTokenFallback(ctx, companyId, token);
+        return {
+          secretResolvable: false,
+          fallbackStored: true
+        };
+      }
+
+      await writeExternalCompanyGitHubTokenFallback(ctx, companyId, token);
+      return {
+        secretResolvable: false,
+        fallbackStored: true
+      };
     });
 
     ctx.actions.register('project.pullRequests.createIssue', async (input) => {

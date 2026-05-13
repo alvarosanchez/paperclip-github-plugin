@@ -228,6 +228,7 @@ async function readSettingsRegistration(installedPluginId, companyId) {
 }
 
 async function assertWorkerPaperclipApiUrlFromSettingsUi(page, installedPluginId, companyId) {
+  const settingsSurface = page.locator('.ghsync-settings');
   const apiUrlInput = page.getByLabel('Worker Paperclip API URL', { exact: true });
   await apiUrlInput.waitFor({ timeout: 120000 });
   const initialValue = await apiUrlInput.inputValue();
@@ -237,7 +238,7 @@ async function assertWorkerPaperclipApiUrlFromSettingsUi(page, installedPluginId
 
   const configuredUrl = `http://localhost:${serverPort}`;
   await apiUrlInput.fill(configuredUrl);
-  await page.getByRole('button', { name: 'Save settings', exact: true }).click();
+  await settingsSurface.getByRole('button', { name: 'Save settings', exact: true }).click();
 
   const settings = await readSettingsRegistration(installedPluginId, companyId);
   if (settings.paperclipApiBaseUrl !== configuredUrl) {
