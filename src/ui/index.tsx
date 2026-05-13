@@ -6855,13 +6855,53 @@ function isPluginSecretReferencesDisabledError(error: unknown): boolean {
   return getActionErrorMessage(error, '').toLowerCase().includes('plugin secret references are disabled');
 }
 
+const PLUGIN_CONFIG_SECRET_KEY_PATTERN = /(?:secret|token).*ref|ref.*(?:secret|token)|secretid|token$/iu;
+
+function isPlainConfigRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function shouldStripPluginConfigValue(key: string, value: unknown): boolean {
+  const normalizedKey = key.replace(/[^a-z0-9]/giu, '').toLowerCase();
+  if (PLUGIN_CONFIG_SECRET_KEY_PATTERN.test(normalizedKey)) {
+    return true;
+  }
+
+  if (!isPlainConfigRecord(value)) {
+    return false;
+  }
+
+  return value.type === 'secret_ref' || typeof value.secretId === 'string';
+}
+
+function stripPluginSecretRefValue(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value
+      .map((entry) => stripPluginSecretRefValue(entry))
+      .filter((entry) => entry !== undefined);
+  }
+
+  if (!isPlainConfigRecord(value)) {
+    return value;
+  }
+
+  const nextEntries: Array<readonly [string, unknown]> = [];
+  for (const [key, entryValue] of Object.entries(value)) {
+    if (shouldStripPluginConfigValue(key, entryValue)) {
+      continue;
+    }
+
+    const nextValue = stripPluginSecretRefValue(entryValue);
+    if (nextValue !== undefined) {
+      nextEntries.push([key, nextValue] as const);
+    }
+  }
+
+  return Object.fromEntries(nextEntries);
+}
+
 function stripPluginSecretRefConfig(config: GitHubSyncPluginConfig): GitHubSyncPluginConfig {
-  const {
-    githubTokenRefs: _githubTokenRefs,
-    paperclipBoardApiTokenRefs: _paperclipBoardApiTokenRefs,
-    ...safeConfig
-  } = config;
-  return safeConfig;
+  return stripPluginSecretRefValue(config) as GitHubSyncPluginConfig;
 }
 
 async function writePluginConfig(pluginId: string, config: GitHubSyncPluginConfig): Promise<void> {
