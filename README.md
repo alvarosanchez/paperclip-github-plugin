@@ -205,7 +205,10 @@ If Paperclip-managed secrets are not available, the worker can read a local fall
 
 ```json
 {
-  "githubToken": "ghp_your_token_here"
+  "githubToken": "ghp_your_token_here",
+  "githubTokensByCompanyId": {
+    "company-uuid": "ghp_company_specific_token_here"
+  }
 }
 ```
 
@@ -213,7 +216,8 @@ Notes:
 
 - This file is read by the worker only.
 - The raw token is never persisted back into plugin state or plugin config.
-- A GitHub token secret saved through the settings UI takes precedence over the local file.
+- A GitHub token secret saved through the settings UI is the primary source. If the current Paperclip host rejects plugin secret-ref resolution while company-scoped plugin config is unavailable, GitHub Sync stores the validated token in `githubTokensByCompanyId` as a worker-local compatibility fallback.
+- On authenticated deployments, selected agents receive `GITHUB_TOKEN` as a latest-version secret-ref env binding, and the settings UI patches agent adapter config with `replaceAdapterConfig: true` so newer Paperclip hosts persist the merged env map.
 
 ### Worker-facing Paperclip API URL
 
