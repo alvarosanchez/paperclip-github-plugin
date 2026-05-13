@@ -23,6 +23,7 @@ import { resolveInstalledGitHubSyncPluginId, resolvePluginSettingsHref } from '.
 import {
   mergePluginConfig,
   normalizePluginConfig,
+  type GitHubSyncPluginConfig,
   resolvePaperclipApiBaseUrlForPluginAction
 } from '../src/ui/plugin-config.ts';
 import {
@@ -4464,6 +4465,85 @@ test('mergePluginConfig preserves existing config while merging token and board 
     'company-2': 'board-secret-ref-2'
   });
   assert.equal(result.customFlag, true);
+});
+
+test('patchPluginConfig retries without plugin secret refs when the host rejects secret refs', async () => {
+  const uiModule = await importFreshUiModule() as {
+    patchPluginConfig?: unknown;
+  };
+
+  assert.equal(typeof uiModule.patchPluginConfig, 'function');
+
+  const patchPluginConfig = uiModule.patchPluginConfig as (
+    pluginId: string,
+    patch: Partial<GitHubSyncPluginConfig>
+  ) => Promise<void>;
+  const originalFetch = globalThis.fetch;
+  const postBodies: unknown[] = [];
+
+  globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+    const url = getRequestUrl(input);
+    const method = (init?.method ?? 'GET').toUpperCase();
+
+    if (url === '/api/plugins/plugin-1/config' && method === 'GET') {
+      return jsonResponse({
+        configJson: {
+          githubTokenRefs: {
+            'company-1': 'github-secret-ref'
+          },
+          paperclipBoardApiTokenRefs: {
+            'company-1': 'board-secret-ref'
+          },
+          paperclipApiBaseUrl: 'http://127.0.0.1:3100'
+        }
+      });
+    }
+
+    if (url === '/api/plugins/plugin-1/config' && method === 'POST') {
+      const body = getJsonRequestBody(init);
+      postBodies.push(body);
+
+      if (postBodies.length === 1) {
+        return jsonResponse(
+          {
+            error: 'Plugin secret references are disabled until company-scoped plugin config lands'
+          },
+          422
+        );
+      }
+
+      return jsonResponse({ ok: true });
+    }
+
+    throw new Error(`Unexpected fetch request: ${method} ${url}`);
+  };
+
+  try {
+    await patchPluginConfig('plugin-1', {
+      paperclipApiBaseUrl: 'http://localhost:3100'
+    });
+
+    assert.deepEqual(postBodies, [
+      {
+        configJson: {
+          githubTokenRefs: {
+            'company-1': 'github-secret-ref'
+          },
+          paperclipBoardApiTokenRefs: {
+            'company-1': 'board-secret-ref'
+          },
+          paperclipApiBaseUrl: 'http://localhost:3100'
+        }
+      },
+      {
+        configJson: {
+          paperclipApiBaseUrl: 'http://localhost:3100'
+        }
+      }
+    ]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test('normalizePluginConfig canonicalizes the trusted Paperclip API origin and drops invalid values', () => {
@@ -12018,6 +12098,83 @@ test('settings.ensureGitHubTokenAvailable overwrites invalid worker-local config
       )
     );
   });
+});
+
+test('settings.updateBoardAccess writes a company-scoped board token fallback for worker-side REST calls', { concurrency: false }, async () => {
+  await withTemporaryPaperclipHome(async ({ configFilePath }) => {
+    const harness = createTestHarness({ manifest });
+    await plugin.definition.setup(harness.ctx);
+
+    await harness.performAction('settings.updateBoardAccess', {
+      companyId: 'company-1',
+      paperclipBoardApiTokenRef: 'board-secret-ref',
+      paperclipBoardApiToken: 'paperclip-board-token',
+      paperclipBoardAccessIdentity: 'Jane Operator'
+    });
+
+    const storedConfig = JSON.parse(await readFile(configFilePath, 'utf8')) as {
+      paperclipBoardApiTokensByCompanyId?: Record<string, string>;
+    };
+
+    assert.deepEqual(storedConfig.paperclipBoardApiTokensByCompanyId, {
+      'company-1': 'paperclip-board-token'
+    });
+  });
+});
+
+test('resolvePaperclipApiAuthTokens falls back to the worker-local board token when plugin secret refs are disabled', async () => {
+  const workerModule = await importFreshWorkerModule();
+  const testing = workerModule.__testing as typeof workerModule.__testing & {
+    resolvePaperclipApiAuthTokens?: (
+      ctx: unknown,
+      settings: unknown,
+      config: unknown,
+      mappings: Array<{ companyId?: string }>
+    ) => Promise<Map<string, string>>;
+  };
+
+  assert.equal(typeof testing.resolvePaperclipApiAuthTokens, 'function');
+
+  const harness = createTestHarness({
+    manifest,
+    config: {
+      paperclipBoardApiTokensByCompanyId: {
+        'company-1': 'paperclip-board-token'
+      }
+    }
+  });
+  await plugin.definition.setup(harness.ctx);
+
+  let resolveCount = 0;
+  harness.ctx.secrets.resolve = async () => {
+    resolveCount += 1;
+    throw new Error('Plugin secret references are disabled until company-scoped plugin config lands');
+  };
+
+  const tokens = await testing.resolvePaperclipApiAuthTokens(
+    harness.ctx,
+    {
+      paperclipBoardApiTokenRefs: {
+        'company-1': 'board-secret-ref'
+      }
+    },
+    {
+      paperclipBoardApiTokenRefs: {
+        'company-1': 'board-secret-ref'
+      },
+      paperclipBoardApiTokensByCompanyId: {
+        'company-1': 'paperclip-board-token'
+      }
+    },
+    [
+      {
+        companyId: 'company-1'
+      }
+    ]
+  );
+
+  assert.equal(resolveCount, 1);
+  assert.equal(tokens.get('company-1'), 'paperclip-board-token');
 });
 
 test('sync.runNow falls back to a company-scoped external config token when plugin secret refs are disabled', { concurrency: false }, async () => {

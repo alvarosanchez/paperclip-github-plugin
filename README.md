@@ -196,6 +196,7 @@ The plugin is designed to avoid persisting raw credentials in plugin state.
 - The settings UI also keeps lightweight non-secret identity labels for those saved connections, so later visits can still show who each company GitHub token and board access are connected as.
 - On authenticated deployments, any selected propagation agents receive `GITHUB_TOKEN` as an agent env secret-ref binding that points at the same saved GitHub token secret instead of a copied raw token.
 - The worker resolves those secret references at runtime instead of storing raw tokens in plugin state.
+- When the current Paperclip host rejects plugin secret refs, GitHub Sync keeps company-scoped worker-local compatibility copies for GitHub tokens and Paperclip board-access tokens in `${PAPERCLIP_HOME:-~/.paperclip}/plugins/github-sync/config.json`. Reconnect board access once after upgrading if sync still cannot authenticate Paperclip label or issue REST calls.
 - On authenticated Paperclip deployments, sync is blocked until the relevant company has connected Paperclip board access.
 - KPI API route requests must include `Authorization: Bearer <PAPERCLIP_API_KEY>` from an agent run; the Paperclip host authenticates the token and supplies the agent company before the worker records any metric event.
 
@@ -208,6 +209,9 @@ If Paperclip-managed secrets are not available, the worker can read a local fall
   "githubToken": "ghp_your_token_here",
   "githubTokensByCompanyId": {
     "company-uuid": "ghp_company_specific_token_here"
+  },
+  "paperclipBoardApiTokensByCompanyId": {
+    "company-uuid": "paperclip_board_api_token_here"
   }
 }
 ```
@@ -217,6 +221,7 @@ Notes:
 - This file is read by the worker only.
 - The raw token is never persisted back into plugin state or plugin config.
 - A GitHub token secret saved through the settings UI is the primary source. If the current Paperclip host rejects plugin secret-ref resolution while company-scoped plugin config is unavailable, GitHub Sync stores the validated token in `githubTokensByCompanyId` as a worker-local compatibility fallback.
+- A Paperclip board access secret saved through the settings UI is also the primary source. If the host cannot resolve it for plugin workers, reconnecting board access stores the approved board token in `paperclipBoardApiTokensByCompanyId` as a worker-local compatibility fallback for direct Paperclip REST calls.
 - On authenticated deployments, selected agents receive `GITHUB_TOKEN` as a latest-version secret-ref env binding, and the settings UI patches agent adapter config with `replaceAdapterConfig: true` so newer Paperclip hosts persist the merged env map.
 
 ### Worker-facing Paperclip API URL
