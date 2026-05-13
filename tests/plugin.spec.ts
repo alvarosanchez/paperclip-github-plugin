@@ -4492,13 +4492,22 @@ test('patchPluginConfig retries without plugin secret refs when the host rejects
             'company-1': 'github-secret-ref'
           },
           githubTokenRef: 'legacy-github-secret-ref',
+          githubTokensByCompanyId: {
+            'company-1': 'ghp_raw_github_token'
+          },
           paperclipBoardApiTokenRefs: {
             'company-1': 'board-secret-ref'
           },
           paperclipBoardApiTokenRef: 'legacy-board-secret-ref',
+          paperclipBoardApiTokensByCompanyId: {
+            'company-1': 'raw-paperclip-board-token'
+          },
           legacyNestedSecret: {
             type: 'secret_ref',
             secretId: '00000000-0000-4000-8000-000000000099'
+          },
+          nestedRawToken: {
+            token: 'raw-nested-token'
           },
           customFlag: true,
           paperclipApiBaseUrl: 'http://127.0.0.1:3100'
@@ -4537,13 +4546,22 @@ test('patchPluginConfig retries without plugin secret refs when the host rejects
             'company-1': 'github-secret-ref'
           },
           githubTokenRef: 'legacy-github-secret-ref',
+          githubTokensByCompanyId: {
+            'company-1': 'ghp_raw_github_token'
+          },
           paperclipBoardApiTokenRefs: {
             'company-1': 'board-secret-ref'
           },
           paperclipBoardApiTokenRef: 'legacy-board-secret-ref',
+          paperclipBoardApiTokensByCompanyId: {
+            'company-1': 'raw-paperclip-board-token'
+          },
           legacyNestedSecret: {
             type: 'secret_ref',
             secretId: '00000000-0000-4000-8000-000000000099'
+          },
+          nestedRawToken: {
+            token: 'raw-nested-token'
           },
           customFlag: true,
           paperclipApiBaseUrl: 'http://localhost:3100'
