@@ -6855,7 +6855,7 @@ function isPluginSecretReferencesDisabledError(error: unknown): boolean {
   return getActionErrorMessage(error, '').toLowerCase().includes('plugin secret references are disabled');
 }
 
-const PLUGIN_CONFIG_SECRET_KEY_PATTERN = /(?:secret|token).*ref|ref.*(?:secret|token)|secretid|token$/iu;
+const PLUGIN_CONFIG_SECRET_KEY_PATTERN = /secret|token/iu;
 
 function isPlainConfigRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
