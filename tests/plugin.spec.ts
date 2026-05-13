@@ -18834,6 +18834,41 @@ test('worker routes non-review-ready GitHub merge state statuses back to active 
       mergeStateStatus: 'UNKNOWN',
       expectedStatus: 'in_review' as const,
       expectedReason: /unknown mergeability/
+    },
+    {
+      githubIssueId: 5001,
+      githubIssueNumber: 50,
+      pullRequestNumber: 500,
+      title: 'Triggered monitor wait',
+      initialStatus: 'in_review' as const,
+      initialExecutionState: {
+        status: 'idle',
+        currentStageId: null,
+        currentStageIndex: null,
+        currentStageType: null,
+        currentParticipant: null,
+        returnAssignee: null,
+        completedStageIds: [],
+        lastDecisionId: null,
+        lastDecisionOutcome: null,
+        monitor: {
+          status: 'triggered',
+          nextCheckAt: null,
+          lastTriggeredAt: '2026-04-09T09:10:00.000Z',
+          attemptCount: 1,
+          notes: 'Check GitHub pull request status.',
+          scheduledBy: 'board',
+          kind: 'external_service',
+          serviceName: 'GitHub',
+          externalRef: null,
+          timeoutAt: null,
+          maxAttempts: null,
+          recoveryPolicy: null,
+          clearedAt: null,
+          clearReason: null
+        }
+      },
+      expectedStatus: 'in_review' as const
     }
   ];
 
@@ -18846,9 +18881,16 @@ test('worker routes non-review-ready GitHub merge state statuses back to active 
       });
 
       const initialStatus = scenario.initialStatus ?? 'in_review';
-      return created.status === initialStatus
+      const patch: Record<string, unknown> = {
+        ...(created.status === initialStatus ? {} : { status: initialStatus }),
+        ...(scenario.initialExecutionState ? {
+          assigneeAgentId: 'agent-1',
+          executionState: scenario.initialExecutionState
+        } : {})
+      };
+      return Object.keys(patch).length === 0
         ? created
-        : harness.ctx.issues.update(created.id, { status: initialStatus }, 'company-1');
+        : harness.ctx.issues.update(created.id, patch as never, 'company-1');
     })
   );
 
@@ -19010,6 +19052,9 @@ test('worker routes non-review-ready GitHub merge state statuses back to active 
         );
       } else {
         assert.equal(issue?.assigneeAgentId ?? null, null);
+        if (scenario.initialExecutionState) {
+          assert.equal(issue?.executionState ?? null, null);
+        }
         const transitionComment = statusTransitionComments.find((comment) => comment.issueId === issue?.id);
         if (scenario.initialStatus === 'done') {
           assert.match(transitionComment?.body ?? '', /from `done` to `in review`/);
