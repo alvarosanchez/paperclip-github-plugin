@@ -4491,9 +4491,16 @@ test('patchPluginConfig retries without plugin secret refs when the host rejects
           githubTokenRefs: {
             'company-1': 'github-secret-ref'
           },
+          githubTokenRef: 'legacy-github-secret-ref',
           paperclipBoardApiTokenRefs: {
             'company-1': 'board-secret-ref'
           },
+          paperclipBoardApiTokenRef: 'legacy-board-secret-ref',
+          legacyNestedSecret: {
+            type: 'secret_ref',
+            secretId: '00000000-0000-4000-8000-000000000099'
+          },
+          customFlag: true,
           paperclipApiBaseUrl: 'http://127.0.0.1:3100'
         }
       });
@@ -4529,14 +4536,22 @@ test('patchPluginConfig retries without plugin secret refs when the host rejects
           githubTokenRefs: {
             'company-1': 'github-secret-ref'
           },
+          githubTokenRef: 'legacy-github-secret-ref',
           paperclipBoardApiTokenRefs: {
             'company-1': 'board-secret-ref'
           },
+          paperclipBoardApiTokenRef: 'legacy-board-secret-ref',
+          legacyNestedSecret: {
+            type: 'secret_ref',
+            secretId: '00000000-0000-4000-8000-000000000099'
+          },
+          customFlag: true,
           paperclipApiBaseUrl: 'http://localhost:3100'
         }
       },
       {
         configJson: {
+          customFlag: true,
           paperclipApiBaseUrl: 'http://localhost:3100'
         }
       }
