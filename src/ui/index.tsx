@@ -7092,7 +7092,7 @@ export async function syncGitHubTokenPropagationForAgents(params: {
   }
 }
 
-function normalizeGitHubTokenSecretRefCandidate(value: unknown): string | undefined {
+function normalizeTrimmedString(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim() ? value.trim() : undefined;
 }
 
@@ -7102,17 +7102,17 @@ export function resolveGitHubTokenSecretRefForPropagation(params: {
   companyId?: string | null;
   pluginConfig?: GitHubSyncPluginConfig | null;
 }): string | undefined {
-  const explicitSecretRef = normalizeGitHubTokenSecretRefCandidate(params.explicitSecretRef);
+  const explicitSecretRef = normalizeTrimmedString(params.explicitSecretRef);
   if (explicitSecretRef) {
     return explicitSecretRef;
   }
 
-  const settingsSecretRef = normalizeGitHubTokenSecretRefCandidate(params.settingsSecretRef);
+  const settingsSecretRef = normalizeTrimmedString(params.settingsSecretRef);
   if (settingsSecretRef) {
     return settingsSecretRef;
   }
 
-  const companyId = normalizeGitHubTokenSecretRefCandidate(params.companyId);
+  const companyId = normalizeTrimmedString(params.companyId);
   if (!companyId || !params.pluginConfig) {
     return undefined;
   }
