@@ -7985,12 +7985,12 @@ test('sync.runNow does not let stale direct PR links close open GitHub issue-lin
       });
     }
 
-    if (requestPathname === '/repos/paperclipai/example-repo/pulls/89') {
+    if (requestPathname === '/repos/third-party/external/pulls/89') {
       return jsonResponse({
         number: 89,
         title: 'Stale merged direct PR link',
         body: 'This older PR was linked directly but is not the issue-closing PR.',
-        html_url: 'https://github.com/paperclipai/example-repo/pull/89',
+        html_url: 'https://github.com/third-party/external/pull/89',
         state: 'closed',
         merged: true
       });
@@ -8102,6 +8102,7 @@ test('sync.runNow does not let stale direct PR links close open GitHub issue-lin
       reference: '88'
     });
     await upsertDirectPullRequestLink(harness, issue.id, 89, {
+      repositoryUrl: 'https://github.com/third-party/external',
       title: 'Stale merged direct PR link'
     });
     await harness.ctx.issues.update(issue.id, { status: 'done' }, 'company-1');

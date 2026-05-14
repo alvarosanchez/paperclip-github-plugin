@@ -10784,10 +10784,12 @@ async function listExternalGitHubLinkSyncWork(
   ]);
 
   for (const record of issueLinks) {
-    if (
-      !doesGitHubIssueLinkRecordMatchTarget(record, target)
-      || isGitHubIssueLinkCoveredByMappings(record, syncableMappings)
-    ) {
+    if (!doesGitHubIssueLinkRecordMatchTarget(record, target)) {
+      continue;
+    }
+
+    issueLinkedPaperclipIssueIds.add(record.paperclipIssueId);
+    if (isGitHubIssueLinkCoveredByMappings(record, syncableMappings)) {
       continue;
     }
 
@@ -10795,7 +10797,6 @@ async function listExternalGitHubLinkSyncWork(
       `${record.paperclipIssueId}:${record.data.githubIssueUrl}`,
       record
     );
-    issueLinkedPaperclipIssueIds.add(record.paperclipIssueId);
   }
 
   for (const record of pullRequestLinks) {
