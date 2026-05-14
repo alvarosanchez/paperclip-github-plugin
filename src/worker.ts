@@ -10681,6 +10681,35 @@ async function listGitHubPullRequestIssueLinksForMapping(
   return [...recordsByKey.values()];
 }
 
+async function listGitHubIssueLinkedPaperclipIssueIdsForMapping(
+  ctx: PluginSetupContext,
+  mapping: RepositoryMapping,
+  importedIssueRecords: ImportedIssueRecord[],
+  target?: ResolvedSyncTarget
+): Promise<Set<string>> {
+  const issueIds = new Set<string>(
+    importedIssueRecords.map((record) => record.paperclipIssueId).filter(Boolean)
+  );
+
+  if (target?.kind === 'issue' && target.issueId && target.githubIssueNumber) {
+    issueIds.add(target.issueId);
+  }
+
+  const issueLinks = await listGitHubIssueLinkRecords(ctx, {
+    ...(target?.kind === 'issue' && target.issueId ? { paperclipIssueId: target.issueId } : {})
+  });
+  for (const record of issueLinks) {
+    if (
+      doesGitHubIssueLinkRecordMatchMapping(record, mapping)
+      && doesGitHubIssueLinkRecordMatchTarget(record, target)
+    ) {
+      issueIds.add(record.paperclipIssueId);
+    }
+  }
+
+  return issueIds;
+}
+
 function doesGitHubIssueLinkRecordMatchMapping(
   record: GitHubIssueLinkRecord,
   mapping: RepositoryMapping
@@ -10744,6 +10773,7 @@ async function listExternalGitHubLinkSyncWork(
   const syncableMappings = getSyncableMappingsForTarget(mappings, target);
   const issueLinksByKey = new Map<string, GitHubIssueLinkRecord>();
   const pullRequestLinksByKey = new Map<string, GitHubPullRequestLinkRecord>();
+  const issueLinkedPaperclipIssueIds = new Set<string>();
   const [issueLinks, pullRequestLinks] = await Promise.all([
     listGitHubIssueLinkRecords(ctx, {
       ...(target?.kind === 'issue' && target.issueId ? { paperclipIssueId: target.issueId } : {})
@@ -10754,10 +10784,12 @@ async function listExternalGitHubLinkSyncWork(
   ]);
 
   for (const record of issueLinks) {
-    if (
-      !doesGitHubIssueLinkRecordMatchTarget(record, target)
-      || isGitHubIssueLinkCoveredByMappings(record, syncableMappings)
-    ) {
+    if (!doesGitHubIssueLinkRecordMatchTarget(record, target)) {
+      continue;
+    }
+
+    issueLinkedPaperclipIssueIds.add(record.paperclipIssueId);
+    if (isGitHubIssueLinkCoveredByMappings(record, syncableMappings)) {
       continue;
     }
 
@@ -10770,6 +10802,7 @@ async function listExternalGitHubLinkSyncWork(
   for (const record of pullRequestLinks) {
     if (
       !doesGitHubPullRequestLinkRecordMatchTarget(record, target)
+      || issueLinkedPaperclipIssueIds.has(record.paperclipIssueId)
       || isGitHubPullRequestLinkCoveredByMappings(record, syncableMappings)
     ) {
       continue;
@@ -19975,7 +20008,14 @@ async function performSync(
         const importRegistryByIssueId = new Map(
           importedIssueRecords.map((entry) => [entry.githubIssueId, entry])
         );
-        const pullRequestLinks = await listGitHubPullRequestIssueLinksForMapping(ctx, mapping, options.target);
+        const githubIssueLinkedPaperclipIssueIds = await listGitHubIssueLinkedPaperclipIssueIdsForMapping(
+          ctx,
+          mapping,
+          importedIssueRecords,
+          options.target
+        );
+        const pullRequestLinks = (await listGitHubPullRequestIssueLinksForMapping(ctx, mapping, options.target))
+          .filter((record) => !githubIssueLinkedPaperclipIssueIds.has(record.paperclipIssueId));
         const ensuredPaperclipIssueIds = new Map<number, string>();
         const trackedIssueIds = new Set<number>([
           ...issues.map((issue) => issue.id),
