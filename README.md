@@ -94,6 +94,8 @@ If a Paperclip issue was created locally or by an agent workflow before GitHub S
 
 Manual GitHub issue links are added to the same import registry and issue-link entity used by normal sync, so future syncs update the Paperclip issue from the GitHub issue. Manual pull request links are added to the PR-link entity used by the project Pull Requests page, so future syncs monitor PR status even when there is no closing GitHub issue.
 
+When a Paperclip issue is linked to a GitHub issue and also has older direct pull request links, the GitHub issue remains the status source of truth. Direct pull request links only drive status for PR-only Paperclip issues, which prevents stale merged PR metadata from closing work while the GitHub issue and its current linked PR are still open.
+
 Operators can unlink a linked Paperclip issue from the GitHub detail surface when they intentionally want GitHub Sync to stop updating it. Agent-facing tools and native agent API routes can create durable issue and pull request links, but they do not expose an unlink operation; internal sync repair may still tombstone a link when GitHub transfers an issue to an unmapped repository.
 
 ### Agent workflows built in

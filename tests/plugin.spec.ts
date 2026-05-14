@@ -7945,6 +7945,187 @@ test('sync.runNow lets open direct PRs drive status when another linked PR is al
   }
 });
 
+test('sync.runNow does not let stale direct PR links close open GitHub issue-linked work', async () => {
+  const harness = await createProjectPullRequestsHarness();
+  const originalFetch = globalThis.fetch;
+  const originalCreateComment = harness.ctx.issues.createComment;
+  const statusTransitionComments: Array<{ issueId: string; body: string }> = [];
+  const issue = await harness.ctx.issues.create({
+    companyId: 'company-1',
+    projectId: 'project-1',
+    title: 'Open issue with stale merged PR link',
+    description: 'The GitHub issue still has an open linked PR.'
+  });
+
+  harness.ctx.issues.createComment = async (issueId, body, companyId) => {
+    statusTransitionComments.push({ issueId, body });
+    return originalCreateComment(issueId, body, companyId);
+  };
+
+  globalThis.fetch = async (input, init) => {
+    const requestUrl = getRequestUrl(input);
+    const requestPathname = getDecodedRequestPathname(input);
+
+    if (requestPathname === '/repos/paperclipai/example-repo/issues/88') {
+      return jsonResponse({
+        id: 8800,
+        number: 88,
+        title: 'Open GitHub issue with linked PR',
+        body: 'GitHub still owns the delivery state.',
+        html_url: 'https://github.com/paperclipai/example-repo/issues/88',
+        state: 'open',
+        state_reason: null,
+        comments: 0,
+        user: {
+          login: 'octocat',
+          html_url: 'https://github.com/octocat',
+          avatar_url: 'https://avatars.githubusercontent.com/u/583231?v=4'
+        },
+        labels: []
+      });
+    }
+
+    if (requestPathname === '/repos/paperclipai/example-repo/pulls/89') {
+      return jsonResponse({
+        number: 89,
+        title: 'Stale merged direct PR link',
+        body: 'This older PR was linked directly but is not the issue-closing PR.',
+        html_url: 'https://github.com/paperclipai/example-repo/pull/89',
+        state: 'closed',
+        merged: true
+      });
+    }
+
+    if (requestPathname === '/graphql') {
+      const { query, variables } = getGraphqlRequest(init);
+      const pullRequestNumber =
+        typeof variables.pullRequestNumber === 'number' ? variables.pullRequestNumber : undefined;
+
+      if (query.includes('query GitHubIssueStatusSnapshot') && variables.issueNumber === 88) {
+        return graphqlResponse({
+          repository: {
+            issue: {
+              number: 88,
+              state: 'OPEN',
+              stateReason: null,
+              comments: {
+                totalCount: 0
+              },
+              closedByPullRequestsReferences: {
+                pageInfo: {
+                  hasNextPage: false,
+                  endCursor: null
+                },
+                nodes: [
+                  {
+                    number: 90,
+                    state: 'OPEN',
+                    repository: {
+                      owner: {
+                        login: 'paperclipai'
+                      },
+                      name: 'example-repo'
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        });
+      }
+
+      if (query.includes('query GitHubRepositoryOpenPullRequestStatuses')) {
+        return graphqlResponse({
+          repository: {
+            pullRequests: {
+              pageInfo: {
+                hasNextPage: false,
+                endCursor: null
+              },
+              nodes: []
+            }
+          }
+        });
+      }
+
+      if (query.includes('query GitHubPullRequestReviewThreads') && pullRequestNumber === 90) {
+        return graphqlResponse({
+          repository: {
+            pullRequest: {
+              reviewThreads: {
+                pageInfo: {
+                  hasNextPage: false,
+                  endCursor: null
+                },
+                nodes: []
+              }
+            }
+          }
+        });
+      }
+
+      if (query.includes('query GitHubPullRequestCiContexts') && pullRequestNumber === 90) {
+        return graphqlResponse({
+          repository: {
+            pullRequest: {
+              mergeable: 'MERGEABLE',
+              mergeStateStatus: 'CLEAN',
+              reviewDecision: null,
+              statusCheckRollup: {
+                contexts: {
+                  pageInfo: {
+                    hasNextPage: false,
+                    endCursor: null
+                  },
+                  nodes: [
+                    {
+                      __typename: 'StatusContext',
+                      state: 'SUCCESS'
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        });
+      }
+    }
+
+    throw new Error(`Unexpected fetch during stale direct PR edge-case sync test: ${requestUrl}`);
+  };
+
+  try {
+    await harness.performAction('issue.linkGitHubItem', {
+      companyId: 'company-1',
+      issueId: issue.id,
+      kind: 'issue',
+      reference: '88'
+    });
+    await upsertDirectPullRequestLink(harness, issue.id, 89, {
+      title: 'Stale merged direct PR link'
+    });
+    await harness.ctx.issues.update(issue.id, { status: 'done' }, 'company-1');
+
+    const sync = await harness.performAction('sync.runNow', {
+      companyId: 'company-1',
+      issueId: issue.id,
+      waitForCompletion: true
+    }) as {
+      syncState: { status: string; syncedIssuesCount?: number };
+    };
+
+    assert.equal(sync.syncState.status, 'success');
+    const updatedIssue = await harness.ctx.issues.get(issue.id, 'company-1');
+    assert.equal(updatedIssue?.status, 'in_review');
+    assert.equal(statusTransitionComments.length, 1);
+    assert.match(statusTransitionComments[0]?.body ?? '', /from `done` to `in review`/);
+    assert.doesNotMatch(statusTransitionComments[0]?.body ?? '', /pull request was merged/);
+  } finally {
+    harness.ctx.issues.createComment = originalCreateComment;
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test('sync.runNow completes all-terminal direct PR groups when any linked PR merged', async () => {
   const harness = await createProjectPullRequestsHarness();
   const originalFetch = globalThis.fetch;
