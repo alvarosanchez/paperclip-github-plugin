@@ -49,11 +49,11 @@
     "remark-gfm": "^4.0.1"
   },
   "devDependencies": {
-    "@types/node": "24.12.3",
+    "@types/node": "24.12.4",
     "@types/react": "19.2.14",
     "esbuild": "0.28.0",
-    "playwright": "1.59.1",
-    "tsx": "4.21.0",
+    "playwright": "1.60.0",
+    "tsx": "4.22.0",
     "typescript": "6.0.3"
   }
 }
