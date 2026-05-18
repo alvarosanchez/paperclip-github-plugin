@@ -13,7 +13,7 @@ importers:
         version: 22.0.1
       '@paperclipai/plugin-sdk':
         specifier: ^2026.512.0
-        version: 2026.512.0(react@19.2.6)
+        version: 2026.513.0(react@19.2.6)
       react:
         specifier: ^19.2.6
         version: 19.2.6
@@ -404,8 +404,8 @@ packages:
     resolution: {integrity: sha512-KMQIfq5sOPpkQYajXHwnhjCC0slzCNScLHs9JafXc4RAJI+9f+jNDlBNaIMTvazOPLgb4BnlhGJOTbnN0wIjPw==}
     engines: {node: '>= 20'}
 
-  '@octokit/request@10.0.8':
-    resolution: {integrity: sha512-SJZNwY9pur9Agf7l87ywFi14W+Hd9Jg6Ifivsd33+/bGUQIjNujdFiXII2/qSlN2ybqUHfp5xpekMEjIBTjlSw==}
+  '@octokit/request@10.0.9':
+    resolution: {integrity: sha512-o8Bi3f608eyM+7BmBiUWxFsdjLb3/ym1cQek5LZOv9KkZcxRrHCPhhRzm6xjO6HVZ85ItD6+sTsjxo821SVa/A==}
     engines: {node: '>= 20'}
 
   '@octokit/rest@22.0.1':
@@ -415,8 +415,8 @@ packages:
   '@octokit/types@16.0.0':
     resolution: {integrity: sha512-sKq+9r1Mm4efXW1FCk7hFSeJo4QKreL/tTbR0rz/qx/r1Oa2VV83LTA/H/MuCOX7uCIJmQVRKBcbmWoySjAnSg==}
 
-  '@paperclipai/plugin-sdk@2026.512.0':
-    resolution: {integrity: sha512-Rk0Ds7+ZuYekNYY+pd78TYOnm6yOuuPCUNI24QV3Re5zN/me/ECbAhp6mUTtfUhp97cvnCIHBpsEJ1tfVhA6QQ==}
+  '@paperclipai/plugin-sdk@2026.513.0':
+    resolution: {integrity: sha512-w6c+qFLuCqrIc0jMDV98gfuS/Czkh0C6Pi+jC2dK9KHszwJmgicSZ1R/uqhfje8+N16U4comxbwo3GE1+VMdiw==}
     hasBin: true
     peerDependencies:
       react: '>=18'
@@ -424,8 +424,8 @@ packages:
       react:
         optional: true
 
-  '@paperclipai/shared@2026.512.0':
-    resolution: {integrity: sha512-OkSsGy2X+yrtZSzobA/GZSM2FxWAOGvhSTPeL+kPlTtKTe3p5IvZIINZr5Kxogq3ms2J8x05jGvGkjF+rIOAAw==}
+  '@paperclipai/shared@2026.513.0':
+    resolution: {integrity: sha512-d9Xpi5JhWaygFArS4tjQ+K5W6CkGxmwtZCxIE2jPHAvw7LZmHVY+QDLwnMGVVgIM1sRkDIseBuw1tOeivyVHRg==}
 
   '@types/debug@4.1.13':
     resolution: {integrity: sha512-KSVgmQmzMwPlmtljOomayoR89W4FynCAi3E8PPs7vmDVPe84hT+vGPKkJfThkmXs0x0jAaa9U8uW8bbfyS2fWw==}
@@ -483,6 +483,10 @@ packages:
 
   comma-separated-tokens@2.0.3:
     resolution: {integrity: sha512-Fu4hJdvzeylCfQPp9SGWidpzrMs7tTrlu6Vb8XGaRGck8QSNZJJp538Wrb60Lax4fPwR64ViY468OIUTbRlGZg==}
+
+  content-type@2.0.0:
+    resolution: {integrity: sha512-j/O/d7GcZCyNl7/hwZAb606rzqkyvaDctLmckbxLzHvFBzTJHuGEdodATcP3yIRoDrLHkIATJuvzbFlp/ki2cQ==}
+    engines: {node: '>=18'}
 
   csstype@3.2.3:
     resolution: {integrity: sha512-z1HGKcYy2xA8AGQfwrn0PAy+PB7X/GSj3UVJW9qKyn43xWa+gl5nXmU4qqLMRzWVLFC8KusUX8T/0kCiOYpAIQ==}
@@ -1020,7 +1024,7 @@ snapshots:
     dependencies:
       '@octokit/auth-token': 6.0.0
       '@octokit/graphql': 9.0.3
-      '@octokit/request': 10.0.8
+      '@octokit/request': 10.0.9
       '@octokit/request-error': 7.1.0
       '@octokit/types': 16.0.0
       before-after-hook: 4.0.0
@@ -1033,7 +1037,7 @@ snapshots:
 
   '@octokit/graphql@9.0.3':
     dependencies:
-      '@octokit/request': 10.0.8
+      '@octokit/request': 10.0.9
       '@octokit/types': 16.0.0
       universal-user-agent: 7.0.3
 
@@ -1057,11 +1061,12 @@ snapshots:
     dependencies:
       '@octokit/types': 16.0.0
 
-  '@octokit/request@10.0.8':
+  '@octokit/request@10.0.9':
     dependencies:
       '@octokit/endpoint': 11.0.3
       '@octokit/request-error': 7.1.0
       '@octokit/types': 16.0.0
+      content-type: 2.0.0
       fast-content-type-parse: 3.0.0
       json-with-bigint: 3.5.8
       universal-user-agent: 7.0.3
@@ -1077,14 +1082,14 @@ snapshots:
     dependencies:
       '@octokit/openapi-types': 27.0.0
 
-  '@paperclipai/plugin-sdk@2026.512.0(react@19.2.6)':
+  '@paperclipai/plugin-sdk@2026.513.0(react@19.2.6)':
     dependencies:
-      '@paperclipai/shared': 2026.512.0
+      '@paperclipai/shared': 2026.513.0
       zod: 3.25.76
     optionalDependencies:
       react: 19.2.6
 
-  '@paperclipai/shared@2026.512.0':
+  '@paperclipai/shared@2026.513.0':
     dependencies:
       zod: 3.25.76
 
@@ -1137,6 +1142,8 @@ snapshots:
   character-reference-invalid@2.0.1: {}
 
   comma-separated-tokens@2.0.3: {}
+
+  content-type@2.0.0: {}
 
   csstype@3.2.3: {}
 
