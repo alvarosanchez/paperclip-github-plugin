@@ -186,6 +186,7 @@ Additional behavior:
 - Sync-driven handoffs to agent assignees best-effort enqueue an explicit wakeup so the next reviewer, approver, or executor can pick the issue up even when their agent is not running heartbeats.
 - Open imported issues that are already in `backlog` stay in `backlog` until someone changes them in Paperclip.
 - If an imported issue is `done` or `cancelled` and GitHub shows it open again with no linked pull request, sync moves it to `todo` so agents can pick it up again.
+- When an issue has an active Paperclip issue monitor, GitHub Sync lets that monitor own the wait. It still refreshes GitHub metadata, but it does not change the issue's Paperclip status, assignee, execution state, transition comments, or wakeups until the monitor is no longer active.
 - Trusted new GitHub comments from the original issue author or a verified maintainer/admin can move an open imported issue back into active work, whether the new comment lands on the source issue, in a linked pull request's top-level comment stream, or in a linked pull request review thread; GitHub Sync uses `in_progress` when it can route the issue to an executor and otherwise `todo`.
 - When the sync changes a Paperclip issue status, it adds a Paperclip comment explaining what changed and why.
 
