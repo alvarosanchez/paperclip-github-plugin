@@ -8,8 +8,7 @@ import { promisify } from 'node:util';
 
 const execFileAsync = promisify(execFile);
 const RELEASE_UNDER_TEST = '2026.517.0';
-const PNPM_UNDER_TEST = '11.0.9';
-const PNPM_ACTION_SETUP_SHA = '739bfe42ca9233c5e6aca07c1a25a9d34aca49b0';
+const PNPM_ACTION_SETUP_SHA_PATTERN = '[0-9a-f]{40}';
 
 test('build script reports missing local dependencies clearly when node_modules is absent', async () => {
   const tempDir = await mkdtemp(join(tmpdir(), 'paperclip-github-plugin-build-no-deps-'));
@@ -56,17 +55,16 @@ test('plugin SDK dependency targets the current Paperclip release', async () => 
   assert.equal(packageJson.dependencies?.['@paperclipai/plugin-sdk'], `^${RELEASE_UNDER_TEST}`);
 });
 
-test('GitHub workflows use the same pnpm version as packageManager', async () => {
+test('GitHub workflows let packageManager select the pnpm version', async () => {
   const packageJson = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'));
   const ciWorkflow = await readFile(new URL('../.github/workflows/ci.yml', import.meta.url), 'utf8');
   const releaseWorkflow = await readFile(new URL('../.github/workflows/release.yml', import.meta.url), 'utf8');
   const pnpmWorkspace = await readFile(new URL('../pnpm-workspace.yaml', import.meta.url), 'utf8');
-  const escapedPnpmVersion = PNPM_UNDER_TEST.replaceAll('.', '\\.');
 
-  assert.equal(packageJson.packageManager, `pnpm@${PNPM_UNDER_TEST}`);
-  assert.match(ciWorkflow, new RegExp(`pnpm/action-setup@${PNPM_ACTION_SETUP_SHA}`));
-  assert.match(releaseWorkflow, new RegExp(`pnpm/action-setup@${PNPM_ACTION_SETUP_SHA}`));
-  assert.match(ciWorkflow, new RegExp(`version: ${escapedPnpmVersion}`));
-  assert.match(releaseWorkflow, new RegExp(`version: ${escapedPnpmVersion}`));
+  assert.match(packageJson.packageManager, /^pnpm@\d+\.\d+\.\d+$/);
+  assert.match(ciWorkflow, new RegExp(`pnpm/action-setup@${PNPM_ACTION_SETUP_SHA_PATTERN} # v6`));
+  assert.match(releaseWorkflow, new RegExp(`pnpm/action-setup@${PNPM_ACTION_SETUP_SHA_PATTERN} # v6`));
+  assert.doesNotMatch(ciWorkflow, /pnpm\/action-setup@[\s\S]*?with:[\s\S]*?\n\s*version:\s/);
+  assert.doesNotMatch(releaseWorkflow, /pnpm\/action-setup@[\s\S]*?with:[\s\S]*?\n\s*version:\s/);
   assert.match(pnpmWorkspace, /^allowBuilds:\n  esbuild: true\n?$/);
 });

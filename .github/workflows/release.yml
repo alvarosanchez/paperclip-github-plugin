@@ -21,7 +21,6 @@ jobs:
       - name: Set up pnpm
         uses: pnpm/action-setup@739bfe42ca9233c5e6aca07c1a25a9d34aca49b0 # v6
         with:
-          version: 11.0.9
           standalone: true
           run_install: false
 
