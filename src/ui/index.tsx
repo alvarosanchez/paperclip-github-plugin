@@ -12,7 +12,7 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 
 import { parseRepositoryReference, type ParsedRepositoryReference } from '../github-repo.ts';
-import { requiresPaperclipBoardAccess } from '../paperclip-health.ts';
+import { resolvePaperclipAuthControlsPolicy } from '../paperclip-health.ts';
 import { normalizeCompanyAssigneeOptionsResponse, type GitHubSyncAssigneeOption } from './assignees.ts';
 import { buildPaperclipUrl, fetchJson, fetchPaperclipHealth, resolveCliAuthPollUrl } from './http.ts';
 import { resolveInstalledGitHubSyncPluginId, resolvePluginSettingsHref } from './plugin-installation.ts';
@@ -650,6 +650,13 @@ type TokenStatus = 'required' | 'valid' | 'invalid';
 type BoardAccessRequirementStatus = 'loading' | 'required' | 'not_required' | 'unknown';
 type SelectTone = 'neutral' | 'blue' | 'yellow' | 'violet' | 'green' | 'red';
 
+interface BoardAccessRequirementState {
+  status: BoardAccessRequirementStatus;
+  required: boolean;
+  settingsVisible: boolean;
+  githubTokenPropagationSettingsVisible: boolean;
+}
+
 interface ThemePalette {
   text: string;
   title: string;
@@ -926,8 +933,15 @@ function getSyncSetupMessage(
 function usePaperclipBoardAccessRequirement(): {
   status: BoardAccessRequirementStatus;
   required: boolean;
+  settingsVisible: boolean;
+  githubTokenPropagationSettingsVisible: boolean;
 } {
-  const [status, setStatus] = useState<BoardAccessRequirementStatus>('loading');
+  const [state, setState] = useState<BoardAccessRequirementState>({
+    status: 'loading',
+    required: false,
+    settingsVisible: false,
+    githubTokenPropagationSettingsVisible: true
+  });
 
   useEffect(() => {
     let cancelled = false;
@@ -939,11 +953,23 @@ function usePaperclipBoardAccessRequirement(): {
       }
 
       if (!health) {
-        setStatus('unknown');
+        const policy = resolvePaperclipAuthControlsPolicy(null);
+        setState({
+          status: 'unknown',
+          required: policy.boardAccessRequired,
+          settingsVisible: policy.boardAccessSettingsVisible,
+          githubTokenPropagationSettingsVisible: policy.githubTokenPropagationSettingsVisible
+        });
         return;
       }
 
-      setStatus(requiresPaperclipBoardAccess(health) ? 'required' : 'not_required');
+      const policy = resolvePaperclipAuthControlsPolicy(health);
+      setState({
+        status: policy.boardAccessRequired ? 'required' : 'not_required',
+        required: policy.boardAccessRequired,
+        settingsVisible: policy.boardAccessSettingsVisible,
+        githubTokenPropagationSettingsVisible: policy.githubTokenPropagationSettingsVisible
+      });
     })();
 
     return () => {
@@ -951,10 +977,7 @@ function usePaperclipBoardAccessRequirement(): {
     };
   }, []);
 
-  return {
-    status,
-    required: status === 'required'
-  };
+  return state;
 }
 
 function getGitHubRateLimitResourceLabel(resource?: string): string | null {
@@ -11778,6 +11801,8 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
   const hasSavedToken = Boolean(form.githubTokenConfigured || showSavedTokenHint);
   const boardAccessConfigured = Boolean(form.paperclipBoardAccessConfigured);
   const boardAccessRequired = boardAccessRequirement.required;
+  const boardAccessSettingsVisible = boardAccessRequirement.settingsVisible;
+  const githubTokenPropagationSettingsVisible = boardAccessRequirement.githubTokenPropagationSettingsVisible;
   const boardAccessReady = !boardAccessRequired || (hasCompanyContext && boardAccessConfigured);
   const tokenStatus = tokenStatusOverride ?? (hasSavedToken ? 'valid' : 'required');
   const tokenTone: Tone = tokenStatus === 'valid' ? 'success' : tokenStatus === 'invalid' ? 'danger' : 'warning';
@@ -11993,7 +12018,7 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
   const manualSyncScopePillLabel = hasCompanyContext ? 'This company' : 'All companies';
   const manualSyncButtonLabel = hasCompanyContext ? 'Run sync for this company' : 'Run sync across all companies';
   const advancedSettingsSummary = formatAdvancedSettingsSummary(form.advancedSettings, availableAssignees, {
-    includePropagation: boardAccessRequired
+    includePropagation: githubTokenPropagationSettingsVisible
   });
   const assigneeSelectOptions: SettingsSelectOption[] = [
     { value: '', label: 'Unassigned' },
@@ -12188,10 +12213,6 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
     previousAgentIds?: string[];
     githubTokenSecretRef?: string;
   }): Promise<void> {
-    if (!boardAccessRequired) {
-      return;
-    }
-
     const selectedAgentIds = normalizeAgentIds(options.selectedAgentIds);
     const previousAgentIds = normalizeAgentIds(options.previousAgentIds);
     if (selectedAgentIds.length === 0 && previousAgentIds.length === 0) {
@@ -12428,7 +12449,7 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
       }));
       toast({
         title: boardIdentity.label ? `Paperclip board access connected as ${boardIdentity.label}` : 'Paperclip board access connected',
-        body: 'Direct Paperclip REST calls can now authenticate in authenticated deployments.',
+        body: 'Direct Paperclip REST calls can now authenticate when the host requires board access.',
         tone: 'success'
       });
       notifyGitHubSyncSettingsChanged();
@@ -12886,7 +12907,7 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
             ) : null}
           </section>
 
-          {boardAccessRequired ? (
+          {boardAccessSettingsVisible ? (
             <section className="ghsync__section">
               <div className="ghsync__section-head">
                 <div className="ghsync__section-copy">
@@ -13288,7 +13309,7 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
                   <p className="ghsync__hint">Comma or newline separated.</p>
                 </div>
 
-                {boardAccessRequired ? (
+                {githubTokenPropagationSettingsVisible ? (
                   <div className="ghsync__field">
                     <label htmlFor="advanced-token-propagation">Propagate GitHub token to agents</label>
                     <SettingsAgentMultiPicker
@@ -13547,7 +13568,7 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
               </span>
             </div>
 
-            {boardAccessRequired ? (
+            {boardAccessSettingsVisible ? (
               <div className="ghsync__check">
                 <div className="ghsync__check-top">
                   <strong>Paperclip board access</strong>

@@ -16,7 +16,7 @@ import {
   PULL_REQUEST_ASSET_API_ROUTE_KEY,
   PULL_REQUEST_ASSET_API_ROUTE_PATH
 } from '../src/kpi-contract.ts';
-import { requiresPaperclipBoardAccess } from '../src/paperclip-health.ts';
+import { requiresPaperclipBoardAccess, resolvePaperclipAuthControlsPolicy } from '../src/paperclip-health.ts';
 import { normalizeCompanyAssigneeOptionsResponse } from '../src/ui/assignees.ts';
 import { fetchJson, fetchPaperclipHealth, resolveCliAuthPollUrl } from '../src/ui/http.ts';
 import { resolveInstalledGitHubSyncPluginId, resolvePluginSettingsHref } from '../src/ui/plugin-installation.ts';
@@ -4374,6 +4374,39 @@ test('fetchPaperclipHealth returns null when the Paperclip health endpoint is un
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+test('Paperclip auth controls policy shows board access setup for local trusted deployments without requiring it', () => {
+  const policy = resolvePaperclipAuthControlsPolicy({
+    deploymentMode: 'local_trusted',
+    deploymentExposure: 'local',
+    authReady: false
+  });
+
+  assert.deepEqual(policy, {
+    boardAccessRequired: false,
+    boardAccessSettingsVisible: true,
+    githubTokenPropagationSettingsVisible: true
+  });
+});
+
+test('Paperclip auth controls policy keeps GitHub token propagation visible across deployment modes', () => {
+  assert.equal(
+    resolvePaperclipAuthControlsPolicy({ deploymentMode: 'authenticated' }).githubTokenPropagationSettingsVisible,
+    true
+  );
+  assert.equal(
+    resolvePaperclipAuthControlsPolicy({ deploymentMode: 'local_trusted' }).githubTokenPropagationSettingsVisible,
+    true
+  );
+  assert.equal(
+    resolvePaperclipAuthControlsPolicy({ deploymentMode: 'development' }).githubTokenPropagationSettingsVisible,
+    true
+  );
+  assert.equal(
+    resolvePaperclipAuthControlsPolicy(null).githubTokenPropagationSettingsVisible,
+    true
+  );
 });
 
 test('resolveGitHubIssueDetailTabState keeps unlinked issue detail views available for manual linking', async () => {

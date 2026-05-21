@@ -4,6 +4,12 @@ export interface PaperclipHealthResponse {
   authReady?: boolean;
 }
 
+export interface PaperclipAuthControlsPolicy {
+  boardAccessRequired: boolean;
+  boardAccessSettingsVisible: boolean;
+  githubTokenPropagationSettingsVisible: boolean;
+}
+
 function normalizeOptionalString(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim() ? value.trim() : undefined;
 }
@@ -31,11 +37,28 @@ export function normalizePaperclipHealthResponse(value: unknown): PaperclipHealt
 
 export function requiresPaperclipBoardAccess(value: unknown): boolean {
   const health = normalizePaperclipHealthResponse(value);
+  return requiresPaperclipBoardAccessForHealth(health);
+}
+
+function requiresPaperclipBoardAccessForHealth(health: PaperclipHealthResponse | null): boolean {
   return health?.deploymentMode?.toLowerCase() === 'authenticated';
 }
 
 export function shouldShowPaperclipBoardAccessSettings(value: unknown): boolean {
   const health = normalizePaperclipHealthResponse(value);
+  return shouldShowPaperclipBoardAccessSettingsForHealth(health);
+}
+
+function shouldShowPaperclipBoardAccessSettingsForHealth(health: PaperclipHealthResponse | null): boolean {
   const deploymentMode = health?.deploymentMode?.toLowerCase();
   return deploymentMode === 'authenticated' || deploymentMode === 'local_trusted';
+}
+
+export function resolvePaperclipAuthControlsPolicy(value: unknown): PaperclipAuthControlsPolicy {
+  const health = normalizePaperclipHealthResponse(value);
+  return {
+    boardAccessRequired: requiresPaperclipBoardAccessForHealth(health),
+    boardAccessSettingsVisible: shouldShowPaperclipBoardAccessSettingsForHealth(health),
+    githubTokenPropagationSettingsVisible: true
+  };
 }
