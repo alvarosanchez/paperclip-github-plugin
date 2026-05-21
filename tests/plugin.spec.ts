@@ -12932,8 +12932,13 @@ test('worker normalizes and saves the Paperclip API base URL alongside setup', a
   assert.equal(result.paperclipApiBaseUrl, 'http://127.0.0.1:63675');
 });
 
-test('worker trusts the current Paperclip API origin on first hosted settings save', async () => {
-  const harness = createTestHarness({ manifest });
+test('worker accepts the current Paperclip API origin after hosted settings mirrors it into plugin config', async () => {
+  const harness = createTestHarness({
+    manifest,
+    config: {
+      paperclipApiBaseUrl: 'http://127.0.0.1:63675'
+    }
+  });
   await plugin.definition.setup(harness.ctx);
 
   const result = await harness.performAction('settings.saveRegistration', {
@@ -12963,6 +12968,27 @@ test('worker trusts the current Paperclip API origin on first hosted settings sa
   assert.deepEqual(savedSettings.paperclipApiBaseUrlByCompanyId, {
     'company-1': 'http://127.0.0.1:63675'
   });
+});
+
+test('worker rejects first Paperclip API origin saves that have not been mirrored into plugin config', async () => {
+  const harness = createTestHarness({ manifest });
+  await plugin.definition.setup(harness.ctx);
+
+  await assert.rejects(
+    harness.performAction('settings.saveRegistration', {
+      companyId: 'company-1',
+      mappings: [
+        {
+          id: 'mapping-a',
+          repositoryUrl: 'paperclipai/example-repo',
+          paperclipProjectName: 'Engineering',
+          paperclipProjectId: 'project-1'
+        }
+      ],
+      paperclipApiBaseUrl: ' http://127.0.0.1:63675/api/companies/company-1/labels '
+    }),
+    /not trusted yet/i
+  );
 });
 
 test('settings.registration reads the paperclipApiBaseUrl plugin config in the worker', async () => {
