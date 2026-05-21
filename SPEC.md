@@ -8,8 +8,8 @@ The plugin MUST provide a settings page inside Paperclip where an operator can c
 
 - a GitHub token stored as a company-scoped Paperclip secret reference
 - an optional external config file at `${PAPERCLIP_HOME:-~/.paperclip}/plugins/github-sync/config.json` for worker-only global values such as a raw `githubToken`
-- Paperclip board access, which is optional on unauthenticated deployments and required when the Paperclip deployment reports `deploymentMode: "authenticated"`
-- on authenticated deployments, a company-scoped multi-select of agents that should receive `GITHUB_TOKEN` propagation from the saved GitHub token secret
+- Paperclip board access, which is optional but configurable on `deploymentMode: "local_trusted"` deployments and required when the Paperclip deployment reports `deploymentMode: "authenticated"`
+- a company-scoped multi-select of agents that should receive `GITHUB_TOKEN` propagation from the saved GitHub token secret
 - one or more GitHub repository mappings
 - company-scoped advanced defaults for imported issues: default assignee, default Paperclip status, executor/reviewer/approver handoff assignees for sync-driven status transitions, and ignored GitHub issue authors, where a saved username such as `renovate` also matches GitHub bot logins such as `renovate[bot]`
 - the frequency for automatic scheduled sync runs for that company
@@ -21,7 +21,8 @@ The settings page MUST allow saving mappings and triggering a manual sync.
 - The settings page SHOULD clearly label company-scoped setup and defaults, including sync cadence, for the active company.
 - When a company context is present, the settings page SHOULD show the active company name prominently using a human-friendly label instead of a raw identifier.
 - When a company already has Paperclip projects bound to GitHub repository workspaces, the settings page SHOULD surface those projects so an operator can enable sync without recreating the project.
-- The settings page MUST only render the Paperclip board-access connect controls and the agent token-propagation selector when the current Paperclip deployment reports `deploymentMode: "authenticated"`.
+- The settings page MUST render the Paperclip board-access connect controls when the current Paperclip deployment reports `deploymentMode: "authenticated"` or `deploymentMode: "local_trusted"`, while only treating board access as required for sync when the deployment reports `deploymentMode: "authenticated"`.
+- The settings page MUST render the agent token-propagation selector regardless of deployment mode so selected agents can receive the saved `GITHUB_TOKEN` secret reference on local trusted and authenticated instances.
 - When the settings page successfully validates a saved GitHub token, it SHOULD persist the validated GitHub login as non-secret display metadata so later visits can continue showing `Authenticated as ...` instead of falling back to a generic ready state.
 - When the settings page successfully connects Paperclip board access for a company, it SHOULD persist a company-scoped non-secret identity label so later visits can continue showing `Connected as ...` instead of falling back to a generic connected state.
 - When the active company has a saved Paperclip board-access user id, every advanced-settings assignee dropdown MUST include a `Me` option that maps to that connected board user alongside the available agents.
@@ -41,8 +42,8 @@ The settings page MUST allow saving mappings and triggering a manual sync.
 - UI-side plugin config writes MUST recover from the known plugin-secret-reference-disabled failure by retrying without plugin secret-ref maps, so saving non-secret settings cannot be blocked by stale secret-ref config.
 - If a Paperclip host rejects plugin secret-ref resolution with the known plugin-secret-reference-disabled failure while company-scoped plugin config is unavailable, the settings UI MAY ask the worker to persist the validated raw token in a worker-local company-scoped fallback map at `${PAPERCLIP_HOME:-~/.paperclip}/plugins/github-sync/config.json` so production sync can continue without writing the raw token to plugin state or plugin config.
 - The plugin MAY persist lightweight non-secret display metadata such as the validated GitHub login alongside the saved GitHub token secret ref so hosted UI can keep connected-state copy consistent across refreshes without resolving the secret.
-- When authenticated deployment settings select agents for GitHub token propagation, the hosted settings UI MUST patch those agents through the host API so `adapterConfig.env.GITHUB_TOKEN` points at that same secret UUID with a latest-version secret-ref binding instead of copying the raw token value.
-- When an authenticated deployment settings save removes an agent from that propagation allowlist, the hosted settings UI SHOULD remove `adapterConfig.env.GITHUB_TOKEN` only when that binding still points at the plugin-managed secret UUID, so unrelated manual agent env settings are not clobbered.
+- When settings select agents for GitHub token propagation, the hosted settings UI MUST patch those agents through the host API so `adapterConfig.env.GITHUB_TOKEN` points at that same secret UUID with a latest-version secret-ref binding instead of copying the raw token value.
+- When a settings save removes an agent from that propagation allowlist, the hosted settings UI SHOULD remove `adapterConfig.env.GITHUB_TOKEN` only when that binding still points at the plugin-managed secret UUID, so unrelated manual agent env settings are not clobbered.
 - Agent token propagation updates MUST send `replaceAdapterConfig: true` when patching agent adapter config so newer Paperclip hosts persist the merged `env` map.
 - If `${PAPERCLIP_HOME:-~/.paperclip}/plugins/github-sync/config.json` exists and contains either a string `githubToken` or a `githubTokensByCompanyId` map, the worker MUST treat those values as worker-only fallback sources for the GitHub token without persisting or returning those raw tokens.
 - The raw Paperclip board API token MUST NOT be persisted in plugin state.

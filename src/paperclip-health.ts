@@ -4,6 +4,12 @@ export interface PaperclipHealthResponse {
   authReady?: boolean;
 }
 
+export interface PaperclipAuthControlsPolicy {
+  boardAccessRequired: boolean;
+  boardAccessSettingsVisible: boolean;
+  githubTokenPropagationSettingsVisible: boolean;
+}
+
 function normalizeOptionalString(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim() ? value.trim() : undefined;
 }
@@ -38,4 +44,12 @@ export function shouldShowPaperclipBoardAccessSettings(value: unknown): boolean 
   const health = normalizePaperclipHealthResponse(value);
   const deploymentMode = health?.deploymentMode?.toLowerCase();
   return deploymentMode === 'authenticated' || deploymentMode === 'local_trusted';
+}
+
+export function resolvePaperclipAuthControlsPolicy(value: unknown): PaperclipAuthControlsPolicy {
+  return {
+    boardAccessRequired: requiresPaperclipBoardAccess(value),
+    boardAccessSettingsVisible: shouldShowPaperclipBoardAccessSettings(value),
+    githubTokenPropagationSettingsVisible: true
+  };
 }
