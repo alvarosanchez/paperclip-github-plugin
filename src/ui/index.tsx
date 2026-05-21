@@ -12518,9 +12518,7 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
       if (!trustedPaperclipApiBaseUrl) {
         throw new Error('Could not resolve the current browser origin for Paperclip API calls.');
       }
-      const nextConfiguredPaperclipApiBaseUrl = paperclipApiBaseUrlIsOverride
-        ? normalizedPaperclipApiBaseUrlDraft ?? ''
-        : '';
+      const nextConfiguredPaperclipApiBaseUrl = trustedPaperclipApiBaseUrl;
 
       await patchPluginConfig(pluginId, {
         paperclipApiBaseUrl: nextConfiguredPaperclipApiBaseUrl
@@ -12558,11 +12556,11 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
         advancedSettings: normalizeAdvancedSettings(result.advancedSettings),
         availableAssignees: result.availableAssignees ?? current.availableAssignees,
         paperclipApiBaseUrl: result.paperclipApiBaseUrl,
-        paperclipApiBaseUrlConfigured: paperclipApiBaseUrlIsOverride,
+        paperclipApiBaseUrlConfigured: Boolean(nextConfiguredPaperclipApiBaseUrl),
         updatedAt: result.updatedAt
       }));
       setScheduleFrequencyDraft(String(normalizeScheduleFrequencyMinutes(result.scheduleFrequencyMinutes)));
-      setPaperclipApiBaseUrlDraft(paperclipApiBaseUrlIsOverride ? nextConfiguredPaperclipApiBaseUrl : trustedPaperclipApiBaseUrl);
+      setPaperclipApiBaseUrlDraft(nextConfiguredPaperclipApiBaseUrl);
 
       toast({
         title: 'GitHub sync setup saved',

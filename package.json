@@ -1,6 +1,6 @@
 {
   "name": "paperclip-github-plugin",
-  "version": "0.9.7",
+  "version": "0.9.8",
   "description": "Paperclip plugin for synchronizing GitHub issues into Paperclip projects.",
   "license": "Apache-2.0",
   "type": "module",
@@ -41,7 +41,7 @@
   },
   "dependencies": {
     "@octokit/rest": "^22.0.1",
-    "@paperclipai/plugin-sdk": "^2026.512.0",
+    "@paperclipai/plugin-sdk": "^2026.517.0",
     "react": "^19.2.6",
     "react-markdown": "^10.1.0",
     "rehype-raw": "^7.0.0",
@@ -49,11 +49,11 @@
     "remark-gfm": "^4.0.1"
   },
   "devDependencies": {
-    "@types/node": "24.12.3",
+    "@types/node": "24.12.4",
     "@types/react": "19.2.14",
     "esbuild": "0.28.0",
-    "playwright": "1.59.1",
-    "tsx": "4.21.0",
+    "playwright": "1.60.0",
+    "tsx": "4.22.1",
     "typescript": "6.0.3"
   }
 }

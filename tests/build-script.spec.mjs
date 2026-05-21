@@ -7,7 +7,7 @@ import test from 'node:test';
 import { promisify } from 'node:util';
 
 const execFileAsync = promisify(execFile);
-const RELEASE_UNDER_TEST = '2026.512.0';
+const RELEASE_UNDER_TEST = '2026.517.0';
 const PNPM_UNDER_TEST = '11.0.9';
 const PNPM_ACTION_SETUP_SHA = '739bfe42ca9233c5e6aca07c1a25a9d34aca49b0';
 
