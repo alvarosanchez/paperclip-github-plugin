@@ -5962,8 +5962,7 @@ function resolvePaperclipApiBaseUrl(...values: unknown[]): string | undefined {
 
 function getConfiguredPaperclipApiBaseUrl(
   settings: Pick<GitHubSyncSettings, 'paperclipApiBaseUrl' | 'paperclipApiBaseUrlByCompanyId'> | null | undefined,
-  config: Pick<GitHubSyncConfig, 'paperclipApiBaseUrl'> | null | undefined
-  ,
+  config: Pick<GitHubSyncConfig, 'paperclipApiBaseUrl'> | null | undefined,
   companyId?: string
 ): string | undefined {
   const normalizedCompanyId = normalizeCompanyId(companyId);
@@ -5979,9 +5978,11 @@ function getConfiguredPaperclipApiBaseUrl(
 function resolveTrustedPaperclipApiBaseUrlInput(
   value: unknown,
   settings: Pick<GitHubSyncSettings, 'paperclipApiBaseUrl' | 'paperclipApiBaseUrlByCompanyId'> | null | undefined,
-  config: Pick<GitHubSyncConfig, 'paperclipApiBaseUrl'> | null | undefined
-  ,
-  companyId?: string
+  config: Pick<GitHubSyncConfig, 'paperclipApiBaseUrl'> | null | undefined,
+  companyId?: string,
+  options: {
+    allowInitialTrust?: boolean;
+  } = {}
 ): string | undefined {
   const requestedPaperclipApiBaseUrl = normalizePaperclipApiBaseUrl(value);
   const configuredPaperclipApiBaseUrl = normalizePaperclipApiBaseUrl(config?.paperclipApiBaseUrl);
@@ -6011,6 +6012,15 @@ function resolveTrustedPaperclipApiBaseUrlInput(
 
   if (savedPaperclipApiBaseUrl && requestedPaperclipApiBaseUrl === savedPaperclipApiBaseUrl) {
     return savedPaperclipApiBaseUrl;
+  }
+
+  if (
+    options.allowInitialTrust
+    && !configuredPaperclipApiBaseUrl
+    && !savedCompanyPaperclipApiBaseUrl
+    && !savedPaperclipApiBaseUrl
+  ) {
+    return requestedPaperclipApiBaseUrl;
   }
 
   throw new Error(
@@ -22248,7 +22258,9 @@ const plugin = definePlugin({
       current = upsertScopedScheduleFrequencyMinutes(current, nextScheduleFrequencyMinutes, requestedCompanyId);
       const nextPaperclipApiBaseUrl =
         'paperclipApiBaseUrl' in record
-          ? resolveTrustedPaperclipApiBaseUrlInput(record.paperclipApiBaseUrl, previous, config, requestedCompanyId)
+          ? resolveTrustedPaperclipApiBaseUrlInput(record.paperclipApiBaseUrl, previous, config, requestedCompanyId, {
+              allowInitialTrust: true
+            })
           : getConfiguredPaperclipApiBaseUrl(previous, config, requestedCompanyId);
       current = upsertScopedPaperclipApiBaseUrl(current, nextPaperclipApiBaseUrl, requestedCompanyId);
       const nextMappings = current.mappings.map((mapping, index) => ({

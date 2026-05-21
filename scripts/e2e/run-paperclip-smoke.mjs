@@ -23,7 +23,7 @@ const seededGitHubPullRequestUrl = 'https://github.com/paperclipai/example-repo/
 const manualGitHubIssueLinkTitle = 'Manual GitHub Issue Link Smoke';
 const manualGitHubPullRequestLinkTitle = 'Manual GitHub PR Link Smoke';
 const seededCompanyAttachmentMaxBytes = 10 * 1024 * 1024;
-const defaultPaperclipaiVersion = '2026.512.0';
+const defaultPaperclipaiVersion = '2026.517.0';
 const paperclipaiVersion = process.env.PAPERCLIP_E2E_PAPERCLIPAI_VERSION?.trim() || defaultPaperclipaiVersion;
 const paperclipaiPackageSpec = paperclipaiVersion.startsWith('paperclipai@')
   ? paperclipaiVersion
@@ -227,6 +227,29 @@ async function readSettingsRegistration(installedPluginId, companyId) {
   return data;
 }
 
+async function waitForSettingsRegistration(installedPluginId, companyId, predicate, description) {
+  const deadline = Date.now() + 120000;
+  let lastSettings = null;
+  let lastError = null;
+
+  while (Date.now() < deadline) {
+    try {
+      lastSettings = await readSettingsRegistration(installedPluginId, companyId);
+      if (predicate(lastSettings)) {
+        return lastSettings;
+      }
+    } catch (error) {
+      lastError = error;
+    }
+
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 1000));
+  }
+
+  const lastValue = lastSettings ? JSON.stringify(lastSettings) : '<none>';
+  const errorSuffix = lastError ? ` Last error: ${lastError instanceof Error ? lastError.message : String(lastError)}` : '';
+  throw new Error(`Timed out waiting for ${description}. Last settings: ${lastValue}.${errorSuffix}`);
+}
+
 async function assertWorkerPaperclipApiUrlFromSettingsUi(page, installedPluginId, companyId) {
   const settingsSurface = page.locator('.ghsync-settings');
   const apiUrlInput = page.getByLabel('Worker Paperclip API URL', { exact: true });
@@ -236,11 +259,37 @@ async function assertWorkerPaperclipApiUrlFromSettingsUi(page, installedPluginId
     throw new Error(`Expected Worker Paperclip API URL field to be prefilled with browser origin ${baseUrl}, received ${initialValue || '<empty>'}.`);
   }
 
+  await page.getByLabel('GitHub repository', { exact: true }).first().fill(seededRepositoryUrl);
+  await page.getByLabel('Paperclip project', { exact: true }).first().fill(seededProjectName);
+  await settingsSurface.getByRole('button', { name: 'Save settings', exact: true }).click();
+
+  await waitForSettingsRegistration(
+    installedPluginId,
+    companyId,
+    (settings) =>
+      settings.paperclipApiBaseUrl === baseUrl
+      && Array.isArray(settings.mappings)
+      && settings.mappings.some((mapping) =>
+        mapping
+        && typeof mapping === 'object'
+        && mapping.repositoryUrl === seededRepositoryUrl
+        && mapping.paperclipProjectName === seededProjectName
+      ),
+    `settings UI to save the default browser-origin Paperclip API URL ${baseUrl}`
+  );
+
+  log(`Verified settings UI saves the default browser-origin paperclipApiBaseUrl as ${baseUrl}.`);
+
   const configuredUrl = `http://localhost:${serverPort}`;
   await apiUrlInput.fill(configuredUrl);
   await settingsSurface.getByRole('button', { name: 'Save settings', exact: true }).click();
 
-  const settings = await readSettingsRegistration(installedPluginId, companyId);
+  const settings = await waitForSettingsRegistration(
+    installedPluginId,
+    companyId,
+    (registration) => registration.paperclipApiBaseUrl === configuredUrl,
+    `settings UI to save the configured Paperclip API URL ${configuredUrl}`
+  );
   if (settings.paperclipApiBaseUrl !== configuredUrl) {
     throw new Error(
       `Expected worker settings.registration to read paperclipApiBaseUrl from settings UI as ${configuredUrl}, received ${settings.paperclipApiBaseUrl ?? 'undefined'}.`

@@ -12932,6 +12932,39 @@ test('worker normalizes and saves the Paperclip API base URL alongside setup', a
   assert.equal(result.paperclipApiBaseUrl, 'http://127.0.0.1:63675');
 });
 
+test('worker trusts the current Paperclip API origin on first hosted settings save', async () => {
+  const harness = createTestHarness({ manifest });
+  await plugin.definition.setup(harness.ctx);
+
+  const result = await harness.performAction('settings.saveRegistration', {
+    companyId: 'company-1',
+    mappings: [
+      {
+        id: 'mapping-a',
+        repositoryUrl: 'paperclipai/example-repo',
+        paperclipProjectName: 'Engineering',
+        paperclipProjectId: 'project-1'
+      }
+    ],
+    paperclipApiBaseUrl: ' http://127.0.0.1:63675/api/companies/company-1/labels '
+  }) as {
+    paperclipApiBaseUrl?: string;
+  };
+
+  assert.equal(result.paperclipApiBaseUrl, 'http://127.0.0.1:63675');
+
+  const savedSettings = harness.getState({
+    scopeKind: 'instance',
+    stateKey: 'paperclip-github-plugin-settings'
+  }) as {
+    paperclipApiBaseUrlByCompanyId?: Record<string, string>;
+  };
+
+  assert.deepEqual(savedSettings.paperclipApiBaseUrlByCompanyId, {
+    'company-1': 'http://127.0.0.1:63675'
+  });
+});
+
 test('settings.registration reads the paperclipApiBaseUrl plugin config in the worker', async () => {
   const harness = createTestHarness({
     manifest,
