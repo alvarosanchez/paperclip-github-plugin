@@ -5962,8 +5962,7 @@ function resolvePaperclipApiBaseUrl(...values: unknown[]): string | undefined {
 
 function getConfiguredPaperclipApiBaseUrl(
   settings: Pick<GitHubSyncSettings, 'paperclipApiBaseUrl' | 'paperclipApiBaseUrlByCompanyId'> | null | undefined,
-  config: Pick<GitHubSyncConfig, 'paperclipApiBaseUrl'> | null | undefined
-  ,
+  config: Pick<GitHubSyncConfig, 'paperclipApiBaseUrl'> | null | undefined,
   companyId?: string
 ): string | undefined {
   const normalizedCompanyId = normalizeCompanyId(companyId);
@@ -5979,8 +5978,7 @@ function getConfiguredPaperclipApiBaseUrl(
 function resolveTrustedPaperclipApiBaseUrlInput(
   value: unknown,
   settings: Pick<GitHubSyncSettings, 'paperclipApiBaseUrl' | 'paperclipApiBaseUrlByCompanyId'> | null | undefined,
-  config: Pick<GitHubSyncConfig, 'paperclipApiBaseUrl'> | null | undefined
-  ,
+  config: Pick<GitHubSyncConfig, 'paperclipApiBaseUrl'> | null | undefined,
   companyId?: string
 ): string | undefined {
   const requestedPaperclipApiBaseUrl = normalizePaperclipApiBaseUrl(value);
