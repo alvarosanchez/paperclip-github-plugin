@@ -4,6 +4,7 @@ import {
   usePluginAction,
   usePluginData,
   usePluginToast,
+  type PluginDetailTabProps,
   type PluginProjectSidebarItemProps
 } from '@paperclipai/plugin-sdk/ui';
 import rehypeRaw from 'rehype-raw';
@@ -359,7 +360,7 @@ interface GitHubIssueDetailsData {
   syncedAt?: string;
 }
 
-type GitHubIssueDetailTabState = 'loading' | 'error' | 'hidden' | 'ready' | 'unlinked';
+type GitHubIssueDetailTabState = 'loading' | 'error' | 'hidden' | 'ready' | 'unlinked' | 'unresolved';
 type ManualGitHubLinkKind = 'issue' | 'pull_request';
 
 interface IssueIdentifierResolutionData {
@@ -4706,6 +4707,15 @@ const EXTENSION_SURFACE_STYLES = `
     line-height: 1.5;
   }
 
+  .ghsync-extension-note p,
+  .ghsync-extension-diagnostics {
+    margin: 8px 0 0;
+  }
+
+  .ghsync-extension-diagnostics {
+    padding-left: 18px;
+  }
+
   .ghsync-issue-detail {
     display: grid;
     gap: 16px;
@@ -7497,9 +7507,10 @@ function useResolvedIssueId(params: {
   issueId: string | null;
   issueIdentifier: string | null;
   loading: boolean;
+  errorMessage: string | null;
 } {
   const pathname = typeof window === 'undefined' ? '' : window.location.pathname;
-  const issueIdentifier = params.entityType === 'issue' ? getIssueIdentifierFromLocation(pathname) : null;
+  const issueIdentifier = getIssueIdentifierFromLocation(pathname);
   const resolution = usePluginData<IssueIdentifierResolutionData | null>('issue.resolveByIdentifier', {
     ...(params.companyId && issueIdentifier ? { companyId: params.companyId } : {}),
     ...(params.projectId && issueIdentifier ? { projectId: params.projectId } : {}),
@@ -7519,17 +7530,24 @@ function useResolvedIssueId(params: {
   }, [issueIdentifier, params.companyId, params.projectId, resolution.refresh]);
 
   if (issueIdentifier) {
+    const contextIssueId =
+      params.entityId && params.entityId !== issueIdentifier
+        ? params.entityId
+        : null;
+
     return {
-      issueId: resolution.data?.issueId ?? null,
+      issueId: resolution.data?.issueId ?? contextIssueId,
       issueIdentifier,
-      loading: resolution.loading && !resolution.data
+      loading: resolution.loading && !resolution.data && !contextIssueId,
+      errorMessage: resolution.error?.message ?? null
     };
   }
 
   return {
-    issueId: params.entityId ?? null,
+    issueId: params.entityType === 'issue' || !params.entityType ? params.entityId ?? null : null,
     issueIdentifier: null,
-    loading: false
+    loading: false,
+    errorMessage: null
   };
 }
 
@@ -14927,12 +14945,14 @@ export function GitHubSyncEntityToolbarButton(): React.JSX.Element | null {
 function GitHubSyncIssueDetailTabContent(props: {
   companyId?: string | null;
   issueId?: string | null;
+  issueIdentifier?: string | null;
+  expectedIssueContext?: boolean;
   loadingIssueId?: boolean;
+  issueResolutionErrorMessage?: string | null;
   themeVars: React.CSSProperties;
 }): React.JSX.Element | null {
   const details = usePluginData<GitHubIssueDetailsData | null>('issue.githubDetails', {
-    ...(props.companyId ? { companyId: props.companyId } : {}),
-    ...(props.issueId ? { issueId: props.issueId } : {})
+    ...(props.companyId && props.issueId ? { companyId: props.companyId, issueId: props.issueId } : {})
   });
   const issueDetails = details.data?.paperclipIssueId === props.issueId ? details.data : null;
   const detailTabState = resolveGitHubIssueDetailTabState({
@@ -14940,7 +14960,10 @@ function GitHubSyncIssueDetailTabContent(props: {
     detailsLoading: details.loading,
     detailsError: Boolean(details.error),
     issueDetails,
-    canLinkManually: Boolean(props.companyId && props.issueId)
+    canLinkManually: Boolean(props.companyId && props.issueId),
+    issueIdentifier: props.issueIdentifier,
+    issueResolutionError: Boolean(props.issueResolutionErrorMessage),
+    expectedIssueContext: Boolean(props.expectedIssueContext)
   });
   const issueSyncButton = useGitHubSyncButtonController({
     companyId: props.companyId,
@@ -15072,7 +15095,40 @@ function GitHubSyncIssueDetailTabContent(props: {
       <style>{EXTENSION_SURFACE_STYLES}</style>
 
       {detailTabState === 'loading' ? <p className="ghsync-extension-empty">Loading GitHub sync details…</p> : null}
-      {detailTabState === 'error' && details.error ? <p className="ghsync-extension-empty">{details.error.message}</p> : null}
+      {detailTabState === 'error' ? (
+        <div className="ghsync-issue-detail__intro">
+          <div className="ghsync-extension-heading">
+            <div className="ghsync-issue-detail__headline">
+              <h4>GitHub sync details unavailable</h4>
+              <p>
+                {details.error?.message
+                  ?? props.issueResolutionErrorMessage
+                  ?? 'GitHub Sync could not load this issue detail view.'}
+              </p>
+            </div>
+          </div>
+          <GitHubIssueDetailTroubleshooting
+            companyId={props.companyId}
+            issueId={props.issueId}
+            issueIdentifier={props.issueIdentifier}
+          />
+        </div>
+      ) : null}
+      {detailTabState === 'unresolved' ? (
+        <div className="ghsync-issue-detail__intro">
+          <div className="ghsync-extension-heading">
+            <div className="ghsync-issue-detail__headline">
+              <h4>GitHub sync details unavailable</h4>
+              <p>GitHub Sync could not resolve the current Paperclip issue context.</p>
+            </div>
+          </div>
+          <GitHubIssueDetailTroubleshooting
+            companyId={props.companyId}
+            issueId={props.issueId}
+            issueIdentifier={props.issueIdentifier}
+          />
+        </div>
+      ) : null}
       {detailTabState === 'unlinked' ? (
         <div className="ghsync-issue-detail__intro">
           <div className="ghsync-extension-heading">
@@ -15321,6 +15377,9 @@ export function resolveGitHubIssueDetailTabState(params: {
   detailsError?: boolean;
   issueDetails?: GitHubIssueDetailsData | null;
   canLinkManually?: boolean;
+  issueIdentifier?: string | null;
+  issueResolutionError?: boolean;
+  expectedIssueContext?: boolean;
 }): GitHubIssueDetailTabState {
   if (params.loadingIssueId || (params.detailsLoading && !params.issueDetails)) {
     return 'loading';
@@ -15330,7 +15389,7 @@ export function resolveGitHubIssueDetailTabState(params: {
     return 'ready';
   }
 
-  if (params.detailsError) {
+  if (params.detailsError || params.issueResolutionError) {
     return 'error';
   }
 
@@ -15338,11 +15397,107 @@ export function resolveGitHubIssueDetailTabState(params: {
     return 'unlinked';
   }
 
+  if (params.issueIdentifier || params.expectedIssueContext) {
+    return 'unresolved';
+  }
+
   return 'hidden';
 }
 
-export function GitHubSyncIssueTaskDetailView(): React.JSX.Element | null {
-  const context = useHostContext();
+type GitHubIssueTaskDetailContext = {
+  companyId?: string;
+  projectId?: string;
+  entityId?: string;
+  entityType?: string;
+};
+
+type GitHubIssueTaskDetailContextInput = {
+  companyId?: unknown;
+  projectId?: unknown;
+  entityId?: unknown;
+  entityType?: unknown;
+} | null | undefined;
+
+function getContextStringValue(
+  context: GitHubIssueTaskDetailContextInput,
+  key: keyof GitHubIssueTaskDetailContext
+): string | null {
+  const value = context?.[key];
+  return typeof value === 'string' && value.trim() ? value.trim() : null;
+}
+
+export function resolveGitHubIssueTaskDetailContext(params: {
+  slotContext?: GitHubIssueTaskDetailContextInput;
+  hostContext?: GitHubIssueTaskDetailContextInput;
+}): GitHubIssueTaskDetailContext {
+  const companyId =
+    getContextStringValue(params.slotContext, 'companyId')
+    ?? getContextStringValue(params.hostContext, 'companyId');
+  const projectId =
+    getContextStringValue(params.slotContext, 'projectId')
+    ?? getContextStringValue(params.hostContext, 'projectId');
+  const entityId =
+    getContextStringValue(params.slotContext, 'entityId')
+    ?? getContextStringValue(params.hostContext, 'entityId');
+  const entityType =
+    getContextStringValue(params.slotContext, 'entityType')
+    ?? getContextStringValue(params.hostContext, 'entityType');
+
+  return {
+    ...(companyId ? { companyId } : {}),
+    ...(projectId ? { projectId } : {}),
+    ...(entityId ? { entityId } : {}),
+    ...(entityType ? { entityType } : {})
+  };
+}
+
+export function shouldExpectGitHubIssueTaskDetailContext(params: {
+  entityId?: string | null;
+  entityType?: string | null;
+  issueIdentifier?: string | null;
+}): boolean {
+  if (params.issueIdentifier) {
+    return true;
+  }
+
+  if (params.entityType === 'issue') {
+    return true;
+  }
+
+  return !params.entityType && Boolean(params.entityId);
+}
+
+function GitHubIssueDetailTroubleshooting(props: {
+  companyId?: string | null;
+  issueId?: string | null;
+  issueIdentifier?: string | null;
+}): React.JSX.Element {
+  return (
+    <div className="ghsync-extension-note">
+      <strong>Troubleshooting</strong>
+      <ul className="ghsync-extension-diagnostics">
+        <li>
+          {props.companyId
+            ? `Company context: ${props.companyId}`
+            : 'Missing company context from the host slot.'}
+        </li>
+        <li>{props.issueId ? `Issue id: ${props.issueId}` : 'Missing canonical Paperclip issue id.'}</li>
+        {props.issueIdentifier ? <li>{`Route issue identifier: ${props.issueIdentifier}`}</li> : null}
+      </ul>
+      <p>
+        Refresh the issue page, then reopen this detail view. If this remains unresolved, include these values when
+        reporting the GitHub Sync plugin issue.
+      </p>
+    </div>
+  );
+}
+
+export function GitHubSyncIssueTaskDetailView(props?: PluginDetailTabProps): React.JSX.Element | null {
+  const hostContext = useHostContext();
+  const context = resolveGitHubIssueTaskDetailContext({
+    slotContext: props?.context ?? null,
+    hostContext
+  });
   const themeMode = useResolvedThemeMode();
   const theme = themeMode === 'light' ? LIGHT_PALETTE : DARK_PALETTE;
   const themeVars = buildThemeVars(theme, themeMode);
@@ -15352,6 +15507,11 @@ export function GitHubSyncIssueTaskDetailView(): React.JSX.Element | null {
     entityId: context.entityId,
     entityType: context.entityType
   });
+  const expectedIssueContext = shouldExpectGitHubIssueTaskDetailContext({
+    entityId: context.entityId,
+    entityType: context.entityType,
+    issueIdentifier: resolvedIssue.issueIdentifier
+  });
   const detailKey = `${context.companyId ?? 'company-none'}:${resolvedIssue.issueIdentifier ?? context.entityId ?? 'issue-none'}`;
 
   return (
@@ -15359,7 +15519,10 @@ export function GitHubSyncIssueTaskDetailView(): React.JSX.Element | null {
       key={detailKey}
       companyId={context.companyId}
       issueId={resolvedIssue.issueId}
+      issueIdentifier={resolvedIssue.issueIdentifier}
+      expectedIssueContext={expectedIssueContext}
       loadingIssueId={resolvedIssue.loading}
+      issueResolutionErrorMessage={resolvedIssue.errorMessage}
       themeVars={themeVars}
     />
   );
