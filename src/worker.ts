@@ -7845,10 +7845,7 @@ function hasActivePaperclipIssueMonitor(syncContext: PaperclipIssueSyncContext):
   }
 
   const normalizedStatus = monitor.status?.trim().toLowerCase();
-  return normalizedStatus !== 'cleared'
-    && normalizedStatus !== 'completed'
-    && normalizedStatus !== 'cancelled'
-    && normalizedStatus !== 'canceled';
+  return normalizedStatus === 'scheduled';
 }
 
 function hasUnresolvedPaperclipIssueBlockerSummary(blockers: unknown): boolean {
