@@ -13020,7 +13020,7 @@ async function updatePaperclipIssueState(
   });
   const issuePatch: Record<string, unknown> = {
     status: nextStatus,
-    ...(syncExecutionStatePatch === null ? { executionState: null } : {}),
+    ...(syncExecutionStatePatch !== undefined ? { executionState: syncExecutionStatePatch } : {}),
     ...(clearExecutionPolicy ? { executionPolicy: null, executionState: null } : {})
   };
 

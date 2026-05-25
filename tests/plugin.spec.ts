@@ -22974,6 +22974,17 @@ test('worker preserves execution-policy pending review state when the local Pape
     const directStatusPatches = directStatusUpdateCalls.filter((call) => typeof call.patch.status === 'string');
     assert.equal(statusPatchRequests.length, 1);
     assert.equal(statusPatchRequests[0]?.body?.status, 'in_review');
+    assert.deepEqual(statusPatchRequests[0]?.body?.executionState, {
+      status: 'pending',
+      currentStageId: 'review-stage',
+      currentStageIndex: 0,
+      currentStageType: 'review',
+      currentParticipant: { type: 'agent', agentId: 'agent-2', userId: null },
+      returnAssignee: { type: 'agent', agentId: 'agent-1', userId: null },
+      completedStageIds: [],
+      lastDecisionId: null,
+      lastDecisionOutcome: null
+    });
     assert.equal(directStatusPatches.length, 1);
     assert.equal(directStatusPatches[0]?.patch.status, 'in_review');
     assert.equal(directStatusPatches[0]?.patch.assigneeAgentId, 'agent-2');
