@@ -4422,7 +4422,9 @@ test('resolveGitHubIssueDetailTabState keeps unlinked issue detail views availab
     detailsError?: boolean;
     issueDetails?: { paperclipIssueId?: string } | null;
     canLinkManually?: boolean;
-  }) => 'loading' | 'error' | 'hidden' | 'ready' | 'unlinked';
+    issueIdentifier?: string;
+    expectedIssueContext?: boolean;
+  }) => 'loading' | 'error' | 'hidden' | 'ready' | 'unlinked' | 'unresolved';
 
   assert.equal(
     resolveGitHubIssueDetailTabState({
@@ -4433,6 +4435,28 @@ test('resolveGitHubIssueDetailTabState keeps unlinked issue detail views availab
       canLinkManually: true
     }),
     'unlinked'
+  );
+  assert.equal(
+    resolveGitHubIssueDetailTabState({
+      loadingIssueId: false,
+      detailsLoading: false,
+      detailsError: false,
+      issueDetails: null,
+      canLinkManually: false,
+      issueIdentifier: 'DUM-4'
+    }),
+    'unresolved'
+  );
+  assert.equal(
+    resolveGitHubIssueDetailTabState({
+      loadingIssueId: false,
+      detailsLoading: false,
+      detailsError: false,
+      issueDetails: null,
+      canLinkManually: false,
+      expectedIssueContext: true
+    }),
+    'unresolved'
   );
   assert.equal(
     resolveGitHubIssueDetailTabState({
@@ -4483,6 +4507,42 @@ test('resolveGitHubIssueDetailTabState keeps unlinked issue detail views availab
       }
     }),
     'ready'
+  );
+});
+
+test('resolveGitHubIssueTaskDetailContext prefers task detail slot context over empty host hook context', async () => {
+  const uiModule = await importFreshUiModule() as {
+    resolveGitHubIssueTaskDetailContext?: unknown;
+  };
+
+  assert.equal(typeof uiModule.resolveGitHubIssueTaskDetailContext, 'function');
+
+  const resolveGitHubIssueTaskDetailContext = uiModule.resolveGitHubIssueTaskDetailContext as (params: {
+    slotContext?: Record<string, unknown> | null;
+    hostContext?: Record<string, unknown> | null;
+  }) => {
+    companyId?: string;
+    projectId?: string;
+    entityId?: string;
+    entityType?: string;
+  };
+
+  assert.deepEqual(
+    resolveGitHubIssueTaskDetailContext({
+      slotContext: {
+        companyId: 'company-1',
+        projectId: 'project-1',
+        entityId: 'issue-1',
+        entityType: 'issue'
+      },
+      hostContext: {}
+    }),
+    {
+      companyId: 'company-1',
+      projectId: 'project-1',
+      entityId: 'issue-1',
+      entityType: 'issue'
+    }
   );
 });
 
