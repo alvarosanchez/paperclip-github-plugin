@@ -10939,7 +10939,178 @@ test('sync.runNow can target a Paperclip issue linked directly to a GitHub pull 
   }
 });
 
-test('sync.runNow abstains from changing issue state while a Paperclip issue monitor is active', async () => {
+test('sync.runNow reconciles a done issue with a triggered monitor when its linked pull request is still open', async () => {
+  const harness = await createProjectPullRequestsHarness();
+  const originalFetch = globalThis.fetch;
+  const originalCreateComment = harness.ctx.issues.createComment;
+  const statusTransitionComments: Array<{ issueId: string; body: string }> = [];
+  const triggeredMonitorExecutionState = {
+    status: 'idle',
+    currentStageId: null,
+    currentStageIndex: null,
+    currentStageType: null,
+    currentParticipant: null,
+    returnAssignee: null,
+    completedStageIds: [],
+    lastDecisionId: null,
+    lastDecisionOutcome: null,
+    monitor: {
+      status: 'triggered',
+      nextCheckAt: null,
+      lastTriggeredAt: '2026-04-09T09:10:00.000Z',
+      attemptCount: 1,
+      notes: 'Check GitHub pull request status.',
+      scheduledBy: 'agent',
+      kind: 'external_service',
+      serviceName: 'GitHub',
+      externalRef: 'https://github.com/paperclipai/example-repo/pull/90',
+      timeoutAt: null,
+      maxAttempts: null,
+      recoveryPolicy: null,
+      clearedAt: null,
+      clearReason: null
+    }
+  };
+  const issue = await harness.ctx.issues.create({
+    companyId: 'company-1',
+    projectId: 'project-1',
+    title: 'Triggered monitor direct PR sync',
+    description: 'This Paperclip issue was marked done after a monitor fired for its linked PR.'
+  });
+
+  harness.ctx.issues.createComment = async (issueId, body, companyId) => {
+    statusTransitionComments.push({ issueId, body });
+    return originalCreateComment(issueId, body, companyId);
+  };
+
+  await harness.ctx.entities.upsert({
+    entityType: 'paperclip-github-plugin.pull-request-link',
+    scopeKind: 'issue',
+    scopeId: issue.id,
+    externalId: 'https://github.com/paperclipai/example-repo/pull/90',
+    title: 'GitHub pull request #90',
+    status: 'open',
+    data: {
+      companyId: 'company-1',
+      paperclipProjectId: 'project-1',
+      repositoryUrl: 'https://github.com/paperclipai/example-repo',
+      githubPullRequestNumber: 90,
+      githubPullRequestUrl: 'https://github.com/paperclipai/example-repo/pull/90',
+      githubPullRequestState: 'open',
+      title: 'Triggered monitor direct PR sync',
+      syncedAt: '2026-04-27T09:30:00.000Z'
+    }
+  });
+  await harness.ctx.issues.update(
+    issue.id,
+    {
+      status: 'done',
+      assigneeAgentId: 'agent-1',
+      executionState: triggeredMonitorExecutionState
+    } as never,
+    'company-1'
+  );
+
+  globalThis.fetch = async (input, init) => {
+    const requestUrl = getRequestUrl(input);
+    const requestPathname = getDecodedRequestPathname(input);
+
+    if (requestPathname === '/repos/paperclipai/example-repo/issues') {
+      throw new Error('PR-targeted sync should not list GitHub issues for the whole repository.');
+    }
+
+    if (requestPathname === '/repos/paperclipai/example-repo/pulls/90') {
+      return jsonResponse({
+        number: 90,
+        title: 'Triggered monitor direct PR sync',
+        body: 'GitHub still has active PR work.',
+        html_url: 'https://github.com/paperclipai/example-repo/pull/90',
+        state: 'open',
+        merged: false
+      });
+    }
+
+    if (requestPathname === '/graphql') {
+      const { query, variables } = getGraphqlRequest(init);
+      const pullRequestNumber =
+        typeof variables.pullRequestNumber === 'number' ? variables.pullRequestNumber : undefined;
+
+      if (query.includes('query GitHubRepositoryOpenIssueLinkedPullRequests')) {
+        throw new Error('PR-targeted sync should not load linked pull requests for the whole repository.');
+      }
+
+      if (query.includes('query GitHubPullRequestReviewThreads') && pullRequestNumber === 90) {
+        return graphqlResponse({
+          repository: {
+            pullRequest: {
+              reviewThreads: {
+                pageInfo: {
+                  hasNextPage: false,
+                  endCursor: null
+                },
+                nodes: []
+              }
+            }
+          }
+        });
+      }
+
+      if (query.includes('query GitHubPullRequestCiContexts') && pullRequestNumber === 90) {
+        return graphqlResponse({
+          repository: {
+            pullRequest: {
+              mergeable: 'CONFLICTING',
+              mergeStateStatus: 'DIRTY',
+              statusCheckRollup: {
+                contexts: {
+                  pageInfo: {
+                    hasNextPage: false,
+                    endCursor: null
+                  },
+                  nodes: [
+                    {
+                      __typename: 'CheckRun',
+                      status: 'COMPLETED',
+                      conclusion: 'FAILURE'
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        });
+      }
+    }
+
+    throw new Error(`Unexpected fetch during triggered monitor PR link sync test: ${requestUrl}`);
+  };
+
+  try {
+    const sync = await harness.performAction('sync.runNow', {
+      companyId: 'company-1',
+      issueId: issue.id,
+      waitForCompletion: true
+    }) as {
+      syncState: { status: string; syncedIssuesCount?: number };
+    };
+
+    assert.equal(sync.syncState.status, 'success');
+    assert.equal(sync.syncState.syncedIssuesCount, 1);
+
+    const updatedIssue = await harness.ctx.issues.get(issue.id, 'company-1') as Record<string, any> | null;
+    assert.equal(updatedIssue?.status, 'todo');
+    assert.equal(updatedIssue?.assigneeAgentId, 'agent-1');
+    assert.equal(updatedIssue?.executionState ?? null, null);
+    assert.equal(statusTransitionComments.length, 1);
+    assert.match(statusTransitionComments[0]?.body ?? '', /from `done` to `todo`/);
+    assert.match(statusTransitionComments[0]?.body ?? '', /failing CI/);
+  } finally {
+    harness.ctx.issues.createComment = originalCreateComment;
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('sync.runNow abstains from changing issue state while a Paperclip issue monitor is scheduled', async () => {
   const harness = await createProjectPullRequestsHarness();
   const originalFetch = globalThis.fetch;
   const originalCreateComment = harness.ctx.issues.createComment;
@@ -10957,9 +11128,9 @@ test('sync.runNow abstains from changing issue state while a Paperclip issue mon
     lastDecisionId: null,
     lastDecisionOutcome: null,
     monitor: {
-      status: 'triggered',
-      nextCheckAt: null,
-      lastTriggeredAt: '2026-04-09T09:10:00.000Z',
+      status: 'scheduled',
+      nextCheckAt: '2026-04-09T09:15:00.000Z',
+      lastTriggeredAt: null,
       attemptCount: 1,
       notes: 'Check GitHub pull request status.',
       scheduledBy: 'agent',
@@ -19389,7 +19560,7 @@ test('worker routes non-review-ready GitHub merge state statuses back to active 
       githubIssueId: 5001,
       githubIssueNumber: 50,
       pullRequestNumber: 500,
-      title: 'Triggered monitor wait',
+      title: 'Scheduled monitor wait',
       initialStatus: 'in_review' as const,
       initialExecutionState: {
         status: 'idle',
@@ -19402,9 +19573,9 @@ test('worker routes non-review-ready GitHub merge state statuses back to active 
         lastDecisionId: null,
         lastDecisionOutcome: null,
         monitor: {
-          status: 'triggered',
-          nextCheckAt: null,
-          lastTriggeredAt: '2026-04-09T09:10:00.000Z',
+          status: 'scheduled',
+          nextCheckAt: '2026-04-09T09:15:00.000Z',
+          lastTriggeredAt: null,
           attemptCount: 1,
           notes: 'Check GitHub pull request status.',
           scheduledBy: 'board',
