@@ -11110,7 +11110,7 @@ test('sync.runNow reconciles a done issue with a triggered monitor when its link
   }
 });
 
-test('sync.runNow abstains from changing issue state while a Paperclip issue monitor is scheduled', async () => {
+test('sync.runNow reconciles a scheduled-monitor issue from linked pull request state', async () => {
   const harness = await createProjectPullRequestsHarness();
   const originalFetch = globalThis.fetch;
   const originalCreateComment = harness.ctx.issues.createComment;
@@ -11275,10 +11275,12 @@ test('sync.runNow abstains from changing issue state while a Paperclip issue mon
     assert.equal(sync.syncState.syncedIssuesCount, 1);
 
     const updatedIssue = await harness.ctx.issues.get(issue.id, 'company-1') as Record<string, any> | null;
-    assert.equal(updatedIssue?.status, 'in_review');
+    assert.equal(updatedIssue?.status, 'todo');
     assert.equal(updatedIssue?.assigneeAgentId, 'agent-1');
-    assert.deepEqual(updatedIssue?.executionState, monitorExecutionState);
-    assert.equal(statusTransitionComments.length, 0);
+    assert.equal(updatedIssue?.executionState ?? null, null);
+    assert.equal(statusTransitionComments.length, 1);
+    assert.match(statusTransitionComments[0]?.body ?? '', /from `in review` to `todo`/);
+    assert.match(statusTransitionComments[0]?.body ?? '', /failing CI/);
     assert.equal(wakeRequests.length, 0);
   } finally {
     harness.ctx.issues.createComment = originalCreateComment;
@@ -19555,42 +19557,6 @@ test('worker routes non-review-ready GitHub merge state statuses back to active 
       mergeStateStatus: 'UNKNOWN',
       expectedStatus: 'in_review' as const,
       expectedReason: /unknown mergeability/
-    },
-    {
-      githubIssueId: 5001,
-      githubIssueNumber: 50,
-      pullRequestNumber: 500,
-      title: 'Scheduled monitor wait',
-      initialStatus: 'in_review' as const,
-      initialExecutionState: {
-        status: 'idle',
-        currentStageId: null,
-        currentStageIndex: null,
-        currentStageType: null,
-        currentParticipant: null,
-        returnAssignee: null,
-        completedStageIds: [],
-        lastDecisionId: null,
-        lastDecisionOutcome: null,
-        monitor: {
-          status: 'scheduled',
-          nextCheckAt: '2026-04-09T09:15:00.000Z',
-          lastTriggeredAt: null,
-          attemptCount: 1,
-          notes: 'Check GitHub pull request status.',
-          scheduledBy: 'board',
-          kind: 'external_service',
-          serviceName: 'GitHub',
-          externalRef: null,
-          timeoutAt: null,
-          maxAttempts: null,
-          recoveryPolicy: null,
-          clearedAt: null,
-          clearReason: null
-        }
-      },
-      expectedStatus: 'in_review' as const,
-      expectMonitorAbstention: true
     }
   ];
 
@@ -19604,11 +19570,7 @@ test('worker routes non-review-ready GitHub merge state statuses back to active 
 
       const initialStatus = scenario.initialStatus ?? 'in_review';
       const patch: Record<string, unknown> = {
-        ...(created.status === initialStatus ? {} : { status: initialStatus }),
-        ...(scenario.initialExecutionState ? {
-          assigneeAgentId: 'agent-1',
-          executionState: scenario.initialExecutionState
-        } : {})
+        ...(created.status === initialStatus ? {} : { status: initialStatus })
       };
       return Object.keys(patch).length === 0
         ? created
@@ -19763,13 +19725,6 @@ test('worker routes non-review-ready GitHub merge state statuses back to active 
       assert.equal(issue?.status, scenario.expectedStatus);
       const transitionComment = statusTransitionComments.find((comment) => comment.issueId === issue?.id);
 
-      if ('expectMonitorAbstention' in scenario && scenario.expectMonitorAbstention) {
-        assert.equal(issue?.assigneeAgentId, 'agent-1');
-        assert.deepEqual(issue?.executionState, scenario.initialExecutionState);
-        assert.equal(transitionComment, undefined);
-        continue;
-      }
-
       if (scenario.expectedStatus === 'in_progress') {
         assert.equal(issue?.assigneeAgentId, 'agent-1');
         assert.match(
@@ -19782,9 +19737,6 @@ test('worker routes non-review-ready GitHub merge state statuses back to active 
         );
       } else {
         assert.equal(issue?.assigneeAgentId ?? null, null);
-        if (scenario.initialExecutionState) {
-          assert.equal(issue?.executionState ?? null, null);
-        }
         if (scenario.initialStatus === 'done') {
           assert.match(transitionComment?.body ?? '', /from `done` to `in review`/);
           assert.match(transitionComment?.body ?? '', scenario.expectedReason ?? /unknown mergeability/);

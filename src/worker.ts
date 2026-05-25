@@ -282,13 +282,6 @@ interface PaperclipIssueExecutionState {
   completedStageIds: string[];
   lastDecisionId?: string | null;
   lastDecisionOutcome?: string | null;
-  monitor?: PaperclipIssueMonitorState | null;
-}
-
-interface PaperclipIssueMonitorState {
-  status?: string;
-  clearedAt: string | null;
-  clearReason: string | null;
 }
 
 interface PaperclipIssueSyncContext {
@@ -7752,7 +7745,6 @@ function normalizePaperclipIssueExecutionState(value: unknown): PaperclipIssueEx
       .map((stageId) => normalizeOptionalString(stageId))
       .filter((stageId): stageId is string => Boolean(stageId))
     : [];
-  const monitor = normalizePaperclipIssueMonitorState(record.monitor);
 
   if (
     !status
@@ -7764,7 +7756,6 @@ function normalizePaperclipIssueExecutionState(value: unknown): PaperclipIssueEx
     && completedStageIds.length === 0
     && lastDecisionId === null
     && lastDecisionOutcome === null
-    && monitor === null
   ) {
     return null;
   }
@@ -7778,29 +7769,7 @@ function normalizePaperclipIssueExecutionState(value: unknown): PaperclipIssueEx
     returnAssignee,
     completedStageIds,
     ...(lastDecisionId !== null ? { lastDecisionId } : {}),
-    ...(lastDecisionOutcome !== null ? { lastDecisionOutcome } : {}),
-    ...(monitor !== null ? { monitor } : {})
-  };
-}
-
-function normalizePaperclipIssueMonitorState(value: unknown): PaperclipIssueMonitorState | null {
-  if (!value || typeof value !== 'object') {
-    return null;
-  }
-
-  const record = value as Record<string, unknown>;
-  const status = normalizeOptionalString(record.status);
-  const clearedAt = normalizeOptionalString(record.clearedAt) ?? null;
-  const clearReason = normalizeOptionalString(record.clearReason) ?? null;
-
-  if (!status && clearedAt === null && clearReason === null && Object.keys(record).length === 0) {
-    return null;
-  }
-
-  return {
-    ...(status ? { status } : {}),
-    clearedAt,
-    clearReason
+    ...(lastDecisionOutcome !== null ? { lastDecisionOutcome } : {})
   };
 }
 
@@ -7832,20 +7801,6 @@ function getPaperclipIssueSyncContext(issue: Issue): PaperclipIssueSyncContext {
     executionPolicy: normalizePaperclipIssueExecutionPolicy(record.executionPolicy),
     executionState: normalizePaperclipIssueExecutionState(record.executionState)
   };
-}
-
-function hasScheduledPaperclipIssueMonitor(syncContext: PaperclipIssueSyncContext): boolean {
-  const monitor = syncContext.executionState?.monitor;
-  if (!monitor) {
-    return false;
-  }
-
-  if (monitor.clearedAt || monitor.clearReason) {
-    return false;
-  }
-
-  const normalizedStatus = monitor.status?.trim().toLowerCase();
-  return normalizedStatus === 'scheduled';
 }
 
 function hasUnresolvedPaperclipIssueBlockerSummary(blockers: unknown): boolean {
@@ -8184,14 +8139,6 @@ function isClearableMaintainerWaitExecutionState(
 ): boolean {
   if (executionState === null) {
     return true;
-  }
-
-  if (hasScheduledPaperclipIssueMonitor({
-    assignee: null,
-    executionPolicy: null,
-    executionState
-  })) {
-    return false;
   }
 
   if (
@@ -13759,19 +13706,6 @@ async function cancelUnmappedTransferredGitHubIssue(
   }
 
   const paperclipIssueSyncContext = getPaperclipIssueSyncContext(paperclipIssue);
-  if (hasScheduledPaperclipIssueMonitor(paperclipIssueSyncContext)) {
-    ctx.logger.info('GitHub sync skipped transferred issue cancellation because an issue monitor is scheduled.', {
-      companyId,
-      issueId: params.importedIssue.paperclipIssueId,
-      transferredRepositoryUrl: params.transferredRepository.url,
-      currentStatus: paperclipIssue.status,
-      resolvedStatus: 'cancelled'
-    });
-    return {
-      updatedStatusesCount: 0
-    };
-  }
-
   await unlinkPaperclipIssueFromGitHub(ctx, {
     companyId,
     issueId: params.importedIssue.paperclipIssueId
@@ -14249,18 +14183,6 @@ async function synchronizePaperclipIssueStatuses(
       importedIssue.lastSeenGitHubState = snapshot.state;
       importedIssue.linkedPullRequestCommentCounts = currentLinkedPullRequestCommentCounts;
 
-      if (hasScheduledPaperclipIssueMonitor(paperclipIssueSyncContext)) {
-        ctx.logger.info('GitHub sync skipped Paperclip issue state changes because an issue monitor is scheduled.', {
-          companyId: mapping.companyId,
-          issueId: importedIssue.paperclipIssueId,
-          repositoryUrl: repository.url,
-          githubIssueNumber: githubIssue.number,
-          currentStatus: paperclipIssue.status,
-          resolvedStatus: nextStatus
-        });
-        continue;
-      }
-
       if (paperclipIssue.status === nextStatus) {
         if (shouldClearTransitionAssignee || shouldClearCompletedExecutionPolicy) {
           updateSyncFailureContext(syncFailureContext, {
@@ -14592,17 +14514,6 @@ async function synchronizePaperclipPullRequestIssueStatuses(
         && nextTransitionAssignee?.principal.kind === 'agent'
         && isActionablePaperclipIssueStatus(nextStatus)
         && (nextAssigneeChanged || paperclipIssue.status !== nextStatus);
-
-      if (hasScheduledPaperclipIssueMonitor(paperclipIssueSyncContext)) {
-        ctx.logger.info('GitHub sync skipped Paperclip pull request issue state changes because an issue monitor is scheduled.', {
-          companyId: mapping.companyId,
-          issueId: paperclipIssueId,
-          repositoryUrl: primaryRepository?.url,
-          currentStatus: paperclipIssue.status,
-          resolvedStatus: nextStatus
-        });
-        continue;
-      }
 
       if (paperclipIssue.status === nextStatus) {
         if (shouldClearTransitionAssignee || shouldClearCompletedExecutionPolicy) {
