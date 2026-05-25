@@ -11114,7 +11114,9 @@ test('sync.runNow reconciles a scheduled-monitor issue from linked pull request 
   const harness = await createProjectPullRequestsHarness();
   const originalFetch = globalThis.fetch;
   const originalCreateComment = harness.ctx.issues.createComment;
+  const originalRequestWakeup = harness.ctx.issues.requestWakeup.bind(harness.ctx.issues);
   const statusTransitionComments: Array<{ issueId: string; body: string }> = [];
+  const wakeRequests: Array<{ issueId: string; companyId: string }> = [];
   const monitorExecutionState = {
     status: 'idle',
     currentStageId: null,
@@ -11152,6 +11154,10 @@ test('sync.runNow reconciles a scheduled-monitor issue from linked pull request 
   harness.ctx.issues.createComment = async (issueId, body, companyId) => {
     statusTransitionComments.push({ issueId, body });
     return originalCreateComment(issueId, body, companyId);
+  };
+  harness.ctx.issues.requestWakeup = async (issueId, companyId, options) => {
+    wakeRequests.push({ issueId, companyId });
+    return originalRequestWakeup(issueId, companyId, options);
   };
 
   await harness.ctx.entities.upsert({
@@ -11275,8 +11281,10 @@ test('sync.runNow reconciles a scheduled-monitor issue from linked pull request 
     assert.equal(statusTransitionComments.length, 1);
     assert.match(statusTransitionComments[0]?.body ?? '', /from `in review` to `todo`/);
     assert.match(statusTransitionComments[0]?.body ?? '', /failing CI/);
+    assert.equal(wakeRequests.length, 0);
   } finally {
     harness.ctx.issues.createComment = originalCreateComment;
+    harness.ctx.issues.requestWakeup = originalRequestWakeup;
     globalThis.fetch = originalFetch;
   }
 });
