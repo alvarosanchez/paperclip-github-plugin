@@ -4546,6 +4546,45 @@ test('resolveGitHubIssueTaskDetailContext prefers task detail slot context over 
   );
 });
 
+test('shouldExpectGitHubIssueTaskDetailContext hides non-issue host surfaces', async () => {
+  const uiModule = await importFreshUiModule() as {
+    shouldExpectGitHubIssueTaskDetailContext?: unknown;
+  };
+
+  assert.equal(typeof uiModule.shouldExpectGitHubIssueTaskDetailContext, 'function');
+
+  const shouldExpectGitHubIssueTaskDetailContext = uiModule.shouldExpectGitHubIssueTaskDetailContext as (params: {
+    entityId?: string | null;
+    entityType?: string | null;
+    issueIdentifier?: string | null;
+  }) => boolean;
+
+  assert.equal(
+    shouldExpectGitHubIssueTaskDetailContext({
+      entityId: 'project-1',
+      entityType: 'project',
+      issueIdentifier: null
+    }),
+    false
+  );
+  assert.equal(
+    shouldExpectGitHubIssueTaskDetailContext({
+      entityId: 'issue-1',
+      entityType: 'issue',
+      issueIdentifier: null
+    }),
+    true
+  );
+  assert.equal(
+    shouldExpectGitHubIssueTaskDetailContext({
+      entityId: null,
+      entityType: null,
+      issueIdentifier: 'DUM-4'
+    }),
+    true
+  );
+});
+
 test('resolvePreviewPersonLabels collapses duplicate login-style names to a single visible label', async () => {
   const uiModule = await importFreshUiModule() as {
     resolvePreviewPersonLabels?: unknown;

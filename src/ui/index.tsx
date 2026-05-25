@@ -14946,6 +14946,7 @@ function GitHubSyncIssueDetailTabContent(props: {
   companyId?: string | null;
   issueId?: string | null;
   issueIdentifier?: string | null;
+  expectedIssueContext?: boolean;
   loadingIssueId?: boolean;
   issueResolutionErrorMessage?: string | null;
   themeVars: React.CSSProperties;
@@ -14962,7 +14963,7 @@ function GitHubSyncIssueDetailTabContent(props: {
     canLinkManually: Boolean(props.companyId && props.issueId),
     issueIdentifier: props.issueIdentifier,
     issueResolutionError: Boolean(props.issueResolutionErrorMessage),
-    expectedIssueContext: true
+    expectedIssueContext: Boolean(props.expectedIssueContext)
   });
   const issueSyncButton = useGitHubSyncButtonController({
     companyId: props.companyId,
@@ -15450,6 +15451,22 @@ export function resolveGitHubIssueTaskDetailContext(params: {
   };
 }
 
+export function shouldExpectGitHubIssueTaskDetailContext(params: {
+  entityId?: string | null;
+  entityType?: string | null;
+  issueIdentifier?: string | null;
+}): boolean {
+  if (params.issueIdentifier) {
+    return true;
+  }
+
+  if (params.entityType === 'issue') {
+    return true;
+  }
+
+  return !params.entityType && Boolean(params.entityId);
+}
+
 function GitHubIssueDetailTroubleshooting(props: {
   companyId?: string | null;
   issueId?: string | null;
@@ -15490,6 +15507,11 @@ export function GitHubSyncIssueTaskDetailView(props?: PluginDetailTabProps): Rea
     entityId: context.entityId,
     entityType: context.entityType
   });
+  const expectedIssueContext = shouldExpectGitHubIssueTaskDetailContext({
+    entityId: context.entityId,
+    entityType: context.entityType,
+    issueIdentifier: resolvedIssue.issueIdentifier
+  });
   const detailKey = `${context.companyId ?? 'company-none'}:${resolvedIssue.issueIdentifier ?? context.entityId ?? 'issue-none'}`;
 
   return (
@@ -15498,6 +15520,7 @@ export function GitHubSyncIssueTaskDetailView(props?: PluginDetailTabProps): Rea
       companyId={context.companyId}
       issueId={resolvedIssue.issueId}
       issueIdentifier={resolvedIssue.issueIdentifier}
+      expectedIssueContext={expectedIssueContext}
       loadingIssueId={resolvedIssue.loading}
       issueResolutionErrorMessage={resolvedIssue.errorMessage}
       themeVars={themeVars}
