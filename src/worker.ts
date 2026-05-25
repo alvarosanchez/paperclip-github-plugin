@@ -7834,7 +7834,7 @@ function getPaperclipIssueSyncContext(issue: Issue): PaperclipIssueSyncContext {
   };
 }
 
-function hasActivePaperclipIssueMonitor(syncContext: PaperclipIssueSyncContext): boolean {
+function hasScheduledPaperclipIssueMonitor(syncContext: PaperclipIssueSyncContext): boolean {
   const monitor = syncContext.executionState?.monitor;
   if (!monitor) {
     return false;
@@ -8186,7 +8186,7 @@ function isClearableMaintainerWaitExecutionState(
     return true;
   }
 
-  if (hasActivePaperclipIssueMonitor({
+  if (hasScheduledPaperclipIssueMonitor({
     assignee: null,
     executionPolicy: null,
     executionState
@@ -13759,8 +13759,8 @@ async function cancelUnmappedTransferredGitHubIssue(
   }
 
   const paperclipIssueSyncContext = getPaperclipIssueSyncContext(paperclipIssue);
-  if (hasActivePaperclipIssueMonitor(paperclipIssueSyncContext)) {
-    ctx.logger.info('GitHub sync skipped transferred issue cancellation because an issue monitor is active.', {
+  if (hasScheduledPaperclipIssueMonitor(paperclipIssueSyncContext)) {
+    ctx.logger.info('GitHub sync skipped transferred issue cancellation because an issue monitor is scheduled.', {
       companyId,
       issueId: params.importedIssue.paperclipIssueId,
       transferredRepositoryUrl: params.transferredRepository.url,
@@ -14249,8 +14249,8 @@ async function synchronizePaperclipIssueStatuses(
       importedIssue.lastSeenGitHubState = snapshot.state;
       importedIssue.linkedPullRequestCommentCounts = currentLinkedPullRequestCommentCounts;
 
-      if (hasActivePaperclipIssueMonitor(paperclipIssueSyncContext)) {
-        ctx.logger.info('GitHub sync skipped Paperclip issue state changes because an issue monitor is active.', {
+      if (hasScheduledPaperclipIssueMonitor(paperclipIssueSyncContext)) {
+        ctx.logger.info('GitHub sync skipped Paperclip issue state changes because an issue monitor is scheduled.', {
           companyId: mapping.companyId,
           issueId: importedIssue.paperclipIssueId,
           repositoryUrl: repository.url,
@@ -14593,8 +14593,8 @@ async function synchronizePaperclipPullRequestIssueStatuses(
         && isActionablePaperclipIssueStatus(nextStatus)
         && (nextAssigneeChanged || paperclipIssue.status !== nextStatus);
 
-      if (hasActivePaperclipIssueMonitor(paperclipIssueSyncContext)) {
-        ctx.logger.info('GitHub sync skipped Paperclip pull request issue state changes because an issue monitor is active.', {
+      if (hasScheduledPaperclipIssueMonitor(paperclipIssueSyncContext)) {
+        ctx.logger.info('GitHub sync skipped Paperclip pull request issue state changes because an issue monitor is scheduled.', {
           companyId: mapping.companyId,
           issueId: paperclipIssueId,
           repositoryUrl: primaryRepository?.url,
