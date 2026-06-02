@@ -12264,6 +12264,119 @@ test('worker scopes mapping saves and settings reads to the requested company', 
   });
 });
 
+test('worker uses the host-authorized company scope for settings save actions', async () => {
+  const harness = createTestHarness({ manifest });
+  await plugin.definition.setup(harness.ctx);
+
+  await harness.performAction('settings.saveRegistration', {
+    companyId: 'company-2',
+    mappings: [
+      {
+        id: 'mapping-b',
+        repositoryUrl: 'https://github.com/paperclipai/another-repo',
+        paperclipProjectName: 'Operations',
+        paperclipProjectId: 'project-2'
+      }
+    ],
+    syncState: {
+      status: 'idle'
+    }
+  });
+
+  const result = await harness.performAction('settings.saveRegistration', {
+    companyId: 'company-2',
+    mappings: [
+      {
+        id: 'mapping-a',
+        repositoryUrl: 'https://github.com/paperclipai/example-repo',
+        paperclipProjectName: 'Engineering',
+        paperclipProjectId: 'project-1',
+        companyId: 'company-2'
+      }
+    ],
+    advancedSettings: {
+      defaultAssigneeUserId: 'user-1',
+      defaultStatus: 'todo',
+      ignoredIssueAuthorUsernames: ['renovate', 'dependabot']
+    },
+    syncState: {
+      status: 'idle'
+    }
+  }, {
+    companyId: 'company-1'
+  }) as {
+    mappings: Array<{
+      id: string;
+      repositoryUrl: string;
+      paperclipProjectName: string;
+      paperclipProjectId?: string;
+      companyId?: string;
+    }>;
+    advancedSettings: {
+      defaultAssigneeUserId?: string;
+      defaultStatus: string;
+      ignoredIssueAuthorUsernames: string[];
+    };
+  };
+
+  assert.deepEqual(result.mappings, [
+    {
+      id: 'mapping-a',
+      repositoryUrl: 'https://github.com/paperclipai/example-repo',
+      paperclipProjectName: 'Engineering',
+      paperclipProjectId: 'project-1',
+      companyId: 'company-1'
+    }
+  ]);
+  assert.deepEqual(result.advancedSettings, {
+    defaultAssigneeUserId: 'user-1',
+    defaultStatus: 'todo',
+    ignoredIssueAuthorUsernames: ['renovate', 'dependabot']
+  });
+
+  const savedSettings = harness.getState({
+    scopeKind: 'instance',
+    stateKey: 'paperclip-github-plugin-settings'
+  }) as {
+    mappings: Array<{
+      id: string;
+      repositoryUrl: string;
+      paperclipProjectName: string;
+      paperclipProjectId?: string;
+      companyId?: string;
+    }>;
+    companyAdvancedSettingsByCompanyId: Record<string, {
+      defaultAssigneeUserId?: string;
+      defaultStatus: string;
+      ignoredIssueAuthorUsernames: string[];
+    }>;
+  };
+
+  assert.deepEqual(savedSettings.mappings, [
+    {
+      id: 'mapping-b',
+      repositoryUrl: 'https://github.com/paperclipai/another-repo',
+      paperclipProjectName: 'Operations',
+      paperclipProjectId: 'project-2',
+      companyId: 'company-2'
+    },
+    {
+      id: 'mapping-a',
+      repositoryUrl: 'https://github.com/paperclipai/example-repo',
+      paperclipProjectName: 'Engineering',
+      paperclipProjectId: 'project-1',
+      companyId: 'company-1'
+    }
+  ]);
+  assert.deepEqual(savedSettings.companyAdvancedSettingsByCompanyId, {
+    'company-1': {
+      defaultAssigneeUserId: 'user-1',
+      defaultStatus: 'todo',
+      ignoredIssueAuthorUsernames: ['renovate', 'dependabot']
+    }
+  });
+});
+
 test('worker scopes github token propagation agent selections to the requested company', async () => {
   const harness = createTestHarness({ manifest });
   await plugin.definition.setup(harness.ctx);

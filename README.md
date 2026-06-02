@@ -106,7 +106,7 @@ They can also link a Paperclip issue to a GitHub issue or pull request in any ac
 ## Requirements
 
 - Node.js 20+
-- a Paperclip host with plugin installation enabled. GitHub Sync is built and tested against Paperclip `2026.517.0`; the manifest relies on explicit capabilities instead of a strict host-version gate because current latest/development hosts can report `0.0.0` during plugin upgrade.
+- a Paperclip host with plugin installation enabled. GitHub Sync is built and tested against Paperclip `2026.529.0`; the manifest relies on explicit capabilities instead of a strict host-version gate because current latest/development hosts can report `0.0.0` during plugin upgrade.
 - a GitHub token with API access to the repositories you want to sync
 
 ## Install from npm
@@ -365,8 +365,8 @@ Useful scripts:
 
 - `pnpm dev` watches the manifest, worker, and UI bundles and rebuilds them into `dist/`
 - `pnpm dev:ui` starts a local Paperclip plugin UI dev server from `dist/ui` on port `4177`
-- `pnpm test:e2e` builds the plugin, boots an isolated Paperclip `2026.517.0` instance, installs the plugin, and verifies the hosted settings page renders
-- `pnpm verify:manual` builds the plugin, boots a local-trusted Paperclip `2026.517.0` instance for manual inspection, seeds a `Dummy Company` with a mapped review project and a `CEO` agent on the Codex local adapter using model `gpt-5.4`, installs the plugin, and opens the company dashboard without seeding KPI history.
+- `pnpm test:e2e` builds the plugin, boots an isolated Paperclip `2026.529.0` instance, installs the plugin, and verifies the hosted settings page renders
+- `pnpm verify:manual` builds the plugin, boots a local-trusted Paperclip `2026.529.0` instance for manual inspection, seeds a `Dummy Company` with a mapped review project and a `CEO` agent on the Codex local adapter using model `gpt-5.4`, installs the plugin, and opens the company dashboard without seeding KPI history.
 
 For fast hosted UI iteration, run `pnpm dev` in one terminal and `pnpm dev:ui` in another.
 

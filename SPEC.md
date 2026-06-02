@@ -148,8 +148,8 @@ The plugin MUST persist repository mappings, company-scoped advanced issue defau
 ## Host integration requirements
 
 - The plugin MUST register successfully in Paperclip.
-- The plugin manifest MUST NOT declare a strict `minimumHostVersion` or `minimumPaperclipVersion` gate while current latest/development Paperclip hosts may report `0.0.0` during plugin upgrade. Required host surfaces MUST remain represented by manifest capabilities and guarded by worker fallbacks where possible, and the docs MUST still state the intended Paperclip `2026.517.0` support baseline.
-- Disposable e2e and manual host verification MUST pin the Paperclip CLI to `2026.517.0` by default, while retaining an explicit environment override for forward and backward compatibility checks.
+- The plugin manifest MUST NOT declare a strict `minimumHostVersion` or `minimumPaperclipVersion` gate while current latest/development Paperclip hosts may report `0.0.0` during plugin upgrade. Required host surfaces MUST remain represented by manifest capabilities and guarded by worker fallbacks where possible, and the docs MUST still state the intended Paperclip `2026.529.0` support baseline.
+- Disposable e2e and manual host verification MUST pin the Paperclip CLI to `2026.529.0` by default, while retaining an explicit environment override for forward and backward compatibility checks.
 - The plugin MUST expose a dashboard widget contribution for sync readiness and setup.
 - The plugin MUST expose a separate dashboard KPI widget contribution.
 - The plugin MUST expose a settings page contribution.
