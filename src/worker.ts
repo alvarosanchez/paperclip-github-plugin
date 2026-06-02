@@ -13,6 +13,7 @@ import {
   type IssueComment,
   type PluginApiRequestInput,
   type PluginApiResponse,
+  type PluginPerformActionContext,
   type ToolResult,
   type ToolRunContext
 } from '@paperclipai/plugin-sdk';
@@ -602,6 +603,17 @@ interface SyncCancellationRequest {
 
 function normalizeCompanyId(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim() ? value.trim() : undefined;
+}
+
+function normalizeActionRecord(input: unknown, context?: PluginPerformActionContext | null): Record<string, unknown> {
+  const record = input && typeof input === 'object' ? { ...(input as Record<string, unknown>) } : {};
+  const scopedCompanyId = normalizeCompanyId(context?.companyId);
+
+  if (scopedCompanyId) {
+    record.companyId = scopedCompanyId;
+  }
+
+  return record;
 }
 
 let activeSyncPromise: Promise<GitHubSyncSettings> | null = null;
@@ -22103,8 +22115,8 @@ const plugin = definePlugin({
       return buildCommentAnnotationData(ctx, record);
     });
 
-    ctx.actions.register('issue.linkGitHubItem', async (input) => {
-      const record = input && typeof input === 'object' ? input as Record<string, unknown> : {};
+    ctx.actions.register('issue.linkGitHubItem', async (input, actionContext) => {
+      const record = normalizeActionRecord(input, actionContext);
       const kind = normalizeIssueGitHubLinkKind(record.kind);
       if (!kind) {
         throw new Error('kind must be "issue" or "pull_request".');
@@ -22136,8 +22148,8 @@ const plugin = definePlugin({
           });
     });
 
-    ctx.actions.register('issue.unlinkGitHubItem', async (input) => {
-      const record = input && typeof input === 'object' ? input as Record<string, unknown> : {};
+    ctx.actions.register('issue.unlinkGitHubItem', async (input, actionContext) => {
+      const record = normalizeActionRecord(input, actionContext);
       const companyId = normalizeCompanyId(record.companyId);
       const issueId = normalizeOptionalString(record.issueId);
       if (!companyId || !issueId) {
@@ -22150,10 +22162,10 @@ const plugin = definePlugin({
       });
     });
 
-    ctx.actions.register('settings.saveRegistration', async (input) => {
+    ctx.actions.register('settings.saveRegistration', async (input, actionContext) => {
       const previous = normalizeSettings(await ctx.state.get(SETTINGS_SCOPE));
       const config = await getResolvedConfig(ctx);
-      const record = input && typeof input === 'object' ? input as Record<string, unknown> : {};
+      const record = normalizeActionRecord(input, actionContext);
       const requestedCompanyId = normalizeCompanyId(record.companyId);
       const requestedGitHubTokenLogin =
         'githubTokenLogin' in record ? normalizeOptionalString(record.githubTokenLogin) : undefined;
@@ -22295,10 +22307,10 @@ const plugin = definePlugin({
       };
     });
 
-    ctx.actions.register('settings.updateBoardAccess', async (input) => {
+    ctx.actions.register('settings.updateBoardAccess', async (input, actionContext) => {
       const previous = normalizeSettings(await ctx.state.get(SETTINGS_SCOPE));
       const config = await getResolvedConfig(ctx);
-      const record = input && typeof input === 'object' ? input as Record<string, unknown> : {};
+      const record = normalizeActionRecord(input, actionContext);
       const companyId = normalizeCompanyId(record.companyId);
       if (!companyId) {
         throw new Error('A company id is required to update Paperclip board access.');
@@ -22383,8 +22395,9 @@ const plugin = definePlugin({
       };
     });
 
-    ctx.actions.register('settings.validateToken', async (input) => {
-      const token = input && typeof input === 'object' && 'token' in input ? (input as { token?: unknown }).token : undefined;
+    ctx.actions.register('settings.validateToken', async (input, actionContext) => {
+      const record = normalizeActionRecord(input, actionContext);
+      const token = 'token' in record ? record.token : undefined;
       const trimmedToken = typeof token === 'string' ? token.trim() : '';
 
       if (!trimmedToken) {
@@ -22394,8 +22407,8 @@ const plugin = definePlugin({
       return validateGithubToken(ctx, trimmedToken);
     });
 
-    ctx.actions.register('settings.ensureGitHubTokenAvailable', async (input) => {
-      const record = input && typeof input === 'object' ? input as Record<string, unknown> : {};
+    ctx.actions.register('settings.ensureGitHubTokenAvailable', async (input, actionContext) => {
+      const record = normalizeActionRecord(input, actionContext);
       const companyId = normalizeCompanyId(record.companyId);
       const githubTokenRef = normalizeSecretRef(record.githubTokenRef);
       const token = normalizeGitHubToken(record.token);
@@ -22439,71 +22452,72 @@ const plugin = definePlugin({
       };
     });
 
-    ctx.actions.register('project.pullRequests.createIssue', async (input) => {
-      const record = input && typeof input === 'object' ? input as Record<string, unknown> : {};
+    ctx.actions.register('project.pullRequests.createIssue', async (input, actionContext) => {
+      const record = normalizeActionRecord(input, actionContext);
       return createProjectPullRequestPaperclipIssue(ctx, record);
     });
 
-    ctx.actions.register('project.pullRequests.refresh', async (input) => {
-      const record = input && typeof input === 'object' ? input as Record<string, unknown> : {};
+    ctx.actions.register('project.pullRequests.refresh', async (input, actionContext) => {
+      const record = normalizeActionRecord(input, actionContext);
       return refreshProjectPullRequests(ctx, record);
     });
 
-    ctx.actions.register('project.pullRequests.updateBranch', async (input) => {
-      const record = input && typeof input === 'object' ? input as Record<string, unknown> : {};
+    ctx.actions.register('project.pullRequests.updateBranch', async (input, actionContext) => {
+      const record = normalizeActionRecord(input, actionContext);
       return updateProjectPullRequestBranch(ctx, record);
     });
 
-    ctx.actions.register('project.pullRequests.requestCopilotAction', async (input) => {
-      const record = input && typeof input === 'object' ? input as Record<string, unknown> : {};
+    ctx.actions.register('project.pullRequests.requestCopilotAction', async (input, actionContext) => {
+      const record = normalizeActionRecord(input, actionContext);
       return requestProjectPullRequestCopilotAction(ctx, record);
     });
 
-    ctx.actions.register('project.pullRequests.merge', async (input) => {
-      const record = input && typeof input === 'object' ? input as Record<string, unknown> : {};
+    ctx.actions.register('project.pullRequests.merge', async (input, actionContext) => {
+      const record = normalizeActionRecord(input, actionContext);
       return mergeProjectPullRequest(ctx, record);
     });
 
-    ctx.actions.register('project.pullRequests.close', async (input) => {
-      const record = input && typeof input === 'object' ? input as Record<string, unknown> : {};
+    ctx.actions.register('project.pullRequests.close', async (input, actionContext) => {
+      const record = normalizeActionRecord(input, actionContext);
       return closeProjectPullRequest(ctx, record);
     });
 
-    ctx.actions.register('project.pullRequests.addComment', async (input) => {
-      const record = input && typeof input === 'object' ? input as Record<string, unknown> : {};
+    ctx.actions.register('project.pullRequests.addComment', async (input, actionContext) => {
+      const record = normalizeActionRecord(input, actionContext);
       return addProjectPullRequestComment(ctx, record);
     });
 
-    ctx.actions.register('project.pullRequests.review', async (input) => {
-      const record = input && typeof input === 'object' ? input as Record<string, unknown> : {};
+    ctx.actions.register('project.pullRequests.review', async (input, actionContext) => {
+      const record = normalizeActionRecord(input, actionContext);
       return reviewProjectPullRequest(ctx, record);
     });
 
-    ctx.actions.register('project.pullRequests.rerunCi', async (input) => {
-      const record = input && typeof input === 'object' ? input as Record<string, unknown> : {};
+    ctx.actions.register('project.pullRequests.rerunCi', async (input, actionContext) => {
+      const record = normalizeActionRecord(input, actionContext);
       return rerunProjectPullRequestCi(ctx, record);
     });
 
-    ctx.actions.register('sync.runNow', async (input) => {
+    ctx.actions.register('sync.runNow', async (input, actionContext) => {
+      const record = normalizeActionRecord(input, actionContext);
       const waitForCompletion =
-        input && typeof input === 'object' && 'waitForCompletion' in input
-          ? Boolean((input as { waitForCompletion?: unknown }).waitForCompletion)
+        'waitForCompletion' in record
+          ? Boolean(record.waitForCompletion)
           : false;
       const paperclipApiBaseUrl =
-        input && typeof input === 'object' && 'paperclipApiBaseUrl' in input
-          ? (input as { paperclipApiBaseUrl?: unknown }).paperclipApiBaseUrl
+        'paperclipApiBaseUrl' in record
+          ? record.paperclipApiBaseUrl
           : undefined;
       const companyId =
-        input && typeof input === 'object' && 'companyId' in input && typeof (input as { companyId?: unknown }).companyId === 'string'
-          ? (input as { companyId?: string }).companyId
+        'companyId' in record && typeof record.companyId === 'string'
+          ? record.companyId
           : undefined;
       const projectId =
-        input && typeof input === 'object' && 'projectId' in input && typeof (input as { projectId?: unknown }).projectId === 'string'
-          ? (input as { projectId?: string }).projectId
+        'projectId' in record && typeof record.projectId === 'string'
+          ? record.projectId
           : undefined;
       const issueId =
-        input && typeof input === 'object' && 'issueId' in input && typeof (input as { issueId?: unknown }).issueId === 'string'
-          ? (input as { issueId?: string }).issueId
+        'issueId' in record && typeof record.issueId === 'string'
+          ? record.issueId
           : undefined;
       const currentSettings = normalizeSettings(await ctx.state.get(SETTINGS_SCOPE));
       const target = await resolveManualSyncTarget(ctx, currentSettings, {
