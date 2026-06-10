@@ -14827,7 +14827,7 @@ function useGitHubSyncButtonController(props: {
       setRunningSync(true);
       const trustedPaperclipApiBaseUrl = await syncTrustedPaperclipApiBaseUrl(pluginIdFromLocation);
       const result = await runSyncNow({
-        waitForCompletion: false,
+        waitForCompletion: true,
         ...(props.companyId ? { companyId: props.companyId } : {}),
         ...(props.entityType === 'project' && props.entityId ? { projectId: props.entityId } : {}),
         ...(props.entityType === 'issue' && props.resolvedIssueId ? { issueId: props.resolvedIssueId } : {}),

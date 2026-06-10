@@ -27205,7 +27205,7 @@ test('scheduled job skips repository setup gaps instead of recording a missing-m
   assert.equal(state.syncState.lastRunTrigger, undefined);
 });
 
-test('scheduled job starts long syncs in the background so the scheduler does not wait for completion', async () => {
+test('scheduled job waits for long sync completion so host invocation scope remains valid', async () => {
   const harness = createTestHarness({
     manifest,
     config: {
@@ -27292,36 +27292,6 @@ test('scheduled job starts long syncs in the background so the scheduler does no
     await harness.runJob('sync.github-issues', {
       trigger: 'schedule',
       scheduledAt: '2026-04-09T09:45:00.000Z'
-    });
-
-    const runningState = harness.getState({
-      scopeKind: 'instance',
-      stateKey: 'paperclip-github-plugin-settings'
-    }) as {
-      syncState: {
-        status: string;
-        lastRunTrigger?: string;
-        progress?: {
-          phase?: string;
-          totalRepositoryCount?: number;
-        };
-      };
-    };
-
-    assert.equal(runningState.syncState.status, 'running');
-    assert.equal(runningState.syncState.lastRunTrigger, 'schedule');
-    assert.equal(runningState.syncState.progress?.phase, 'preparing');
-    assert.equal(runningState.syncState.progress?.totalRepositoryCount, 1);
-
-    await waitFor(() => {
-      const current = harness.getState({
-        scopeKind: 'instance',
-        stateKey: 'paperclip-github-plugin-settings'
-      }) as {
-        syncState?: { status?: string };
-      } | undefined;
-
-      return current?.syncState?.status === 'success';
     });
 
     const completedState = harness.getState({
