@@ -22498,7 +22498,7 @@ const plugin = definePlugin({
           return;
         }
 
-        await startSync(ctx, trigger);
+        await startSync(ctx, trigger, { awaitCompletion: true });
         return;
       }
 
@@ -22508,7 +22508,10 @@ const plugin = definePlugin({
           continue;
         }
 
-        await startSync(ctx, trigger, target ? { target } : {});
+        await startSync(ctx, trigger, {
+          awaitCompletion: true,
+          ...(target ? { target } : {})
+        });
       }
     });
   },
