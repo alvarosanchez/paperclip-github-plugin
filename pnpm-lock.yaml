@@ -15,7 +15,7 @@ importers:
         specifier: ^2026.529.0
         version: 2026.529.0(react@19.2.7)
       react:
-        specifier: ^19.2.6
+        specifier: ^19.2.7
         version: 19.2.7
       react-markdown:
         specifier: ^10.1.0
