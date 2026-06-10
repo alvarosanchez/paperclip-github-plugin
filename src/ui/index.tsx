@@ -12645,6 +12645,7 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
 
       const trustedPaperclipApiBaseUrl = await syncTrustedPaperclipApiBaseUrl(pluginIdFromLocation);
       const result = await runSyncNow({
+        waitForCompletion: true,
         ...(hostContext.companyId ? { companyId: hostContext.companyId } : {}),
         ...(trustedPaperclipApiBaseUrl ? { paperclipApiBaseUrl: trustedPaperclipApiBaseUrl } : {})
       }) as GitHubSyncSettings;
@@ -13824,6 +13825,7 @@ export function GitHubSyncDashboardWidget(): React.JSX.Element {
 
       const trustedPaperclipApiBaseUrl = await syncTrustedPaperclipApiBaseUrl(pluginIdFromLocation);
       const result = await runSyncNow({
+        waitForCompletion: true,
         ...(hostContext.companyId ? { companyId: hostContext.companyId } : {}),
         ...(trustedPaperclipApiBaseUrl ? { paperclipApiBaseUrl: trustedPaperclipApiBaseUrl } : {})
       }) as GitHubSyncSettings;
