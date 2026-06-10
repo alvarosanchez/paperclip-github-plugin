@@ -22413,7 +22413,7 @@ const plugin = definePlugin({
       const waitForCompletion =
         'waitForCompletion' in record
           ? Boolean(record.waitForCompletion)
-          : false;
+          : true;
       const paperclipApiBaseUrl =
         'paperclipApiBaseUrl' in record
           ? record.paperclipApiBaseUrl

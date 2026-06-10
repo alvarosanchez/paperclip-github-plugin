@@ -25715,7 +25715,9 @@ test('worker keeps progress in preparing while warming GitHub review and CI data
   };
 
   try {
-    const result = await harness.performAction('sync.runNow', {}) as {
+    const result = await harness.performAction('sync.runNow', {
+      waitForCompletion: false
+    }) as {
       syncState: {
         status: string;
       };
@@ -25847,7 +25849,9 @@ test('worker returns a running state for long manual syncs and persists the fina
   };
 
   try {
-    const result = await harness.performAction('sync.runNow', {}) as {
+    const result = await harness.performAction('sync.runNow', {
+      waitForCompletion: false
+    }) as {
       syncState: { status: string; message?: string; lastRunTrigger?: string };
     };
 
@@ -25984,7 +25988,8 @@ test('global toolbar reads keep a live company-scoped sync in running state', as
 
   try {
     const scopedResult = await harness.performAction('sync.runNow', {
-      companyId: 'company-1'
+      companyId: 'company-1',
+      waitForCompletion: false
     }) as {
       syncState: { status: string; message?: string };
     };
@@ -26105,7 +26110,8 @@ test('repeat sync.runNow keeps a live company-scoped sync in running state', asy
 
   try {
     const scopedRunPromise = harness.performAction('sync.runNow', {
-      companyId: 'company-1'
+      companyId: 'company-1',
+      waitForCompletion: false
     }) as Promise<{
       syncState: { status: string; message?: string };
     }>;
@@ -26121,7 +26127,9 @@ test('repeat sync.runNow keeps a live company-scoped sync in running state', asy
       return current?.syncState?.status === 'running';
     });
 
-    const repeatedResult = await harness.performAction('sync.runNow', {}) as {
+    const repeatedResult = await harness.performAction('sync.runNow', {
+      waitForCompletion: false
+    }) as {
       syncState: { status: string; message?: string };
     };
     assert.equal(repeatedResult.syncState.status, 'running');
@@ -26359,7 +26367,8 @@ test('worker can cancel a long-running manual sync after it has started', async 
 
   try {
     const runningResult = await harness.performAction('sync.runNow', {
-      companyId: 'company-1'
+      companyId: 'company-1',
+      waitForCompletion: false
     }) as {
       syncState: { status: string; message?: string };
     };
@@ -26945,7 +26954,9 @@ test('worker persists live sync progress and imported counts before a long-runni
   };
 
   try {
-    const result = await harness.performAction('sync.runNow', {}) as {
+    const result = await harness.performAction('sync.runNow', {
+      waitForCompletion: false
+    }) as {
       syncState: {
         status: string;
         progress?: {
@@ -27203,6 +27214,112 @@ test('scheduled job skips repository setup gaps instead of recording a missing-m
   assert.equal(state.syncState.checkedAt, '2026-04-09T09:00:00.000Z');
   assert.equal(state.syncState.message, undefined);
   assert.equal(state.syncState.lastRunTrigger, undefined);
+});
+
+test('sync.runNow waits for completion by default so host invocation scope remains valid', async () => {
+  const harness = createTestHarness({
+    manifest,
+    config: {
+      githubTokenRef: 'github-secret-ref'
+    }
+  });
+  await plugin.definition.setup(harness.ctx);
+
+  await harness.performAction('settings.saveRegistration', {
+    mappings: [
+      {
+        id: 'mapping-a',
+        repositoryUrl: 'paperclipai/example-repo',
+        paperclipProjectName: 'Engineering',
+        paperclipProjectId: 'project-1',
+        companyId: 'company-1'
+      }
+    ],
+    syncState: {
+      status: 'idle'
+    }
+  });
+
+  const originalFetch = globalThis.fetch;
+
+  globalThis.fetch = async (input, init) => {
+    const rawUrl = getRequestUrl(input);
+    const url = new URL(rawUrl);
+
+    if (url.pathname === '/repos/paperclipai/example-repo/issues' && ['all', 'open'].includes(url.searchParams.get('state') ?? '')) {
+      await delay(700);
+
+      return jsonResponse([
+        {
+          id: 1001,
+          number: 10,
+          title: 'Manual sync issue',
+          body: 'Body from GitHub',
+          html_url: 'https://github.com/paperclipai/example-repo/issues/10',
+          state: 'open'
+        }
+      ]);
+    }
+
+    if (url.pathname === '/graphql') {
+      const { query, variables } = getGraphqlRequest(init);
+      const issueNumber = typeof variables.issueNumber === 'number' ? variables.issueNumber : undefined;
+
+      if (query.includes('query GitHubIssueParentRelationships')) {
+        return graphqlIssueParentRelationshipsResponse([
+          {
+            issueNumber: 10
+          }
+        ]);
+      }
+
+      if (query.includes('query GitHubIssueStatusSnapshot') && issueNumber === 10) {
+        return graphqlResponse({
+          repository: {
+            issue: {
+              number: 10,
+              state: 'OPEN',
+              stateReason: null,
+              comments: {
+                totalCount: 0
+              },
+              closedByPullRequestsReferences: {
+                pageInfo: {
+                  hasNextPage: false,
+                  endCursor: null
+                },
+                nodes: []
+              }
+            }
+          }
+        });
+      }
+    }
+
+    throw new Error(`Unexpected GitHub request: ${url.toString()}`);
+  };
+
+  try {
+    const result = await harness.performAction('sync.runNow', {
+      companyId: 'company-1'
+    }) as {
+      syncState: {
+        status: string;
+        createdIssuesCount?: number;
+        skippedIssuesCount?: number;
+        syncedIssuesCount?: number;
+        lastRunTrigger?: string;
+      };
+    };
+
+    assert.equal(result.syncState.status, 'success');
+    assert.equal(result.syncState.createdIssuesCount, 1);
+    assert.equal(result.syncState.skippedIssuesCount, 0);
+    assert.equal(result.syncState.syncedIssuesCount, 1);
+    assert.equal(result.syncState.lastRunTrigger, 'manual');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test('scheduled job waits for long sync completion so host invocation scope remains valid', async () => {
