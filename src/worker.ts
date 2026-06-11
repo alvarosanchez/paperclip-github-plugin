@@ -23,8 +23,6 @@ import { parseRepositoryReference, type ParsedRepositoryReference } from './gith
 import {
   COMPANY_METRIC_API_ROUTE_KEY,
   GITHUB_SYNC_PLUGIN_ID,
-  ISSUE_LINK_API_ROUTE_KEY,
-  PULL_REQUEST_ASSET_API_ROUTE_KEY,
 } from './kpi-contract.ts';
 import { normalizePaperclipHealthResponse, requiresPaperclipBoardAccess } from './paperclip-health.ts';
 
@@ -15441,164 +15439,6 @@ async function handleCompanyMetricApiRoute(
   };
 }
 
-function parsePluginApiRouteJsonObjectBody(input: PluginApiRequestInput, routeLabel: string): Record<string, unknown> {
-  if (!input.body || typeof input.body !== 'object' || Array.isArray(input.body)) {
-    throw new Error(`${routeLabel} body must be a JSON object.`);
-  }
-
-  return input.body as Record<string, unknown>;
-}
-
-function parseIssueLinkApiRouteBody(input: PluginApiRequestInput): Record<string, unknown> {
-  return parsePluginApiRouteJsonObjectBody(input, 'Issue link route');
-}
-
-function normalizeIssueLinkApiRouteKind(payload: Record<string, unknown>): 'issue' | 'pull_request' | null {
-  const explicitKind = normalizeIssueGitHubLinkKind(payload.kind);
-  if (explicitKind) {
-    return explicitKind;
-  }
-
-  const reference = normalizeOptionalString(payload.reference);
-  if (
-    normalizeGitHubPullRequestHtmlUrl(normalizeOptionalString(payload.pullRequestUrl))
-    || normalizeToolPositiveInteger(payload.pullRequestNumber)
-    || (reference && parseGitHubPullRequestHtmlUrl(reference))
-  ) {
-    return 'pull_request';
-  }
-
-  if (
-    normalizeToolPositiveInteger(payload.issueNumber)
-    || (reference && parseGitHubIssueHtmlUrl(reference))
-  ) {
-    return 'issue';
-  }
-
-  return null;
-}
-
-async function handlePullRequestAssetApiRoute(
-  ctx: PluginSetupContext,
-  input: PluginApiRequestInput
-): Promise<PluginApiResponse> {
-  if (input.actor.actorType !== 'agent') {
-    throw new Error('Pull request assets must be uploaded by an authenticated Paperclip agent.');
-  }
-
-  const payload = parsePluginApiRouteJsonObjectBody(input, 'Pull request asset route');
-  const rawPullRequestUrl = normalizeOptionalString(payload.pullRequestUrl);
-  const pullRequestUrl = normalizeGitHubPullRequestHtmlUrl(rawPullRequestUrl);
-  if (rawPullRequestUrl && !pullRequestUrl) {
-    throw new Error('pullRequestUrl must be a valid GitHub pull request URL.');
-  }
-  const parsedPullRequestUrl = pullRequestUrl ? parseGitHubPullRequestHtmlUrl(pullRequestUrl) : undefined;
-  const repositoryInput = normalizeOptionalString(payload.repository) ?? parsedPullRequestUrl?.repositoryUrl;
-  if (!repositoryInput) {
-    throw new Error('repository is required unless pullRequestUrl is provided.');
-  }
-
-  const repository = requireRepositoryReference(repositoryInput);
-  const pullRequestNumber = normalizeToolPositiveInteger(payload.pullRequestNumber) ?? parsedPullRequestUrl?.pullRequestNumber;
-  if (!pullRequestNumber) {
-    throw new Error('pullRequestNumber is required unless pullRequestUrl is provided.');
-  }
-  if (parsedPullRequestUrl && !areRepositoriesEqual(repository, requireRepositoryReference(parsedPullRequestUrl.repositoryUrl))) {
-    throw new Error('repository must match pullRequestUrl.');
-  }
-
-  const octokit = await createGitHubToolOctokit(ctx, input.companyId, {
-    toolName: PULL_REQUEST_ASSET_API_ROUTE_KEY,
-    repositoryUrl: repository.url
-  });
-  const asset = await uploadPullRequestAssetArtifact({
-    octokit,
-    repository,
-    pullRequestNumber,
-    payload
-  });
-
-  return {
-    status: 201,
-    body: {
-      status: 'uploaded',
-      asset
-    }
-  };
-}
-
-async function handleIssueLinkApiRoute(
-  ctx: PluginSetupContext,
-  input: PluginApiRequestInput
-): Promise<PluginApiResponse> {
-  if (input.actor.actorType !== 'agent') {
-    throw new Error('GitHub issue links must be recorded by an authenticated Paperclip agent.');
-  }
-
-  const companyId = normalizeCompanyId(input.companyId);
-  if (!companyId) {
-    throw new Error('GitHub issue links require the host to provide the authenticated agent company.');
-  }
-
-  const payload = parseIssueLinkApiRouteBody(input);
-  const requestedCompanyId = normalizeCompanyId(payload.companyId);
-  if (requestedCompanyId && requestedCompanyId !== companyId) {
-    throw new Error('companyId must match the authenticated Paperclip agent company.');
-  }
-
-  const kind = normalizeIssueLinkApiRouteKind(payload);
-  if (!kind) {
-    throw new Error('kind must be "issue" or "pull_request", or the payload must include a full GitHub URL.');
-  }
-
-  const paperclipIssueId =
-    normalizeOptionalString(payload.paperclipIssueId)
-    ?? normalizeOptionalString(payload.issueId);
-  if (!paperclipIssueId) {
-    throw new Error('paperclipIssueId is required.');
-  }
-
-  const linkResult = kind === 'issue'
-    ? await linkPaperclipIssueToGitHubIssue(ctx, {
-        companyId,
-        issueId: paperclipIssueId,
-        reference: payload.reference,
-        repositoryUrl: normalizeOptionalString(payload.repository),
-        issueNumber: payload.issueNumber,
-        allowUnmapped: true
-      })
-    : await linkPaperclipIssueToGitHubPullRequest(ctx, {
-        companyId,
-        issueId: paperclipIssueId,
-        reference: payload.reference,
-        repositoryUrl: normalizeOptionalString(payload.repository),
-        pullRequestNumber: payload.pullRequestNumber,
-        pullRequestUrl: payload.pullRequestUrl,
-        allowUnmapped: true
-      });
-
-  ctx.logger.info('GitHub Sync recorded a GitHub issue link API route event.', {
-    routeKey: input.routeKey,
-    companyId,
-    kind,
-    paperclipIssueId,
-    repositoryUrl: normalizeOptionalString(linkResult.repositoryUrl),
-    githubIssueNumber: normalizeToolPositiveInteger(linkResult.githubIssueNumber),
-    githubPullRequestNumber: normalizeToolPositiveInteger(linkResult.githubPullRequestNumber),
-    agentId: input.actor.agentId ?? null,
-    runId: input.actor.runId ?? null
-  });
-
-  return {
-    status: 201,
-    body: {
-      status: 'linked',
-      companyId,
-      ...linkResult
-    }
-  };
-}
-
 async function createGitHubToolOctokit(
   ctx: PluginSetupContext,
   companyId?: string,
@@ -22523,15 +22363,6 @@ const plugin = definePlugin({
     if (input.routeKey === COMPANY_METRIC_API_ROUTE_KEY) {
       return handleCompanyMetricApiRoute(pluginRuntimeContext, input);
     }
-
-    if (input.routeKey === ISSUE_LINK_API_ROUTE_KEY) {
-      return handleIssueLinkApiRoute(pluginRuntimeContext, input);
-    }
-
-    if (input.routeKey === PULL_REQUEST_ASSET_API_ROUTE_KEY) {
-      return handlePullRequestAssetApiRoute(pluginRuntimeContext, input);
-    }
-
     return {
       status: 404,
       body: {

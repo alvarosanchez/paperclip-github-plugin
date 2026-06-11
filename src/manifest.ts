@@ -5,11 +5,7 @@ import { GITHUB_AGENT_TOOLS } from './github-agent-tools.ts';
 import {
   COMPANY_METRIC_API_ROUTE_KEY,
   COMPANY_METRIC_API_ROUTE_PATH,
-  GITHUB_SYNC_PLUGIN_ID,
-  ISSUE_LINK_API_ROUTE_KEY,
-  ISSUE_LINK_API_ROUTE_PATH,
-  PULL_REQUEST_ASSET_API_ROUTE_KEY,
-  PULL_REQUEST_ASSET_API_ROUTE_PATH
+  GITHUB_SYNC_PLUGIN_ID
 } from './kpi-contract.ts';
 
 const require = createRequire(import.meta.url);
@@ -90,20 +86,6 @@ export const manifest: PaperclipPluginManifestV1 = {
       routeKey: COMPANY_METRIC_API_ROUTE_KEY,
       method: 'POST',
       path: COMPANY_METRIC_API_ROUTE_PATH,
-      auth: 'agent',
-      capability: 'api.routes.register'
-    },
-    {
-      routeKey: ISSUE_LINK_API_ROUTE_KEY,
-      method: 'POST',
-      path: ISSUE_LINK_API_ROUTE_PATH,
-      auth: 'agent',
-      capability: 'api.routes.register'
-    },
-    {
-      routeKey: PULL_REQUEST_ASSET_API_ROUTE_KEY,
-      method: 'POST',
-      path: PULL_REQUEST_ASSET_API_ROUTE_PATH,
       auth: 'agent',
       capability: 'api.routes.register'
     }

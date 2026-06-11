@@ -12,9 +12,7 @@ import manifest from '../src/manifest.ts';
 import {
   COMPANY_METRIC_API_ROUTE_KEY,
   COMPANY_METRIC_API_ROUTE_PATH,
-  GITHUB_SYNC_PLUGIN_ID,
-  PULL_REQUEST_ASSET_API_ROUTE_KEY,
-  PULL_REQUEST_ASSET_API_ROUTE_PATH
+  GITHUB_SYNC_PLUGIN_ID
 } from '../src/kpi-contract.ts';
 import { requiresPaperclipBoardAccess, resolvePaperclipAuthControlsPolicy } from '../src/paperclip-health.ts';
 import { normalizeCompanyAssigneeOptionsResponse } from '../src/ui/assignees.ts';
@@ -769,70 +767,6 @@ async function postCompanyMetricApiRoute(
   } as Parameters<NonNullable<typeof plugin.definition.onApiRequest>>[0]);
 }
 
-async function postIssueLinkApiRoute(
-  payload: Record<string, unknown>,
-  options: {
-    companyId?: string;
-    actorType?: 'agent' | 'user';
-  } = {}
-): Promise<Awaited<ReturnType<NonNullable<typeof plugin.definition.onApiRequest>>>> {
-  const onApiRequest = plugin.definition.onApiRequest;
-  if (typeof onApiRequest !== 'function') {
-    throw new Error('Plugin API route handler is not registered.');
-  }
-  const actorType = options.actorType ?? 'agent';
-
-  return await onApiRequest({
-    routeKey: 'link-github-item',
-    method: 'POST',
-    path: '/issue-link',
-    params: {},
-    query: {},
-    body: payload,
-    companyId: options.companyId ?? 'company-1',
-    actor: {
-      actorType,
-      actorId: actorType === 'agent' ? 'agent-1' : 'user-1',
-      agentId: actorType === 'agent' ? 'agent-1' : null,
-      userId: actorType === 'user' ? 'user-1' : null,
-      runId: actorType === 'agent' ? 'run-1' : null
-    },
-    headers: {}
-  } as Parameters<NonNullable<typeof plugin.definition.onApiRequest>>[0]);
-}
-
-async function postPullRequestAssetApiRoute(
-  payload: Record<string, unknown>,
-  options: {
-    companyId?: string;
-    actorType?: 'agent' | 'user';
-  } = {}
-): Promise<Awaited<ReturnType<NonNullable<typeof plugin.definition.onApiRequest>>>> {
-  const onApiRequest = plugin.definition.onApiRequest;
-  if (typeof onApiRequest !== 'function') {
-    throw new Error('Plugin API route handler is not registered.');
-  }
-  const actorType = options.actorType ?? 'agent';
-
-  return await onApiRequest({
-    routeKey: PULL_REQUEST_ASSET_API_ROUTE_KEY,
-    method: 'POST',
-    path: PULL_REQUEST_ASSET_API_ROUTE_PATH,
-    params: {},
-    query: {},
-    body: payload,
-    companyId: options.companyId ?? 'company-1',
-    actor: {
-      actorType,
-      actorId: actorType === 'agent' ? 'agent-1' : 'user-1',
-      agentId: actorType === 'agent' ? 'agent-1' : null,
-      userId: actorType === 'user' ? 'user-1' : null,
-      runId: actorType === 'agent' ? 'run-1' : null
-    },
-    headers: {}
-  } as Parameters<NonNullable<typeof plugin.definition.onApiRequest>>[0]);
-}
-
 function createProjectFixture(params: {
   id: string;
   companyId: string;
@@ -881,6 +815,7 @@ function createProjectFixture(params: {
     leadAgentId: null,
     targetDate: null,
     color: null,
+    icon: null,
     env: null,
     pauseReason: null,
     pausedAt: null,
@@ -1842,7 +1777,7 @@ test('fetchJson reports HTML API responses without throwing a raw JSON parse err
   }
 });
 
-test('manifest declares the GitHub agent tools, KPI API route, and capabilities', () => {
+test('manifest declares GitHub agent tools and only the external metrics API route', () => {
   assert.ok(manifest.capabilities.includes('agent.tools.register'));
   assert.ok(manifest.capabilities.includes('api.routes.register'));
   assert.ok(Array.isArray(manifest.tools));
@@ -1889,22 +1824,6 @@ test('manifest declares the GitHub agent tools, KPI API route, and capabilities'
         routeKey: COMPANY_METRIC_API_ROUTE_KEY,
         method: 'POST',
         path: COMPANY_METRIC_API_ROUTE_PATH,
-        auth: 'agent',
-        capability: 'api.routes.register',
-        companyResolution: null
-      },
-      {
-        routeKey: 'link-github-item',
-        method: 'POST',
-        path: '/issue-link',
-        auth: 'agent',
-        capability: 'api.routes.register',
-        companyResolution: null
-      },
-      {
-        routeKey: PULL_REQUEST_ASSET_API_ROUTE_KEY,
-        method: 'POST',
-        path: PULL_REQUEST_ASSET_API_ROUTE_PATH,
         auth: 'agent',
         capability: 'api.routes.register',
         companyResolution: null
@@ -2004,114 +1923,6 @@ test('upload_pull_request_asset publishes an image asset with embeddable markdow
   } finally {
     globalThis.fetch = originalFetch;
   }
-});
-
-test('pull request asset API route uploads PDF assets for authenticated agents', async () => {
-  const harness = await createGitHubAgentToolHarness();
-  const originalFetch = globalThis.fetch;
-  const pdfBase64 = Buffer.from('%PDF-1.4 fake pdf bytes').toString('base64');
-
-  globalThis.fetch = async (input, init) => {
-    const url = new URL(getRequestUrl(input));
-
-    if (url.pathname === '/repos/paperclipai/example-repo/pulls/43') {
-      return jsonResponse({
-        number: 43,
-        head: {
-          sha: 'fedcba9876543210fedcba9876543210fedcba98'
-        },
-        base: {
-          sha: '3333333333333333333333333333333333333333'
-        }
-      });
-    }
-
-    if (getDecodedRequestPathname(input) === '/repos/paperclipai/example-repo/git/ref/heads/paperclip-artifacts-pr-43') {
-      return jsonResponse({
-        object: {
-          sha: '4444444444444444444444444444444444444444'
-        }
-      });
-    }
-
-    if (getDecodedRequestPathname(input) === '/repos/paperclipai/example-repo/contents/assets/pr-43/fedcba987654/review-report.pdf') {
-      if (init?.method === 'PUT') {
-        return jsonResponse({
-          content: {
-            path: 'assets/pr-43/fedcba987654/review-report.pdf'
-          },
-          commit: {
-            sha: '5555555555555555555555555555555555555555'
-          }
-        });
-      }
-
-      return jsonResponse({ message: 'Not Found' }, 404);
-    }
-
-    throw new Error(`Unexpected GitHub request: ${init?.method ?? 'GET'} ${url.toString()}`);
-  };
-
-  try {
-    const response = await postPullRequestAssetApiRoute({
-      repository: 'paperclipai/example-repo',
-      pullRequestNumber: 43,
-      fileName: 'review report.pdf',
-      label: 'Review report PDF',
-      dataUrl: `data:application/pdf;base64,${pdfBase64}`
-    });
-
-    assert.equal(response?.status, 201);
-    const body = response?.body as { status: string; asset: Record<string, unknown> };
-    assert.equal(body.status, 'uploaded');
-    assert.equal(body.asset.fileName, 'review-report.pdf');
-    assert.equal(body.asset.artifactBranch, 'paperclip-artifacts-pr-43');
-    assert.equal(body.asset.mimeType, 'application/pdf');
-    assert.equal(
-      body.asset.markdown,
-      '[Review report PDF](https://raw.githubusercontent.com/paperclipai/example-repo/5555555555555555555555555555555555555555/assets/pr-43/fedcba987654/review-report.pdf)'
-    );
-  } finally {
-    globalThis.fetch = originalFetch;
-  }
-});
-
-test('pull request asset API route reports route-specific body and URL validation errors', async () => {
-  await createGitHubAgentToolHarness();
-  const onApiRequest = plugin.definition.onApiRequest;
-  if (typeof onApiRequest !== 'function') {
-    throw new Error('Plugin API route handler is not registered.');
-  }
-
-  await assert.rejects(
-    () => onApiRequest({
-      routeKey: PULL_REQUEST_ASSET_API_ROUTE_KEY,
-      method: 'POST',
-      path: PULL_REQUEST_ASSET_API_ROUTE_PATH,
-      params: {},
-      query: {},
-      body: 'not an object',
-      companyId: 'company-1',
-      actor: {
-        actorType: 'agent',
-        actorId: 'agent-1',
-        agentId: 'agent-1',
-        userId: null,
-        runId: 'run-1'
-      },
-      headers: {}
-    } as Parameters<NonNullable<typeof plugin.definition.onApiRequest>>[0]),
-    /Pull request asset route body must be a JSON object\./
-  );
-
-  await assert.rejects(
-    () => postPullRequestAssetApiRoute({
-      pullRequestUrl: 'https://example.com/not-github',
-      fileName: 'review-report.pdf',
-      contentBase64: Buffer.from('report').toString('base64')
-    }),
-    /pullRequestUrl must be a valid GitHub pull request URL\./
-  );
 });
 
 test('search_repository_items infers the mapped repository from the tool run context', async () => {
@@ -2652,159 +2463,6 @@ test('company metric API route resolves a gh-created pull request repository fro
     assert.equal(pullRequestLinks.length, 1);
     assert.equal(pullRequestLinks[0]?.externalId, 'https://github.com/paperclipai/example-repo/pull/25');
   } finally {
-    globalThis.fetch = originalFetch;
-  }
-});
-
-test('issue-link API route links third-party pull requests to Paperclip issues for later sync', async () => {
-  const harness = createTestHarness({
-    manifest,
-    config: {
-      githubToken: TEST_GITHUB_TOKEN
-    }
-  });
-  await plugin.definition.setup(harness.ctx);
-  const originalFetch = globalThis.fetch;
-  const originalCreateComment = harness.ctx.issues.createComment;
-  const statusTransitionComments: Array<{ issueId: string; body: string }> = [];
-  const issue = await harness.ctx.issues.create({
-    companyId: 'company-1',
-    projectId: 'project-1',
-    title: 'Third-party repository PR',
-    description: 'An agent created a PR in a repository that is not mapped to this Paperclip project.'
-  });
-  await harness.ctx.issues.update(issue.id, { status: 'in_review' }, 'company-1');
-
-  harness.ctx.issues.createComment = async (issueId, body, companyId) => {
-    statusTransitionComments.push({ issueId, body });
-    return originalCreateComment(issueId, body, companyId);
-  };
-  const originalEntityList = harness.ctx.entities.list.bind(harness.ctx.entities);
-  let linkEntityListCalls = 0;
-
-  globalThis.fetch = async (input, init) => {
-    const requestUrl = getRequestUrl(input);
-    const requestPathname = getDecodedRequestPathname(input);
-
-    if (requestPathname === '/repos/third-party/external/pulls/77') {
-      return jsonResponse({
-        number: 77,
-        title: 'Fix Paperclip issue from a third-party repo',
-        body: 'Created outside the mapped sync repositories.',
-        html_url: 'https://github.com/third-party/external/pull/77',
-        state: 'open',
-        merged: false
-      });
-    }
-
-    if (requestPathname === '/repos/third-party/external/issues') {
-      throw new Error('Third-party issue-link sync should not list every issue in the repository.');
-    }
-
-    if (requestPathname === '/graphql') {
-      const { query, variables } = getGraphqlRequest(init);
-      const pullRequestNumber =
-        typeof variables.pullRequestNumber === 'number' ? variables.pullRequestNumber : undefined;
-
-      if (query.includes('query GitHubRepositoryOpenIssueLinkedPullRequests')) {
-        throw new Error('Third-party issue-link sync should not scan repository-wide issue links.');
-      }
-
-      if (query.includes('query GitHubPullRequestReviewThreads') && pullRequestNumber === 77) {
-        return graphqlResponse({
-          repository: {
-            pullRequest: {
-              reviewThreads: {
-                pageInfo: {
-                  hasNextPage: false,
-                  endCursor: null
-                },
-                nodes: []
-              }
-            }
-          }
-        });
-      }
-
-      if (query.includes('query GitHubPullRequestCiContexts') && pullRequestNumber === 77) {
-        return graphqlResponse({
-          repository: {
-            pullRequest: {
-              mergeable: 'CONFLICTING',
-              mergeStateStatus: 'DIRTY',
-              statusCheckRollup: {
-                contexts: {
-                  pageInfo: {
-                    hasNextPage: false,
-                    endCursor: null
-                  },
-                  nodes: [
-                    {
-                      __typename: 'CheckRun',
-                      status: 'COMPLETED',
-                      conclusion: 'FAILURE'
-                    }
-                  ]
-                }
-              }
-            }
-          }
-        });
-      }
-    }
-
-    throw new Error(`Unexpected fetch during third-party issue-link route test: ${requestUrl}`);
-  };
-
-  try {
-    const routeResponse = await postIssueLinkApiRoute({
-      kind: 'pull_request',
-      paperclipIssueId: issue.id,
-      pullRequestUrl: 'https://github.com/third-party/external/pull/77'
-    });
-
-    assert.equal(routeResponse.status, 201);
-    assert.deepEqual(routeResponse.body, {
-      status: 'linked',
-      companyId: 'company-1',
-      kind: 'pull_request',
-      paperclipIssueId: issue.id,
-      repositoryUrl: 'https://github.com/third-party/external',
-      githubPullRequestNumber: 77,
-      githubPullRequestUrl: 'https://github.com/third-party/external/pull/77',
-      githubPullRequestState: 'open'
-    });
-
-    harness.ctx.entities.list = async (query) => {
-      if (
-        query.entityType === 'paperclip-github-plugin.issue-link'
-        || query.entityType === 'paperclip-github-plugin.pull-request-link'
-      ) {
-        linkEntityListCalls += 1;
-      }
-
-      return originalEntityList(query);
-    };
-
-    const sync = await harness.performAction('sync.runNow', {
-      companyId: 'company-1',
-      waitForCompletion: true
-    }) as {
-      syncState: { status: string; syncedIssuesCount?: number };
-    };
-
-    assert.equal(sync.syncState.status, 'success');
-    assert.equal(sync.syncState.syncedIssuesCount, 1);
-    assert.equal(linkEntityListCalls, 2);
-
-    const updatedIssue = await harness.ctx.issues.get(issue.id, 'company-1');
-    assert.equal(updatedIssue?.status, 'todo');
-    assert.equal(statusTransitionComments.length, 1);
-    assert.match(statusTransitionComments[0]?.body ?? '', /from `in review` to `todo`/);
-    assert.match(statusTransitionComments[0]?.body ?? '', /failing CI/);
-  } finally {
-    harness.ctx.entities.list = originalEntityList;
-    harness.ctx.issues.createComment = originalCreateComment;
     globalThis.fetch = originalFetch;
   }
 });
