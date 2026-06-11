@@ -23,7 +23,7 @@ const seededGitHubPullRequestUrl = 'https://github.com/paperclipai/example-repo/
 const manualGitHubIssueLinkTitle = 'Manual GitHub Issue Link Smoke';
 const manualGitHubPullRequestLinkTitle = 'Manual GitHub PR Link Smoke';
 const seededCompanyAttachmentMaxBytes = 10 * 1024 * 1024;
-const defaultPaperclipaiVersion = '2026.529.0';
+const defaultPaperclipaiVersion = '2026.609.0';
 const paperclipaiVersion = process.env.PAPERCLIP_E2E_PAPERCLIPAI_VERSION?.trim() || defaultPaperclipaiVersion;
 const paperclipaiPackageSpec = paperclipaiVersion.startsWith('paperclipai@')
   ? paperclipaiVersion
@@ -297,6 +297,21 @@ async function assertWorkerPaperclipApiUrlFromSettingsUi(page, installedPluginId
   }
 
   log(`Verified settings UI prefills browser origin, saves paperclipApiBaseUrl, and the worker reads it as ${configuredUrl}.`);
+}
+
+async function ensureGitHubTokenConfiguredInSettingsUi(page, githubToken) {
+  const tokenInput = page.getByLabel('GitHub token', { exact: true });
+  const tokenInputVisible = await tokenInput.isVisible().catch(() => false);
+
+  if (tokenInputVisible) {
+    await tokenInput.fill(githubToken);
+    await page.getByRole('button', { name: 'Save token', exact: true }).click();
+    await page.getByText('Token valid', { exact: true }).waitFor({ timeout: 120000 });
+    log('Verified GitHub token can be saved through the settings UI.');
+    return;
+  }
+
+  await page.getByText(/Authenticated as|Company token ready/).first().waitFor({ timeout: 120000 });
 }
 
 async function assertWorkerDoesNotReadPaperclipApiUrlFromRuntimeEnv(installedPluginId, companyId) {
@@ -749,7 +764,7 @@ async function waitForServerExit(timeoutMs) {
     return;
   }
 
-  if (serverProcess.exitCode !== null) {
+  if (serverProcess.exitCode !== null || serverProcess.signalCode !== null) {
     return;
   }
 
@@ -767,6 +782,27 @@ async function waitForServerExit(timeoutMs) {
   });
 }
 
+function signalServerProcess(signal) {
+  if (!serverProcess?.pid) {
+    return;
+  }
+
+  try {
+    if (process.platform !== 'win32') {
+      process.kill(-serverProcess.pid, signal);
+      return;
+    }
+  } catch {
+    // Fall back to signaling the wrapper process below.
+  }
+
+  try {
+    serverProcess.kill(signal);
+  } catch {
+    // The process may have already exited between checks.
+  }
+}
+
 async function cleanup() {
   if (cleanedUp) {
     return;
@@ -775,13 +811,13 @@ async function cleanup() {
   cleanedUp = true;
 
   if (serverProcess) {
-    if (serverProcess.exitCode === null && !serverProcess.killed) {
-      serverProcess.kill('SIGINT');
+    if (serverProcess.exitCode === null && serverProcess.signalCode === null) {
+      signalServerProcess('SIGINT');
       await waitForServerExit(5000);
     }
 
-    if (serverProcess.exitCode === null && !serverProcess.killed) {
-      serverProcess.kill('SIGKILL');
+    if (serverProcess.exitCode === null && serverProcess.signalCode === null) {
+      signalServerProcess('SIGKILL');
       await waitForServerExit(5000);
     }
   }
@@ -884,6 +920,7 @@ async function main() {
     await page.getByText('GitHub Sync settings', { exact: true }).waitFor({ timeout: 120000 });
     const settingsSurface = page.locator('.ghsync-settings');
     await page.getByRole('heading', { name: 'GitHub access', exact: true }).waitFor({ timeout: 120000 });
+    await ensureGitHubTokenConfiguredInSettingsUi(page, githubToken);
     const boardAccessHeading = page.getByRole('heading', { name: 'Paperclip board access', exact: true });
     if (shouldShowBoardAccessSettings) {
       await boardAccessHeading.waitFor({ timeout: 120000 });

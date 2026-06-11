@@ -7,7 +7,7 @@ import test from 'node:test';
 import { promisify } from 'node:util';
 
 const execFileAsync = promisify(execFile);
-const RELEASE_UNDER_TEST = '2026.529.0';
+const RELEASE_UNDER_TEST = '2026.609.0';
 const PNPM_ACTION_SETUP_SHA_PATTERN = '[0-9a-f]{40}';
 
 test('build script reports missing local dependencies clearly when node_modules is absent', async () => {

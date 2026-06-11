@@ -23,7 +23,7 @@ const seededAgentName = 'CEO';
 const seededAgentModel = 'gpt-5.4';
 const seededAgentHireDecisionNote = 'Approved automatically for GitHub Sync manual verification seeding.';
 const seededCompanyAttachmentMaxBytes = 10 * 1024 * 1024;
-const defaultPaperclipaiVersion = '2026.529.0';
+const defaultPaperclipaiVersion = '2026.609.0';
 const paperclipaiVersion = process.env.PAPERCLIP_E2E_PAPERCLIPAI_VERSION?.trim() || defaultPaperclipaiVersion;
 const paperclipaiPackageSpec = paperclipaiVersion.startsWith('paperclipai@')
   ? paperclipaiVersion

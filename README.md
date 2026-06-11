@@ -70,11 +70,11 @@ GitHub Sync exposes a dedicated KPI dashboard widget alongside the operational s
 
 Because GitHub alone cannot tell which pull requests came from a Paperclip company, the plugin uses explicit Paperclip attribution for delivery activity. `create_pull_request` automatically records a Paperclip-created PR event, and agents that use `gh` or another non-plugin GitHub client can post pull-request-created events to the plugin API route so the KPI history stays specific to Paperclip work. When either path includes the Paperclip issue id, GitHub Sync also records the pull request link so later sync runs can move that issue based on PR CI, merge state, and review activity.
 
-That API route path matters on authenticated Paperclip deployments today because a current host bug blocks agents from calling plugin tools unless the instance runs in `local_trusted` mode. Those agents can still use `gh` with the propagated `GITHUB_TOKEN`, then call the agent-authenticated plugin API route from the shell after they create a PR. The Paperclip host authenticates `Authorization: Bearer <PAPERCLIP_API_KEY>`, scopes the request to the calling agent's company, and rejects anonymous or non-agent calls before dispatching to the worker.
+That API route remains intentionally separate from the plugin tool surface because it records PRs created outside the plugin, for example when an agent uses `gh` with the propagated `GITHUB_TOKEN`. The Paperclip host authenticates the bearer agent token, scopes the request to the calling agent's company, and rejects anonymous or non-agent calls before dispatching to the worker.
 
 ### Third-party issue links
 
-Sometimes a Paperclip issue is implemented through a GitHub issue or pull request in a repository that is not mapped to any Paperclip project. GitHub Sync can now track those targeted links without enrolling the whole repository in sync. The `link_github_item` agent tool records the durable link on local-trusted Paperclip instances, and authenticated agent runs can post the same link to `/api/plugins/paperclip-github-plugin/api/issue-link` with `PAPERCLIP_API_KEY` when plugin tools are blocked by host board-auth gates.
+Sometimes a Paperclip issue is implemented through a GitHub issue or pull request in a repository that is not mapped to any Paperclip project. GitHub Sync can now track those targeted links without enrolling the whole repository in sync. Authenticated agent runs should use the `link_github_item` plugin tool to record the durable link.
 
 Third-party links are company-scoped and sync only the linked GitHub issue or pull request. Future manual or scheduled company sync runs refresh those external records and update the Paperclip issue status from the same CI, mergeability, review, thread, and issue-state rules used for mapped repositories.
 
@@ -96,7 +96,7 @@ Manual GitHub issue links are added to the same import registry and issue-link e
 
 When a Paperclip issue is linked to a GitHub issue and also has older direct pull request links, the GitHub issue remains the status source of truth. Direct pull request links only drive status for PR-only Paperclip issues, which prevents stale merged PR metadata from closing work while the GitHub issue and its current linked PR are still open.
 
-Operators can unlink a linked Paperclip issue from the GitHub detail surface when they intentionally want GitHub Sync to stop updating it. Agent-facing tools and native agent API routes can create durable issue and pull request links, but they do not expose an unlink operation; internal sync repair may still tombstone a link when GitHub transfers an issue to an unmapped repository.
+Operators can unlink a linked Paperclip issue from the GitHub detail surface when they intentionally want GitHub Sync to stop updating it. Agent-facing tools can create durable issue and pull request links, but they do not expose an unlink operation; internal sync repair may still tombstone a link when GitHub transfers an issue to an unmapped repository.
 
 ### Agent workflows built in
 
@@ -106,7 +106,7 @@ They can also link a Paperclip issue to a GitHub issue or pull request in any ac
 ## Requirements
 
 - Node.js 20+
-- a Paperclip host with plugin installation enabled. GitHub Sync is built and tested against Paperclip `2026.529.0`; the manifest relies on explicit capabilities instead of a strict host-version gate because current latest/development hosts can report `0.0.0` during plugin upgrade.
+- a Paperclip host with plugin installation enabled. GitHub Sync is built and tested against Paperclip `2026.609.0`; the manifest relies on explicit capabilities instead of a strict host-version gate because current latest/development hosts can report `0.0.0` during plugin upgrade.
 - a GitHub token with API access to the repositories you want to sync
 
 ## Install from npm
@@ -279,9 +279,7 @@ curl -X POST "${PAPERCLIP_API_URL%/}/api/plugins/paperclip-github-plugin/api/com
 
 The worker deduplicates repeated PR events by preferring the pull request URL, then `repository + pullRequestNumber`, before falling back to the explicit `eventKey`. When `paperclipIssueId` is present, the worker verifies the live pull request and persists the same PR-link metadata used by scheduled/manual status syncs.
 
-Current host caveat: on authenticated Paperclip deployments, the Paperclip host currently guards `GET /api/plugins/tools` and `POST /api/plugins/tools/execute` with board authentication before dispatching to any plugin worker. If an agent run does not have board access for the target company, GitHub Sync tool discovery and execution fail with `403 {"error":"Board access required"}` before this plugin's worker code runs.
-
-Because the KPI attribution endpoint is a native plugin JSON route rather than a plugin tool, authenticated agent runs can still call it directly with `PAPERCLIP_API_KEY` even while that host bug blocks the GitHub Sync tool surface.
+Paperclip `2026.609.0` accepts agent authentication for plugin tool discovery and execution, so agents should use the declared GitHub Sync tools for first-class workflow operations. The KPI attribution endpoint remains a native plugin JSON route for PRs created outside the plugin tool path.
 
 ### Pull request asset upload
 
@@ -289,31 +287,24 @@ For PRs that need durable assets in the description, agents can call the `upload
 
 The plugin writes the asset to a non-merge artifact branch named `paperclip-artifacts-pr-<number>` by default, stores it under `assets/pr-<number>/<head-sha>/`, and returns immutable raw GitHub URLs plus Markdown suitable for a PR description. Images return image Markdown; PDFs and other files return normal Markdown links.
 
-Authenticated agent runs that cannot call plugin tools can post the same JSON payload to `/api/plugins/paperclip-github-plugin/api/pull-request-assets` with `Authorization: Bearer ${PAPERCLIP_API_KEY}`. The native plugin route is agent-authenticated by the Paperclip host before worker dispatch.
+Example tool payload:
 
-Example:
-
-```bash
-contentBase64="$(base64 -w0 /tmp/review-report.pdf)"
-payload="$(jq -n \
-  --arg repository paperclipai/example-repo \
-  --argjson pullRequestNumber 21 \
-  --arg fileName review-report.pdf \
-  --arg label 'Review report PDF' \
-  --arg contentBase64 "$contentBase64" \
-  '{repository:$repository,pullRequestNumber:$pullRequestNumber,fileName:$fileName,label:$label,contentBase64:$contentBase64,mimeType:"application/pdf"}')"
-
-curl -X POST "${PAPERCLIP_API_URL%/}/api/plugins/paperclip-github-plugin/api/pull-request-assets" \
-  -H "content-type: application/json" \
-  -H "authorization: Bearer ${PAPERCLIP_API_KEY}" \
-  -d "${payload}"
+```json
+{
+  "repository": "paperclipai/example-repo",
+  "pullRequestNumber": 21,
+  "fileName": "review-report.pdf",
+  "label": "Review report PDF",
+  "contentBase64": "<base64 PDF bytes>",
+  "mimeType": "application/pdf"
+}
 ```
 
-The response body contains `asset.markdown`, `asset.rawUrl`, `asset.artifactBranch`, `asset.path`, and `asset.commitSha`.
+The tool result contains `asset.markdown`, `asset.rawUrl`, `asset.artifactBranch`, `asset.path`, and `asset.commitSha`.
 
-### Issue link API route
+### Issue link tool
 
-Authenticated agent runs can link the current Paperclip issue to a GitHub issue or pull request by posting to `/api/plugins/paperclip-github-plugin/api/issue-link`. This is useful after creating a PR with `gh` in a repository that is not mapped to a Paperclip project.
+Authenticated agent runs can link the current Paperclip issue to a GitHub issue or pull request by calling the `link_github_item` tool. This is useful after creating a PR with `gh` in a repository that is not mapped to a Paperclip project.
 
 Supported payload fields:
 
@@ -323,15 +314,13 @@ Supported payload fields:
 - `repository` optional: `owner/repo` or `https://github.com/owner/repo`, required for number-only references when the issue project is not mapped to that repository
 - `issueNumber`, `pullRequestNumber`, or `pullRequestUrl` optional alternatives to `reference`
 
-Example:
+Example tool payload:
 
-```bash
-payload='{"paperclipIssueId":"iss_123","pullRequestUrl":"https://github.com/third-party/external/pull/77"}'
-
-curl -X POST "${PAPERCLIP_API_URL%/}/api/plugins/paperclip-github-plugin/api/issue-link" \
-  -H "content-type: application/json" \
-  -H "authorization: Bearer ${PAPERCLIP_API_KEY}" \
-  -d "${payload}"
+```json
+{
+  "paperclipIssueId": "iss_123",
+  "pullRequestUrl": "https://github.com/third-party/external/pull/77"
+}
 ```
 
 ## Troubleshooting
@@ -339,7 +328,7 @@ curl -X POST "${PAPERCLIP_API_URL%/}/api/plugins/paperclip-github-plugin/api/iss
 - If an older GitHub Sync build fails upgrade with `requires host version 2026.427.0 or newer, but this server is running 0.0.0`, upgrade to a build that removes the strict manifest host-version gate. The host is reporting a development-version sentinel, so the plugin now relies on declared capabilities and runtime fallbacks instead.
 - If setup is reported as incomplete, confirm that a GitHub token has been saved or that `${PAPERCLIP_HOME:-~/.paperclip}/plugins/github-sync/config.json` contains `githubToken`, and make sure at least one mapping has a created Paperclip project or at least one Paperclip issue has been linked to GitHub.
 - If Paperclip says board access is required, open plugin settings inside the affected company and complete the Paperclip board access flow before retrying sync.
-- If GitHub Sync agent tools fail with `403 {"error":"Board access required"}` on `/api/plugins/tools` or `/api/plugins/tools/execute`, the current Paperclip host rejected the request before the plugin worker ran. Re-run from a board-authenticated session or agent run that has board access to the target company.
+- If GitHub Sync agent tools fail on `/api/plugins/tools` or `/api/plugins/tools/execute`, confirm the Paperclip host is `2026.609.0` or newer and that the tool request includes the agent run context required by Paperclip.
 - If a KPI API route call is rejected, make sure the request includes `Authorization: Bearer ${PAPERCLIP_API_KEY}`, that the token is still valid for the current run, and that any `companyId` in the payload matches the calling agent's company.
 - If the worker reaches an authenticated HTML page instead of the Paperclip API JSON responses it expects, connect Paperclip board access for that company or set **Worker Paperclip API URL** in GitHub Sync settings to a worker-accessible Paperclip API origin.
 - If a Paperclip API fetch fails before any HTTP response is returned, the saved diagnostics include the method, URL, primary error, nested cause, and cause code when Node exposes them.
@@ -365,8 +354,8 @@ Useful scripts:
 
 - `pnpm dev` watches the manifest, worker, and UI bundles and rebuilds them into `dist/`
 - `pnpm dev:ui` starts a local Paperclip plugin UI dev server from `dist/ui` on port `4177`
-- `pnpm test:e2e` builds the plugin, boots an isolated Paperclip `2026.529.0` instance, installs the plugin, and verifies the hosted settings page renders
-- `pnpm verify:manual` builds the plugin, boots a local-trusted Paperclip `2026.529.0` instance for manual inspection, seeds a `Dummy Company` with a mapped review project and a `CEO` agent on the Codex local adapter using model `gpt-5.4`, installs the plugin, and opens the company dashboard without seeding KPI history.
+- `pnpm test:e2e` builds the plugin, boots an isolated Paperclip `2026.609.0` instance, installs the plugin, and verifies the hosted settings page renders
+- `pnpm verify:manual` builds the plugin, boots a local-trusted Paperclip `2026.609.0` instance for manual inspection, seeds a `Dummy Company` with a mapped review project and a `CEO` agent on the Codex local adapter using model `gpt-5.4`, installs the plugin, and opens the company dashboard without seeding KPI history.
 
 For fast hosted UI iteration, run `pnpm dev` in one terminal and `pnpm dev:ui` in another.
 
