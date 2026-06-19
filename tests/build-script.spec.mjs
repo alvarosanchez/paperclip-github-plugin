@@ -7,7 +7,7 @@ import test from 'node:test';
 import { promisify } from 'node:util';
 
 const execFileAsync = promisify(execFile);
-const RELEASE_UNDER_TEST = '2026.609.0';
+const RELEASE_UNDER_TEST = '2026.618.0';
 const PNPM_ACTION_SETUP_SHA_PATTERN = '[0-9a-f]{40}';
 
 test('build script reports missing local dependencies clearly when node_modules is absent', async () => {
@@ -47,6 +47,8 @@ test('release verification harnesses default to the current Paperclip release', 
 
   assert.match(smokeScript, new RegExp(`const defaultPaperclipaiVersion = '${RELEASE_UNDER_TEST.replaceAll('.', '\\.')}'`));
   assert.match(manualScript, new RegExp(`const defaultPaperclipaiVersion = '${RELEASE_UNDER_TEST.replaceAll('.', '\\.')}'`));
+  assert.match(smokeScript, /node@24/);
+  assert.match(manualScript, /node@24/);
 });
 
 test('plugin SDK dependency targets the current Paperclip release', async () => {
@@ -66,5 +68,6 @@ test('GitHub workflows let packageManager select the pnpm version', async () => 
   assert.match(releaseWorkflow, new RegExp(`pnpm/action-setup@${PNPM_ACTION_SETUP_SHA_PATTERN} # v6`));
   assert.doesNotMatch(ciWorkflow, /pnpm\/action-setup@[\s\S]*?with:[\s\S]*?\n\s*version:\s/);
   assert.doesNotMatch(releaseWorkflow, /pnpm\/action-setup@[\s\S]*?with:[\s\S]*?\n\s*version:\s/);
-  assert.match(pnpmWorkspace, /^allowBuilds:\n  esbuild: true\n?$/);
+  assert.match(pnpmWorkspace, /^allowBuilds:\n  esbuild: true\n/);
+  assert.match(pnpmWorkspace, /minimumReleaseAgeExclude:\n  - '@paperclipai\/plugin-sdk@2026\.618\.0'\n  - '@paperclipai\/shared@2026\.618\.0'\n?$/);
 });
