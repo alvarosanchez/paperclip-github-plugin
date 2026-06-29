@@ -80,12 +80,15 @@ test('documents and enforces the Paperclip 2026.626 GitHub Sync adoption boundar
 
   assert.match(readme, /external object references and task watchdogs/i);
   assert.match(readme, /built-in GitHub external-object provider/i);
+  assert.match(readme, /retires its plugin comment-annotation slot/i);
   assert.match(readme, /do not use them to poll GitHub PR state/i);
   assert.match(spec, /MUST NOT declare a duplicate GitHub `external\.objects\.\*` provider/i);
+  assert.match(spec, /MUST NOT declare the legacy `commentAnnotation` UI slot/i);
   assert.match(spec, /GitHub Sync MUST NOT create, read, update, delete, or auto-attach `\/api\/issues\/:id\/watchdog` configuration/i);
   assert.match(spec, /tools are normal company-scoped plugin tools, not currently task-watchdog-scope-aware/i);
 
   assert.doesNotMatch(manifestSource, /external\.objects\./);
+  assert.doesNotMatch(manifestSource, /commentAnnotation/);
   assert.doesNotMatch(manifestSource, /watchdog/i);
   assert.doesNotMatch(workerSource, /\/watchdog\b/);
   assert.doesNotMatch(workerSource, /upsertIssueWatchdog|watchdog\s*:/);

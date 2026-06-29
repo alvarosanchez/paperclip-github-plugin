@@ -4505,7 +4505,7 @@ test('manifest exposes GitHub Sync page, sidebar, dashboard widgets, and setting
   assert.ok(manifest.capabilities.includes('ui.sidebar.register'));
   assert.ok(manifest.capabilities.some((capability) => capability === 'ui.dashboardWidget.register'));
   assert.ok(manifest.capabilities.includes('ui.detailTab.register'));
-  assert.ok(manifest.capabilities.includes('ui.commentAnnotation.register'));
+  assert.equal(manifest.capabilities.includes('ui.commentAnnotation.register'), false);
   assert.ok(manifest.capabilities.includes('ui.action.register'));
   assert.ok(manifest.capabilities.includes('issues.read'));
   assert.ok(manifest.capabilities.includes('issues.update'));
@@ -4538,7 +4538,7 @@ test('manifest exposes GitHub Sync page, sidebar, dashboard widgets, and setting
   assert.ok(syncDashboardSlot);
   assert.ok(kpiDashboardSlot);
   assert.ok(issueDetailSlot);
-  assert.ok(commentAnnotationSlot);
+  assert.equal(commentAnnotationSlot, undefined);
   assert.ok(globalToolbarSlot);
   assert.ok(entityToolbarSlot);
   assert.equal(pullRequestsPageSlot?.type, 'page');
@@ -4555,7 +4555,6 @@ test('manifest exposes GitHub Sync page, sidebar, dashboard widgets, and setting
   assert.equal(typeof uiModule.GitHubSyncKpiDashboardWidget, 'function');
   assert.equal(issueDetailSlot?.type, 'taskDetailView');
   assert.equal(issueDetailSlot?.exportName, 'GitHubSyncIssueTaskDetailView');
-  assert.equal(commentAnnotationSlot?.exportName, 'GitHubSyncCommentAnnotation');
   assert.equal(globalToolbarSlot?.exportName, 'GitHubSyncGlobalToolbarButton');
   assert.equal(entityToolbarSlot?.exportName, 'GitHubSyncEntityToolbarButton');
 });
