@@ -106,7 +106,7 @@ They can also link a Paperclip issue to a GitHub issue or pull request in any ac
 ## Requirements
 
 - Node.js 20+
-- a Paperclip host with plugin installation enabled. GitHub Sync is built and tested against Paperclip `2026.618.0`; the manifest relies on explicit capabilities instead of a strict host-version gate because current latest/development hosts can report `0.0.0` during plugin upgrade.
+- a Paperclip host with plugin installation enabled. GitHub Sync is built and tested against Paperclip `2026.626.0`; the manifest relies on explicit capabilities instead of a strict host-version gate because current latest/development hosts can report `0.0.0` during plugin upgrade.
 - a GitHub token with API access to the repositories you want to sync
 
 ## Install from npm
@@ -279,7 +279,10 @@ curl -X POST "${PAPERCLIP_API_URL%/}/api/plugins/paperclip-github-plugin/api/com
 
 The worker deduplicates repeated PR events by preferring the pull request URL, then `repository + pullRequestNumber`, before falling back to the explicit `eventKey`. When `paperclipIssueId` is present, the worker verifies the live pull request and persists the same PR-link metadata used by scheduled/manual status syncs.
 
-Paperclip `2026.618.0` accepts agent authentication for plugin tool discovery and execution, so agents should use the declared GitHub Sync tools for first-class workflow operations. The KPI attribution endpoint remains a native plugin JSON route for PRs created outside the plugin tool path.
+
+Paperclip `2026.626.0` adds external object references and task watchdogs, both relevant to GitHub URLs and long-running PR follow-up. This compatibility PR intentionally does not register `external.objects.*` providers yet: GitHub Sync already owns GitHub issue/PR state through mappings, plugin entities, sync jobs, and agent tools, and a future product PR should design object-reference detection/status refresh so it does not duplicate or conflict with the existing sync model. Task watchdogs likewise remain a Paperclip issue-level/runtime control; this plugin continues to expose GitHub status through sync jobs, project mappings, issue/PR links, and tools.
+
+Paperclip `2026.626.0` accepts agent authentication for plugin tool discovery and execution, so agents should use the declared GitHub Sync tools for first-class workflow operations. The KPI attribution endpoint remains a native plugin JSON route for PRs created outside the plugin tool path.
 
 ### Pull request asset upload
 
@@ -328,7 +331,7 @@ Example tool payload:
 - If an older GitHub Sync build fails upgrade with `requires host version 2026.427.0 or newer, but this server is running 0.0.0`, upgrade to a build that removes the strict manifest host-version gate. The host is reporting a development-version sentinel, so the plugin now relies on declared capabilities and runtime fallbacks instead.
 - If setup is reported as incomplete, confirm that a GitHub token has been saved or that `${PAPERCLIP_HOME:-~/.paperclip}/plugins/github-sync/config.json` contains `githubToken`, and make sure at least one mapping has a created Paperclip project or at least one Paperclip issue has been linked to GitHub.
 - If Paperclip says board access is required, open plugin settings inside the affected company and complete the Paperclip board access flow before retrying sync.
-- If GitHub Sync agent tools fail on `/api/plugins/tools` or `/api/plugins/tools/execute`, confirm the Paperclip host is `2026.618.0` or newer and that the tool request includes the agent run context required by Paperclip.
+- If GitHub Sync agent tools fail on `/api/plugins/tools` or `/api/plugins/tools/execute`, confirm the Paperclip host is `2026.626.0` or newer and that the tool request includes the agent run context required by Paperclip.
 - If a KPI API route call is rejected, make sure the request includes `Authorization: Bearer ${PAPERCLIP_API_KEY}`, that the token is still valid for the current run, and that any `companyId` in the payload matches the calling agent's company.
 - If the worker reaches an authenticated HTML page instead of the Paperclip API JSON responses it expects, connect Paperclip board access for that company or set **Worker Paperclip API URL** in GitHub Sync settings to a worker-accessible Paperclip API origin.
 - If a Paperclip API fetch fails before any HTTP response is returned, the saved diagnostics include the method, URL, primary error, nested cause, and cause code when Node exposes them.
@@ -354,10 +357,10 @@ Useful scripts:
 
 - `pnpm dev` watches the manifest, worker, and UI bundles and rebuilds them into `dist/`
 - `pnpm dev:ui` starts a local Paperclip plugin UI dev server from `dist/ui` on port `4177`
-- `pnpm test:e2e` builds the plugin, boots an isolated Paperclip `2026.618.0` instance, installs the plugin, and verifies the hosted settings page renders
-- `pnpm verify:manual` builds the plugin, boots a local-trusted Paperclip `2026.618.0` instance for manual inspection, seeds a `Dummy Company` with a mapped review project and a `CEO` agent on the Codex local adapter using model `gpt-5.4`, installs the plugin, and opens the company dashboard without seeding KPI history.
+- `pnpm test:e2e` builds the plugin, boots an isolated Paperclip `2026.626.0` instance, installs the plugin, and verifies the hosted settings page renders
+- `pnpm verify:manual` builds the plugin, boots a local-trusted Paperclip `2026.626.0` instance for manual inspection, seeds a `Dummy Company` with a mapped review project and a `CEO` agent on the Codex local adapter using model `gpt-5.4`, installs the plugin, and opens the company dashboard without seeding KPI history.
 
-The disposable Paperclip harnesses run `paperclipai@2026.618.0` under `node@24`, matching the release's Docker baseline and avoiding Node 20's missing `node:sqlite` runtime module.
+The disposable Paperclip harnesses run `paperclipai@2026.626.0` under `node@24`, matching the release's Docker baseline and avoiding Node 20's missing `node:sqlite` runtime module.
 
 For fast hosted UI iteration, run `pnpm dev` in one terminal and `pnpm dev:ui` in another.
 

@@ -1,5 +1,5 @@
 allowBuilds:
   esbuild: true
 minimumReleaseAgeExclude:
-  - '@paperclipai/plugin-sdk@2026.618.0'
-  - '@paperclipai/shared@2026.618.0'
+  - '@paperclipai/plugin-sdk@2026.626.0'
+  - '@paperclipai/shared@2026.626.0'

@@ -148,8 +148,8 @@ The plugin MUST persist repository mappings, company-scoped advanced issue defau
 ## Host integration requirements
 
 - The plugin MUST register successfully in Paperclip.
-- The plugin manifest MUST NOT declare a strict `minimumHostVersion` or `minimumPaperclipVersion` gate while current latest/development Paperclip hosts may report `0.0.0` during plugin upgrade. Required host surfaces MUST remain represented by manifest capabilities and guarded by worker fallbacks where possible, and the docs MUST still state the intended Paperclip `2026.618.0` support baseline.
-- Disposable e2e and manual host verification MUST pin the Paperclip CLI to `2026.618.0` by default, while retaining an explicit environment override for forward and backward compatibility checks.
+- The plugin manifest MUST NOT declare a strict `minimumHostVersion` or `minimumPaperclipVersion` gate while current latest/development Paperclip hosts may report `0.0.0` during plugin upgrade. Required host surfaces MUST remain represented by manifest capabilities and guarded by worker fallbacks where possible, and the docs MUST still state the intended Paperclip `2026.626.0` support baseline.
+- Disposable e2e and manual host verification MUST pin the Paperclip CLI to `2026.626.0` by default, while retaining an explicit environment override for forward and backward compatibility checks.
 - The plugin MUST expose a dashboard widget contribution for sync readiness and setup.
 - The plugin MUST expose a separate dashboard KPI widget contribution.
 - The plugin MUST expose a settings page contribution.
@@ -204,3 +204,8 @@ The plugin MUST persist repository mappings, company-scoped advanced issue defau
 - The release workflow MUST derive the published version from the GitHub release tag and stamp that version into publishable package metadata before build and publish.
 - After a successful publish, the release workflow MUST sync that resolved release version back into the checked-in `package.json` on the release target branch so repository metadata reflects the latest published release.
 - The release workflow MUST run on a Node.js version that already satisfies npm trusted publishing requirements instead of relying on an in-job npm self-upgrade step.
+
+
+## Paperclip 2026.626 compatibility boundary
+
+Paperclip 2026.626 external object references, task watchdogs, ask work mode, routine date variables, and built-in Hermes adapters are host/runtime capabilities. GitHub Sync must not declare `external.objects.*` providers until a dedicated product change defines how GitHub URL detection/status refresh coexists with the existing GitHub issue/PR sync mappings, plugin entities, and agent tools.
