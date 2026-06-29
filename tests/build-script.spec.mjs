@@ -77,6 +77,8 @@ test('documents the Paperclip 2026.626 GitHub Sync adoption boundary', async () 
   const spec = await readFile(new URL('../SPEC.md', import.meta.url), 'utf8');
 
   assert.match(readme, /external object references and task watchdogs/i);
-  assert.match(readme, /does not register `external\.objects\.\*` providers yet/i);
-  assert.match(spec, /external object references[\s\S]{0,300}existing GitHub issue\/PR sync mappings/i);
+  assert.match(readme, /built-in GitHub external-object provider/i);
+  assert.match(readme, /do not use them to poll GitHub PR state/i);
+  assert.match(spec, /MUST NOT declare a duplicate GitHub `external\.objects\.\*` provider/i);
+  assert.match(spec, /Task watchdogs MUST NOT replace GitHub Sync's scheduled\/manual PR status refresh/i);
 });

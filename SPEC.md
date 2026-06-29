@@ -208,4 +208,6 @@ The plugin MUST persist repository mappings, company-scoped advanced issue defau
 
 ## Paperclip 2026.626 compatibility boundary
 
-Paperclip 2026.626 external object references, task watchdogs, ask work mode, routine date variables, and built-in Hermes adapters are host/runtime capabilities. GitHub Sync must not declare `external.objects.*` providers until a dedicated product change defines how GitHub URL detection/status refresh coexists with the existing GitHub issue/PR sync mappings, plugin entities, and agent tools.
+Paperclip 2026.626 external object references, task watchdogs, ask work mode, routine date variables, and built-in Hermes adapters are host/runtime capabilities. GitHub Sync MUST NOT declare a duplicate GitHub `external.objects.*` provider while the host ships a built-in GitHub external-object provider. Synced descriptions, comments, and status-transition annotations SHOULD continue to include canonical GitHub issue and pull request URLs so the host provider can detect them, but GitHub Sync's mappings, plugin entities, sync jobs, and agent tools remain authoritative for routing mapped/linked Paperclip issue state.
+
+Task watchdogs MUST NOT replace GitHub Sync's scheduled/manual PR status refresh. Waiting on GitHub CI, mergeability, review threads, or maintainer approval is an external GitHub wait, not a stopped Paperclip task tree. GitHub Sync MAY coexist with operator-created task watchdogs, but it MUST continue to drive issue status from GitHub snapshots and MUST NOT treat watchdog review issues as the source of truth for PR state.
