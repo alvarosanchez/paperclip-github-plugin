@@ -72,13 +72,21 @@ test('GitHub workflows let packageManager select the pnpm version', async () => 
   assert.match(pnpmWorkspace, /minimumReleaseAgeExclude:\n  - '@paperclipai\/plugin-sdk@2026\.626\.0'\n  - '@paperclipai\/shared@2026\.626\.0'\n?$/);
 });
 
-test('documents the Paperclip 2026.626 GitHub Sync adoption boundary', async () => {
+test('documents and enforces the Paperclip 2026.626 GitHub Sync adoption boundary', async () => {
   const readme = await readFile(new URL('../README.md', import.meta.url), 'utf8');
   const spec = await readFile(new URL('../SPEC.md', import.meta.url), 'utf8');
+  const manifestSource = await readFile(new URL('../src/manifest.ts', import.meta.url), 'utf8');
+  const workerSource = await readFile(new URL('../src/worker.ts', import.meta.url), 'utf8');
 
   assert.match(readme, /external object references and task watchdogs/i);
   assert.match(readme, /built-in GitHub external-object provider/i);
   assert.match(readme, /do not use them to poll GitHub PR state/i);
   assert.match(spec, /MUST NOT declare a duplicate GitHub `external\.objects\.\*` provider/i);
-  assert.match(spec, /Task watchdogs MUST NOT replace GitHub Sync's scheduled\/manual PR status refresh/i);
+  assert.match(spec, /GitHub Sync MUST NOT create, read, update, delete, or auto-attach `\/api\/issues\/:id\/watchdog` configuration/i);
+  assert.match(spec, /tools are normal company-scoped plugin tools, not currently task-watchdog-scope-aware/i);
+
+  assert.doesNotMatch(manifestSource, /external\.objects\./);
+  assert.doesNotMatch(manifestSource, /watchdog/i);
+  assert.doesNotMatch(workerSource, /\/watchdog\b/);
+  assert.doesNotMatch(workerSource, /upsertIssueWatchdog|watchdog\s*:/);
 });
