@@ -3802,11 +3802,11 @@ async function resolvePaperclipIssueGitHubLink(
   return await hydrateRecoveredPaperclipIssueGitHubLink(ctx, issueId, fallbackLink) ?? fallbackLink;
 }
 
-async function resolvePaperclipIssueGitHubPullRequestLink(
+async function listPaperclipIssueGitHubPullRequestLinks(
   ctx: PluginSetupContext,
   issueId: string,
   companyId: string
-): Promise<GitHubPullRequestLinkRecord | null> {
+): Promise<GitHubPullRequestLinkRecord[]> {
   const links = await listGitHubPullRequestLinkRecords(ctx, {
     paperclipIssueId: issueId
   });
@@ -3819,7 +3819,15 @@ async function resolvePaperclipIssueGitHubPullRequestLink(
       const safeRightTimestamp = Number.isFinite(rightTimestamp) ? rightTimestamp : 0;
       const safeLeftTimestamp = Number.isFinite(leftTimestamp) ? leftTimestamp : 0;
       return safeRightTimestamp - safeLeftTimestamp;
-    })[0] ?? null;
+    });
+}
+
+async function resolvePaperclipIssueGitHubPullRequestLink(
+  ctx: PluginSetupContext,
+  issueId: string,
+  companyId: string
+): Promise<GitHubPullRequestLinkRecord | null> {
+  return (await listPaperclipIssueGitHubPullRequestLinks(ctx, issueId, companyId))[0] ?? null;
 }
 
 async function hydrateRecoveredPaperclipIssueGitHubLink(
@@ -15850,15 +15858,78 @@ async function resolveGitHubPullRequestToolTarget(
 }> {
   const paperclipIssueId = normalizeOptionalToolString(input.paperclipIssueId);
   if (paperclipIssueId) {
-    const link = await resolvePaperclipIssueGitHubLink(ctx, paperclipIssueId, runCtx.companyId);
-    if (!link) {
+    const [link, directPullRequestLinks] = await Promise.all([
+      resolvePaperclipIssueGitHubLink(ctx, paperclipIssueId, runCtx.companyId),
+      listPaperclipIssueGitHubPullRequestLinks(ctx, paperclipIssueId, runCtx.companyId)
+    ]);
+    const directPullRequestReferences = normalizeLinkedPullRequestReferences(
+      directPullRequestLinks.map((record) => ({
+        number: record.data.githubPullRequestNumber,
+        repositoryUrl: record.data.repositoryUrl
+      }))
+    );
+    if (!link && directPullRequestReferences.length === 0) {
       throw new Error('This Paperclip issue is not linked to GitHub yet.');
     }
 
     const explicitPullRequestNumber = normalizeToolPositiveInteger(input.pullRequestNumber);
-    const linkedPullRequests = link.linkedPullRequests.length > 0
-      ? link.linkedPullRequests
-      : normalizeLinkedPullRequestReferences(link.linkedPullRequestNumbers, link.repositoryUrl);
+    if (!link) {
+      const explicitRepository = normalizeOptionalToolString(input.repository);
+      if (explicitPullRequestNumber !== undefined) {
+        const matchingPullRequests = directPullRequestReferences.filter(
+          (pullRequest) => pullRequest.number === explicitPullRequestNumber
+        );
+        if (explicitRepository) {
+          const requestedRepository = requireRepositoryReference(explicitRepository);
+          const matchingPullRequest = matchingPullRequests.find((pullRequest) =>
+            areRepositoriesEqual(requestedRepository, requireRepositoryReference(pullRequest.repositoryUrl))
+          );
+          if (!matchingPullRequest) {
+            throw new Error('repository and pullRequestNumber must match a pull request directly linked to the provided Paperclip issue.');
+          }
+          return {
+            repository: requestedRepository,
+            pullRequestNumber: explicitPullRequestNumber,
+            paperclipIssueId
+          };
+        }
+        if (matchingPullRequests.length === 1) {
+          return {
+            repository: requireRepositoryReference(matchingPullRequests[0].repositoryUrl),
+            pullRequestNumber: explicitPullRequestNumber,
+            paperclipIssueId
+          };
+        }
+        if (matchingPullRequests.length > 1) {
+          throw new Error('repository is required because the Paperclip issue has matching direct pull request links in multiple repositories.');
+        }
+        throw new Error('pullRequestNumber must match a pull request directly linked to the provided Paperclip issue.');
+      }
+
+      if (directPullRequestReferences.length === 1) {
+        const inferredPullRequest = directPullRequestReferences[0];
+        if (explicitRepository) {
+          const requestedRepository = requireRepositoryReference(explicitRepository);
+          if (!areRepositoriesEqual(requestedRepository, requireRepositoryReference(inferredPullRequest.repositoryUrl))) {
+            throw new Error('repository must match the GitHub repository for the directly linked pull request.');
+          }
+        }
+        return {
+          repository: requireRepositoryReference(inferredPullRequest.repositoryUrl),
+          pullRequestNumber: inferredPullRequest.number,
+          paperclipIssueId
+        };
+      }
+
+      throw new Error('pullRequestNumber is required unless the Paperclip issue has exactly one directly linked pull request.');
+    }
+
+    const linkedPullRequests = normalizeLinkedPullRequestReferences([
+      ...(link.linkedPullRequests.length > 0
+        ? link.linkedPullRequests
+        : normalizeLinkedPullRequestReferences(link.linkedPullRequestNumbers, link.repositoryUrl)),
+      ...directPullRequestReferences
+    ]);
     if (explicitPullRequestNumber !== undefined) {
       const explicitRepository = normalizeOptionalToolString(input.repository);
       const matchingLinkedPullRequests = linkedPullRequests.filter(

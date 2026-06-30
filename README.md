@@ -245,6 +245,8 @@ Branch publication uses an isolated temporary bare repository backed by the trus
 
 The call is ordered and retry-safe rather than a cross-system transaction: a published branch may remain if GitHub PR creation or Paperclip link persistence fails. On retry, the tool re-verifies and republishes the exact SHA, then recovers an already-open PR only when repository, head, base, and head SHA all match before repairing the link and metric. It never deletes a branch or closes a PR as automatic compensation.
 
+After that durable link is written, pull-request tools can use the same `paperclipIssueId` to read or update the PR immediately, even when the Paperclip issue was created natively and has no linked GitHub issue. If one Paperclip issue has same-number PRs in different repositories, the caller must also supply the repository so the worker can reject ambiguous or unlinked selections.
+
 When an agent sends GitHub body content through the plugin, including issue bodies, pull request descriptions, comments, and review-thread replies, the plugin adds a GitHub-flavored Markdown footer with a horizontal rule and compact heading that discloses AI authorship. If the tool caller supplies `llmModel`, the footer also includes the model name, for example `###### ✨ This comment was AI-generated using gpt-5.4`.
 
 ### KPI attribution API route
