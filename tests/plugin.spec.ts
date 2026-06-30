@@ -8,6 +8,7 @@ import test from 'node:test';
 import type { Agent, Project } from '@paperclipai/plugin-sdk';
 import { createTestHarness } from '@paperclipai/plugin-sdk/testing';
 
+import type { PublishLocalBranchInput, PublishedBranch } from '../src/git-branch-publisher.ts';
 import manifest from '../src/manifest.ts';
 import {
   COMPANY_METRIC_API_ROUTE_KEY,
@@ -31,8 +32,13 @@ import {
 
 const TEST_GITHUB_TOKEN = 'ghp_test_token';
 const TEST_GITHUB_SECRET_ID = '00000000-0000-4000-8000-000000000001';
+const TEST_HEAD_COMMIT_SHA = 'c13293efd19eca09004826317182be4e0f502eed';
 
 let plugin!: typeof import('../src/worker.ts').default;
+let publishedBranchRequests: PublishLocalBranchInput[] = [];
+let configureCreatePullRequestBranchPublisher!: (
+  publisher?: (input: PublishLocalBranchInput) => Promise<PublishedBranch>
+) => void;
 let workerImportSerial = 0;
 let uiImportSerial = 0;
 
@@ -53,7 +59,18 @@ async function importFreshUiModule() {
 }
 
 test.beforeEach(async () => {
-  plugin = await importFreshWorker();
+  const workerModule = await importFreshWorkerModule();
+  publishedBranchRequests = [];
+  configureCreatePullRequestBranchPublisher = workerModule.__testing.setCreatePullRequestBranchPublisher;
+  workerModule.__testing.setCreatePullRequestBranchPublisher(async (input: PublishLocalBranchInput) => {
+    publishedBranchRequests.push(input);
+    return {
+      branchName: input.branchName,
+      commitSha: input.expectedCommitSha,
+      remoteRef: `refs/heads/${input.branchName}`
+    };
+  });
+  plugin = workerModule.default;
 });
 
 test('sync keeps completed healthy PR waits unassigned instead of restarting internal review', async () => {
@@ -655,6 +672,30 @@ async function createGitHubAgentToolHarness() {
     config: {
       githubToken: TEST_GITHUB_TOKEN
     }
+  });
+  const project = createProjectFixture({
+    id: 'project-1',
+    companyId: 'company-1',
+    name: 'Engineering',
+    repoUrl: 'https://github.com/paperclipai/example-repo'
+  });
+  harness.seed({
+    projects: [project],
+    executionWorkspaces: [
+      {
+        id: 'execution-workspace-1',
+        companyId: 'company-1',
+        projectId: 'project-1',
+        projectWorkspaceId: 'workspace-project-1',
+        path: '/tmp/paperclip-github-plugin-example-repo/.paperclip/worktrees/issue-worktree',
+        cwd: '/tmp/paperclip-github-plugin-example-repo/.paperclip/worktrees/issue-worktree',
+        repoUrl: 'https://github.com/paperclipai/example-repo',
+        baseRef: 'main',
+        branchName: null,
+        providerType: 'local',
+        providerMetadata: null
+      }
+    ]
   });
   await plugin.definition.setup(harness.ctx);
   await harness.performAction('settings.saveRegistration', {
@@ -1555,6 +1596,23 @@ test('manifest declares GitHub agent tools and only the external metrics API rou
   );
 });
 
+test('create_pull_request requires one-call branch publication inputs', () => {
+  assert.ok(manifest.capabilities.includes('execution.workspaces.read'));
+  assert.ok(manifest.capabilities.includes('issues.checkout'));
+  const declaration = manifest.tools?.find((tool) => tool.name === 'create_pull_request');
+  assert.ok(declaration);
+  assert.match(declaration.description, /publish(?:es)? the local branch/i);
+  assert.deepEqual(
+    declaration.parametersSchema.required,
+    ['paperclipIssueId', 'head', 'headCommitSha', 'base', 'title']
+  );
+  const properties = declaration.parametersSchema.properties as Record<string, { description?: string }>;
+  assert.match(
+    String(properties.headCommitSha?.description ?? ''),
+    /exact local branch tip/i
+  );
+});
+
 test('upload_pull_request_asset publishes an image asset with embeddable markdown', async () => {
   const harness = await createGitHubAgentToolHarness();
   const originalFetch = globalThis.fetch;
@@ -1905,6 +1963,15 @@ test('add_issue_comment appends a generic AI footer when llmModel is omitted', a
 
 test('create_pull_request appends the required AI footer to the pull request body', async () => {
   const harness = await createGitHubAgentToolHarness();
+  const issue = await harness.ctx.issues.create({
+    companyId: 'company-1',
+    projectId: 'project-1',
+    title: 'Fix the importer',
+    description: 'Publish and open the pull request in one call.',
+    status: 'in_progress',
+    assigneeAgentId: 'agent-1',
+    executionWorkspaceId: 'execution-workspace-1'
+  });
   const originalFetch = globalThis.fetch;
   let createdBody = '';
 
@@ -1934,17 +2001,39 @@ test('create_pull_request appends the required AI footer to the pull request bod
 
   try {
     const result = await harness.executeTool('create_pull_request', {
+      paperclipIssueId: issue.id,
       head: 'feature/fix-importer',
+      headCommitSha: TEST_HEAD_COMMIT_SHA,
       base: 'main',
       title: 'Fix the importer',
       body: 'This closes the sync gap.',
       llmModel: 'gpt-5.4'
     }, {
+      agentId: 'agent-1',
+      runId: 'run-1',
       companyId: 'company-1',
       projectId: 'project-1'
     });
 
     assert.ok(!result.error);
+    assert.equal(publishedBranchRequests.length, 1);
+    assert.deepEqual(
+      {
+        workspacePath: publishedBranchRequests[0]?.workspacePath,
+        repositoryUrl: publishedBranchRequests[0]?.repositoryUrl,
+        branchName: publishedBranchRequests[0]?.branchName,
+        expectedCommitSha: publishedBranchRequests[0]?.expectedCommitSha,
+        baseBranch: publishedBranchRequests[0]?.baseBranch
+      },
+      {
+        workspacePath: '/tmp/paperclip-github-plugin-example-repo/.paperclip/worktrees/issue-worktree',
+        repositoryUrl: 'https://github.com/paperclipai/example-repo',
+        branchName: 'feature/fix-importer',
+        expectedCommitSha: TEST_HEAD_COMMIT_SHA,
+        baseBranch: 'main'
+      }
+    );
+    assert.equal(publishedBranchRequests[0]?.githubToken, TEST_GITHUB_TOKEN);
     assert.match(createdBody, /^This closes the sync gap\./);
     assert.match(createdBody, /---\n###### ✨ This pull request description was AI-generated using gpt-5\.4/);
     assert.match((result.data as { pullRequest: { body: string } }).pullRequest.body, /gpt-5\.4/);
@@ -1953,8 +2042,130 @@ test('create_pull_request appends the required AI footer to the pull request bod
   }
 });
 
+test('create_pull_request does not call the GitHub PR API when branch publication fails', async () => {
+  const harness = await createGitHubAgentToolHarness();
+  const issue = await harness.ctx.issues.create({
+    companyId: 'company-1',
+    projectId: 'project-1',
+    title: 'Publication failure',
+    description: 'The PR API must not run after a failed branch publication.',
+    status: 'in_progress',
+    assigneeAgentId: 'agent-1',
+    executionWorkspaceId: 'execution-workspace-1'
+  });
+  configureCreatePullRequestBranchPublisher(async () => {
+    throw new Error('remote branch verification failed');
+  });
+  const originalFetch = globalThis.fetch;
+  let githubApiCalled = false;
+  globalThis.fetch = async () => {
+    githubApiCalled = true;
+    throw new Error('GitHub PR API should not be called.');
+  };
+
+  try {
+    const result = await harness.executeTool('create_pull_request', {
+      paperclipIssueId: issue.id,
+      head: 'feature/publication-failure',
+      headCommitSha: TEST_HEAD_COMMIT_SHA,
+      base: 'main',
+      title: 'Do not create this PR'
+    }, {
+      agentId: 'agent-1',
+      runId: 'run-1',
+      companyId: 'company-1',
+      projectId: 'project-1'
+    });
+
+    assert.match(result.error ?? '', /remote branch verification failed/i);
+    assert.equal(githubApiCalled, false);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('create_pull_request recovers an existing exact-SHA pull request after a retryable create conflict', async () => {
+  const harness = await createGitHubAgentToolHarness();
+  const issue = await harness.ctx.issues.create({
+    companyId: 'company-1',
+    projectId: 'project-1',
+    title: 'Retry-safe pull request',
+    description: 'Recover the already-created PR after response or link loss.',
+    status: 'in_progress',
+    assigneeAgentId: 'agent-1',
+    executionWorkspaceId: 'execution-workspace-1'
+  });
+  const originalFetch = globalThis.fetch;
+  const seenRequests: string[] = [];
+  globalThis.fetch = async (input, init) => {
+    const url = new URL(getRequestUrl(input));
+    const method = init?.method ?? 'GET';
+    seenRequests.push(`${method} ${url.pathname}`);
+    if (url.pathname === '/repos/paperclipai/example-repo/pulls' && method === 'POST') {
+      return jsonResponse({ message: 'A pull request already exists for this branch.' }, 422);
+    }
+    if (url.pathname === '/repos/paperclipai/example-repo/pulls' && method === 'GET') {
+      return jsonResponse([{
+        number: 24,
+        title: 'Retry-safe pull request',
+        body: '',
+        html_url: 'https://github.com/paperclipai/example-repo/pull/24',
+        state: 'open',
+        draft: false,
+        head: {
+          ref: 'feature/retry-safe',
+          sha: TEST_HEAD_COMMIT_SHA
+        },
+        base: {
+          ref: 'main'
+        }
+      }]);
+    }
+    throw new Error(`Unexpected GitHub request: ${method} ${url.pathname}`);
+  };
+
+  try {
+    const result = await harness.executeTool('create_pull_request', {
+      paperclipIssueId: issue.id,
+      head: 'feature/retry-safe',
+      headCommitSha: TEST_HEAD_COMMIT_SHA,
+      base: 'main',
+      title: 'Retry-safe pull request'
+    }, {
+      agentId: 'agent-1',
+      runId: 'run-1',
+      companyId: 'company-1',
+      projectId: 'project-1'
+    });
+
+    assert.ok(!result.error);
+    assert.deepEqual(seenRequests, [
+      'POST /repos/paperclipai/example-repo/pulls',
+      'GET /repos/paperclipai/example-repo/pulls'
+    ]);
+    assert.equal((result.data as { pullRequest: { number: number } }).pullRequest.number, 24);
+    const links = await harness.ctx.entities.list({
+      entityType: 'paperclip-github-plugin.pull-request-link',
+      scopeKind: 'issue',
+      scopeId: issue.id
+    });
+    assert.equal(links.length, 1);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test('create_pull_request auto-records Paperclip PR metrics and API route attribution dedupes duplicate PR events', async () => {
   const harness = await createGitHubAgentToolHarness();
+  const issue = await harness.ctx.issues.create({
+    companyId: 'company-1',
+    projectId: 'project-1',
+    title: 'Metric-tracked pull request',
+    description: 'Track one atomic pull request creation.',
+    status: 'in_progress',
+    assigneeAgentId: 'agent-1',
+    executionWorkspaceId: 'execution-workspace-1'
+  });
   const originalFetch = globalThis.fetch;
 
   globalThis.fetch = async (input, init) => {
@@ -1982,10 +2193,14 @@ test('create_pull_request auto-records Paperclip PR metrics and API route attrib
 
   try {
     const createResult = await harness.executeTool('create_pull_request', {
+      paperclipIssueId: issue.id,
       head: 'feature/fix-importer',
+      headCommitSha: TEST_HEAD_COMMIT_SHA,
       base: 'main',
       title: 'Fix the importer'
     }, {
+      agentId: 'agent-1',
+      runId: 'run-1',
       companyId: 'company-1',
       projectId: 'project-1'
     });
@@ -2037,7 +2252,10 @@ test('create_pull_request links the created pull request to the current Papercli
     companyId: 'company-1',
     projectId: 'project-1',
     title: 'Native Paperclip issue',
-    description: 'This issue did not come from GitHub.'
+    description: 'This issue did not come from GitHub.',
+    status: 'in_progress',
+    assigneeAgentId: 'agent-1',
+    executionWorkspaceId: 'execution-workspace-1'
   });
 
   globalThis.fetch = async (input, init) => {
@@ -2067,9 +2285,12 @@ test('create_pull_request links the created pull request to the current Papercli
     const createResult = await harness.executeTool('create_pull_request', {
       paperclipIssueId: issue.id,
       head: 'feature/native-paperclip-issue',
+      headCommitSha: TEST_HEAD_COMMIT_SHA,
       base: 'main',
       title: 'Fix native issue sync'
     }, {
+      agentId: 'agent-1',
+      runId: 'run-1',
       companyId: 'company-1',
       projectId: 'project-1'
     });

@@ -263,20 +263,25 @@ export const GITHUB_AGENT_TOOLS: PluginToolDeclaration[] = [
   {
     name: 'create_pull_request',
     displayName: 'Create Pull Request',
-    description: 'Open a GitHub pull request once the implementation branch is pushed. When a non-empty body is provided, the plugin appends an AI-authorship footer and includes llmModel when supplied.',
+    description: 'Publish the local branch at the exact requested commit, verify the remote branch, then create and link a GitHub pull request in one operation. The GitHub credential remains inside the trusted plugin worker. When a non-empty body is provided, the plugin appends an AI-authorship footer and includes llmModel when supplied.',
     parametersSchema: {
       type: 'object',
       additionalProperties: false,
-      required: ['head', 'base', 'title'],
+      required: ['paperclipIssueId', 'head', 'headCommitSha', 'base', 'title'],
       properties: {
         repository: repositoryProperty,
         paperclipIssueId: {
           type: 'string',
-          description: 'Optional Paperclip issue id to link with the created pull request so GitHub Sync can monitor PR status for that issue.'
+          description: 'Paperclip issue id used to resolve the trusted project workspace, mapped GitHub repository, and durable pull-request link.'
         },
         head: {
           type: 'string',
-          description: 'Head branch name or owner:branch.'
+          description: 'Plain local branch name to publish. Owner-qualified branches and arbitrary refspecs are rejected.'
+        },
+        headCommitSha: {
+          type: 'string',
+          pattern: '^[0-9a-fA-F]{40}$',
+          description: 'Full 40-character commit SHA that must equal the exact local branch tip and the verified remote branch tip.'
         },
         base: {
           type: 'string',
