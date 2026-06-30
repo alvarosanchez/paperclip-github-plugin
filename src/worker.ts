@@ -244,7 +244,6 @@ interface GitHubSyncAdvancedSettings {
   approverAssigneeUserId?: string;
   defaultStatus: PaperclipIssueStatus;
   ignoredIssueAuthorUsernames: string[];
-  githubTokenPropagationAgentIds?: string[];
 }
 
 interface GitHubSyncAssigneeOption {
@@ -5803,11 +5802,6 @@ function normalizeAdvancedSettings(value: unknown): GitHubSyncAdvancedSettings {
     'ignoredIssueAuthorUsernames' in record
       ? normalizeIgnoredIssueAuthorUsernames(record.ignoredIssueAuthorUsernames)
       : DEFAULT_ADVANCED_SETTINGS.ignoredIssueAuthorUsernames;
-  const githubTokenPropagationAgentIds =
-    'githubTokenPropagationAgentIds' in record
-      ? normalizeAgentIds(record.githubTokenPropagationAgentIds)
-      : [];
-
   return {
     ...normalizeAdvancedSettingsAssigneeOverride(record, {
       agentId: 'defaultAssigneeAgentId',
@@ -5826,8 +5820,7 @@ function normalizeAdvancedSettings(value: unknown): GitHubSyncAdvancedSettings {
       userId: 'approverAssigneeUserId'
     }),
     defaultStatus,
-    ignoredIssueAuthorUsernames,
-    ...(githubTokenPropagationAgentIds.length > 0 ? { githubTokenPropagationAgentIds } : {})
+    ignoredIssueAuthorUsernames
   };
 }
 

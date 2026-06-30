@@ -30,7 +30,6 @@ export const manifest: PaperclipPluginManifestV1 = {
     'ui.page.register',
     'ui.dashboardWidget.register',
     'ui.detailTab.register',
-    'ui.commentAnnotation.register',
     'ui.action.register',
     'plugin.state.read',
     'plugin.state.write',
@@ -130,13 +129,6 @@ export const manifest: PaperclipPluginManifestV1 = {
         displayName: 'GitHub',
         exportName: 'GitHubSyncIssueTaskDetailView',
         entityTypes: ['issue']
-      },
-      {
-        type: 'commentAnnotation',
-        id: 'paperclip-github-plugin-comment-annotation',
-        displayName: 'GitHub Sync Links',
-        exportName: 'GitHubSyncCommentAnnotation',
-        entityTypes: ['comment']
       },
       {
         type: 'globalToolbarButton',

@@ -260,7 +260,6 @@ interface GitHubSyncAdvancedSettings {
   approverAssigneeUserId?: string;
   defaultStatus: PaperclipIssueStatus;
   ignoredIssueAuthorUsernames: string[];
-  githubTokenPropagationAgentIds?: string[];
 }
 
 interface GitHubSyncSettings {
@@ -655,7 +654,6 @@ interface BoardAccessRequirementState {
   status: BoardAccessRequirementStatus;
   required: boolean;
   settingsVisible: boolean;
-  githubTokenPropagationSettingsVisible: boolean;
 }
 
 interface ThemePalette {
@@ -935,13 +933,11 @@ function usePaperclipBoardAccessRequirement(): {
   status: BoardAccessRequirementStatus;
   required: boolean;
   settingsVisible: boolean;
-  githubTokenPropagationSettingsVisible: boolean;
 } {
   const [state, setState] = useState<BoardAccessRequirementState>({
     status: 'loading',
     required: false,
-    settingsVisible: false,
-    githubTokenPropagationSettingsVisible: true
+    settingsVisible: false
   });
 
   useEffect(() => {
@@ -958,8 +954,7 @@ function usePaperclipBoardAccessRequirement(): {
         setState({
           status: 'unknown',
           required: policy.boardAccessRequired,
-          settingsVisible: policy.boardAccessSettingsVisible,
-          githubTokenPropagationSettingsVisible: policy.githubTokenPropagationSettingsVisible
+          settingsVisible: policy.boardAccessSettingsVisible
         });
         return;
       }
@@ -968,8 +963,7 @@ function usePaperclipBoardAccessRequirement(): {
       setState({
         status: policy.boardAccessRequired ? 'required' : 'not_required',
         required: policy.boardAccessRequired,
-        settingsVisible: policy.boardAccessSettingsVisible,
-        githubTokenPropagationSettingsVisible: policy.githubTokenPropagationSettingsVisible
+        settingsVisible: policy.boardAccessSettingsVisible
       });
     })();
 
@@ -4967,10 +4961,7 @@ function normalizeAdvancedSettings(value: unknown): GitHubSyncAdvancedSettings {
     ignoredIssueAuthorUsernames:
       'ignoredIssueAuthorUsernames' in record
         ? normalizeIgnoredIssueAuthorUsernames(record.ignoredIssueAuthorUsernames)
-        : DEFAULT_ADVANCED_SETTINGS.ignoredIssueAuthorUsernames,
-    ...(normalizeAgentIds(record.githubTokenPropagationAgentIds).length > 0
-      ? { githubTokenPropagationAgentIds: normalizeAgentIds(record.githubTokenPropagationAgentIds) }
-      : {})
+        : DEFAULT_ADVANCED_SETTINGS.ignoredIssueAuthorUsernames
   };
 }
 
@@ -4999,10 +4990,7 @@ function getComparableAdvancedSettings(value: GitHubSyncAdvancedSettings | null 
     ...(settings.approverAssigneeAgentId ? { approverAssigneeAgentId: settings.approverAssigneeAgentId } : {}),
     ...(settings.approverAssigneeUserId ? { approverAssigneeUserId: settings.approverAssigneeUserId } : {}),
     defaultStatus: settings.defaultStatus,
-    ignoredIssueAuthorUsernames: [...settings.ignoredIssueAuthorUsernames].sort((left, right) => left.localeCompare(right)),
-    ...(settings.githubTokenPropagationAgentIds?.length
-      ? { githubTokenPropagationAgentIds: [...settings.githubTokenPropagationAgentIds].sort((left, right) => left.localeCompare(right)) }
-      : {})
+    ignoredIssueAuthorUsernames: [...settings.ignoredIssueAuthorUsernames].sort((left, right) => left.localeCompare(right))
   };
 }
 
@@ -5144,30 +5132,9 @@ function getAvailableAssigneeOptions(
   return normalizedOptions.sort(compareAssigneeOptions);
 }
 
-function getAvailablePropagationAgentOptions(
-  options: GitHubSyncAssigneeOption[] | null | undefined,
-  selectedAgentIds: string[] | null | undefined
-): GitHubSyncAssigneeOption[] {
-  const normalizedOptions = [...(options ?? []).filter((option) => option.kind === 'agent')];
-  const selectedIds = normalizeAgentIds(selectedAgentIds);
-
-  for (const selectedAgentId of selectedIds) {
-    if (!normalizedOptions.some((option) => option.id === selectedAgentId)) {
-      normalizedOptions.push({
-        kind: 'agent',
-        id: selectedAgentId,
-        name: 'Unavailable agent'
-      });
-    }
-  }
-
-  return normalizedOptions.sort(compareAssigneeOptions);
-}
-
 function formatAdvancedSettingsSummary(
   advancedSettings: GitHubSyncAdvancedSettings,
-  availableAssignees: GitHubSyncAssigneeOption[],
-  options?: { includePropagation?: boolean }
+  availableAssignees: GitHubSyncAssigneeOption[]
 ): string {
   const resolveAssigneeLabel = (
     principal: GitHubSyncAssigneePrincipal | null,
@@ -5196,15 +5163,6 @@ function formatAdvancedSettingsSummary(
       ? advancedSettings.ignoredIssueAuthorUsernames.join(', ')
       : 'none';
   const handoffLabel = `Back to work: ${executorLabel} · Review: ${reviewerLabel} · Approval: ${approverLabel}`;
-  if (options?.includePropagation) {
-    const propagatedAgentsLabel =
-      advancedSettings.githubTokenPropagationAgentIds?.length
-        ? `${advancedSettings.githubTokenPropagationAgentIds.length} selected`
-        : 'none';
-
-    return `Import: ${assigneeLabel} · ${handoffLabel} · Status: ${statusLabel} · Ignore: ${ignoredAuthorsLabel} · Propagate: ${propagatedAgentsLabel}`;
-  }
-
   return `Import: ${assigneeLabel} · ${handoffLabel} · Status: ${statusLabel} · Ignore: ${ignoredAuthorsLabel}`;
 }
 
@@ -6965,192 +6923,6 @@ export async function patchPluginConfig(pluginId: string, patch: Record<string, 
 
     await writePluginConfig(pluginId, safeConfig);
   }
-}
-
-const GITHUB_TOKEN_PROPAGATION_CONCURRENCY_LIMIT = 4;
-
-function normalizeAgentAdapterConfig(value: unknown): Record<string, unknown> {
-  return value && typeof value === 'object' && !Array.isArray(value)
-    ? { ...(value as Record<string, unknown>) }
-    : {};
-}
-
-function normalizeAgentEnvBindings(value: unknown): Record<string, unknown> {
-  return value && typeof value === 'object' && !Array.isArray(value)
-    ? { ...(value as Record<string, unknown>) }
-    : {};
-}
-
-function isMatchingSecretRefEnvBinding(value: unknown, secretId: string): boolean {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    return false;
-  }
-
-  const record = value as Record<string, unknown>;
-  return record.type === 'secret_ref' && record.secretId === secretId;
-}
-
-function getAgentPropagationPatch(params: {
-  adapterConfig: unknown;
-  githubTokenSecretRef: string;
-  mode: 'ensure' | 'remove';
-}): Record<string, unknown> | null {
-  const adapterConfig = normalizeAgentAdapterConfig(params.adapterConfig);
-  const currentEnv = normalizeAgentEnvBindings(adapterConfig.env);
-
-  if (params.mode === 'ensure') {
-    const nextEnv = {
-      ...currentEnv,
-      GITHUB_TOKEN: {
-        type: 'secret_ref',
-        secretId: params.githubTokenSecretRef,
-        version: 'latest'
-      }
-    };
-
-    if (JSON.stringify(nextEnv) === JSON.stringify(currentEnv)) {
-      return null;
-    }
-
-    return {
-      ...adapterConfig,
-      env: nextEnv
-    };
-  }
-
-  if (!isMatchingSecretRefEnvBinding(currentEnv.GITHUB_TOKEN, params.githubTokenSecretRef)) {
-    return null;
-  }
-
-  const nextEnv = { ...currentEnv };
-  delete nextEnv.GITHUB_TOKEN;
-
-  const nextAdapterConfig = {
-    ...adapterConfig
-  };
-
-  if (Object.keys(nextEnv).length > 0) {
-    nextAdapterConfig.env = nextEnv;
-  } else {
-    delete nextAdapterConfig.env;
-  }
-
-  return nextAdapterConfig;
-}
-
-async function runWithConcurrencyLimit<T>(
-  items: T[],
-  concurrencyLimit: number,
-  worker: (item: T) => Promise<void>
-): Promise<void> {
-  if (items.length === 0) {
-    return;
-  }
-
-  let nextIndex = 0;
-  const runnerCount = Math.min(concurrencyLimit, items.length);
-
-  await Promise.all(
-    Array.from({ length: runnerCount }, async () => {
-      while (nextIndex < items.length) {
-        const currentIndex = nextIndex;
-        nextIndex += 1;
-        await worker(items[currentIndex]);
-      }
-    })
-  );
-}
-
-async function applyGitHubTokenPropagationUpdate(params: {
-  agentId: string;
-  githubTokenSecretRef: string;
-  mode: 'ensure' | 'remove';
-}): Promise<void> {
-  const agent = await fetchJson<{ adapterConfig?: unknown }>(`/api/agents/${params.agentId}`);
-  const nextAdapterConfig = getAgentPropagationPatch({
-    adapterConfig: agent?.adapterConfig,
-    githubTokenSecretRef: params.githubTokenSecretRef,
-    mode: params.mode
-  });
-
-  if (!nextAdapterConfig) {
-    return;
-  }
-
-  await fetchJson(`/api/agents/${params.agentId}`, {
-    method: 'PATCH',
-    body: JSON.stringify({
-      adapterConfig: nextAdapterConfig,
-      replaceAdapterConfig: true
-    })
-  });
-}
-
-export async function syncGitHubTokenPropagationForAgents(params: {
-  githubTokenSecretRef: string;
-  selectedAgentIds: string[];
-  previousAgentIds?: string[];
-}): Promise<void> {
-  const selectedAgentIds = normalizeAgentIds(params.selectedAgentIds);
-  const selectedAgentIdSet = new Set(selectedAgentIds);
-  const previousAgentIds = normalizeAgentIds(params.previousAgentIds);
-  const failures = new Set<string>();
-  const operations = [
-    ...selectedAgentIds.map((agentId) => ({ agentId, mode: 'ensure' as const })),
-    ...previousAgentIds
-      .filter((agentId) => !selectedAgentIdSet.has(agentId))
-      .map((agentId) => ({ agentId, mode: 'remove' as const }))
-  ];
-
-  await runWithConcurrencyLimit(
-    operations,
-    GITHUB_TOKEN_PROPAGATION_CONCURRENCY_LIMIT,
-    async (operation) => {
-      try {
-        await applyGitHubTokenPropagationUpdate({
-          agentId: operation.agentId,
-          githubTokenSecretRef: params.githubTokenSecretRef,
-          mode: operation.mode
-        });
-      } catch {
-        failures.add(operation.agentId);
-      }
-    }
-  );
-
-  if (failures.size > 0) {
-    throw new Error(
-      `GitHub token propagation could not update these agents: ${[...failures].join(', ')}.`
-    );
-  }
-}
-
-function normalizeTrimmedString(value: unknown): string | undefined {
-  return typeof value === 'string' && value.trim() ? value.trim() : undefined;
-}
-
-export function resolveGitHubTokenSecretRefForPropagation(params: {
-  explicitSecretRef?: unknown;
-  settingsSecretRef?: unknown;
-  companyId?: string | null;
-  pluginConfig?: GitHubSyncPluginConfig | null;
-}): string | undefined {
-  const explicitSecretRef = normalizeTrimmedString(params.explicitSecretRef);
-  if (explicitSecretRef) {
-    return explicitSecretRef;
-  }
-
-  const settingsSecretRef = normalizeTrimmedString(params.settingsSecretRef);
-  if (settingsSecretRef) {
-    return settingsSecretRef;
-  }
-
-  const companyId = normalizeTrimmedString(params.companyId);
-  if (!companyId || !params.pluginConfig) {
-    return undefined;
-  }
-
-  return normalizePluginConfig(params.pluginConfig).githubTokenRefs?.[companyId];
 }
 
 function normalizeCliAuthPollIntervalMs(value: unknown): number {
@@ -11612,14 +11384,6 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
           }
         });
 
-        const selectedAgentIds = normalizeAgentIds(settings.data?.advancedSettings?.githubTokenPropagationAgentIds);
-        if (selectedAgentIds.length > 0) {
-          await propagateGitHubTokenToSelectedAgents({
-            selectedAgentIds,
-            previousAgentIds: selectedAgentIds,
-            githubTokenSecretRef: secretRef
-          });
-        }
 
         if (cancelled) {
           return;
@@ -11659,7 +11423,6 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
   }, [
     hostContext.companyId,
     pluginIdFromLocation,
-    settings.data?.advancedSettings?.githubTokenPropagationAgentIds,
     settings.data?.githubTokenNeedsConfigSync,
     settings.data?.githubTokenConfigSyncRef,
     settings.refresh,
@@ -11820,7 +11583,6 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
   const boardAccessConfigured = Boolean(form.paperclipBoardAccessConfigured);
   const boardAccessRequired = boardAccessRequirement.required;
   const boardAccessSettingsVisible = boardAccessRequirement.settingsVisible;
-  const githubTokenPropagationSettingsVisible = boardAccessRequirement.githubTokenPropagationSettingsVisible;
   const boardAccessReady = !boardAccessRequired || (hasCompanyContext && boardAccessConfigured);
   const tokenStatus = tokenStatusOverride ?? (hasSavedToken ? 'valid' : 'required');
   const tokenTone: Tone = tokenStatus === 'valid' ? 'success' : tokenStatus === 'invalid' ? 'danger' : 'warning';
@@ -11886,12 +11648,6 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
       getAdvancedSettingsAssigneePrincipal(form.advancedSettings, 'reviewer'),
       getAdvancedSettingsAssigneePrincipal(form.advancedSettings, 'approver')
     ]
-  );
-  const propagationAgents = getAvailablePropagationAgentOptions(
-    (currentSettings?.availableAssignees?.length ? currentSettings.availableAssignees : null)
-    ?? (form.availableAssignees?.length ? form.availableAssignees : null)
-    ?? browserAvailableAssignees,
-    form.advancedSettings.githubTokenPropagationAgentIds
   );
   const savedMappingsSource = currentSettings ? currentSettings.mappings ?? [] : form.mappings;
   const savedMappings = getComparableMappings(savedMappingsSource);
@@ -12035,9 +11791,7 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
     : 'ghsync__scope-pill ghsync__scope-pill--mixed';
   const manualSyncScopePillLabel = hasCompanyContext ? 'This company' : 'All companies';
   const manualSyncButtonLabel = hasCompanyContext ? 'Run sync for this company' : 'Run sync across all companies';
-  const advancedSettingsSummary = formatAdvancedSettingsSummary(form.advancedSettings, availableAssignees, {
-    includePropagation: githubTokenPropagationSettingsVisible
-  });
+  const advancedSettingsSummary = formatAdvancedSettingsSummary(form.advancedSettings, availableAssignees);
   const assigneeSelectOptions: SettingsSelectOption[] = [
     { value: '', label: 'Unassigned' },
     ...availableAssignees.map((option) => ({
@@ -12054,11 +11808,6 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
       icon: option.kind
     }))
   ];
-  const propagationAgentOptions: SettingsSelectOption[] = propagationAgents.map((option) => ({
-    value: option.id,
-    label: formatAssigneeOptionLabel(option),
-    icon: 'agent' as const
-  }));
   const statusSelectOptions: SettingsSelectOption[] = PAPERCLIP_STATUS_OPTIONS.map((option) => ({
     value: option.value,
     label: option.label,
@@ -12226,52 +11975,6 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
     });
   }
 
-  async function propagateGitHubTokenToSelectedAgents(options: {
-    selectedAgentIds: string[];
-    previousAgentIds?: string[];
-    githubTokenSecretRef?: string;
-  }): Promise<void> {
-    const selectedAgentIds = normalizeAgentIds(options.selectedAgentIds);
-    const previousAgentIds = normalizeAgentIds(options.previousAgentIds);
-    if (selectedAgentIds.length === 0 && previousAgentIds.length === 0) {
-      return;
-    }
-
-    const companyId = hostContext.companyId;
-    let githubTokenSecretRef = resolveGitHubTokenSecretRefForPropagation({
-      explicitSecretRef: options.githubTokenSecretRef,
-      settingsSecretRef: currentSettings?.githubTokenConfigSyncRef ?? settings.data?.githubTokenConfigSyncRef,
-      companyId
-    });
-
-    if (!githubTokenSecretRef) {
-      if (!companyId) {
-        throw new Error('Company context is required to propagate the GitHub token.');
-      }
-
-      const pluginId = await resolveCurrentPluginId(pluginIdFromLocation);
-      if (!pluginId) {
-        throw new Error('Plugin id is required to propagate the GitHub token to selected agents.');
-      }
-
-      const currentConfigResponse = await fetchJson<PluginConfigResponse | null>(`/api/plugins/${pluginId}/config`);
-      githubTokenSecretRef = resolveGitHubTokenSecretRefForPropagation({
-        companyId,
-        pluginConfig: normalizePluginConfig(currentConfigResponse?.configJson)
-      });
-    }
-
-    if (!githubTokenSecretRef) {
-      throw new Error('GitHub token propagation requires a GitHub token saved through this settings page.');
-    }
-
-    await syncGitHubTokenPropagationForAgents({
-      githubTokenSecretRef,
-      selectedAgentIds,
-      previousAgentIds
-    });
-  }
-
   async function handleSaveToken(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setSubmittingToken(true);
@@ -12343,17 +12046,6 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
         availabilityWarning = error;
       }
 
-      const selectedAgentIds = normalizeAgentIds(currentSettings?.advancedSettings?.githubTokenPropagationAgentIds);
-      let propagationError: unknown = null;
-      try {
-        await propagateGitHubTokenToSelectedAgents({
-          selectedAgentIds,
-          previousAgentIds: selectedAgentIds,
-          githubTokenSecretRef: secret.id
-        });
-      } catch (error) {
-        propagationError = error;
-      }
 
       setForm((current) => ({
         ...current,
@@ -12369,16 +12061,6 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
         body: 'Token saved.',
         tone: 'success'
       });
-      if (propagationError) {
-        toast({
-          title: 'GitHub token saved, but agent propagation needs attention',
-          body: getActionErrorMessage(
-            propagationError,
-            'GitHub Sync could not update the selected agents with the saved token.'
-          ),
-          tone: 'error'
-        });
-      }
       if (availabilityWarning) {
         toast({
           title: 'GitHub token saved, but worker token access needs attention',
@@ -12571,21 +12253,6 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
         ...(trustedPaperclipApiBaseUrl ? { paperclipApiBaseUrl: trustedPaperclipApiBaseUrl } : {})
       }) as GitHubSyncSettings;
 
-      let propagationError: unknown = null;
-      try {
-        const githubTokenSecretRef = resolveGitHubTokenSecretRefForPropagation({
-          explicitSecretRef: result.githubTokenConfigSyncRef,
-          settingsSecretRef: currentSettings?.githubTokenConfigSyncRef ?? settings.data?.githubTokenConfigSyncRef,
-          companyId
-        });
-        await propagateGitHubTokenToSelectedAgents({
-          selectedAgentIds: normalizeAgentIds(normalizeAdvancedSettings(result.advancedSettings).githubTokenPropagationAgentIds),
-          previousAgentIds: normalizeAgentIds(currentSettings?.advancedSettings?.githubTokenPropagationAgentIds),
-          githubTokenSecretRef
-        });
-      } catch (error) {
-        propagationError = error;
-      }
 
       setForm((current) => ({
         ...current,
@@ -12606,16 +12273,6 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
         body: `Advanced defaults, mappings, and automatic sync are saved for ${currentCompanyName}.`,
         tone: 'success'
       });
-      if (propagationError) {
-        toast({
-          title: 'Settings saved, but agent propagation needs attention',
-          body: getActionErrorMessage(
-            propagationError,
-            'GitHub Sync could not apply the selected agent token propagation updates.'
-          ),
-          tone: 'error'
-        });
-      }
       notifyGitHubSyncSettingsChanged();
 
       try {
@@ -13328,33 +12985,6 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
                   <p className="ghsync__hint">Comma or newline separated.</p>
                 </div>
 
-                {githubTokenPropagationSettingsVisible ? (
-                  <div className="ghsync__field">
-                    <label htmlFor="advanced-token-propagation">Propagate GitHub token to agents</label>
-                    <SettingsAgentMultiPicker
-                      id="advanced-token-propagation"
-                      values={form.advancedSettings.githubTokenPropagationAgentIds ?? []}
-                      options={propagationAgentOptions}
-                      disabled={settingsMutationsLocked || tokenStatus !== 'valid'}
-                      onChange={(nextValues) => {
-                        setForm((current) => ({
-                          ...current,
-                          advancedSettings: {
-                            ...current.advancedSettings,
-                            ...(nextValues.length > 0
-                              ? { githubTokenPropagationAgentIds: nextValues }
-                              : { githubTokenPropagationAgentIds: undefined })
-                          }
-                        }));
-                      }}
-                    />
-                    <p className="ghsync__hint">
-                      {tokenStatus === 'valid'
-                        ? 'Selected agents receive `GITHUB_TOKEN` from the saved GitHub secret when you save settings.'
-                        : 'Save a valid GitHub token before choosing agents to propagate it to.'}
-                    </p>
-                  </div>
-                ) : null}
               </div>
             ) : null}
           </section>

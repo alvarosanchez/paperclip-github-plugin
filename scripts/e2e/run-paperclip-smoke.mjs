@@ -23,7 +23,7 @@ const seededGitHubPullRequestUrl = 'https://github.com/paperclipai/example-repo/
 const manualGitHubIssueLinkTitle = 'Manual GitHub Issue Link Smoke';
 const manualGitHubPullRequestLinkTitle = 'Manual GitHub PR Link Smoke';
 const seededCompanyAttachmentMaxBytes = 10 * 1024 * 1024;
-const defaultPaperclipaiVersion = '2026.618.0';
+const defaultPaperclipaiVersion = '2026.626.0';
 const paperclipaiVersion = process.env.PAPERCLIP_E2E_PAPERCLIPAI_VERSION?.trim() || defaultPaperclipaiVersion;
 const paperclipaiPackageSpec = paperclipaiVersion.startsWith('paperclipai@')
   ? paperclipaiVersion
@@ -928,7 +928,7 @@ async function main() {
       throw new Error('Paperclip board access settings should stay hidden outside authenticated or local trusted deployments.');
     }
     await settingsSurface.getByRole('button', { name: 'Expand', exact: true }).click();
-    await page.getByLabel('Propagate GitHub token to agents').waitFor({ timeout: 120000 });
+    await page.getByLabel('Ignore issues from GitHub usernames').waitFor({ timeout: 120000 });
     await page.getByRole('heading', { name: 'Repositories', exact: true }).waitFor({ timeout: 120000 });
     await page.getByRole('heading', { name: 'Sync', exact: true }).waitFor({ timeout: 120000 });
     await assertWorkerDoesNotReadPaperclipApiUrlFromRuntimeEnv(installedPluginId, company.id);

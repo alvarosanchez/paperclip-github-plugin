@@ -9,7 +9,6 @@ The plugin MUST provide a settings page inside Paperclip where an operator can c
 - a GitHub token stored as a company-scoped Paperclip secret reference
 - an optional external config file at `${PAPERCLIP_HOME:-~/.paperclip}/plugins/github-sync/config.json` for worker-only global values such as a raw `githubToken`
 - Paperclip board access, which is optional but configurable on `deploymentMode: "local_trusted"` deployments and required when the Paperclip deployment reports `deploymentMode: "authenticated"`
-- a company-scoped multi-select of agents that should receive `GITHUB_TOKEN` propagation from the saved GitHub token secret
 - one or more GitHub repository mappings
 - company-scoped advanced defaults for imported issues: default assignee, default Paperclip status, executor/reviewer/approver handoff assignees for sync-driven status transitions, and ignored GitHub issue authors, where a saved username such as `renovate` also matches GitHub bot logins such as `renovate[bot]`
 - the frequency for automatic scheduled sync runs for that company
@@ -22,7 +21,6 @@ The settings page MUST allow saving mappings and triggering a manual sync.
 - When a company context is present, the settings page SHOULD show the active company name prominently using a human-friendly label instead of a raw identifier.
 - When a company already has Paperclip projects bound to GitHub repository workspaces, the settings page SHOULD surface those projects so an operator can enable sync without recreating the project.
 - The settings page MUST render the Paperclip board-access connect controls when the current Paperclip deployment reports `deploymentMode: "authenticated"` or `deploymentMode: "local_trusted"`, while only treating board access as required for sync when the deployment reports `deploymentMode: "authenticated"`.
-- The settings page MUST render the agent token-propagation selector regardless of deployment mode so selected agents can receive the saved `GITHUB_TOKEN` secret reference on local trusted and authenticated instances.
 - When the settings page successfully validates a saved GitHub token, it SHOULD persist the validated GitHub login as non-secret display metadata so later visits can continue showing `Authenticated as ...` instead of falling back to a generic ready state.
 - When the settings page successfully connects Paperclip board access for a company, it SHOULD persist a company-scoped non-secret identity label so later visits can continue showing `Connected as ...` instead of falling back to a generic connected state.
 - When the active company has a saved Paperclip board-access user id, every advanced-settings assignee dropdown MUST include a `Me` option that maps to that connected board user alongside the available agents.
@@ -42,9 +40,7 @@ The settings page MUST allow saving mappings and triggering a manual sync.
 - UI-side plugin config writes MUST recover from the known plugin-secret-reference-disabled failure by retrying without plugin secret-ref maps, so saving non-secret settings cannot be blocked by stale secret-ref config.
 - If a Paperclip host rejects plugin secret-ref resolution with the known plugin-secret-reference-disabled failure while company-scoped plugin config is unavailable, the settings UI MAY ask the worker to persist the validated raw token in a worker-local company-scoped fallback map at `${PAPERCLIP_HOME:-~/.paperclip}/plugins/github-sync/config.json` so production sync can continue without writing the raw token to plugin state or plugin config.
 - The plugin MAY persist lightweight non-secret display metadata such as the validated GitHub login alongside the saved GitHub token secret ref so hosted UI can keep connected-state copy consistent across refreshes without resolving the secret.
-- When settings select agents for GitHub token propagation, the hosted settings UI MUST patch those agents through the host API so `adapterConfig.env.GITHUB_TOKEN` points at that same secret UUID with a latest-version secret-ref binding instead of copying the raw token value.
-- When a settings save removes an agent from that propagation allowlist, the hosted settings UI SHOULD remove `adapterConfig.env.GITHUB_TOKEN` only when that binding still points at the plugin-managed secret UUID, so unrelated manual agent env settings are not clobbered.
-- Agent token propagation updates MUST send `replaceAdapterConfig: true` when patching agent adapter config so newer Paperclip hosts persist the merged `env` map.
+- The settings UI MUST NOT propagate the saved GitHub token into agent `adapterConfig.env`; authenticated agents should use Paperclip's plugin tool dispatcher for GitHub Sync tools instead of receiving `GITHUB_TOKEN` from this plugin.
 - If `${PAPERCLIP_HOME:-~/.paperclip}/plugins/github-sync/config.json` exists and contains either a string `githubToken` or a `githubTokensByCompanyId` map, the worker MUST treat those values as worker-only fallback sources for the GitHub token without persisting or returning those raw tokens.
 - The raw Paperclip board API token MUST NOT be persisted in plugin state.
 - Connecting Paperclip board access from the settings UI MUST create or reuse a company secret through the Paperclip host API and MUST persist only the resulting secret UUID, keyed by company in plugin state and mirrored into plugin instance config when the host allows plugin secret refs there.
@@ -148,8 +144,8 @@ The plugin MUST persist repository mappings, company-scoped advanced issue defau
 ## Host integration requirements
 
 - The plugin MUST register successfully in Paperclip.
-- The plugin manifest MUST NOT declare a strict `minimumHostVersion` or `minimumPaperclipVersion` gate while current latest/development Paperclip hosts may report `0.0.0` during plugin upgrade. Required host surfaces MUST remain represented by manifest capabilities and guarded by worker fallbacks where possible, and the docs MUST still state the intended Paperclip `2026.618.0` support baseline.
-- Disposable e2e and manual host verification MUST pin the Paperclip CLI to `2026.618.0` by default, while retaining an explicit environment override for forward and backward compatibility checks.
+- The plugin manifest MUST NOT declare a strict `minimumHostVersion` or `minimumPaperclipVersion` gate while current latest/development Paperclip hosts may report `0.0.0` during plugin upgrade. Required host surfaces MUST remain represented by manifest capabilities and guarded by worker fallbacks where possible, and the docs MUST still state the intended Paperclip `2026.626.0` support baseline.
+- Disposable e2e and manual host verification MUST pin the Paperclip CLI to `2026.626.0` by default, while retaining an explicit environment override for forward and backward compatibility checks.
 - The plugin MUST expose a dashboard widget contribution for sync readiness and setup.
 - The plugin MUST expose a separate dashboard KPI widget contribution.
 - The plugin MUST expose a settings page contribution.
@@ -204,3 +200,10 @@ The plugin MUST persist repository mappings, company-scoped advanced issue defau
 - The release workflow MUST derive the published version from the GitHub release tag and stamp that version into publishable package metadata before build and publish.
 - After a successful publish, the release workflow MUST sync that resolved release version back into the checked-in `package.json` on the release target branch so repository metadata reflects the latest published release.
 - The release workflow MUST run on a Node.js version that already satisfies npm trusted publishing requirements instead of relying on an in-job npm self-upgrade step.
+
+
+## Paperclip 2026.626 compatibility boundary
+
+Paperclip 2026.626 external object references, task watchdogs, ask work mode, routine date variables, and built-in Hermes adapters are host/runtime capabilities. GitHub Sync MUST NOT declare a duplicate GitHub `external.objects.*` provider while the host ships a built-in GitHub external-object provider. Because that host provider now supersedes the plugin's generic comment-link rendering, GitHub Sync MUST NOT declare the legacy `commentAnnotation` UI slot for GitHub links. Synced descriptions, comments, and status-transition annotations SHOULD continue to include canonical GitHub issue and pull request URLs so the host provider can detect them, but GitHub Sync's mappings, plugin entities, sync jobs, and agent tools remain authoritative for routing mapped/linked Paperclip issue state.
+
+Task watchdogs MUST NOT replace GitHub Sync's scheduled/manual PR status refresh. GitHub Sync MUST NOT create, read, update, delete, or auto-attach `/api/issues/:id/watchdog` configuration, and MUST NOT pass a `watchdog` field when importing or creating GitHub-backed Paperclip issues. Waiting on GitHub CI, mergeability, review threads, or maintainer approval is an external GitHub wait, not a stopped Paperclip task tree. GitHub Sync MAY coexist with operator-created task watchdogs, and its normal issue comments/status transitions SHOULD remain visible to host watchdog reconciliation. However, GitHub Sync MUST continue to drive issue status from GitHub snapshots and MUST NOT treat watchdog review issues as the source of truth for PR state. GitHub Sync tools are normal company-scoped plugin tools, not currently task-watchdog-scope-aware; a future host/plugin contract is required before mutating GitHub tools can enforce watched-subtree scope.

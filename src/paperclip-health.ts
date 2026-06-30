@@ -7,7 +7,6 @@ export interface PaperclipHealthResponse {
 export interface PaperclipAuthControlsPolicy {
   boardAccessRequired: boolean;
   boardAccessSettingsVisible: boolean;
-  githubTokenPropagationSettingsVisible: boolean;
 }
 
 function normalizeOptionalString(value: unknown): string | undefined {
@@ -58,7 +57,6 @@ export function resolvePaperclipAuthControlsPolicy(value: unknown): PaperclipAut
   const health = normalizePaperclipHealthResponse(value);
   return {
     boardAccessRequired: requiresPaperclipBoardAccessForHealth(health),
-    boardAccessSettingsVisible: shouldShowPaperclipBoardAccessSettingsForHealth(health),
-    githubTokenPropagationSettingsVisible: true
+    boardAccessSettingsVisible: shouldShowPaperclipBoardAccessSettingsForHealth(health)
   };
 }

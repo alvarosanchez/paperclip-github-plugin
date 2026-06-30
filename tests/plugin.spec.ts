@@ -1169,287 +1169,6 @@ test('clearGitHubTokenConfigSyncAttemptOnFailure allows the same settings repair
   );
 });
 
-test('syncGitHubTokenPropagationForAgents adds and removes agent GITHUB_TOKEN secret refs without clobbering unrelated env config', async () => {
-  const uiModule = await importFreshUiModule() as {
-    syncGitHubTokenPropagationForAgents?: unknown;
-  };
-
-  assert.equal(typeof uiModule.syncGitHubTokenPropagationForAgents, 'function');
-
-  const syncGitHubTokenPropagationForAgents = uiModule.syncGitHubTokenPropagationForAgents as (params: {
-    githubTokenSecretRef: string;
-    selectedAgentIds: string[];
-    previousAgentIds?: string[];
-  }) => Promise<void>;
-  const originalFetch = globalThis.fetch;
-  const patchBodies: Array<{ agentId: string; body: Record<string, unknown> }> = [];
-
-  globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
-    const url = getRequestUrl(input);
-    const method = (init?.method ?? 'GET').toUpperCase();
-
-    if (url === '/api/agents/agent-1' && method === 'GET') {
-      return jsonResponse({
-        id: 'agent-1',
-        companyId: 'company-1',
-        adapterConfig: {
-          cwd: '/tmp/agent-1',
-          env: {
-            EXISTING: {
-              type: 'plain',
-              value: '1'
-            }
-          }
-        }
-      });
-    }
-
-    if (url === '/api/agents/agent-2' && method === 'GET') {
-      return jsonResponse({
-        id: 'agent-2',
-        companyId: 'company-1',
-        adapterConfig: {
-          model: 'gpt-5.4',
-          env: {
-            GITHUB_TOKEN: {
-              type: 'secret_ref',
-              secretId: TEST_GITHUB_SECRET_ID,
-              version: 'latest'
-            },
-            KEEP_ME: {
-              type: 'plain',
-              value: '2'
-            }
-          }
-        }
-      });
-    }
-
-    if (url === '/api/agents/agent-3' && method === 'GET') {
-      return jsonResponse({
-        id: 'agent-3',
-        companyId: 'company-1',
-        adapterConfig: {
-          env: {
-            GITHUB_TOKEN: {
-              type: 'secret_ref',
-              secretId: '00000000-0000-4000-8000-000000000099',
-              version: 'latest'
-            }
-          }
-        }
-      });
-    }
-
-    if (url.startsWith('/api/agents/') && method === 'PATCH') {
-      const agentId = url.slice('/api/agents/'.length);
-      patchBodies.push({
-        agentId,
-        body: getJsonRequestBody(init) ?? {}
-      });
-      return jsonResponse({ ok: true });
-    }
-
-    throw new Error(`Unexpected fetch request: ${method} ${url}`);
-  };
-
-  try {
-    await syncGitHubTokenPropagationForAgents({
-      githubTokenSecretRef: TEST_GITHUB_SECRET_ID,
-      selectedAgentIds: ['agent-1'],
-      previousAgentIds: ['agent-1', 'agent-2', 'agent-3']
-    });
-
-    assert.deepEqual(
-      [...patchBodies].sort((left, right) => left.agentId.localeCompare(right.agentId)),
-      [
-      {
-        agentId: 'agent-1',
-        body: {
-          adapterConfig: {
-            cwd: '/tmp/agent-1',
-            env: {
-              EXISTING: {
-                type: 'plain',
-                value: '1'
-              },
-              GITHUB_TOKEN: {
-                type: 'secret_ref',
-                secretId: TEST_GITHUB_SECRET_ID,
-                version: 'latest'
-              }
-            }
-          },
-          replaceAdapterConfig: true
-        }
-      },
-      {
-        agentId: 'agent-2',
-        body: {
-          adapterConfig: {
-            model: 'gpt-5.4',
-            env: {
-              KEEP_ME: {
-                type: 'plain',
-                value: '2'
-              }
-            }
-          },
-          replaceAdapterConfig: true
-        }
-      }
-      ]
-    );
-  } finally {
-    globalThis.fetch = originalFetch;
-  }
-});
-
-test('syncGitHubTokenPropagationForAgents batches propagation updates with a small concurrency limit', async () => {
-  const uiModule = await importFreshUiModule() as {
-    syncGitHubTokenPropagationForAgents?: unknown;
-  };
-
-  assert.equal(typeof uiModule.syncGitHubTokenPropagationForAgents, 'function');
-
-  const syncGitHubTokenPropagationForAgents = uiModule.syncGitHubTokenPropagationForAgents as (params: {
-    githubTokenSecretRef: string;
-    selectedAgentIds: string[];
-    previousAgentIds?: string[];
-  }) => Promise<void>;
-  const originalFetch = globalThis.fetch;
-  const patchBodies: Array<{ agentId: string; body: Record<string, unknown> }> = [];
-  let inFlight = 0;
-  let maxInFlight = 0;
-
-  globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
-    const url = getRequestUrl(input);
-    const method = (init?.method ?? 'GET').toUpperCase();
-
-    if (!url.startsWith('/api/agents/')) {
-      throw new Error(`Unexpected fetch request: ${method} ${url}`);
-    }
-
-    const agentId = url.slice('/api/agents/'.length);
-    inFlight += 1;
-    maxInFlight = Math.max(maxInFlight, inFlight);
-
-    await delay(20);
-
-    try {
-      if (method === 'GET') {
-        return jsonResponse({
-          id: agentId,
-          companyId: 'company-1',
-          adapterConfig: {
-            cwd: `/tmp/${agentId}`
-          }
-        });
-      }
-
-      if (method === 'PATCH') {
-        patchBodies.push({
-          agentId,
-          body: getJsonRequestBody(init) ?? {}
-        });
-        return jsonResponse({ ok: true });
-      }
-
-      throw new Error(`Unexpected fetch request: ${method} ${url}`);
-    } finally {
-      inFlight -= 1;
-    }
-  };
-
-  try {
-    await syncGitHubTokenPropagationForAgents({
-      githubTokenSecretRef: TEST_GITHUB_SECRET_ID,
-      selectedAgentIds: ['agent-1', 'agent-2', 'agent-3', 'agent-4', 'agent-5', 'agent-6']
-    });
-
-    assert.ok(maxInFlight > 1);
-    assert.ok(maxInFlight <= 4);
-    assert.deepEqual(
-      [...patchBodies].sort((left, right) => left.agentId.localeCompare(right.agentId)),
-      [
-        'agent-1',
-        'agent-2',
-        'agent-3',
-        'agent-4',
-        'agent-5',
-        'agent-6'
-      ].map((agentId) => ({
-        agentId,
-        body: {
-          adapterConfig: {
-            cwd: `/tmp/${agentId}`,
-            env: {
-              GITHUB_TOKEN: {
-                type: 'secret_ref',
-                secretId: TEST_GITHUB_SECRET_ID,
-                version: 'latest'
-              }
-            }
-          },
-          replaceAdapterConfig: true
-        }
-      }))
-    );
-  } finally {
-    globalThis.fetch = originalFetch;
-  }
-});
-
-test('resolveGitHubTokenSecretRefForPropagation uses saved settings ref when plugin config refs are stripped', async () => {
-  const uiModule = await importFreshUiModule() as {
-    resolveGitHubTokenSecretRefForPropagation?: unknown;
-  };
-
-  assert.equal(typeof uiModule.resolveGitHubTokenSecretRefForPropagation, 'function');
-
-  const resolveGitHubTokenSecretRefForPropagation = uiModule.resolveGitHubTokenSecretRefForPropagation as (params: {
-    explicitSecretRef?: unknown;
-    settingsSecretRef?: unknown;
-    companyId?: string | null;
-    pluginConfig?: GitHubSyncPluginConfig | null;
-  }) => string | undefined;
-
-  assert.equal(
-    resolveGitHubTokenSecretRefForPropagation({
-      explicitSecretRef: ' explicit-secret-ref ',
-      settingsSecretRef: 'settings-secret-ref',
-      companyId: 'company-1',
-      pluginConfig: {
-        githubTokenRefs: {
-          'company-1': 'config-secret-ref'
-        }
-      }
-    }),
-    'explicit-secret-ref'
-  );
-
-  assert.equal(
-    resolveGitHubTokenSecretRefForPropagation({
-      settingsSecretRef: 'settings-secret-ref',
-      companyId: 'company-1',
-      pluginConfig: {}
-    }),
-    'settings-secret-ref'
-  );
-
-  assert.equal(
-    resolveGitHubTokenSecretRefForPropagation({
-      companyId: 'company-1',
-      pluginConfig: {
-        githubTokenRefs: {
-          'company-1': 'config-secret-ref'
-        }
-      }
-    }),
-    'config-secret-ref'
-  );
-});
-
 test('resolveInstalledGitHubSyncPluginId finds the GitHub Sync installation id from plugin listings', () => {
   const records = [
     {
@@ -4043,28 +3762,8 @@ test('Paperclip auth controls policy shows board access setup for local trusted 
 
   assert.deepEqual(policy, {
     boardAccessRequired: false,
-    boardAccessSettingsVisible: true,
-    githubTokenPropagationSettingsVisible: true
+    boardAccessSettingsVisible: true
   });
-});
-
-test('Paperclip auth controls policy keeps GitHub token propagation visible across deployment modes', () => {
-  assert.equal(
-    resolvePaperclipAuthControlsPolicy({ deploymentMode: 'authenticated' }).githubTokenPropagationSettingsVisible,
-    true
-  );
-  assert.equal(
-    resolvePaperclipAuthControlsPolicy({ deploymentMode: 'local_trusted' }).githubTokenPropagationSettingsVisible,
-    true
-  );
-  assert.equal(
-    resolvePaperclipAuthControlsPolicy({ deploymentMode: 'development' }).githubTokenPropagationSettingsVisible,
-    true
-  );
-  assert.equal(
-    resolvePaperclipAuthControlsPolicy(null).githubTokenPropagationSettingsVisible,
-    true
-  );
 });
 
 test('resolveGitHubIssueDetailTabState keeps unlinked issue detail views available for manual linking', async () => {
@@ -4505,7 +4204,7 @@ test('manifest exposes GitHub Sync page, sidebar, dashboard widgets, and setting
   assert.ok(manifest.capabilities.includes('ui.sidebar.register'));
   assert.ok(manifest.capabilities.some((capability) => capability === 'ui.dashboardWidget.register'));
   assert.ok(manifest.capabilities.includes('ui.detailTab.register'));
-  assert.ok(manifest.capabilities.includes('ui.commentAnnotation.register'));
+  assert.equal(manifest.capabilities.includes('ui.commentAnnotation.register'), false);
   assert.ok(manifest.capabilities.includes('ui.action.register'));
   assert.ok(manifest.capabilities.includes('issues.read'));
   assert.ok(manifest.capabilities.includes('issues.update'));
@@ -4538,7 +4237,7 @@ test('manifest exposes GitHub Sync page, sidebar, dashboard widgets, and setting
   assert.ok(syncDashboardSlot);
   assert.ok(kpiDashboardSlot);
   assert.ok(issueDetailSlot);
-  assert.ok(commentAnnotationSlot);
+  assert.equal(commentAnnotationSlot, undefined);
   assert.ok(globalToolbarSlot);
   assert.ok(entityToolbarSlot);
   assert.equal(pullRequestsPageSlot?.type, 'page');
@@ -4555,7 +4254,6 @@ test('manifest exposes GitHub Sync page, sidebar, dashboard widgets, and setting
   assert.equal(typeof uiModule.GitHubSyncKpiDashboardWidget, 'function');
   assert.equal(issueDetailSlot?.type, 'taskDetailView');
   assert.equal(issueDetailSlot?.exportName, 'GitHubSyncIssueTaskDetailView');
-  assert.equal(commentAnnotationSlot?.exportName, 'GitHubSyncCommentAnnotation');
   assert.equal(globalToolbarSlot?.exportName, 'GitHubSyncGlobalToolbarButton');
   assert.equal(entityToolbarSlot?.exportName, 'GitHubSyncEntityToolbarButton');
 });
@@ -12031,89 +11729,6 @@ test('worker uses the host-authorized company scope for settings save actions', 
       defaultAssigneeUserId: 'user-1',
       defaultStatus: 'todo',
       ignoredIssueAuthorUsernames: ['renovate', 'dependabot']
-    }
-  });
-});
-
-test('worker scopes github token propagation agent selections to the requested company', async () => {
-  const harness = createTestHarness({ manifest });
-  await plugin.definition.setup(harness.ctx);
-
-  await harness.performAction('settings.saveRegistration', {
-    companyId: 'company-1',
-    advancedSettings: {
-      defaultStatus: 'todo',
-      ignoredIssueAuthorUsernames: ['renovate'],
-      githubTokenPropagationAgentIds: ['agent-2', 'agent-1', 'agent-2']
-    },
-    syncState: {
-      status: 'idle'
-    }
-  });
-
-  await harness.performAction('settings.saveRegistration', {
-    companyId: 'company-2',
-    advancedSettings: {
-      defaultStatus: 'backlog',
-      ignoredIssueAuthorUsernames: ['dependabot'],
-      githubTokenPropagationAgentIds: ['agent-3']
-    },
-    syncState: {
-      status: 'idle'
-    }
-  });
-
-  const companyOneResult = await harness.getData<{
-    advancedSettings: {
-      defaultStatus: string;
-      ignoredIssueAuthorUsernames: string[];
-      githubTokenPropagationAgentIds?: string[];
-    };
-  }>('settings.registration', {
-    companyId: 'company-1'
-  });
-  const companyTwoResult = await harness.getData<{
-    advancedSettings: {
-      defaultStatus: string;
-      ignoredIssueAuthorUsernames: string[];
-      githubTokenPropagationAgentIds?: string[];
-    };
-  }>('settings.registration', {
-    companyId: 'company-2'
-  });
-
-  assert.deepEqual(companyOneResult.advancedSettings, {
-    defaultStatus: 'todo',
-    ignoredIssueAuthorUsernames: ['renovate'],
-    githubTokenPropagationAgentIds: ['agent-1', 'agent-2']
-  });
-  assert.deepEqual(companyTwoResult.advancedSettings, {
-    defaultStatus: 'backlog',
-    ignoredIssueAuthorUsernames: ['dependabot'],
-    githubTokenPropagationAgentIds: ['agent-3']
-  });
-
-  const savedSettings = harness.getState({
-    scopeKind: 'instance',
-    stateKey: 'paperclip-github-plugin-settings'
-  }) as {
-    companyAdvancedSettingsByCompanyId: Record<string, {
-      defaultStatus: string;
-      ignoredIssueAuthorUsernames: string[];
-      githubTokenPropagationAgentIds?: string[];
-    }>;
-  };
-
-  assert.deepEqual(savedSettings.companyAdvancedSettingsByCompanyId, {
-    'company-1': {
-      defaultStatus: 'todo',
-      ignoredIssueAuthorUsernames: ['renovate'],
-      githubTokenPropagationAgentIds: ['agent-1', 'agent-2']
-    },
-    'company-2': {
-      defaultStatus: 'backlog',
-      ignoredIssueAuthorUsernames: ['dependabot'],
-      githubTokenPropagationAgentIds: ['agent-3']
     }
   });
 });
