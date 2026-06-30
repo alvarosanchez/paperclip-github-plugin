@@ -35,6 +35,7 @@ export const manifest: PaperclipPluginManifestV1 = {
     'plugin.state.write',
     'instance.settings.register',
     'projects.read',
+    'project.workspaces.read',
     'issues.read',
     'issues.create',
     'issues.update',

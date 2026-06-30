@@ -8,6 +8,7 @@ import test from 'node:test';
 import type { Agent, Project } from '@paperclipai/plugin-sdk';
 import { createTestHarness } from '@paperclipai/plugin-sdk/testing';
 
+import type { PublishLocalBranchInput, PublishedBranch } from '../src/git-branch-publisher.ts';
 import manifest from '../src/manifest.ts';
 import {
   COMPANY_METRIC_API_ROUTE_KEY,
@@ -31,8 +32,13 @@ import {
 
 const TEST_GITHUB_TOKEN = 'ghp_test_token';
 const TEST_GITHUB_SECRET_ID = '00000000-0000-4000-8000-000000000001';
+const TEST_HEAD_COMMIT_SHA = 'c13293efd19eca09004826317182be4e0f502eed';
 
 let plugin!: typeof import('../src/worker.ts').default;
+let publishedBranchRequests: PublishLocalBranchInput[] = [];
+let configureCreatePullRequestBranchPublisher!: (
+  publisher?: (input: PublishLocalBranchInput) => Promise<PublishedBranch>
+) => void;
 let workerImportSerial = 0;
 let uiImportSerial = 0;
 
@@ -53,7 +59,18 @@ async function importFreshUiModule() {
 }
 
 test.beforeEach(async () => {
-  plugin = await importFreshWorker();
+  const workerModule = await importFreshWorkerModule();
+  publishedBranchRequests = [];
+  configureCreatePullRequestBranchPublisher = workerModule.__testing.setCreatePullRequestBranchPublisher;
+  workerModule.__testing.setCreatePullRequestBranchPublisher(async (input: PublishLocalBranchInput) => {
+    publishedBranchRequests.push(input);
+    return {
+      branchName: input.branchName,
+      commitSha: input.expectedCommitSha,
+      remoteRef: `refs/heads/${input.branchName}`
+    };
+  });
+  plugin = workerModule.default;
 });
 
 test('sync keeps completed healthy PR waits unassigned instead of restarting internal review', async () => {
@@ -655,6 +672,29 @@ async function createGitHubAgentToolHarness() {
     config: {
       githubToken: TEST_GITHUB_TOKEN
     }
+  });
+  const project = createProjectFixture({
+    id: 'project-1',
+    companyId: 'company-1',
+    name: 'Engineering',
+    repoUrl: 'https://github.com/paperclipai/example-repo'
+  });
+  harness.seed({
+    projects: [project],
+    projectWorkspaces: [
+      {
+        id: 'workspace-project-1',
+        projectId: 'project-1',
+        name: 'Engineering workspace',
+        path: '/tmp/paperclip-github-plugin-example-repo',
+        repoUrl: 'https://github.com/paperclipai/example-repo',
+        repoRef: null,
+        defaultRef: 'main',
+        isPrimary: true,
+        createdAt: '2026-04-12T10:00:00.000Z',
+        updatedAt: '2026-04-12T10:00:00.000Z'
+      }
+    ]
   });
   await plugin.definition.setup(harness.ctx);
   await harness.performAction('settings.saveRegistration', {
@@ -1555,6 +1595,22 @@ test('manifest declares GitHub agent tools and only the external metrics API rou
   );
 });
 
+test('create_pull_request requires one-call branch publication inputs', () => {
+  assert.ok(manifest.capabilities.includes('project.workspaces.read'));
+  const declaration = manifest.tools?.find((tool) => tool.name === 'create_pull_request');
+  assert.ok(declaration);
+  assert.match(declaration.description, /publish(?:es)? the local branch/i);
+  assert.deepEqual(
+    declaration.parametersSchema.required,
+    ['paperclipIssueId', 'head', 'headCommitSha', 'base', 'title']
+  );
+  const properties = declaration.parametersSchema.properties as Record<string, { description?: string }>;
+  assert.match(
+    String(properties.headCommitSha?.description ?? ''),
+    /exact local branch tip/i
+  );
+});
+
 test('upload_pull_request_asset publishes an image asset with embeddable markdown', async () => {
   const harness = await createGitHubAgentToolHarness();
   const originalFetch = globalThis.fetch;
@@ -1905,6 +1961,12 @@ test('add_issue_comment appends a generic AI footer when llmModel is omitted', a
 
 test('create_pull_request appends the required AI footer to the pull request body', async () => {
   const harness = await createGitHubAgentToolHarness();
+  const issue = await harness.ctx.issues.create({
+    companyId: 'company-1',
+    projectId: 'project-1',
+    title: 'Fix the importer',
+    description: 'Publish and open the pull request in one call.'
+  });
   const originalFetch = globalThis.fetch;
   let createdBody = '';
 
@@ -1934,7 +1996,9 @@ test('create_pull_request appends the required AI footer to the pull request bod
 
   try {
     const result = await harness.executeTool('create_pull_request', {
+      paperclipIssueId: issue.id,
       head: 'feature/fix-importer',
+      headCommitSha: TEST_HEAD_COMMIT_SHA,
       base: 'main',
       title: 'Fix the importer',
       body: 'This closes the sync gap.',
@@ -1945,6 +2009,24 @@ test('create_pull_request appends the required AI footer to the pull request bod
     });
 
     assert.ok(!result.error);
+    assert.equal(publishedBranchRequests.length, 1);
+    assert.deepEqual(
+      {
+        workspacePath: publishedBranchRequests[0]?.workspacePath,
+        repositoryUrl: publishedBranchRequests[0]?.repositoryUrl,
+        branchName: publishedBranchRequests[0]?.branchName,
+        expectedCommitSha: publishedBranchRequests[0]?.expectedCommitSha,
+        baseBranch: publishedBranchRequests[0]?.baseBranch
+      },
+      {
+        workspacePath: '/tmp/paperclip-github-plugin-example-repo',
+        repositoryUrl: 'https://github.com/paperclipai/example-repo',
+        branchName: 'feature/fix-importer',
+        expectedCommitSha: TEST_HEAD_COMMIT_SHA,
+        baseBranch: 'main'
+      }
+    );
+    assert.equal(publishedBranchRequests[0]?.githubToken, TEST_GITHUB_TOKEN);
     assert.match(createdBody, /^This closes the sync gap\./);
     assert.match(createdBody, /---\n###### ✨ This pull request description was AI-generated using gpt-5\.4/);
     assert.match((result.data as { pullRequest: { body: string } }).pullRequest.body, /gpt-5\.4/);
@@ -1953,8 +2035,51 @@ test('create_pull_request appends the required AI footer to the pull request bod
   }
 });
 
+test('create_pull_request does not call the GitHub PR API when branch publication fails', async () => {
+  const harness = await createGitHubAgentToolHarness();
+  const issue = await harness.ctx.issues.create({
+    companyId: 'company-1',
+    projectId: 'project-1',
+    title: 'Publication failure',
+    description: 'The PR API must not run after a failed branch publication.'
+  });
+  configureCreatePullRequestBranchPublisher(async () => {
+    throw new Error('remote branch verification failed');
+  });
+  const originalFetch = globalThis.fetch;
+  let githubApiCalled = false;
+  globalThis.fetch = async () => {
+    githubApiCalled = true;
+    throw new Error('GitHub PR API should not be called.');
+  };
+
+  try {
+    const result = await harness.executeTool('create_pull_request', {
+      paperclipIssueId: issue.id,
+      head: 'feature/publication-failure',
+      headCommitSha: TEST_HEAD_COMMIT_SHA,
+      base: 'main',
+      title: 'Do not create this PR'
+    }, {
+      companyId: 'company-1',
+      projectId: 'project-1'
+    });
+
+    assert.match(result.error ?? '', /remote branch verification failed/i);
+    assert.equal(githubApiCalled, false);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test('create_pull_request auto-records Paperclip PR metrics and API route attribution dedupes duplicate PR events', async () => {
   const harness = await createGitHubAgentToolHarness();
+  const issue = await harness.ctx.issues.create({
+    companyId: 'company-1',
+    projectId: 'project-1',
+    title: 'Metric-tracked pull request',
+    description: 'Track one atomic pull request creation.'
+  });
   const originalFetch = globalThis.fetch;
 
   globalThis.fetch = async (input, init) => {
@@ -1982,7 +2107,9 @@ test('create_pull_request auto-records Paperclip PR metrics and API route attrib
 
   try {
     const createResult = await harness.executeTool('create_pull_request', {
+      paperclipIssueId: issue.id,
       head: 'feature/fix-importer',
+      headCommitSha: TEST_HEAD_COMMIT_SHA,
       base: 'main',
       title: 'Fix the importer'
     }, {
@@ -2067,6 +2194,7 @@ test('create_pull_request links the created pull request to the current Papercli
     const createResult = await harness.executeTool('create_pull_request', {
       paperclipIssueId: issue.id,
       head: 'feature/native-paperclip-issue',
+      headCommitSha: TEST_HEAD_COMMIT_SHA,
       base: 'main',
       title: 'Fix native issue sync'
     }, {

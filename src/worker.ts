@@ -19,6 +19,11 @@ import {
 } from '@paperclipai/plugin-sdk';
 
 import { getGitHubAgentToolDeclaration } from './github-agent-tools.ts';
+import {
+  publishLocalBranchForPullRequest,
+  type PublishLocalBranchInput,
+  type PublishedBranch
+} from './git-branch-publisher.ts';
 import { parseRepositoryReference, type ParsedRepositoryReference } from './github-repo.ts';
 import {
   COMPANY_METRIC_API_ROUTE_KEY,
@@ -29,6 +34,12 @@ import { normalizePaperclipHealthResponse, requiresPaperclipBoardAccess } from '
 const GITHUB_SYNC_BASE_ORIGIN_KIND = `plugin:${GITHUB_SYNC_PLUGIN_ID}` as const;
 const GITHUB_ISSUE_ORIGIN_KIND = `plugin:${GITHUB_SYNC_PLUGIN_ID}:github-issue` as const;
 const GITHUB_PULL_REQUEST_ORIGIN_KIND = `plugin:${GITHUB_SYNC_PLUGIN_ID}:github-pull-request` as const;
+
+type CreatePullRequestBranchPublisher = (
+  input: PublishLocalBranchInput
+) => Promise<PublishedBranch>;
+
+let createPullRequestBranchPublisher: CreatePullRequestBranchPublisher = publishLocalBranchForPullRequest;
 
 const SETTINGS_SCOPE = {
   scopeKind: 'instance' as const,
@@ -21046,19 +21057,46 @@ function registerGitHubAgentTools(ctx: PluginSetupContext): void {
       const input = getToolInputRecord(params);
       const paperclipIssueId = normalizeOptionalToolString(input.paperclipIssueId);
       const explicitRepository = normalizeOptionalToolString(input.repository);
-      const issueLinkScope = paperclipIssueId && !explicitRepository
-        ? await resolveIssueGitHubLinkMapping(ctx, {
-            companyId: runCtx.companyId,
-            issueId: paperclipIssueId
-          })
-        : null;
-      const repository = issueLinkScope?.repository ?? await resolveGitHubToolRepository(ctx, runCtx, input);
       const head = normalizeOptionalToolString(input.head);
+      const headCommitSha = normalizeOptionalToolString(input.headCommitSha);
       const base = normalizeOptionalToolString(input.base);
       const title = normalizeOptionalToolString(input.title);
-      if (!head || !base || !title) {
-        throw new Error('head, base, and title are required.');
+      if (!paperclipIssueId || !head || !headCommitSha || !base || !title) {
+        throw new Error('paperclipIssueId, head, headCommitSha, base, and title are required.');
       }
+
+      const issueLinkScope = await resolveIssueGitHubLinkMapping(ctx, {
+        companyId: runCtx.companyId,
+        issueId: paperclipIssueId,
+        ...(explicitRepository ? { repositoryUrl: explicitRepository } : {})
+      });
+      if (issueLinkScope.projectId !== runCtx.projectId) {
+        throw new Error('The selected Paperclip issue does not belong to the current tool run project.');
+      }
+      if (
+        issueLinkScope.issue.assigneeAgentId
+        && issueLinkScope.issue.assigneeAgentId !== runCtx.agentId
+      ) {
+        throw new Error('The selected Paperclip issue is assigned to another agent.');
+      }
+      const repository = issueLinkScope.repository;
+      const workspace = await ctx.projects.getWorkspaceForIssue(paperclipIssueId, runCtx.companyId);
+      if (!workspace || workspace.projectId !== runCtx.projectId) {
+        throw new Error('The selected Paperclip issue does not have a trusted primary project workspace for branch publication.');
+      }
+
+      const githubToken = (await resolveGithubToken(ctx, { companyId: runCtx.companyId })).trim();
+      if (!githubToken) {
+        throw new Error(MISSING_GITHUB_TOKEN_SYNC_MESSAGE);
+      }
+      const publishedBranch = await createPullRequestBranchPublisher({
+        workspacePath: workspace.path,
+        repositoryUrl: repository.url,
+        branchName: head,
+        expectedCommitSha: headCommitSha,
+        baseBranch: base,
+        githubToken
+      });
 
       const body = typeof input.body === 'string'
         ? appendOptionalAiAuthorshipFooter(
@@ -21067,11 +21105,16 @@ function registerGitHubAgentTools(ctx: PluginSetupContext): void {
             normalizeOptionalToolString(input.llmModel)
           )
         : undefined;
-      const octokit = await createAgentToolOctokit(runCtx, 'create_pull_request', repository);
+      const octokit = createGitHubOctokit(ctx, githubToken, {
+        companyId: runCtx.companyId,
+        operation: 'github-api',
+        repositoryUrl: repository.url,
+        toolName: 'create_pull_request'
+      });
       const response = await octokit.rest.pulls.create({
         owner: repository.owner,
         repo: repository.repo,
-        head,
+        head: publishedBranch.branchName,
         base,
         title,
         ...(body !== undefined ? { body } : {}),
@@ -21129,6 +21172,11 @@ function registerGitHubAgentTools(ctx: PluginSetupContext): void {
         `Created pull request #${response.data.number} in ${formatRepositoryLabel(repository)}.`,
         {
           repository: repository.url,
+          publishedBranch: {
+            name: publishedBranch.branchName,
+            commitSha: publishedBranch.commitSha,
+            remoteRef: publishedBranch.remoteRef
+          },
           pullRequest: {
             number: response.data.number,
             title: response.data.title,
@@ -21747,7 +21795,12 @@ export const __testing = {
   resolvePaperclipApiAuthTokens,
   resolveGithubToken,
   resolvePaperclipPullRequestIssueStatus,
-  resolveSyncTransitionAssignee
+  resolveSyncTransitionAssignee,
+  setCreatePullRequestBranchPublisher(
+    publisher?: CreatePullRequestBranchPublisher
+  ): void {
+    createPullRequestBranchPublisher = publisher ?? publishLocalBranchForPullRequest;
+  }
 };
 
 const plugin = definePlugin({
