@@ -93,6 +93,10 @@ const defaultRunGit: GitCommandRunner = async (args, options) => {
         rejectOnce(new Error('git credential pipe was not available'));
         return;
       }
+      credentialPipe.on('error', (error: NodeJS.ErrnoException) => {
+        if (error.code === 'EPIPE' || error.code === 'ECONNRESET') return;
+        rejectOnce(error);
+      });
       credentialPipe.end(`${options.credential}\n`);
     }
   });
