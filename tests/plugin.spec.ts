@@ -2278,6 +2278,60 @@ test('create_pull_request links the created pull request to the current Papercli
       }, 201);
     }
 
+    if (url.pathname === '/repos/paperclipai/example-repo/pulls/23') {
+      return jsonResponse({
+        number: 23,
+        title: 'Fix native issue sync',
+        body: '',
+        html_url: 'https://github.com/paperclipai/example-repo/pull/23',
+        state: 'open',
+        draft: false,
+        merged: false,
+        mergeable: true,
+        mergeable_state: 'clean',
+        head: {
+          ref: 'feature/native-paperclip-issue',
+          sha: TEST_HEAD_COMMIT_SHA
+        },
+        base: {
+          ref: 'main'
+        },
+        user: {
+          login: 'paperclip-bot'
+        },
+        requested_reviewers: [],
+        requested_teams: []
+      });
+    }
+
+    if (url.pathname === '/graphql') {
+      const { query } = getGraphqlRequest(init);
+      if (query.includes('query GitHubPullRequestReviewThreads')) {
+        return graphqlResponse({
+          repository: {
+            pullRequest: {
+              reviewThreads: {
+                pageInfo: { hasNextPage: false, endCursor: null },
+                nodes: []
+              }
+            }
+          }
+        });
+      }
+      if (query.includes('query GitHubPullRequestCiContexts')) {
+        return graphqlResponse({
+          repository: {
+            pullRequest: {
+              mergeable: 'MERGEABLE',
+              mergeStateStatus: 'CLEAN',
+              reviewDecision: null,
+              statusCheckRollup: null
+            }
+          }
+        });
+      }
+    }
+
     throw new Error(`Unexpected GitHub request: ${url.toString()}`);
   };
 
@@ -2305,6 +2359,64 @@ test('create_pull_request links the created pull request to the current Papercli
     assert.equal(pullRequestLinks.length, 1);
     assert.equal(pullRequestLinks[0]?.externalId, 'https://github.com/paperclipai/example-repo/pull/23');
     assert.equal((pullRequestLinks[0]?.data as { githubPullRequestNumber?: unknown }).githubPullRequestNumber, 23);
+
+    const getResult = await harness.executeTool('get_pull_request', {
+      paperclipIssueId: issue.id
+    }, {
+      agentId: 'agent-1',
+      runId: 'run-1',
+      companyId: 'company-1',
+      projectId: 'project-1'
+    });
+    assert.ok(!getResult.error);
+    assert.equal((getResult.data as { pullRequest: { number: number } }).pullRequest.number, 23);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('PR tools preserve repository ambiguity checks across direct pull request links', async () => {
+  const harness = await createProjectPullRequestsHarness();
+  const issue = await harness.ctx.issues.create({
+    companyId: 'company-1',
+    projectId: 'project-1',
+    title: 'Direct PR ambiguity target',
+    description: 'Created in Paperclip first.'
+  });
+  await upsertDirectPullRequestLink(harness, issue.id, 23);
+  await upsertDirectPullRequestLink(harness, issue.id, 23, {
+    repositoryUrl: 'https://github.com/third-party/external'
+  });
+
+  const ambiguousResult = await harness.executeTool('list_pull_request_files', {
+    paperclipIssueId: issue.id,
+    pullRequestNumber: 23
+  }, {
+    companyId: 'company-1',
+    projectId: 'project-1'
+  });
+  assert.match(ambiguousResult.error ?? '', /repository is required/i);
+
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    const url = new URL(getRequestUrl(input));
+    if (url.pathname === '/repos/third-party/external/pulls/23/files') {
+      return jsonResponse([]);
+    }
+    throw new Error(`Unexpected GitHub request: ${url.toString()}`);
+  };
+
+  try {
+    const selectedResult = await harness.executeTool('list_pull_request_files', {
+      paperclipIssueId: issue.id,
+      repository: 'https://github.com/third-party/external',
+      pullRequestNumber: 23
+    }, {
+      companyId: 'company-1',
+      projectId: 'project-1'
+    });
+    assert.ok(!selectedResult.error);
+    assert.equal((selectedResult.data as { pullRequestNumber: number }).pullRequestNumber, 23);
   } finally {
     globalThis.fetch = originalFetch;
   }
