@@ -30,6 +30,12 @@ function createSuccessfulRunner(calls: TestGitCall[]): GitCommandRunner {
     if (command.includes('check-ref-format --branch')) {
       return { stdout: 'feature/atomic-pr\n', stderr: '' };
     }
+    if (command.includes('symbolic-ref --quiet HEAD')) {
+      return { stdout: 'refs/heads/feature/atomic-pr\n', stderr: '' };
+    }
+    if (command.includes('rev-parse --verify HEAD^{commit}')) {
+      return { stdout: `${COMMIT_SHA}\n`, stderr: '' };
+    }
     if (command.includes('rev-parse --verify refs/heads/feature/atomic-pr^{commit}')) {
       return { stdout: `${COMMIT_SHA}\n`, stderr: '' };
     }
@@ -104,10 +110,35 @@ test('rejects a requested commit that is not the exact local branch tip before a
       baseBranch: 'main',
       githubToken: 'github-secret-value'
     }, { runGit }),
-    /does not match the local branch tip/i
+    /does not match (?:the local branch tip|the execution worktree HEAD)/i
   );
 
   assert.ok(calls.every((call) => !call.args.some((arg) => arg === 'push')));
+  assert.ok(calls.every((call) => call.credential === undefined));
+});
+
+test('rejects a branch that is not checked out in the execution worktree before authenticated git runs', async () => {
+  const calls: TestGitCall[] = [];
+  const baseRunner = createSuccessfulRunner(calls);
+  const runGit: GitCommandRunner = async (args, options) => {
+    if (args.includes('symbolic-ref')) {
+      return { stdout: 'refs/heads/feature/another-worktree\n', stderr: '' };
+    }
+    return baseRunner(args, options);
+  };
+
+  await assert.rejects(
+    publishLocalBranchForPullRequest({
+      workspacePath: '/srv/example',
+      repositoryUrl: 'https://github.com/paperclipai/example-repo',
+      branchName: 'feature/atomic-pr',
+      expectedCommitSha: COMMIT_SHA,
+      baseBranch: 'main',
+      githubToken: 'github-secret-value'
+    }, { runGit }),
+    /is not checked out in this execution worktree/i
+  );
+
   assert.ok(calls.every((call) => call.credential === undefined));
 });
 

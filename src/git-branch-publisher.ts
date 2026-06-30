@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
 import type { Writable } from 'node:stream';
@@ -7,6 +7,7 @@ import type { Writable } from 'node:stream';
 const FULL_GIT_SHA_PATTERN = /^[0-9a-f]{40}$/i;
 const GITHUB_HOST = 'github.com';
 const MAX_GIT_OUTPUT_BYTES = 1024 * 1024;
+const GIT_COMMAND_TIMEOUT_MS = 5 * 60_000;
 const GIT_CREDENTIAL_HELPER = '!f() { if [ "$1" = get ]; then IFS= read -r password <&3; printf "%s\\n" username=x-access-token "password=$password"; fi; }; f';
 
 export interface GitCommandResult {
@@ -52,9 +53,11 @@ const defaultRunGit: GitCommandRunner = async (args, options) => {
     let stdout = '';
     let stderr = '';
     let settled = false;
+    let timeout: NodeJS.Timeout | undefined;
     const rejectOnce = (error: Error): void => {
       if (settled) return;
       settled = true;
+      if (timeout) clearTimeout(timeout);
       child.kill('SIGKILL');
       rejectPromise(error);
     };
@@ -79,6 +82,7 @@ const defaultRunGit: GitCommandRunner = async (args, options) => {
     child.on('close', (code, signal) => {
       if (settled) return;
       settled = true;
+      if (timeout) clearTimeout(timeout);
       if (code === 0) {
         resolvePromise({ stdout, stderr });
         return;
@@ -86,6 +90,11 @@ const defaultRunGit: GitCommandRunner = async (args, options) => {
       const detail = stderr.trim() || stdout.trim() || `exit code ${code ?? 'unknown'}${signal ? ` (${signal})` : ''}`;
       rejectPromise(new Error(detail));
     });
+
+    timeout = setTimeout(() => {
+      rejectOnce(new Error(`git command timed out after ${GIT_COMMAND_TIMEOUT_MS}ms`));
+    }, GIT_COMMAND_TIMEOUT_MS);
+    timeout.unref();
 
     if (options.credential) {
       const credentialPipe = child.stdio[3] as Writable | null;
@@ -173,12 +182,15 @@ function createAuthenticatedGitEnvironment(params: {
   return {
     ...createBaseGitEnvironment(),
     HOME: params.temporaryHome,
+    XDG_CONFIG_HOME: params.temporaryHome,
     GIT_ALTERNATE_OBJECT_DIRECTORIES: params.alternateObjectDirectory,
-    GIT_CONFIG_COUNT: '2',
+    GIT_CONFIG_COUNT: '3',
     GIT_CONFIG_KEY_0: 'credential.helper',
     GIT_CONFIG_VALUE_0: '',
     GIT_CONFIG_KEY_1: 'credential.https://github.com.helper',
-    GIT_CONFIG_VALUE_1: GIT_CREDENTIAL_HELPER
+    GIT_CONFIG_VALUE_1: GIT_CREDENTIAL_HELPER,
+    GIT_CONFIG_KEY_2: 'core.hooksPath',
+    GIT_CONFIG_VALUE_2: '/dev/null'
   };
 }
 
@@ -238,6 +250,29 @@ export async function publishLocalBranchForPullRequest(
     'The requested base branch name is invalid'
   );
 
+  const expectedHeadRef = `refs/heads/${branchName}`;
+  const checkedOutBranchResult = await runGitStep(
+    runGit,
+    ['-C', workspacePath, 'symbolic-ref', '--quiet', 'HEAD'],
+    baseEnvironment,
+    'Could not resolve the execution worktree branch'
+  );
+  const checkedOutBranchRef = checkedOutBranchResult.stdout.trim();
+  if (checkedOutBranchRef !== expectedHeadRef) {
+    throw new Error(`The requested head branch ${branchName} is not checked out in this execution worktree. Found ${checkedOutBranchRef || 'detached HEAD'}.`);
+  }
+
+  const checkedOutCommitResult = await runGitStep(
+    runGit,
+    ['-C', workspacePath, 'rev-parse', '--verify', 'HEAD^{commit}'],
+    baseEnvironment,
+    'Could not resolve the execution worktree HEAD commit'
+  );
+  const checkedOutCommitSha = checkedOutCommitResult.stdout.trim().toLowerCase();
+  if (checkedOutCommitSha !== expectedCommitSha) {
+    throw new Error(`headCommitSha does not match the execution worktree HEAD. Expected ${expectedCommitSha}, found ${checkedOutCommitSha || 'no commit'}.`);
+  }
+
   const commonDirResult = await runGitStep(
     runGit,
     ['-C', workspacePath, 'rev-parse', '--git-common-dir'],
@@ -265,6 +300,8 @@ export async function publishLocalBranchForPullRequest(
 
   const temporaryRoot = await mkdtemp(join(tmpdir(), 'paperclip-github-publish-'));
   const temporaryGitDir = join(temporaryRoot, 'repository.git');
+  const emptyTemplateDir = join(temporaryRoot, 'empty-template');
+  await mkdir(emptyTemplateDir, { mode: 0o700 });
   const authenticatedEnvironment = createAuthenticatedGitEnvironment({
     temporaryHome: temporaryRoot,
     alternateObjectDirectory: join(commonGitDir, 'objects')
@@ -273,8 +310,8 @@ export async function publishLocalBranchForPullRequest(
   try {
     await runGitStep(
       runGit,
-      ['init', '--bare', temporaryGitDir],
-      baseEnvironment,
+      ['init', '--bare', `--template=${emptyTemplateDir}`, temporaryGitDir],
+      authenticatedEnvironment,
       'Could not initialize the temporary Git publisher'
     );
     await runGitStep(
@@ -292,15 +329,13 @@ export async function publishLocalBranchForPullRequest(
       runGit,
       ['--git-dir', temporaryGitDir, 'rev-parse', '--verify', `refs/remotes/origin/${baseBranch}^{commit}`],
       authenticatedEnvironment,
-      `The pull request base branch ${baseBranch} was not found on GitHub`,
-      githubToken
+      `The pull request base branch ${baseBranch} was not found on GitHub`
     );
     await runGitStep(
       runGit,
       ['--git-dir', temporaryGitDir, 'merge-base', '--is-ancestor', `refs/remotes/origin/${baseBranch}`, expectedCommitSha],
       authenticatedEnvironment,
-      `The local branch ${branchName} is not based on the requested base branch ${baseBranch}`,
-      githubToken
+      `The local branch ${branchName} is not based on the requested base branch ${baseBranch}`
     );
     await runGitStep(
       runGit,

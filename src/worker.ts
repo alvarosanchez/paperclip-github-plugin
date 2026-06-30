@@ -21079,10 +21079,36 @@ function registerGitHubAgentTools(ctx: PluginSetupContext): void {
       ) {
         throw new Error('The selected Paperclip issue is assigned to another agent.');
       }
+      await ctx.issues.assertCheckoutOwner({
+        issueId: paperclipIssueId,
+        companyId: runCtx.companyId,
+        actorAgentId: runCtx.agentId,
+        actorRunId: runCtx.runId
+      });
+
+      const executionWorkspaceId = normalizeOptionalToolString(issueLinkScope.issue.executionWorkspaceId);
+      if (!executionWorkspaceId) {
+        throw new Error('The selected Paperclip issue does not have an execution workspace for branch publication.');
+      }
+      const workspace = await ctx.executionWorkspaces.get(executionWorkspaceId, runCtx.companyId);
+      if (
+        !workspace
+        || workspace.companyId !== runCtx.companyId
+        || workspace.projectId !== runCtx.projectId
+      ) {
+        throw new Error('The selected Paperclip issue execution workspace does not belong to the current tool run project.');
+      }
+      const workspacePath = normalizeOptionalToolString(workspace.cwd)
+        ?? normalizeOptionalToolString(workspace.path);
+      if (!workspacePath) {
+        throw new Error('The selected Paperclip issue execution workspace is not locally realized.');
+      }
+      const workspaceRepository = workspace.repoUrl
+        ? parseRepositoryReference(workspace.repoUrl)
+        : null;
       const repository = issueLinkScope.repository;
-      const workspace = await ctx.projects.getWorkspaceForIssue(paperclipIssueId, runCtx.companyId);
-      if (!workspace || workspace.projectId !== runCtx.projectId) {
-        throw new Error('The selected Paperclip issue does not have a trusted primary project workspace for branch publication.');
+      if (!workspaceRepository || !areRepositoriesEqual(workspaceRepository, repository)) {
+        throw new Error('The execution workspace repository does not match the GitHub repository mapped to this Paperclip issue.');
       }
 
       const githubToken = (await resolveGithubToken(ctx, { companyId: runCtx.companyId })).trim();
@@ -21090,7 +21116,7 @@ function registerGitHubAgentTools(ctx: PluginSetupContext): void {
         throw new Error(MISSING_GITHUB_TOKEN_SYNC_MESSAGE);
       }
       const publishedBranch = await createPullRequestBranchPublisher({
-        workspacePath: workspace.path,
+        workspacePath: workspacePath!,
         repositoryUrl: repository.url,
         branchName: head,
         expectedCommitSha: headCommitSha,
@@ -21111,18 +21137,54 @@ function registerGitHubAgentTools(ctx: PluginSetupContext): void {
         repositoryUrl: repository.url,
         toolName: 'create_pull_request'
       });
-      const response = await octokit.rest.pulls.create({
-        owner: repository.owner,
-        repo: repository.repo,
-        head: publishedBranch.branchName,
-        base,
-        title,
-        ...(body !== undefined ? { body } : {}),
-        ...(typeof input.draft === 'boolean' ? { draft: input.draft } : {}),
-        headers: {
-          'X-GitHub-Api-Version': GITHUB_API_VERSION
+      let pullRequestData: {
+        number: number;
+        title: string;
+        body: string | null;
+        html_url: string;
+        state: string;
+        draft?: boolean;
+        head: { ref: string; sha: string };
+        base: { ref: string };
+      };
+      try {
+        pullRequestData = (await octokit.rest.pulls.create({
+          owner: repository.owner,
+          repo: repository.repo,
+          head: publishedBranch.branchName,
+          base,
+          title,
+          ...(body !== undefined ? { body } : {}),
+          ...(typeof input.draft === 'boolean' ? { draft: input.draft } : {}),
+          headers: {
+            'X-GitHub-Api-Version': GITHUB_API_VERSION
+          }
+        })).data;
+      } catch (error) {
+        if (getErrorStatus(error) !== 422) {
+          throw error;
         }
-      });
+        const existingResponse = await octokit.rest.pulls.list({
+          owner: repository.owner,
+          repo: repository.repo,
+          state: 'open',
+          head: `${repository.owner}:${publishedBranch.branchName}`,
+          base,
+          per_page: 100,
+          headers: {
+            'X-GitHub-Api-Version': GITHUB_API_VERSION
+          }
+        });
+        const existingPullRequest = existingResponse.data.find((candidate) =>
+          candidate.head.ref === publishedBranch.branchName
+          && candidate.base.ref === base
+          && candidate.head.sha.toLowerCase() === publishedBranch.commitSha.toLowerCase()
+        );
+        if (!existingPullRequest) {
+          throw error;
+        }
+        pullRequestData = existingPullRequest;
+      }
 
       if (paperclipIssueId) {
         const linkScope = issueLinkScope ?? await resolveIssueGitHubLinkMapping(ctx, {
@@ -21131,19 +21193,19 @@ function registerGitHubAgentTools(ctx: PluginSetupContext): void {
           repositoryUrl: repository.url
         });
         const pullRequestUrl =
-          normalizeGitHubPullRequestHtmlUrl(response.data.html_url)
-          ?? `${repository.url}/pull/${response.data.number}`;
+          normalizeGitHubPullRequestHtmlUrl(pullRequestData.html_url)
+          ?? `${repository.url}/pull/${pullRequestData.number}`;
 
         await upsertGitHubPullRequestLinkRecord(ctx, {
           companyId: runCtx.companyId,
           projectId: linkScope.mapping.paperclipProjectId ?? linkScope.projectId,
           issueId: paperclipIssueId,
           repositoryUrl: repository.url,
-          pullRequestNumber: response.data.number,
+          pullRequestNumber: pullRequestData.number,
           pullRequestUrl,
-          pullRequestTitle: response.data.title || title,
+          pullRequestTitle: pullRequestData.title || title,
           pullRequestState: getGitHubPullRequestStateForLink({
-            state: response.data.state,
+            state: pullRequestData.state,
             merged: false
           })
         });
@@ -21160,8 +21222,8 @@ function registerGitHubAgentTools(ctx: PluginSetupContext): void {
           companyId: runCtx.companyId,
           metric: 'paperclipPullRequestsCreatedCount',
           repositoryUrl: repository.url,
-          pullRequestNumber: response.data.number,
-          pullRequestUrl: response.data.html_url ?? undefined
+          pullRequestNumber: pullRequestData.number,
+          pullRequestUrl: pullRequestData.html_url ?? undefined
         },
         {
           throwOnPersistFailure: false
@@ -21169,7 +21231,7 @@ function registerGitHubAgentTools(ctx: PluginSetupContext): void {
       );
 
       return buildToolSuccessResult(
-        `Created pull request #${response.data.number} in ${formatRepositoryLabel(repository)}.`,
+        `Created pull request #${pullRequestData.number} in ${formatRepositoryLabel(repository)}.`,
         {
           repository: repository.url,
           publishedBranch: {
@@ -21178,14 +21240,14 @@ function registerGitHubAgentTools(ctx: PluginSetupContext): void {
             remoteRef: publishedBranch.remoteRef
           },
           pullRequest: {
-            number: response.data.number,
-            title: response.data.title,
-            body: response.data.body ?? '',
-            url: response.data.html_url,
-            state: response.data.state,
-            isDraft: response.data.draft,
-            headRefName: response.data.head.ref,
-            baseRefName: response.data.base.ref
+            number: pullRequestData.number,
+            title: pullRequestData.title,
+            body: pullRequestData.body ?? '',
+            url: pullRequestData.html_url,
+            state: pullRequestData.state,
+            isDraft: pullRequestData.draft,
+            headRefName: pullRequestData.head.ref,
+            baseRefName: pullRequestData.base.ref
           }
         }
       );

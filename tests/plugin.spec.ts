@@ -681,18 +681,19 @@ async function createGitHubAgentToolHarness() {
   });
   harness.seed({
     projects: [project],
-    projectWorkspaces: [
+    executionWorkspaces: [
       {
-        id: 'workspace-project-1',
+        id: 'execution-workspace-1',
+        companyId: 'company-1',
         projectId: 'project-1',
-        name: 'Engineering workspace',
-        path: '/tmp/paperclip-github-plugin-example-repo',
+        projectWorkspaceId: 'workspace-project-1',
+        path: '/tmp/paperclip-github-plugin-example-repo/.paperclip/worktrees/issue-worktree',
+        cwd: '/tmp/paperclip-github-plugin-example-repo/.paperclip/worktrees/issue-worktree',
         repoUrl: 'https://github.com/paperclipai/example-repo',
-        repoRef: null,
-        defaultRef: 'main',
-        isPrimary: true,
-        createdAt: '2026-04-12T10:00:00.000Z',
-        updatedAt: '2026-04-12T10:00:00.000Z'
+        baseRef: 'main',
+        branchName: null,
+        providerType: 'local',
+        providerMetadata: null
       }
     ]
   });
@@ -1596,7 +1597,8 @@ test('manifest declares GitHub agent tools and only the external metrics API rou
 });
 
 test('create_pull_request requires one-call branch publication inputs', () => {
-  assert.ok(manifest.capabilities.includes('project.workspaces.read'));
+  assert.ok(manifest.capabilities.includes('execution.workspaces.read'));
+  assert.ok(manifest.capabilities.includes('issues.checkout'));
   const declaration = manifest.tools?.find((tool) => tool.name === 'create_pull_request');
   assert.ok(declaration);
   assert.match(declaration.description, /publish(?:es)? the local branch/i);
@@ -1965,7 +1967,10 @@ test('create_pull_request appends the required AI footer to the pull request bod
     companyId: 'company-1',
     projectId: 'project-1',
     title: 'Fix the importer',
-    description: 'Publish and open the pull request in one call.'
+    description: 'Publish and open the pull request in one call.',
+    status: 'in_progress',
+    assigneeAgentId: 'agent-1',
+    executionWorkspaceId: 'execution-workspace-1'
   });
   const originalFetch = globalThis.fetch;
   let createdBody = '';
@@ -2004,6 +2009,8 @@ test('create_pull_request appends the required AI footer to the pull request bod
       body: 'This closes the sync gap.',
       llmModel: 'gpt-5.4'
     }, {
+      agentId: 'agent-1',
+      runId: 'run-1',
       companyId: 'company-1',
       projectId: 'project-1'
     });
@@ -2019,7 +2026,7 @@ test('create_pull_request appends the required AI footer to the pull request bod
         baseBranch: publishedBranchRequests[0]?.baseBranch
       },
       {
-        workspacePath: '/tmp/paperclip-github-plugin-example-repo',
+        workspacePath: '/tmp/paperclip-github-plugin-example-repo/.paperclip/worktrees/issue-worktree',
         repositoryUrl: 'https://github.com/paperclipai/example-repo',
         branchName: 'feature/fix-importer',
         expectedCommitSha: TEST_HEAD_COMMIT_SHA,
@@ -2041,7 +2048,10 @@ test('create_pull_request does not call the GitHub PR API when branch publicatio
     companyId: 'company-1',
     projectId: 'project-1',
     title: 'Publication failure',
-    description: 'The PR API must not run after a failed branch publication.'
+    description: 'The PR API must not run after a failed branch publication.',
+    status: 'in_progress',
+    assigneeAgentId: 'agent-1',
+    executionWorkspaceId: 'execution-workspace-1'
   });
   configureCreatePullRequestBranchPublisher(async () => {
     throw new Error('remote branch verification failed');
@@ -2061,6 +2071,8 @@ test('create_pull_request does not call the GitHub PR API when branch publicatio
       base: 'main',
       title: 'Do not create this PR'
     }, {
+      agentId: 'agent-1',
+      runId: 'run-1',
       companyId: 'company-1',
       projectId: 'project-1'
     });
@@ -2072,13 +2084,87 @@ test('create_pull_request does not call the GitHub PR API when branch publicatio
   }
 });
 
+test('create_pull_request recovers an existing exact-SHA pull request after a retryable create conflict', async () => {
+  const harness = await createGitHubAgentToolHarness();
+  const issue = await harness.ctx.issues.create({
+    companyId: 'company-1',
+    projectId: 'project-1',
+    title: 'Retry-safe pull request',
+    description: 'Recover the already-created PR after response or link loss.',
+    status: 'in_progress',
+    assigneeAgentId: 'agent-1',
+    executionWorkspaceId: 'execution-workspace-1'
+  });
+  const originalFetch = globalThis.fetch;
+  const seenRequests: string[] = [];
+  globalThis.fetch = async (input, init) => {
+    const url = new URL(getRequestUrl(input));
+    const method = init?.method ?? 'GET';
+    seenRequests.push(`${method} ${url.pathname}`);
+    if (url.pathname === '/repos/paperclipai/example-repo/pulls' && method === 'POST') {
+      return jsonResponse({ message: 'A pull request already exists for this branch.' }, 422);
+    }
+    if (url.pathname === '/repos/paperclipai/example-repo/pulls' && method === 'GET') {
+      return jsonResponse([{
+        number: 24,
+        title: 'Retry-safe pull request',
+        body: '',
+        html_url: 'https://github.com/paperclipai/example-repo/pull/24',
+        state: 'open',
+        draft: false,
+        head: {
+          ref: 'feature/retry-safe',
+          sha: TEST_HEAD_COMMIT_SHA
+        },
+        base: {
+          ref: 'main'
+        }
+      }]);
+    }
+    throw new Error(`Unexpected GitHub request: ${method} ${url.pathname}`);
+  };
+
+  try {
+    const result = await harness.executeTool('create_pull_request', {
+      paperclipIssueId: issue.id,
+      head: 'feature/retry-safe',
+      headCommitSha: TEST_HEAD_COMMIT_SHA,
+      base: 'main',
+      title: 'Retry-safe pull request'
+    }, {
+      agentId: 'agent-1',
+      runId: 'run-1',
+      companyId: 'company-1',
+      projectId: 'project-1'
+    });
+
+    assert.ok(!result.error);
+    assert.deepEqual(seenRequests, [
+      'POST /repos/paperclipai/example-repo/pulls',
+      'GET /repos/paperclipai/example-repo/pulls'
+    ]);
+    assert.equal((result.data as { pullRequest: { number: number } }).pullRequest.number, 24);
+    const links = await harness.ctx.entities.list({
+      entityType: 'paperclip-github-plugin.pull-request-link',
+      scopeKind: 'issue',
+      scopeId: issue.id
+    });
+    assert.equal(links.length, 1);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test('create_pull_request auto-records Paperclip PR metrics and API route attribution dedupes duplicate PR events', async () => {
   const harness = await createGitHubAgentToolHarness();
   const issue = await harness.ctx.issues.create({
     companyId: 'company-1',
     projectId: 'project-1',
     title: 'Metric-tracked pull request',
-    description: 'Track one atomic pull request creation.'
+    description: 'Track one atomic pull request creation.',
+    status: 'in_progress',
+    assigneeAgentId: 'agent-1',
+    executionWorkspaceId: 'execution-workspace-1'
   });
   const originalFetch = globalThis.fetch;
 
@@ -2113,6 +2199,8 @@ test('create_pull_request auto-records Paperclip PR metrics and API route attrib
       base: 'main',
       title: 'Fix the importer'
     }, {
+      agentId: 'agent-1',
+      runId: 'run-1',
       companyId: 'company-1',
       projectId: 'project-1'
     });
@@ -2164,7 +2252,10 @@ test('create_pull_request links the created pull request to the current Papercli
     companyId: 'company-1',
     projectId: 'project-1',
     title: 'Native Paperclip issue',
-    description: 'This issue did not come from GitHub.'
+    description: 'This issue did not come from GitHub.',
+    status: 'in_progress',
+    assigneeAgentId: 'agent-1',
+    executionWorkspaceId: 'execution-workspace-1'
   });
 
   globalThis.fetch = async (input, init) => {
@@ -2198,6 +2289,8 @@ test('create_pull_request links the created pull request to the current Papercli
       base: 'main',
       title: 'Fix native issue sync'
     }, {
+      agentId: 'agent-1',
+      runId: 'run-1',
       companyId: 'company-1',
       projectId: 'project-1'
     });
