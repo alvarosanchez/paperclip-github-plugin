@@ -928,7 +928,7 @@ async function main() {
       throw new Error('Paperclip board access settings should stay hidden outside authenticated or local trusted deployments.');
     }
     await settingsSurface.getByRole('button', { name: 'Expand', exact: true }).click();
-    await page.getByLabel('Propagate GitHub token to agents').waitFor({ timeout: 120000 });
+    await page.getByLabel('Ignore issues from GitHub usernames').waitFor({ timeout: 120000 });
     await page.getByRole('heading', { name: 'Repositories', exact: true }).waitFor({ timeout: 120000 });
     await page.getByRole('heading', { name: 'Sync', exact: true }).waitFor({ timeout: 120000 });
     await assertWorkerDoesNotReadPaperclipApiUrlFromRuntimeEnv(installedPluginId, company.id);
