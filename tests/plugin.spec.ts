@@ -666,7 +666,12 @@ test('shouldStartWorkerHost rejects unrelated entrypoints', async () => {
   }
 });
 
-async function createGitHubAgentToolHarness() {
+async function createGitHubAgentToolHarness(options: {
+  repositoryUrl?: string;
+  includeMapping?: boolean;
+} = {}) {
+  const repositoryUrl = options.repositoryUrl ?? 'https://github.com/paperclipai/example-repo';
+  const includeMapping = options.includeMapping ?? true;
   const harness = createTestHarness({
     manifest,
     config: {
@@ -677,7 +682,7 @@ async function createGitHubAgentToolHarness() {
     id: 'project-1',
     companyId: 'company-1',
     name: 'Engineering',
-    repoUrl: 'https://github.com/paperclipai/example-repo'
+    repoUrl: repositoryUrl
   });
   harness.seed({
     projects: [project],
@@ -689,7 +694,7 @@ async function createGitHubAgentToolHarness() {
         projectWorkspaceId: 'workspace-project-1',
         path: '/tmp/paperclip-github-plugin-example-repo/.paperclip/worktrees/issue-worktree',
         cwd: '/tmp/paperclip-github-plugin-example-repo/.paperclip/worktrees/issue-worktree',
-        repoUrl: 'https://github.com/paperclipai/example-repo',
+        repoUrl: repositoryUrl,
         baseRef: 'main',
         branchName: null,
         providerType: 'local',
@@ -698,21 +703,23 @@ async function createGitHubAgentToolHarness() {
     ]
   });
   await plugin.definition.setup(harness.ctx);
-  await harness.performAction('settings.saveRegistration', {
-    companyId: 'company-1',
-    mappings: [
-      {
-        id: 'mapping-a',
-        repositoryUrl: 'paperclipai/example-repo',
-        paperclipProjectName: 'Engineering',
-        paperclipProjectId: 'project-1',
-        companyId: 'company-1'
+  if (includeMapping) {
+    await harness.performAction('settings.saveRegistration', {
+      companyId: 'company-1',
+      mappings: [
+        {
+          id: 'mapping-a',
+          repositoryUrl,
+          paperclipProjectName: 'Engineering',
+          paperclipProjectId: 'project-1',
+          companyId: 'company-1'
+        }
+      ],
+      syncState: {
+        status: 'idle'
       }
-    ],
-    syncState: {
-      status: 'idle'
-    }
-  });
+    });
+  }
 
   return harness;
 }
@@ -2040,6 +2047,107 @@ test('create_pull_request appends the required AI footer to the pull request bod
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+test('create_pull_request publishes to an explicit repository outside Paperclip mappings', async () => {
+  const repositoryUrl = 'https://github.com/alvarosanchez/micronaut-agent-company';
+  const harness = await createGitHubAgentToolHarness({
+    repositoryUrl,
+    includeMapping: false
+  });
+  const issue = await harness.ctx.issues.create({
+    companyId: 'company-1',
+    projectId: 'project-1',
+    title: 'Reduce routine frequency',
+    description: 'Deliver a change to an otherwise unrelated repository.',
+    status: 'in_progress',
+    assigneeAgentId: 'agent-1',
+    executionWorkspaceId: 'execution-workspace-1'
+  });
+  const originalFetch = globalThis.fetch;
+
+  globalThis.fetch = async (input, init) => {
+    const url = new URL(getRequestUrl(input));
+    if (url.pathname === '/repos/alvarosanchez/micronaut-agent-company/pulls') {
+      const requestBody = getJsonRequestBody(init);
+      return jsonResponse({
+        number: 123,
+        title: requestBody?.title,
+        body: requestBody?.body ?? '',
+        html_url: `${repositoryUrl}/pull/123`,
+        state: 'open',
+        draft: false,
+        head: {
+          ref: 'chore/reduce-routine-frequency',
+          sha: TEST_HEAD_COMMIT_SHA
+        },
+        base: {
+          ref: 'main'
+        }
+      }, 201);
+    }
+    throw new Error(`Unexpected GitHub request: ${url.toString()}`);
+  };
+
+  try {
+    const result = await harness.executeTool('create_pull_request', {
+      repository: 'alvarosanchez/micronaut-agent-company',
+      paperclipIssueId: issue.id,
+      head: 'chore/reduce-routine-frequency',
+      headCommitSha: TEST_HEAD_COMMIT_SHA,
+      base: 'main',
+      title: 'Reduce routine frequency'
+    }, {
+      agentId: 'agent-1',
+      runId: 'run-1',
+      companyId: 'company-1',
+      projectId: 'project-1'
+    });
+
+    assert.ok(!result.error);
+    assert.equal(publishedBranchRequests.length, 1);
+    assert.equal(publishedBranchRequests[0]?.repositoryUrl, repositoryUrl);
+    assert.equal((result.data as { repository: string }).repository, repositoryUrl);
+    const links = await harness.ctx.entities.list({
+      entityType: 'paperclip-github-plugin.pull-request-link',
+      scopeKind: 'issue',
+      scopeId: issue.id
+    });
+    assert.equal(links.length, 1);
+    assert.equal((links[0]?.data as { repositoryUrl?: string }).repositoryUrl, repositoryUrl);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('create_pull_request rejects an explicit repository that does not match the execution workspace', async () => {
+  const harness = await createGitHubAgentToolHarness();
+  const issue = await harness.ctx.issues.create({
+    companyId: 'company-1',
+    projectId: 'project-1',
+    title: 'Reject unrelated workspace publication',
+    description: 'The trusted worktree must remain the source of the published commit.',
+    status: 'in_progress',
+    assigneeAgentId: 'agent-1',
+    executionWorkspaceId: 'execution-workspace-1'
+  });
+
+  const result = await harness.executeTool('create_pull_request', {
+    repository: 'third-party/upstream',
+    paperclipIssueId: issue.id,
+    head: 'feature/wrong-workspace',
+    headCommitSha: TEST_HEAD_COMMIT_SHA,
+    base: 'main',
+    title: 'Do not publish this branch'
+  }, {
+    agentId: 'agent-1',
+    runId: 'run-1',
+    companyId: 'company-1',
+    projectId: 'project-1'
+  });
+
+  assert.match(result.error ?? '', /execution workspace repository does not match the selected GitHub repository/i);
+  assert.equal(publishedBranchRequests.length, 0);
 });
 
 test('create_pull_request does not call the GitHub PR API when branch publication fails', async () => {

@@ -269,10 +269,13 @@ export const GITHUB_AGENT_TOOLS: PluginToolDeclaration[] = [
       additionalProperties: false,
       required: ['paperclipIssueId', 'head', 'headCommitSha', 'base', 'title'],
       properties: {
-        repository: repositoryProperty,
+        repository: {
+          type: 'string',
+          description: 'Target GitHub repository as owner/repo or https://github.com/owner/repo. It may be outside Paperclip repository mappings, but it must match the issue execution workspace. Omit only when the issue project has exactly one mapped repository.'
+        },
         paperclipIssueId: {
           type: 'string',
-          description: 'Paperclip issue id used to resolve the trusted project workspace, mapped GitHub repository, and durable pull-request link.'
+          description: 'Paperclip issue id used to resolve the trusted execution workspace and durable pull-request link.'
         },
         head: {
           type: 'string',

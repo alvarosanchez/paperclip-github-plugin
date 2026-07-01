@@ -21136,17 +21136,17 @@ function registerGitHubAgentTools(ctx: PluginSetupContext): void {
         throw new Error('paperclipIssueId, head, headCommitSha, base, and title are required.');
       }
 
-      const issueLinkScope = await resolveIssueGitHubLinkMapping(ctx, {
-        companyId: runCtx.companyId,
-        issueId: paperclipIssueId,
-        ...(explicitRepository ? { repositoryUrl: explicitRepository } : {})
-      });
-      if (issueLinkScope.projectId !== runCtx.projectId) {
+      const issue = await ctx.issues.get(paperclipIssueId, runCtx.companyId);
+      if (!issue) {
+        throw new Error('Paperclip issue was not found.');
+      }
+      const issueProjectId = normalizeOptionalToolString(issue.projectId);
+      if (!issueProjectId || issueProjectId !== runCtx.projectId) {
         throw new Error('The selected Paperclip issue does not belong to the current tool run project.');
       }
       if (
-        issueLinkScope.issue.assigneeAgentId
-        && issueLinkScope.issue.assigneeAgentId !== runCtx.agentId
+        issue.assigneeAgentId
+        && issue.assigneeAgentId !== runCtx.agentId
       ) {
         throw new Error('The selected Paperclip issue is assigned to another agent.');
       }
@@ -21157,7 +21157,7 @@ function registerGitHubAgentTools(ctx: PluginSetupContext): void {
         actorRunId: runCtx.runId
       });
 
-      const executionWorkspaceId = normalizeOptionalToolString(issueLinkScope.issue.executionWorkspaceId);
+      const executionWorkspaceId = normalizeOptionalToolString(issue.executionWorkspaceId);
       if (!executionWorkspaceId) {
         throw new Error('The selected Paperclip issue does not have an execution workspace for branch publication.');
       }
@@ -21177,9 +21177,17 @@ function registerGitHubAgentTools(ctx: PluginSetupContext): void {
       const workspaceRepository = workspace.repoUrl
         ? parseRepositoryReference(workspace.repoUrl)
         : null;
-      const repository = issueLinkScope.repository;
+      const repository = explicitRepository
+        ? parseRepositoryReference(explicitRepository)
+        : (await resolveIssueGitHubLinkMapping(ctx, {
+            companyId: runCtx.companyId,
+            issueId: paperclipIssueId
+          })).repository;
+      if (!repository) {
+        throw new Error(`Invalid GitHub repository: ${explicitRepository}. Use owner/repo or https://github.com/owner/repo.`);
+      }
       if (!workspaceRepository || !areRepositoriesEqual(workspaceRepository, repository)) {
-        throw new Error('The execution workspace repository does not match the GitHub repository mapped to this Paperclip issue.');
+        throw new Error('The execution workspace repository does not match the selected GitHub repository.');
       }
 
       const githubToken = (await resolveGithubToken(ctx, { companyId: runCtx.companyId })).trim();
@@ -21258,18 +21266,13 @@ function registerGitHubAgentTools(ctx: PluginSetupContext): void {
       }
 
       if (paperclipIssueId) {
-        const linkScope = issueLinkScope ?? await resolveIssueGitHubLinkMapping(ctx, {
-          companyId: runCtx.companyId,
-          issueId: paperclipIssueId,
-          repositoryUrl: repository.url
-        });
         const pullRequestUrl =
           normalizeGitHubPullRequestHtmlUrl(pullRequestData.html_url)
           ?? `${repository.url}/pull/${pullRequestData.number}`;
 
         await upsertGitHubPullRequestLinkRecord(ctx, {
           companyId: runCtx.companyId,
-          projectId: linkScope.mapping.paperclipProjectId ?? linkScope.projectId,
+          projectId: issueProjectId,
           issueId: paperclipIssueId,
           repositoryUrl: repository.url,
           pullRequestNumber: pullRequestData.number,
@@ -21282,7 +21285,7 @@ function registerGitHubAgentTools(ctx: PluginSetupContext): void {
         });
         invalidateProjectPullRequestCaches({
           companyId: runCtx.companyId,
-          projectId: linkScope.mapping.paperclipProjectId ?? linkScope.projectId,
+          projectId: issueProjectId,
           repository
         });
       }
