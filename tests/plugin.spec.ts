@@ -669,9 +669,11 @@ test('shouldStartWorkerHost rejects unrelated entrypoints', async () => {
 async function createGitHubAgentToolHarness(options: {
   repositoryUrl?: string;
   includeMapping?: boolean;
+  workspacePath?: string;
 } = {}) {
   const repositoryUrl = options.repositoryUrl ?? 'https://github.com/paperclipai/example-repo';
   const includeMapping = options.includeMapping ?? true;
+  const workspacePath = options.workspacePath ?? '/tmp/paperclip-github-plugin-example-repo/.paperclip/worktrees/issue-worktree';
   const harness = createTestHarness({
     manifest,
     config: {
@@ -692,8 +694,8 @@ async function createGitHubAgentToolHarness(options: {
         companyId: 'company-1',
         projectId: 'project-1',
         projectWorkspaceId: 'workspace-project-1',
-        path: '/tmp/paperclip-github-plugin-example-repo/.paperclip/worktrees/issue-worktree',
-        cwd: '/tmp/paperclip-github-plugin-example-repo/.paperclip/worktrees/issue-worktree',
+        path: workspacePath,
+        cwd: workspacePath,
         repoUrl: repositoryUrl,
         baseRef: 'main',
         branchName: null,
@@ -1618,6 +1620,8 @@ test('create_pull_request requires one-call branch publication inputs', () => {
     String(properties.headCommitSha?.description ?? ''),
     /exact local branch tip/i
   );
+  assert.match(String(properties.repository?.description ?? ''), /outside Paperclip repository mappings/i);
+  assert.match(String(properties.workspaceRelativePath?.description ?? ''), /relative to the trusted issue execution workspace/i);
 });
 
 test('upload_pull_request_asset publishes an image asset with embeddable markdown', async () => {
@@ -2049,11 +2053,14 @@ test('create_pull_request appends the required AI footer to the pull request bod
   }
 });
 
-test('create_pull_request publishes to an explicit repository outside Paperclip mappings', async () => {
+test('create_pull_request publishes to an explicit repository outside Paperclip mappings from a nested checkout', async () => {
   const repositoryUrl = 'https://github.com/alvarosanchez/micronaut-agent-company';
+  const workspaceRoot = await mkdtemp(join(tmpdir(), 'paperclip-github-workspace-'));
+  const repositoryPath = join(workspaceRoot, 'micronaut-agent-company');
+  await mkdir(repositoryPath);
   const harness = await createGitHubAgentToolHarness({
-    repositoryUrl,
-    includeMapping: false
+    includeMapping: false,
+    workspacePath: workspaceRoot
   });
   const issue = await harness.ctx.issues.create({
     companyId: 'company-1',
@@ -2092,6 +2099,7 @@ test('create_pull_request publishes to an explicit repository outside Paperclip 
   try {
     const result = await harness.executeTool('create_pull_request', {
       repository: 'alvarosanchez/micronaut-agent-company',
+      workspaceRelativePath: 'micronaut-agent-company',
       paperclipIssueId: issue.id,
       head: 'chore/reduce-routine-frequency',
       headCommitSha: TEST_HEAD_COMMIT_SHA,
@@ -2106,6 +2114,7 @@ test('create_pull_request publishes to an explicit repository outside Paperclip 
 
     assert.ok(!result.error);
     assert.equal(publishedBranchRequests.length, 1);
+    assert.equal(publishedBranchRequests[0]?.workspacePath, repositoryPath);
     assert.equal(publishedBranchRequests[0]?.repositoryUrl, repositoryUrl);
     assert.equal((result.data as { repository: string }).repository, repositoryUrl);
     const links = await harness.ctx.entities.list({
@@ -2117,37 +2126,30 @@ test('create_pull_request publishes to an explicit repository outside Paperclip 
     assert.equal((links[0]?.data as { repositoryUrl?: string }).repositoryUrl, repositoryUrl);
   } finally {
     globalThis.fetch = originalFetch;
+    await rm(workspaceRoot, { recursive: true, force: true });
   }
 });
 
-test('create_pull_request rejects an explicit repository that does not match the execution workspace', async () => {
-  const harness = await createGitHubAgentToolHarness();
-  const issue = await harness.ctx.issues.create({
-    companyId: 'company-1',
-    projectId: 'project-1',
-    title: 'Reject unrelated workspace publication',
-    description: 'The trusted worktree must remain the source of the published commit.',
-    status: 'in_progress',
-    assigneeAgentId: 'agent-1',
-    executionWorkspaceId: 'execution-workspace-1'
-  });
+test('create_pull_request rejects workspaceRelativePath escapes', async () => {
+  const workerModule = await importFreshWorkerModule();
+  const workspaceRoot = await mkdtemp(join(tmpdir(), 'paperclip-trusted-workspace-'));
+  const outsideRoot = await mkdtemp(join(tmpdir(), 'paperclip-outside-workspace-'));
+  const symlinkPath = join(workspaceRoot, 'escaped-checkout');
+  await symlink(outsideRoot, symlinkPath);
 
-  const result = await harness.executeTool('create_pull_request', {
-    repository: 'third-party/upstream',
-    paperclipIssueId: issue.id,
-    head: 'feature/wrong-workspace',
-    headCommitSha: TEST_HEAD_COMMIT_SHA,
-    base: 'main',
-    title: 'Do not publish this branch'
-  }, {
-    agentId: 'agent-1',
-    runId: 'run-1',
-    companyId: 'company-1',
-    projectId: 'project-1'
-  });
-
-  assert.match(result.error ?? '', /execution workspace repository does not match the selected GitHub repository/i);
-  assert.equal(publishedBranchRequests.length, 0);
+  try {
+    assert.throws(
+      () => workerModule.__testing.resolveTrustedWorkspacePath(workspaceRoot, 'escaped-checkout'),
+      /must stay inside the trusted execution workspace/i
+    );
+    assert.throws(
+      () => workerModule.__testing.resolveTrustedWorkspacePath(workspaceRoot, outsideRoot),
+      /must be relative to the trusted execution workspace/i
+    );
+  } finally {
+    await rm(workspaceRoot, { recursive: true, force: true });
+    await rm(outsideRoot, { recursive: true, force: true });
+  }
 });
 
 test('create_pull_request does not call the GitHub PR API when branch publication fails', async () => {
