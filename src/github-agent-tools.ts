@@ -271,7 +271,11 @@ export const GITHUB_AGENT_TOOLS: PluginToolDeclaration[] = [
       properties: {
         repository: {
           type: 'string',
-          description: 'Target GitHub repository as owner/repo or https://github.com/owner/repo. It may be outside Paperclip repository mappings, but it must match the issue execution workspace. Omit only when the issue project has exactly one mapped repository.'
+          description: 'Target GitHub repository as owner/repo or https://github.com/owner/repo. It may be outside Paperclip repository mappings. Omit only when the issue project has exactly one mapped repository.'
+        },
+        workspaceRelativePath: {
+          type: 'string',
+          description: 'Optional path to the local Git checkout, relative to the trusted issue execution workspace. Use this when a general-purpose workspace contains the target repository in a subdirectory.'
         },
         paperclipIssueId: {
           type: 'string',

@@ -2,7 +2,7 @@ import { Buffer } from 'node:buffer';
 import { realpathSync } from 'node:fs';
 import { chmod, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Octokit } from '@octokit/rest';
 import {
@@ -20752,6 +20752,23 @@ async function startSync(
   }
 }
 
+function resolveTrustedWorkspacePath(workspacePath: string, workspaceRelativePath?: string): string {
+  if (!workspaceRelativePath) {
+    return workspacePath;
+  }
+  const trustedRoot = realpathSync(workspacePath);
+  if (isAbsolute(workspaceRelativePath)) {
+    throw new Error('workspaceRelativePath must be relative to the trusted execution workspace.');
+  }
+
+  const candidate = realpathSync(resolve(trustedRoot, workspaceRelativePath));
+  const relativeCandidate = relative(trustedRoot, candidate);
+  if (relativeCandidate === '..' || relativeCandidate.startsWith(`..${process.platform === 'win32' ? '\\' : '/'}`) || isAbsolute(relativeCandidate)) {
+    throw new Error('workspaceRelativePath must stay inside the trusted execution workspace.');
+  }
+  return candidate;
+}
+
 function registerGitHubAgentTools(ctx: PluginSetupContext): void {
   async function createAgentToolOctokit(
     runCtx: ToolRunContext,
@@ -21128,6 +21145,7 @@ function registerGitHubAgentTools(ctx: PluginSetupContext): void {
       const input = getToolInputRecord(params);
       const paperclipIssueId = normalizeOptionalToolString(input.paperclipIssueId);
       const explicitRepository = normalizeOptionalToolString(input.repository);
+      const workspaceRelativePath = normalizeOptionalToolString(input.workspaceRelativePath);
       const head = normalizeOptionalToolString(input.head);
       const headCommitSha = normalizeOptionalToolString(input.headCommitSha);
       const base = normalizeOptionalToolString(input.base);
@@ -21174,9 +21192,7 @@ function registerGitHubAgentTools(ctx: PluginSetupContext): void {
       if (!workspacePath) {
         throw new Error('The selected Paperclip issue execution workspace is not locally realized.');
       }
-      const workspaceRepository = workspace.repoUrl
-        ? parseRepositoryReference(workspace.repoUrl)
-        : null;
+      const publicationWorkspacePath = resolveTrustedWorkspacePath(workspacePath, workspaceRelativePath);
       const repository = explicitRepository
         ? parseRepositoryReference(explicitRepository)
         : (await resolveIssueGitHubLinkMapping(ctx, {
@@ -21186,16 +21202,13 @@ function registerGitHubAgentTools(ctx: PluginSetupContext): void {
       if (!repository) {
         throw new Error(`Invalid GitHub repository: ${explicitRepository}. Use owner/repo or https://github.com/owner/repo.`);
       }
-      if (!workspaceRepository || !areRepositoriesEqual(workspaceRepository, repository)) {
-        throw new Error('The execution workspace repository does not match the selected GitHub repository.');
-      }
 
       const githubToken = (await resolveGithubToken(ctx, { companyId: runCtx.companyId })).trim();
       if (!githubToken) {
         throw new Error(MISSING_GITHUB_TOKEN_SYNC_MESSAGE);
       }
       const publishedBranch = await createPullRequestBranchPublisher({
-        workspacePath: workspacePath!,
+        workspacePath: publicationWorkspacePath,
         repositoryUrl: repository.url,
         branchName: head,
         expectedCommitSha: headCommitSha,
@@ -21932,6 +21945,7 @@ export const __testing = {
   resolveGithubToken,
   resolvePaperclipPullRequestIssueStatus,
   resolveSyncTransitionAssignee,
+  resolveTrustedWorkspacePath,
   setCreatePullRequestBranchPublisher(
     publisher?: CreatePullRequestBranchPublisher
   ): void {
