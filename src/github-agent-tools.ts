@@ -420,7 +420,8 @@ export const GITHUB_AGENT_TOOLS: PluginToolDeclaration[] = [
           minLength: 1,
           description: 'Human-facing reply body without the AI footer. It must remain non-empty after trimming and removing any existing AI footer.'
         },
-        llmModel: llmModelProperty
+        llmModel: llmModelProperty,
+        paperclipIssueId: paperclipIssueIdProperty
       }
     }
   },
@@ -436,7 +437,8 @@ export const GITHUB_AGENT_TOOLS: PluginToolDeclaration[] = [
         threadId: {
           type: 'string',
           description: 'GitHub pull request review thread node id.'
-        }
+        },
+        paperclipIssueId: paperclipIssueIdProperty
       }
     }
   },
@@ -452,7 +454,8 @@ export const GITHUB_AGENT_TOOLS: PluginToolDeclaration[] = [
         threadId: {
           type: 'string',
           description: 'GitHub pull request review thread node id.'
-        }
+        },
+        paperclipIssueId: paperclipIssueIdProperty
       }
     }
   },
@@ -641,6 +644,30 @@ export const GITHUB_AGENT_TOOLS: PluginToolDeclaration[] = [
         pullRequestUrl: {
           type: 'string',
           description: 'Full GitHub pull request URL.'
+        }
+      }
+    }
+  },
+  {
+    name: 'get_issue_interaction_summary',
+    displayName: 'Get Issue Interaction Summary',
+    description: 'Return a deterministic, sanitized interaction summary for one Paperclip issue over a maximum 30-day [from,to) UTC range.',
+    parametersSchema: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['paperclipIssueId'],
+      properties: {
+        paperclipIssueId: {
+          type: 'string',
+          description: 'Paperclip issue id in the authenticated tool run company.'
+        },
+        from: {
+          type: 'string',
+          description: 'Optional inclusive ISO timestamp. Defaults to 30 days before to.'
+        },
+        to: {
+          type: 'string',
+          description: 'Optional exclusive ISO timestamp. Defaults to the current time.'
         }
       }
     }

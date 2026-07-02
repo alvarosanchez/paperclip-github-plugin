@@ -1,4 +1,5 @@
 import { Buffer } from 'node:buffer';
+import { createHash } from 'node:crypto';
 import { realpathSync } from 'node:fs';
 import { chmod, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
@@ -25,6 +26,14 @@ import {
   type PublishedBranch
 } from './git-branch-publisher.ts';
 import { parseRepositoryReference, type ParsedRepositoryReference } from './github-repo.ts';
+import {
+  buildIssueInteractionSummary,
+  ISSUE_INTERACTION_ENTITY_TYPE,
+  ISSUE_INTERACTION_LEDGER_STARTED_AT,
+  parseIssueInteractionRange,
+  sanitizeIssueInteractionEvent,
+  type IssueInteractionEvent
+} from './issue-interactions.ts';
 import {
   COMPANY_METRIC_API_ROUTE_KEY,
   GITHUB_SYNC_PLUGIN_ID,
@@ -12978,8 +12987,10 @@ async function updatePaperclipIssueState(
     paperclipApiBaseUrl
   } = params;
   const trimmedTransitionComment = transitionComment.trim();
+  const interactionOccurredAt = new Date().toISOString();
   const statusWillChange = currentStatus !== nextStatus;
   let createdTransitionComment: IssueComment | null = null;
+  let interactionCommentId: string | undefined;
   let issueUpdated = false;
   const syncExecutionStatePatch = buildSyncFallbackExecutionStatePatch({
     currentStatus,
@@ -13016,6 +13027,7 @@ async function updatePaperclipIssueState(
     }
 
     createdTransitionComment = await ctx.issues.createComment(issueId, trimmedTransitionComment, companyId);
+    interactionCommentId = createdTransitionComment.id;
   }
 
   if (paperclipApiBaseUrl) {
@@ -13121,6 +13133,7 @@ async function updatePaperclipIssueState(
     }
   } else if (trimmedTransitionComment && typeof ctx.issues.createComment === 'function') {
     const createdComment = await ctx.issues.createComment(issueId, trimmedTransitionComment, companyId);
+    interactionCommentId = createdComment.id;
     if (transitionCommentAnnotation) {
       await upsertStatusTransitionCommentAnnotation(ctx, {
         issueId,
@@ -13132,6 +13145,47 @@ async function updatePaperclipIssueState(
         }
       });
     }
+  }
+
+  const reasonCode = (transitionCommentAnnotation?.reason ?? trimmedTransitionComment)
+    .toLowerCase()
+    .replace(/https?:\/\/\S+/g, 'github_link')
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .slice(0, 80) || 'github_sync_decision';
+  try {
+    await persistIssueInteractionEvent(ctx, {
+      schemaVersion: 1,
+      companyId,
+      paperclipIssueId: issueId,
+      occurredAt: interactionOccurredAt,
+      category: 'sync',
+      action: 'status_decision',
+      source: 'sync',
+      ...(transitionCommentAnnotation ? {
+        remote: {
+          repositoryUrl: transitionCommentAnnotation.repositoryUrl,
+          kind: 'issue',
+          number: transitionCommentAnnotation.githubIssueNumber,
+          url: transitionCommentAnnotation.githubIssueUrl
+        }
+      } : {}),
+      transition: {
+        from: currentStatus,
+        to: nextStatus,
+        reasonCode
+      },
+      outcome: statusWillChange ? 'changed' : 'noop',
+      dedupeKey: `sync:${issueId}:${interactionCommentId ?? interactionOccurredAt}:${currentStatus}:${nextStatus}`
+    });
+  } catch (error) {
+    ctx.logger.warn('GitHub Sync could not persist a status-decision interaction event.', {
+      companyId,
+      issueId,
+      currentStatus,
+      nextStatus,
+      error: getErrorMessage(error)
+    });
   }
 }
 
@@ -20752,6 +20806,134 @@ async function startSync(
   }
 }
 
+async function persistIssueInteractionEvent(
+  ctx: PluginSetupContext,
+  event: IssueInteractionEvent
+): Promise<void> {
+  const sanitized = sanitizeIssueInteractionEvent(event);
+  await ctx.entities.upsert({
+    entityType: ISSUE_INTERACTION_ENTITY_TYPE,
+    scopeKind: 'issue',
+    scopeId: sanitized.paperclipIssueId,
+    externalId: sanitized.dedupeKey,
+    title: `${sanitized.source}: ${sanitized.action}`,
+    status: sanitized.outcome,
+    data: { ...sanitized }
+  });
+}
+
+async function listIssueInteractionEvents(
+  ctx: PluginSetupContext,
+  paperclipIssueId: string
+): Promise<IssueInteractionEvent[]> {
+  const events: IssueInteractionEvent[] = [];
+  for (let offset = 0; ; ) {
+    const page = await ctx.entities.list({
+      entityType: ISSUE_INTERACTION_ENTITY_TYPE,
+      scopeKind: 'issue',
+      scopeId: paperclipIssueId,
+      limit: 100,
+      offset
+    });
+    for (const entry of page) {
+      if (entry.scopeKind !== 'issue' || entry.scopeId !== paperclipIssueId) continue;
+      try {
+        events.push(sanitizeIssueInteractionEvent(entry.data as unknown as IssueInteractionEvent));
+      } catch {
+        // Ignore malformed legacy rows rather than leaking or returning untrusted fields.
+      }
+    }
+    if (page.length < 100) break;
+    offset += page.length;
+  }
+  return events;
+}
+
+async function buildIssueInteractionSummaryForTool(
+  ctx: PluginSetupContext,
+  input: Record<string, unknown>,
+  runCtx: ToolRunContext
+) {
+  const paperclipIssueId = normalizeOptionalToolString(input.paperclipIssueId);
+  if (!paperclipIssueId) throw new Error('paperclipIssueId is required.');
+  const issue = await ctx.issues.get(paperclipIssueId, runCtx.companyId);
+  if (!issue) throw new Error('Paperclip issue was not found in the authenticated company.');
+  const range = parseIssueInteractionRange({ from: input.from, to: input.to });
+  const events = await listIssueInteractionEvents(ctx, paperclipIssueId);
+  return buildIssueInteractionSummary({
+    companyId: runCtx.companyId,
+    paperclipIssueId,
+    range,
+    events,
+    ledgerStartedAt: ISSUE_INTERACTION_LEDGER_STARTED_AT
+  });
+}
+
+async function executeTrackedGitHubMutation(
+  ctx: PluginSetupContext,
+  action: string,
+  params: unknown,
+  runCtx: ToolRunContext,
+  fn: () => Promise<ToolResult>
+): Promise<ToolResult> {
+  const input = getToolInputRecord(params);
+  const paperclipIssueId = normalizeOptionalToolString(input.paperclipIssueId);
+  if (paperclipIssueId && !await ctx.issues.get(paperclipIssueId, runCtx.companyId)) {
+    return executeGitHubTool(async () => {
+      throw new Error('Paperclip issue was not found in the authenticated company.');
+    });
+  }
+  const startedAt = new Date();
+  const result = await executeGitHubTool(fn);
+  if (!paperclipIssueId) return result;
+
+  const runRecord = runCtx as unknown as Record<string, unknown>;
+  const fingerprintInput = JSON.stringify(input, Object.keys(input).sort());
+  const fingerprint = createHash('sha256').update(fingerprintInput).digest('hex').slice(0, 24);
+  const runId = normalizeOptionalToolString(runRecord.runId);
+  const issueNumber = normalizeToolPositiveInteger(input.issueNumber);
+  const pullRequestNumber = normalizeToolPositiveInteger(input.pullRequestNumber);
+  const repository = parseRepositoryReference(normalizeOptionalToolString(input.repository) ?? '');
+  const remoteNumber = issueNumber ?? pullRequestNumber;
+  const remoteKind = issueNumber ? 'issue' : pullRequestNumber ? 'pull_request' : undefined;
+  const durationMs = Math.max(0, Date.now() - startedAt.getTime());
+
+  try {
+    await persistIssueInteractionEvent(ctx, {
+      schemaVersion: 1,
+      companyId: runCtx.companyId,
+      paperclipIssueId,
+      occurredAt: startedAt.toISOString(),
+      category: action.includes('comment') || action.includes('reply') ? 'comment' : 'github_write',
+      action,
+      source: 'agent_tool',
+      actor: {
+        agentId: normalizeOptionalToolString(runRecord.agentId),
+        runId,
+        llmModel: normalizeOptionalToolString(input.llmModel)
+      },
+      ...((repository || remoteKind || remoteNumber) ? {
+        remote: {
+          repositoryUrl: repository?.url,
+          kind: remoteKind,
+          number: remoteNumber
+        }
+      } : {}),
+      outcome: result.error ? 'failed' : 'changed',
+      durationMs,
+      dedupeKey: `agent_tool:${runId ?? 'unknown-run'}:${action}:${fingerprint}`
+    });
+  } catch (error) {
+    ctx.logger.warn('GitHub Sync could not persist an issue interaction event.', {
+      companyId: runCtx.companyId,
+      paperclipIssueId,
+      action,
+      error: getErrorMessage(error)
+    });
+  }
+  return result;
+}
+
 function resolveTrustedWorkspacePath(workspacePath: string, workspaceRelativePath?: string): string {
   if (!workspaceRelativePath) {
     return workspacePath;
@@ -20933,7 +21115,7 @@ function registerGitHubAgentTools(ctx: PluginSetupContext): void {
   ctx.tools.register(
     'update_issue',
     getGitHubAgentToolDeclaration('update_issue'),
-    async (params, runCtx) => executeGitHubTool(async () => {
+    async (params, runCtx) => executeTrackedGitHubMutation(ctx, 'update_issue', params, runCtx, async () => {
       const input = getToolInputRecord(params);
       const target = await resolveGitHubIssueToolTarget(ctx, runCtx, input);
       const octokit = await createAgentToolOctokit(runCtx, 'update_issue', target.repository);
@@ -21036,7 +21218,7 @@ function registerGitHubAgentTools(ctx: PluginSetupContext): void {
   ctx.tools.register(
     'assign_to_current_user',
     getGitHubAgentToolDeclaration('assign_to_current_user'),
-    async (params, runCtx) => executeGitHubTool(async () => {
+    async (params, runCtx) => executeTrackedGitHubMutation(ctx, 'assign_to_current_user', params, runCtx, async () => {
       const input = getToolInputRecord(params);
       const target = await resolveGitHubIssueToolTarget(ctx, runCtx, input);
       const octokit = await createAgentToolOctokit(runCtx, 'assign_to_current_user', target.repository);
@@ -21106,7 +21288,7 @@ function registerGitHubAgentTools(ctx: PluginSetupContext): void {
   ctx.tools.register(
     'add_issue_comment',
     getGitHubAgentToolDeclaration('add_issue_comment'),
-    async (params, runCtx) => executeGitHubTool(async () => {
+    async (params, runCtx) => executeTrackedGitHubMutation(ctx, 'add_issue_comment', params, runCtx, async () => {
       const input = getToolInputRecord(params);
       const target = await resolveGitHubIssueToolTarget(ctx, runCtx, input);
       const octokit = await createAgentToolOctokit(runCtx, 'add_issue_comment', target.repository);
@@ -21141,7 +21323,7 @@ function registerGitHubAgentTools(ctx: PluginSetupContext): void {
   ctx.tools.register(
     'create_pull_request',
     getGitHubAgentToolDeclaration('create_pull_request'),
-    async (params, runCtx) => executeGitHubTool(async () => {
+    async (params, runCtx) => executeTrackedGitHubMutation(ctx, 'create_pull_request', params, runCtx, async () => {
       const input = getToolInputRecord(params);
       const paperclipIssueId = normalizeOptionalToolString(input.paperclipIssueId);
       const explicitRepository = normalizeOptionalToolString(input.repository);
@@ -21394,7 +21576,7 @@ function registerGitHubAgentTools(ctx: PluginSetupContext): void {
   ctx.tools.register(
     'update_pull_request',
     getGitHubAgentToolDeclaration('update_pull_request'),
-    async (params, runCtx) => executeGitHubTool(async () => {
+    async (params, runCtx) => executeTrackedGitHubMutation(ctx, 'update_pull_request', params, runCtx, async () => {
       const input = getToolInputRecord(params);
       const target = await resolveGitHubPullRequestToolTarget(ctx, runCtx, input);
       const octokit = await createAgentToolOctokit(runCtx, 'update_pull_request', target.repository);
@@ -21618,7 +21800,7 @@ function registerGitHubAgentTools(ctx: PluginSetupContext): void {
   ctx.tools.register(
     'reply_to_review_thread',
     getGitHubAgentToolDeclaration('reply_to_review_thread'),
-    async (params, runCtx) => executeGitHubTool(async () => {
+    async (params, runCtx) => executeTrackedGitHubMutation(ctx, 'reply_to_review_thread', params, runCtx, async () => {
       const input = getToolInputRecord(params);
       const threadId = normalizeOptionalToolString(input.threadId);
       if (!threadId) {
@@ -21657,7 +21839,7 @@ function registerGitHubAgentTools(ctx: PluginSetupContext): void {
   ctx.tools.register(
     'resolve_review_thread',
     getGitHubAgentToolDeclaration('resolve_review_thread'),
-    async (params, runCtx) => executeGitHubTool(async () => {
+    async (params, runCtx) => executeTrackedGitHubMutation(ctx, 'resolve_review_thread', params, runCtx, async () => {
       const input = getToolInputRecord(params);
       const threadId = normalizeOptionalToolString(input.threadId);
       if (!threadId) {
@@ -21691,7 +21873,7 @@ function registerGitHubAgentTools(ctx: PluginSetupContext): void {
   ctx.tools.register(
     'unresolve_review_thread',
     getGitHubAgentToolDeclaration('unresolve_review_thread'),
-    async (params, runCtx) => executeGitHubTool(async () => {
+    async (params, runCtx) => executeTrackedGitHubMutation(ctx, 'unresolve_review_thread', params, runCtx, async () => {
       const input = getToolInputRecord(params);
       const threadId = normalizeOptionalToolString(input.threadId);
       if (!threadId) {
@@ -21725,7 +21907,7 @@ function registerGitHubAgentTools(ctx: PluginSetupContext): void {
   ctx.tools.register(
     'request_pull_request_reviewers',
     getGitHubAgentToolDeclaration('request_pull_request_reviewers'),
-    async (params, runCtx) => executeGitHubTool(async () => {
+    async (params, runCtx) => executeTrackedGitHubMutation(ctx, 'request_pull_request_reviewers', params, runCtx, async () => {
       const input = getToolInputRecord(params);
       const target = await resolveGitHubPullRequestToolTarget(ctx, runCtx, input);
       const userReviewers = normalizeToolStringArray(input.userReviewers);
@@ -21788,7 +21970,7 @@ function registerGitHubAgentTools(ctx: PluginSetupContext): void {
   ctx.tools.register(
     'add_pull_request_to_project',
     getGitHubAgentToolDeclaration('add_pull_request_to_project'),
-    async (params, runCtx) => executeGitHubTool(async () => {
+    async (params, runCtx) => executeTrackedGitHubMutation(ctx, 'add_pull_request_to_project', params, runCtx, async () => {
       const input = getToolInputRecord(params);
       const target = await resolveGitHubPullRequestToolTarget(ctx, runCtx, input);
       const octokit = await createAgentToolOctokit(runCtx, 'add_pull_request_to_project', target.repository);
@@ -21855,7 +22037,7 @@ function registerGitHubAgentTools(ctx: PluginSetupContext): void {
   ctx.tools.register(
     'upload_pull_request_asset',
     getGitHubAgentToolDeclaration('upload_pull_request_asset'),
-    async (params, runCtx) => executeGitHubTool(async () => {
+    async (params, runCtx) => executeTrackedGitHubMutation(ctx, 'upload_pull_request_asset', params, runCtx, async () => {
       const input = getToolInputRecord(params);
       const target = await resolveGitHubPullRequestToolTarget(ctx, runCtx, input);
       const octokit = await createAgentToolOctokit(runCtx, 'upload_pull_request_asset', target.repository);
@@ -21878,7 +22060,7 @@ function registerGitHubAgentTools(ctx: PluginSetupContext): void {
   ctx.tools.register(
     'link_github_item',
     getGitHubAgentToolDeclaration('link_github_item'),
-    async (params, runCtx) => executeGitHubTool(async () => {
+    async (params, runCtx) => executeTrackedGitHubMutation(ctx, 'link_github_item', params, runCtx, async () => {
       const input = getToolInputRecord(params);
       const kind = normalizeIssueGitHubLinkKind(input.kind);
       if (!kind) {
@@ -21919,6 +22101,18 @@ function registerGitHubAgentTools(ctx: PluginSetupContext): void {
       );
     })
   );
+
+  ctx.tools.register(
+    'get_issue_interaction_summary',
+    getGitHubAgentToolDeclaration('get_issue_interaction_summary'),
+    async (params, runCtx) => executeGitHubTool(async () => {
+      const summary = await buildIssueInteractionSummaryForTool(ctx, getToolInputRecord(params), runCtx);
+      return buildToolSuccessResult(
+        `Loaded ${summary.counts.events} captured interactions for Paperclip issue ${summary.paperclipIssueId}.`,
+        { summary }
+      );
+    })
+  );
 }
 
 export function shouldStartWorkerHost(moduleUrl: string, entry = process.argv[1]): boolean {
@@ -21946,6 +22140,7 @@ export const __testing = {
   resolvePaperclipPullRequestIssueStatus,
   resolveSyncTransitionAssignee,
   resolveTrustedWorkspacePath,
+  updatePaperclipIssueState,
   setCreatePullRequestBranchPublisher(
     publisher?: CreatePullRequestBranchPublisher
   ): void {

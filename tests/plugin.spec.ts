@@ -1572,7 +1572,8 @@ test('manifest declares GitHub agent tools and only the external metrics API rou
       'list_organization_projects',
       'add_pull_request_to_project',
       'upload_pull_request_asset',
-      'link_github_item'
+      'link_github_item',
+      'get_issue_interaction_summary'
     ]
   );
   assert.equal(
@@ -2469,6 +2470,15 @@ test('create_pull_request links the created pull request to the current Papercli
     assert.equal(pullRequestLinks.length, 1);
     assert.equal(pullRequestLinks[0]?.externalId, 'https://github.com/paperclipai/example-repo/pull/23');
     assert.equal((pullRequestLinks[0]?.data as { githubPullRequestNumber?: unknown }).githubPullRequestNumber, 23);
+
+    const interactionEvents = await harness.ctx.entities.list({
+      entityType: 'paperclip-github-plugin.issue-interaction-event',
+      scopeKind: 'issue',
+      scopeId: issue.id
+    });
+    assert.equal(interactionEvents.length, 1);
+    assert.equal((interactionEvents[0]?.data as { action?: unknown }).action, 'create_pull_request');
+    assert.equal((interactionEvents[0]?.data as { outcome?: unknown }).outcome, 'changed');
 
     const getResult = await harness.executeTool('get_pull_request', {
       paperclipIssueId: issue.id

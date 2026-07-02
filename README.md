@@ -102,6 +102,20 @@ Operators can unlink a linked Paperclip issue from the GitHub detail surface whe
 Paperclip agents can search GitHub for duplicates, read and update issues, assign issues to the saved token owner, post comments, create pull requests, inspect changed files and CI, reply to review threads, resolve or unresolve threads, request reviewers, search org-level GitHub Projects, and associate pull requests with those projects without leaving the Paperclip plugin surface.
 They can also link a Paperclip issue to a GitHub issue or pull request in any accessible repository with `link_github_item`, including third-party repositories that are not mapped to a Paperclip project.
 
+### Issue interaction ledger and 30-day summary
+
+GitHub Sync keeps a forward-only, issue-scoped interaction ledger in `paperclip-github-plugin.issue-interaction-event` entities. It captures sync status decisions (changes and meaningful no-ops, including direct-PR status paths) and issue-scoped mutating GitHub agent tool attempts. Agent/run/model attribution and normalized remote identifiers are retained when available; raw issue or comment bodies, logs, credentials, secret references, headers, and provider payloads are never stored in the ledger.
+
+Agents can call `get_issue_interaction_summary` with:
+
+- `paperclipIssueId` (required)
+- `from` (optional inclusive ISO timestamp)
+- `to` (optional exclusive ISO timestamp)
+
+The authenticated tool-run company is authoritative. The worker verifies the issue in that company and rejects cross-company access. The default range is the 30 days ending now, custom ranges use UTC `[from,to)` semantics, and no query may exceed 30 days. Results are deterministic compact JSON with coverage metadata, counts for events/runs/comments/remote writes/status decisions/transitions/failures/no-ops, ordered transitions, repeated-action and reversal signals, and explicit limitations.
+
+Coverage begins when this ledger ships; GitHub Sync does not reconstruct earlier history. GitHub actions performed outside captured plugin paths are absent, and mutating tools only produce issue-ledger entries when they are invoked with `paperclipIssueId`. Thread-only mutations accept an optional `paperclipIssueId` for this attribution. This first increment does not capture read-only tools, operator UI mutations, arbitrary external GitHub activity, token/cost data, or historical comments/runs.
+
 ## Requirements
 
 - Node.js 20+
