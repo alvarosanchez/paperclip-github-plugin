@@ -29,7 +29,6 @@ import { parseRepositoryReference, type ParsedRepositoryReference } from './gith
 import {
   buildIssueInteractionSummary,
   ISSUE_INTERACTION_ENTITY_TYPE,
-  ISSUE_INTERACTION_LEDGER_STARTED_AT,
   parseIssueInteractionRange,
   sanitizeIssueInteractionEvent,
   type IssueInteractionEvent
@@ -12957,6 +12956,21 @@ function doIssueNumberListsMatch(left: number[], right: number[]): boolean {
   return left.every((value, index) => value === right[index]);
 }
 
+function classifyIssueInteractionReason(value: string): string {
+  const reason = value.toLowerCase();
+  if (reason.includes('new github comment')) return 'trusted_comment';
+  if (reason.includes('green ci') && reason.includes('review thread')) return 'pr_ready';
+  if (reason.includes('merge conflict')) return 'pr_merge_conflict';
+  if (reason.includes('failing ci')) return 'pr_ci_failed';
+  if (reason.includes('unfinished ci')) return 'pr_ci_unfinished';
+  if (reason.includes('unknown mergeability')) return 'pr_mergeability_unknown';
+  if (reason.includes('closed as completed')) return 'issue_closed_completed';
+  if (reason.includes('closed') && reason.includes('not planned')) return 'issue_closed_not_planned';
+  if (reason.includes('duplicate')) return 'issue_closed_duplicate';
+  if (reason.includes('open with no linked pull request')) return 'issue_ready_for_triage';
+  return 'github_sync_status_decision';
+}
+
 async function updatePaperclipIssueState(
   ctx: PluginSetupContext,
   params: {
@@ -13147,12 +13161,7 @@ async function updatePaperclipIssueState(
     }
   }
 
-  const reasonCode = (transitionCommentAnnotation?.reason ?? trimmedTransitionComment)
-    .toLowerCase()
-    .replace(/https?:\/\/\S+/g, 'github_link')
-    .replace(/[^a-z0-9]+/g, '_')
-    .replace(/^_+|_+$/g, '')
-    .slice(0, 80) || 'github_sync_decision';
+  const reasonCode = classifyIssueInteractionReason(transitionCommentAnnotation?.reason ?? trimmedTransitionComment);
   try {
     await persistIssueInteractionEvent(ctx, {
       schemaVersion: 1,
@@ -20811,6 +20820,33 @@ async function persistIssueInteractionEvent(
   event: IssueInteractionEvent
 ): Promise<void> {
   const sanitized = sanitizeIssueInteractionEvent(event);
+  for (let offset = 0; ; ) {
+    const page = await ctx.entities.list({
+      entityType: ISSUE_INTERACTION_ENTITY_TYPE,
+      scopeKind: 'issue',
+      scopeId: sanitized.paperclipIssueId,
+      externalId: sanitized.dedupeKey,
+      limit: 100,
+      offset
+    });
+    for (const entry of page) {
+      if (
+        entry.scopeKind !== 'issue'
+        || entry.scopeId !== sanitized.paperclipIssueId
+        || entry.externalId !== sanitized.dedupeKey
+      ) continue;
+      try {
+        const previous = sanitizeIssueInteractionEvent(entry.data as unknown as IssueInteractionEvent);
+        if (JSON.stringify(previous) === JSON.stringify(sanitized)) return;
+        throw new Error('Issue interaction dedupe key already exists with different immutable content.');
+      } catch (error) {
+        if (error instanceof Error && error.message.includes('different immutable content')) throw error;
+        throw new Error('Issue interaction dedupe key already exists with malformed immutable content.');
+      }
+    }
+    if (page.length < 100) break;
+    offset += page.length;
+  }
   await ctx.entities.upsert({
     entityType: ISSUE_INTERACTION_ENTITY_TYPE,
     scopeKind: 'issue',
@@ -20824,6 +20860,7 @@ async function persistIssueInteractionEvent(
 
 async function listIssueInteractionEvents(
   ctx: PluginSetupContext,
+  companyId: string,
   paperclipIssueId: string
 ): Promise<IssueInteractionEvent[]> {
   const events: IssueInteractionEvent[] = [];
@@ -20837,8 +20874,10 @@ async function listIssueInteractionEvents(
     });
     for (const entry of page) {
       if (entry.scopeKind !== 'issue' || entry.scopeId !== paperclipIssueId) continue;
+      const raw = entry.data as Record<string, unknown> | null;
+      if (raw?.companyId !== companyId || raw?.paperclipIssueId !== paperclipIssueId) continue;
       try {
-        events.push(sanitizeIssueInteractionEvent(entry.data as unknown as IssueInteractionEvent));
+        events.push(sanitizeIssueInteractionEvent(raw as unknown as IssueInteractionEvent));
       } catch {
         // Ignore malformed legacy rows rather than leaking or returning untrusted fields.
       }
@@ -20859,13 +20898,12 @@ async function buildIssueInteractionSummaryForTool(
   const issue = await ctx.issues.get(paperclipIssueId, runCtx.companyId);
   if (!issue) throw new Error('Paperclip issue was not found in the authenticated company.');
   const range = parseIssueInteractionRange({ from: input.from, to: input.to });
-  const events = await listIssueInteractionEvents(ctx, paperclipIssueId);
+  const events = await listIssueInteractionEvents(ctx, runCtx.companyId, paperclipIssueId);
   return buildIssueInteractionSummary({
     companyId: runCtx.companyId,
     paperclipIssueId,
     range,
-    events,
-    ledgerStartedAt: ISSUE_INTERACTION_LEDGER_STARTED_AT
+    events
   });
 }
 
@@ -20904,7 +20942,9 @@ async function executeTrackedGitHubMutation(
       companyId: runCtx.companyId,
       paperclipIssueId,
       occurredAt: startedAt.toISOString(),
-      category: action.includes('comment') || action.includes('reply') ? 'comment' : 'github_write',
+      category: action === 'link_github_item'
+        ? 'paperclip_link'
+        : action.includes('comment') || action.includes('reply') ? 'comment' : 'github_write',
       action,
       source: 'agent_tool',
       actor: {
@@ -20921,7 +20961,7 @@ async function executeTrackedGitHubMutation(
       } : {}),
       outcome: result.error ? 'failed' : 'changed',
       durationMs,
-      dedupeKey: `agent_tool:${runId ?? 'unknown-run'}:${action}:${fingerprint}`
+      dedupeKey: `agent_tool:${runId}:${action}:${fingerprint}:${startedAt.toISOString()}`
     });
   } catch (error) {
     ctx.logger.warn('GitHub Sync could not persist an issue interaction event.', {
@@ -22135,6 +22175,7 @@ export const __testing = {
   formatPaperclipApiFetchErrorMessage,
   hasUnresolvedPaperclipIssueBlocker,
   isHealthyMaintainerWaitTransition,
+  persistIssueInteractionEvent,
   resolvePaperclipApiAuthTokens,
   resolveGithubToken,
   resolvePaperclipPullRequestIssueStatus,

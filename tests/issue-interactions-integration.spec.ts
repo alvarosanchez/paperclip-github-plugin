@@ -40,6 +40,54 @@ test('get_issue_interaction_summary enforces issue company scope and returns com
     }
   });
 
+  await harness.ctx.entities.upsert({
+    entityType: 'paperclip-github-plugin.issue-interaction-event',
+    scopeKind: 'issue',
+    scopeId: 'issue-history-1',
+    externalId: 'cross-company-contamination',
+    title: 'contaminating event',
+    status: 'changed',
+    data: {
+      schemaVersion: 1,
+      companyId: 'company-2',
+      paperclipIssueId: 'issue-history-1',
+      occurredAt: '2026-07-01T10:00:00.000Z',
+      category: 'sync',
+      action: 'status_decision',
+      source: 'sync',
+      outcome: 'changed',
+      dedupeKey: 'cross-company-contamination'
+    }
+  });
+
+  await harness.ctx.entities.upsert({
+    entityType: 'paperclip-github-plugin.issue-interaction-event',
+    scopeKind: 'issue',
+    scopeId: 'other-issue',
+    externalId: 'other-issue-event',
+    title: 'other issue event',
+    status: 'changed',
+    data: {
+      schemaVersion: 1,
+      companyId: 'company-1',
+      paperclipIssueId: 'other-issue',
+      occurredAt: '2026-07-01T11:00:00.000Z',
+      category: 'sync',
+      action: 'status_decision',
+      source: 'sync',
+      outcome: 'changed',
+      dedupeKey: 'other-issue-event'
+    }
+  });
+  const originalList = harness.ctx.entities.list;
+  harness.ctx.entities.list = async (input) => {
+    if ((input as { entityType?: unknown }).entityType === 'paperclip-github-plugin.issue-interaction-event') {
+      const { scopeId: _scopeId, ...rest } = input as Record<string, unknown>;
+      return originalList(rest as Parameters<typeof originalList>[0]);
+    }
+    return originalList(input);
+  };
+
   const result = await harness.executeTool('get_issue_interaction_summary', {
     paperclipIssueId: 'issue-history-1',
     from: '2026-07-01T00:00:00.000Z',
@@ -100,8 +148,12 @@ test('issue-scoped mutating tool failures append a sanitized attributed ledger e
   assert.match(serialized, /"runId":"run-1"/);
   assert.doesNotMatch(serialized, /raw body|headers|token|error/i);
 
+  const to = new Date().toISOString();
+  const from = new Date(Date.parse(to) - 24 * 60 * 60 * 1000).toISOString();
   const summaryResult = await harness.executeTool('get_issue_interaction_summary', {
-    paperclipIssueId: 'issue-mutation-1'
+    paperclipIssueId: 'issue-mutation-1',
+    from,
+    to
   }, {
     companyId: 'company-1',
     projectId: 'project-1'
@@ -109,6 +161,37 @@ test('issue-scoped mutating tool failures append a sanitized attributed ledger e
   const payload = summaryResult.data as { summary?: { counts?: { failures?: number; remoteWrites?: number } } };
   assert.equal(payload.summary?.counts?.failures, 1);
   assert.equal(payload.summary?.counts?.remoteWrites, 1);
+});
+
+test('interaction dedupe keys are immutable and idempotent', async () => {
+  const harness = createTestHarness({ manifest });
+  await plugin.definition.setup(harness.ctx);
+  const event = {
+    schemaVersion: 1 as const,
+    companyId: 'company-1',
+    paperclipIssueId: 'issue-immutable',
+    occurredAt: '2026-07-01T09:00:00.000Z',
+    category: 'sync',
+    action: 'status_decision',
+    source: 'sync' as const,
+    outcome: 'changed' as const,
+    dedupeKey: 'immutable-event-1'
+  };
+
+  await __testing.persistIssueInteractionEvent(harness.ctx, event);
+  await __testing.persistIssueInteractionEvent(harness.ctx, event);
+  await assert.rejects(
+    __testing.persistIssueInteractionEvent(harness.ctx, { ...event, action: 'different_action' }),
+    /different immutable content/i
+  );
+
+  const rows = await harness.ctx.entities.list({
+    entityType: 'paperclip-github-plugin.issue-interaction-event',
+    scopeKind: 'issue',
+    scopeId: 'issue-immutable'
+  });
+  assert.equal(rows.length, 1);
+  assert.equal((rows[0]?.data as { action?: string }).action, 'status_decision');
 });
 
 test('direct-PR status transitions and no-op decisions are captured without issue annotation metadata', async () => {
@@ -152,7 +235,7 @@ test('direct-PR status transitions and no-op decisions are captured without issu
   assert.deepEqual((changed?.data as { transition?: unknown }).transition, {
     from: 'in_progress',
     to: 'in_review',
-    reasonCode: 'github_sync_moved_this_issue_to_in_review_because_the_directly_linked_pull_reque'
+    reasonCode: 'github_sync_status_decision'
   });
   assert.deepEqual(
     rows.map((row) => (row.data as { outcome?: unknown }).outcome).sort(),

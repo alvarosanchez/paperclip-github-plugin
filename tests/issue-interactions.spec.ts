@@ -88,6 +88,7 @@ test('summary is deterministic, bounded to [from,to), and reports counts, transi
     events: 4,
     runs: 2,
     comments: 2,
+    mutatingToolAttempts: 3,
     remoteWrites: 3,
     statusDecisions: 1,
     statusTransitions: 1,
@@ -107,7 +108,10 @@ test('summary is deterministic, bounded to [from,to), and reports counts, transi
     failedActions: 1,
     noopStatusDecisions: 0
   });
-  assert.equal(summary.coverage.complete, true);
+  assert.equal(summary.coverage.overallComplete, false);
+  assert.equal(summary.coverage.dimensions.pluginLedger.complete, true);
+  assert.equal(summary.coverage.dimensions.paperclipCore.included, false);
+  assert.deepEqual(summary.truncation, { transitions: false, returnedTransitions: 1 });
   assert.deepEqual(summary.limitations, [
     'Only events captured after ledger instrumentation are included; no historical backfill is attempted.',
     'GitHub activity performed outside GitHub Sync is not included unless a captured plugin path records it.'

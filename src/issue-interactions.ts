@@ -1,7 +1,6 @@
 export const ISSUE_INTERACTION_ENTITY_TYPE = 'paperclip-github-plugin.issue-interaction-event';
 export const ISSUE_INTERACTION_SCHEMA_VERSION = 1 as const;
 export const ISSUE_INTERACTION_MAX_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
-export const ISSUE_INTERACTION_LEDGER_STARTED_AT = '2026-07-02T00:00:00.000Z';
 
 export type IssueInteractionSource = 'agent_tool' | 'sync' | 'api_route' | 'operator_action' | 'backfill';
 export type IssueInteractionOutcome = 'observed' | 'changed' | 'noop' | 'failed';
@@ -171,7 +170,12 @@ export function buildIssueInteractionSummary(input: {
     const current = transitions[index]!;
     if (previous.from === current.to && previous.to === current.from) statusReversals += 1;
   }
-  const ledgerStartedAt = input.ledgerStartedAt ?? ISSUE_INTERACTION_LEDGER_STARTED_AT;
+  const ledgerStartedAt = input.ledgerStartedAt
+    ? isoTimestamp(input.ledgerStartedAt, 'ledgerStartedAt')
+    : (sanitized.map((entry) => entry.occurredAt).sort()[0] ?? null);
+  const ledgerWindowComplete = ledgerStartedAt !== null && Date.parse(ledgerStartedAt) <= fromMs;
+  const MAX_TRANSITIONS = 100;
+  const visibleTransitions = transitions.slice(-MAX_TRANSITIONS);
 
   return {
     schemaVersion: ISSUE_INTERACTION_SCHEMA_VERSION,
@@ -179,21 +183,33 @@ export function buildIssueInteractionSummary(input: {
     paperclipIssueId: input.paperclipIssueId,
     range: input.range,
     coverage: {
-      ledgerStartedAt,
-      complete: Date.parse(ledgerStartedAt) <= fromMs,
-      historicalBackfill: false
+      overallComplete: false,
+      dimensions: {
+        pluginLedger: {
+          startedAt: ledgerStartedAt,
+          complete: ledgerWindowComplete,
+          historicalBackfill: false
+        },
+        paperclipCore: { included: false, complete: false },
+        externalGitHub: { included: false, complete: false }
+      }
     },
     counts: {
       events: events.length,
       runs: runIds.size,
       comments: events.filter((entry) => entry.action.includes('comment') || entry.action.includes('reply')).length,
-      remoteWrites: events.filter((entry) => entry.source === 'agent_tool').length,
+      mutatingToolAttempts: events.filter((entry) => entry.source === 'agent_tool').length,
+      remoteWrites: events.filter((entry) => entry.source === 'agent_tool' && entry.category !== 'paperclip_link').length,
       statusDecisions: events.filter((entry) => entry.action === 'status_decision').length,
       statusTransitions: transitions.length,
       failures: events.filter((entry) => entry.outcome === 'failed').length,
       noops: events.filter((entry) => entry.outcome === 'noop').length
     },
-    transitions,
+    transitions: visibleTransitions,
+    truncation: {
+      transitions: transitions.length > visibleTransitions.length,
+      returnedTransitions: visibleTransitions.length
+    },
     signals: {
       repeatedActions: [...actionCounts.entries()]
         .filter(([, count]) => count > 1)
