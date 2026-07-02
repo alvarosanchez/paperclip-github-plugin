@@ -199,7 +199,11 @@ export function buildIssueInteractionSummary(input: {
       runs: runIds.size,
       comments: events.filter((entry) => entry.action.includes('comment') || entry.action.includes('reply')).length,
       mutatingToolAttempts: events.filter((entry) => entry.source === 'agent_tool').length,
-      remoteWrites: events.filter((entry) => entry.source === 'agent_tool' && entry.category !== 'paperclip_link').length,
+      remoteWrites: events.filter((entry) => (
+        entry.source === 'agent_tool'
+        && entry.category !== 'paperclip_link'
+        && entry.outcome === 'changed'
+      )).length,
       statusDecisions: events.filter((entry) => entry.action === 'status_decision').length,
       statusTransitions: transitions.length,
       failures: events.filter((entry) => entry.outcome === 'failed').length,

@@ -89,7 +89,7 @@ test('summary is deterministic, bounded to [from,to), and reports counts, transi
     runs: 2,
     comments: 2,
     mutatingToolAttempts: 3,
-    remoteWrites: 3,
+    remoteWrites: 2,
     statusDecisions: 1,
     statusTransitions: 1,
     failures: 1,

@@ -160,7 +160,7 @@ test('issue-scoped mutating tool failures append a sanitized attributed ledger e
   });
   const payload = summaryResult.data as { summary?: { counts?: { failures?: number; remoteWrites?: number } } };
   assert.equal(payload.summary?.counts?.failures, 1);
-  assert.equal(payload.summary?.counts?.remoteWrites, 1);
+  assert.equal(payload.summary?.counts?.remoteWrites, 0);
 });
 
 test('interaction dedupe keys are immutable and idempotent', async () => {
