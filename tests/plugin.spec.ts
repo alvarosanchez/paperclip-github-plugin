@@ -2476,9 +2476,15 @@ test('create_pull_request links the created pull request to the current Papercli
       scopeKind: 'issue',
       scopeId: issue.id
     });
-    assert.equal(interactionEvents.length, 1);
-    assert.equal((interactionEvents[0]?.data as { action?: unknown }).action, 'create_pull_request');
-    assert.equal((interactionEvents[0]?.data as { outcome?: unknown }).outcome, 'changed');
+    assert.equal(interactionEvents.length, 2);
+    assert.deepEqual(
+      interactionEvents.map((event) => (event.data as { action?: unknown }).action),
+      ['create_pull_request', 'create_pull_request']
+    );
+    assert.deepEqual(
+      interactionEvents.map((event) => (event.data as { outcome?: unknown }).outcome).sort(),
+      ['changed', 'observed']
+    );
 
     const getResult = await harness.executeTool('get_pull_request', {
       paperclipIssueId: issue.id
@@ -3278,6 +3284,104 @@ test('update_issue omits a blank body update after stripping AI footers', async 
   }
 });
 
+test('update_issue reports a no-op when requested fields already match', async () => {
+  const harness = await createGitHubAgentToolHarness();
+  harness.seed({
+    issues: [{
+      id: 'issue-update-noop',
+      companyId: 'company-1',
+      projectId: 'project-1',
+      title: 'Update no-op',
+      description: '',
+      status: 'todo'
+    } as never]
+  });
+  await harness.ctx.entities.upsert({
+    entityType: 'paperclip-github-plugin.issue-link',
+    scopeKind: 'issue',
+    scopeId: 'issue-update-noop',
+    data: {
+      companyId: 'company-1',
+      paperclipProjectId: 'project-1',
+      repositoryUrl: 'https://github.com/paperclipai/example-repo',
+      githubIssueId: 1200,
+      githubIssueNumber: 12,
+      githubIssueUrl: 'https://github.com/paperclipai/example-repo/issues/12',
+      githubIssueState: 'open',
+      commentsCount: 3,
+      linkedPullRequestNumbers: [],
+      labels: ['bug'],
+      syncedAt: '2026-07-02T00:00:00.000Z'
+    }
+  });
+  const originalFetch = globalThis.fetch;
+  let patchCalls = 0;
+
+  globalThis.fetch = async (input, init) => {
+    const url = new URL(getRequestUrl(input));
+    if (url.pathname === '/repos/paperclipai/example-repo/issues/12' && init?.method === 'PATCH') {
+      patchCalls += 1;
+    }
+    if (url.pathname === '/repos/paperclipai/example-repo/issues/12') {
+      return jsonResponse({
+        id: 1200,
+        number: 12,
+        title: 'Importer bug',
+        body: 'Original issue body.',
+        html_url: 'https://github.com/paperclipai/example-repo/issues/12',
+        state: 'open',
+        comments: 3,
+        user: { login: 'octocat' },
+        assignees: [{ login: 'octocat' }],
+        labels: [{ name: 'bug' }],
+        milestone: null
+      });
+    }
+    throw new Error(`Unexpected GitHub request: ${url.toString()}`);
+  };
+
+  try {
+    const result = await harness.executeTool('update_issue', {
+      paperclipIssueId: 'issue-update-noop',
+      repository: 'paperclipai/example-repo',
+      issueNumber: 12,
+      title: 'Importer bug',
+      state: 'open',
+      setLabels: ['bug'],
+      setAssignees: ['octocat'],
+      milestoneNumber: null
+    }, {
+      companyId: 'company-1',
+      projectId: 'project-1'
+    });
+    assert.ok(!result.error, result.error);
+    assert.match(result.content ?? '', /no github issue changes were requested/i);
+    assert.equal(patchCalls, 0);
+    const rows = await harness.ctx.entities.list({
+      entityType: 'paperclip-github-plugin.issue-interaction-event',
+      scopeKind: 'issue',
+      scopeId: 'issue-update-noop'
+    });
+    assert.deepEqual(rows.map((row) => (row.data as { outcome?: string }).outcome).sort(), ['noop', 'observed']);
+    await new Promise((resolve) => setTimeout(resolve, 2));
+    const to = new Date().toISOString();
+    const summary = await harness.executeTool('get_issue_interaction_summary', {
+      paperclipIssueId: 'issue-update-noop',
+      from: new Date(Date.parse(to) - 60_000).toISOString(),
+      to
+    }, {
+      companyId: 'company-1',
+      projectId: 'project-1'
+    });
+    const counts = (summary.data as { summary?: { counts?: { noops?: number; remoteWrites?: number; uncertainAttempts?: number } } }).summary?.counts;
+    assert.equal(counts?.noops, 1);
+    assert.equal(counts?.remoteWrites, 0);
+    assert.equal(counts?.uncertainAttempts, 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test('update_issue refreshes the AI footer when updating the issue body', async () => {
   const harness = await createGitHubAgentToolHarness();
   const originalFetch = globalThis.fetch;
@@ -3414,6 +3518,47 @@ test('update_pull_request refreshes the AI footer when updating the pull request
     assert.doesNotMatch(updatedBody, /old-model/);
     assert.match(updatedBody, /---\n###### ✨ This pull request description was AI-generated using gpt-5\.4/);
     assert.match((result.data as { pullRequest: { body: string } }).pullRequest.body, /gpt-5\.4/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('update_pull_request reports a no-op when no fields differ', async () => {
+  const harness = await createGitHubAgentToolHarness();
+  const originalFetch = globalThis.fetch;
+  let patchCalls = 0;
+  globalThis.fetch = async (input, init) => {
+    const url = new URL(getRequestUrl(input));
+    if (url.pathname === '/repos/paperclipai/example-repo/pulls/7' && init?.method === 'PATCH') patchCalls += 1;
+    if (url.pathname === '/repos/paperclipai/example-repo/pulls/7') {
+      return jsonResponse({
+        number: 7,
+        title: 'Fix the importer',
+        body: 'Existing PR description.',
+        html_url: 'https://github.com/paperclipai/example-repo/pull/7',
+        state: 'open',
+        draft: false,
+        merged: false,
+        mergeable: true,
+        mergeable_state: 'clean',
+        node_id: 'PR_node',
+        head: { ref: 'feature/fix-importer', sha: 'abc123' },
+        base: { ref: 'main' }
+      });
+    }
+    throw new Error(`Unexpected GitHub request: ${url.toString()}`);
+  };
+  try {
+    const result = await harness.executeTool('update_pull_request', {
+      pullRequestNumber: 7,
+      title: 'Fix the importer',
+      state: 'open',
+      base: 'main',
+      isDraft: false
+    }, { companyId: 'company-1', projectId: 'project-1' });
+    assert.ok(!result.error);
+    assert.match(result.content ?? '', /No GitHub pull request changes were requested/);
+    assert.equal(patchCalls, 0);
   } finally {
     globalThis.fetch = originalFetch;
   }

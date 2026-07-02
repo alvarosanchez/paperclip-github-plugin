@@ -1,5 +1,5 @@
 import { Buffer } from 'node:buffer';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { realpathSync } from 'node:fs';
 import { chmod, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
@@ -29,6 +29,7 @@ import { parseRepositoryReference, type ParsedRepositoryReference } from './gith
 import {
   buildIssueInteractionSummary,
   ISSUE_INTERACTION_ENTITY_TYPE,
+  ISSUE_INTERACTION_MAX_SCAN_ROWS,
   parseIssueInteractionRange,
   sanitizeIssueInteractionEvent,
   type IssueInteractionEvent
@@ -13004,7 +13005,6 @@ async function updatePaperclipIssueState(
   const interactionOccurredAt = new Date().toISOString();
   const statusWillChange = currentStatus !== nextStatus;
   let createdTransitionComment: IssueComment | null = null;
-  let interactionCommentId: string | undefined;
   let issueUpdated = false;
   const syncExecutionStatePatch = buildSyncFallbackExecutionStatePatch({
     currentStatus,
@@ -13031,17 +13031,60 @@ async function updatePaperclipIssueState(
     issuePatch.assigneeUserId = null;
   }
 
+  if (statusWillChange && !trimmedTransitionComment) {
+    throw new Error('GitHub Sync refused to update a Paperclip issue status without an explanatory transition comment.');
+  }
+  if (statusWillChange && typeof ctx.issues.createComment !== 'function') {
+    throw new Error('This Paperclip runtime does not expose issue comment creation, so GitHub Sync refused to update a Paperclip issue status without an explanatory comment.');
+  }
+
+  const reasonCode = classifyIssueInteractionReason(transitionCommentAnnotation?.reason ?? trimmedTransitionComment);
+  const interactionDedupeBase = `sync:${issueId}:${interactionOccurredAt}:${currentStatus}:${nextStatus}`;
+  await persistIssueInteractionEvent(ctx, {
+    schemaVersion: 1,
+    companyId,
+    paperclipIssueId: issueId,
+    occurredAt: interactionOccurredAt,
+    category: 'sync',
+    action: 'status_decision',
+    source: 'sync',
+    ...(transitionCommentAnnotation ? {
+      remote: {
+        repositoryUrl: transitionCommentAnnotation.repositoryUrl,
+        kind: 'issue',
+        number: transitionCommentAnnotation.githubIssueNumber,
+        url: transitionCommentAnnotation.githubIssueUrl
+      }
+    } : {}),
+    transition: { from: currentStatus, to: nextStatus, reasonCode },
+    outcome: 'observed',
+    dedupeKey: `${interactionDedupeBase}:intent`
+  });
+
+  const persistSyncResult = (outcome: 'changed' | 'noop' | 'failed') => persistIssueInteractionEvent(ctx, {
+    schemaVersion: 1,
+    companyId,
+    paperclipIssueId: issueId,
+    occurredAt: interactionOccurredAt,
+    category: 'sync',
+    action: 'status_decision',
+    source: 'sync',
+    ...(transitionCommentAnnotation ? {
+      remote: {
+        repositoryUrl: transitionCommentAnnotation.repositoryUrl,
+        kind: 'issue' as const,
+        number: transitionCommentAnnotation.githubIssueNumber,
+        url: transitionCommentAnnotation.githubIssueUrl
+      }
+    } : {}),
+    transition: { from: currentStatus, to: nextStatus, reasonCode },
+    outcome,
+    dedupeKey: `${interactionDedupeBase}:result`
+  });
+
+  try {
   if (statusWillChange) {
-    if (!trimmedTransitionComment) {
-      throw new Error('GitHub Sync refused to update a Paperclip issue status without an explanatory transition comment.');
-    }
-
-    if (typeof ctx.issues.createComment !== 'function') {
-      throw new Error('This Paperclip runtime does not expose issue comment creation, so GitHub Sync refused to update a Paperclip issue status without an explanatory comment.');
-    }
-
     createdTransitionComment = await ctx.issues.createComment(issueId, trimmedTransitionComment, companyId);
-    interactionCommentId = createdTransitionComment.id;
   }
 
   if (paperclipApiBaseUrl) {
@@ -13147,7 +13190,6 @@ async function updatePaperclipIssueState(
     }
   } else if (trimmedTransitionComment && typeof ctx.issues.createComment === 'function') {
     const createdComment = await ctx.issues.createComment(issueId, trimmedTransitionComment, companyId);
-    interactionCommentId = createdComment.id;
     if (transitionCommentAnnotation) {
       await upsertStatusTransitionCommentAnnotation(ctx, {
         issueId,
@@ -13161,41 +13203,16 @@ async function updatePaperclipIssueState(
     }
   }
 
-  const reasonCode = classifyIssueInteractionReason(transitionCommentAnnotation?.reason ?? trimmedTransitionComment);
-  try {
-    await persistIssueInteractionEvent(ctx, {
-      schemaVersion: 1,
-      companyId,
-      paperclipIssueId: issueId,
-      occurredAt: interactionOccurredAt,
-      category: 'sync',
-      action: 'status_decision',
-      source: 'sync',
-      ...(transitionCommentAnnotation ? {
-        remote: {
-          repositoryUrl: transitionCommentAnnotation.repositoryUrl,
-          kind: 'issue',
-          number: transitionCommentAnnotation.githubIssueNumber,
-          url: transitionCommentAnnotation.githubIssueUrl
-        }
-      } : {}),
-      transition: {
-        from: currentStatus,
-        to: nextStatus,
-        reasonCode
-      },
-      outcome: statusWillChange ? 'changed' : 'noop',
-      dedupeKey: `sync:${issueId}:${interactionCommentId ?? interactionOccurredAt}:${currentStatus}:${nextStatus}`
-    });
   } catch (error) {
-    ctx.logger.warn('GitHub Sync could not persist a status-decision interaction event.', {
-      companyId,
-      issueId,
-      currentStatus,
-      nextStatus,
-      error: getErrorMessage(error)
-    });
+    try {
+      await persistSyncResult('failed');
+    } catch (ledgerError) {
+      throw new AggregateError([error, ledgerError], 'GitHub Sync mutation failed and its result event could not be persisted.');
+    }
+    throw error;
   }
+
+  await persistSyncResult(statusWillChange ? 'changed' : 'noop');
 }
 
 function sortIssuesForImport(issues: GitHubIssueRecord[]): GitHubIssueRecord[] {
@@ -19575,6 +19592,13 @@ function mergeNamedValues(
   return [...values.values()];
 }
 
+function sameNamedValues(left: string[], right: string[]): boolean {
+  if (left.length !== right.length) return false;
+  const normalizedLeft = left.map((value) => value.toLowerCase()).sort();
+  const normalizedRight = right.map((value) => value.toLowerCase()).sort();
+  return normalizedLeft.every((value, index) => value === normalizedRight[index]);
+}
+
 async function validateGithubToken(ctx: PluginSetupContext, token: string): Promise<TokenValidationResult> {
   const octokit = createGitHubOctokit(ctx, token.trim(), {
     logFailures: false,
@@ -20820,38 +20844,12 @@ async function persistIssueInteractionEvent(
   event: IssueInteractionEvent
 ): Promise<void> {
   const sanitized = sanitizeIssueInteractionEvent(event);
-  for (let offset = 0; ; ) {
-    const page = await ctx.entities.list({
-      entityType: ISSUE_INTERACTION_ENTITY_TYPE,
-      scopeKind: 'issue',
-      scopeId: sanitized.paperclipIssueId,
-      externalId: sanitized.dedupeKey,
-      limit: 100,
-      offset
-    });
-    for (const entry of page) {
-      if (
-        entry.scopeKind !== 'issue'
-        || entry.scopeId !== sanitized.paperclipIssueId
-        || entry.externalId !== sanitized.dedupeKey
-      ) continue;
-      try {
-        const previous = sanitizeIssueInteractionEvent(entry.data as unknown as IssueInteractionEvent);
-        if (JSON.stringify(previous) === JSON.stringify(sanitized)) return;
-        throw new Error('Issue interaction dedupe key already exists with different immutable content.');
-      } catch (error) {
-        if (error instanceof Error && error.message.includes('different immutable content')) throw error;
-        throw new Error('Issue interaction dedupe key already exists with malformed immutable content.');
-      }
-    }
-    if (page.length < 100) break;
-    offset += page.length;
-  }
+  const contentAddress = createHash('sha256').update(JSON.stringify(sanitized)).digest('hex');
   await ctx.entities.upsert({
     entityType: ISSUE_INTERACTION_ENTITY_TYPE,
     scopeKind: 'issue',
     scopeId: sanitized.paperclipIssueId,
-    externalId: sanitized.dedupeKey,
+    externalId: `event:${contentAddress}`,
     title: `${sanitized.source}: ${sanitized.action}`,
     status: sanitized.outcome,
     data: { ...sanitized }
@@ -20861,10 +20859,23 @@ async function persistIssueInteractionEvent(
 async function listIssueInteractionEvents(
   ctx: PluginSetupContext,
   companyId: string,
-  paperclipIssueId: string
-): Promise<IssueInteractionEvent[]> {
-  const events: IssueInteractionEvent[] = [];
-  for (let offset = 0; ; ) {
+  paperclipIssueId: string,
+  range: { from: string; to: string }
+): Promise<{
+  events: IssueInteractionEvent[];
+  ledgerStartedAt: string | null;
+  integrity: { malformedRows: number; conflictingKeys: number; scanTruncated: boolean; scannedRows: number };
+}> {
+  const byDedupeKey = new Map<string, { event: IssueInteractionEvent; serialized: string }>();
+  const conflictingKeys = new Set<string>();
+  let malformedRows = 0;
+  let scannedRows = 0;
+  let scanTruncated = false;
+  let ledgerStartedAt: string | null = null;
+  const fromMs = Date.parse(range.from);
+  const toMs = Date.parse(range.to);
+
+  outer: for (let offset = 0; ; ) {
     const page = await ctx.entities.list({
       entityType: ISSUE_INTERACTION_ENTITY_TYPE,
       scopeKind: 'issue',
@@ -20873,19 +20884,41 @@ async function listIssueInteractionEvents(
       offset
     });
     for (const entry of page) {
+      if (scannedRows >= ISSUE_INTERACTION_MAX_SCAN_ROWS) {
+        scanTruncated = true;
+        break outer;
+      }
+      scannedRows += 1;
       if (entry.scopeKind !== 'issue' || entry.scopeId !== paperclipIssueId) continue;
       const raw = entry.data as Record<string, unknown> | null;
       if (raw?.companyId !== companyId || raw?.paperclipIssueId !== paperclipIssueId) continue;
       try {
-        events.push(sanitizeIssueInteractionEvent(raw as unknown as IssueInteractionEvent));
+        const event = sanitizeIssueInteractionEvent(raw as unknown as IssueInteractionEvent);
+        if (ledgerStartedAt === null || event.occurredAt < ledgerStartedAt) ledgerStartedAt = event.occurredAt;
+        const serialized = JSON.stringify(event);
+        const existing = byDedupeKey.get(event.dedupeKey);
+        if (existing && existing.serialized !== serialized) conflictingKeys.add(event.dedupeKey);
+        else if (!existing) byDedupeKey.set(event.dedupeKey, { event, serialized });
       } catch {
-        // Ignore malformed legacy rows rather than leaking or returning untrusted fields.
+        malformedRows += 1;
       }
     }
     if (page.length < 100) break;
     offset += page.length;
   }
-  return events;
+
+  const events = [...byDedupeKey.entries()]
+    .filter(([dedupeKey, { event }]) => {
+      if (conflictingKeys.has(dedupeKey)) return false;
+      const timestamp = Date.parse(event.occurredAt);
+      return timestamp >= fromMs && timestamp < toMs;
+    })
+    .map(([, value]) => value.event);
+  return {
+    events,
+    ledgerStartedAt,
+    integrity: { malformedRows, conflictingKeys: conflictingKeys.size, scanTruncated, scannedRows }
+  };
 }
 
 async function buildIssueInteractionSummaryForTool(
@@ -20898,13 +20931,24 @@ async function buildIssueInteractionSummaryForTool(
   const issue = await ctx.issues.get(paperclipIssueId, runCtx.companyId);
   if (!issue) throw new Error('Paperclip issue was not found in the authenticated company.');
   const range = parseIssueInteractionRange({ from: input.from, to: input.to });
-  const events = await listIssueInteractionEvents(ctx, runCtx.companyId, paperclipIssueId);
+  const ledger = await listIssueInteractionEvents(ctx, runCtx.companyId, paperclipIssueId, range);
   return buildIssueInteractionSummary({
     companyId: runCtx.companyId,
     paperclipIssueId,
     range,
-    events
+    events: ledger.events,
+    ledgerStartedAt: ledger.ledgerStartedAt,
+    integrity: ledger.integrity
   });
+}
+
+function trackedMutationOutcome(result: ToolResult): 'changed' | 'noop' | 'failed' {
+  if (result.error) return 'failed';
+  const content = typeof result.content === 'string' ? result.content.toLowerCase() : '';
+  if (/\bno (?:github )?.*changes? (?:were )?requested\b/.test(content) || /\bwas already\b/.test(content) || /\bis already\b/.test(content)) {
+    return 'noop';
+  }
+  return 'changed';
 }
 
 async function executeTrackedGitHubMutation(
@@ -20922,8 +20966,7 @@ async function executeTrackedGitHubMutation(
     });
   }
   const startedAt = new Date();
-  const result = await executeGitHubTool(fn);
-  if (!paperclipIssueId) return result;
+  if (!paperclipIssueId) return executeGitHubTool(fn);
 
   const runRecord = runCtx as unknown as Record<string, unknown>;
   const fingerprintInput = JSON.stringify(input, Object.keys(input).sort());
@@ -20934,43 +20977,67 @@ async function executeTrackedGitHubMutation(
   const repository = parseRepositoryReference(normalizeOptionalToolString(input.repository) ?? '');
   const remoteNumber = issueNumber ?? pullRequestNumber;
   const remoteKind = issueNumber ? 'issue' : pullRequestNumber ? 'pull_request' : undefined;
+  const attemptId = createHash('sha256')
+    .update([runId ?? 'no-run-id', action, fingerprint, startedAt.toISOString(), randomUUID()].join('\n'))
+    .digest('hex');
+  const dedupeBase = `agent_tool:${attemptId}`;
+
+  await persistIssueInteractionEvent(ctx, {
+    schemaVersion: 1,
+    companyId: runCtx.companyId,
+    paperclipIssueId,
+    occurredAt: startedAt.toISOString(),
+    category: action === 'link_github_item'
+      ? 'paperclip_link'
+      : action.includes('comment') || action.includes('reply') ? 'comment' : 'github_write',
+    action,
+    source: 'agent_tool',
+    actor: {
+      agentId: normalizeOptionalToolString(runRecord.agentId),
+      runId,
+      llmModel: normalizeOptionalToolString(input.llmModel)
+    },
+    ...((repository || remoteKind || remoteNumber) ? {
+      remote: {
+        repositoryUrl: repository?.url,
+        kind: remoteKind,
+        number: remoteNumber
+      }
+    } : {}),
+    outcome: 'observed',
+    durationMs: 0,
+    dedupeKey: `${dedupeBase}:intent`
+  });
+
+  const result = await executeGitHubTool(fn);
   const durationMs = Math.max(0, Date.now() - startedAt.getTime());
 
-  try {
-    await persistIssueInteractionEvent(ctx, {
-      schemaVersion: 1,
-      companyId: runCtx.companyId,
-      paperclipIssueId,
-      occurredAt: startedAt.toISOString(),
-      category: action === 'link_github_item'
-        ? 'paperclip_link'
-        : action.includes('comment') || action.includes('reply') ? 'comment' : 'github_write',
-      action,
-      source: 'agent_tool',
-      actor: {
-        agentId: normalizeOptionalToolString(runRecord.agentId),
-        runId,
-        llmModel: normalizeOptionalToolString(input.llmModel)
-      },
-      ...((repository || remoteKind || remoteNumber) ? {
-        remote: {
-          repositoryUrl: repository?.url,
-          kind: remoteKind,
-          number: remoteNumber
-        }
-      } : {}),
-      outcome: result.error ? 'failed' : 'changed',
-      durationMs,
-      dedupeKey: `agent_tool:${runId}:${action}:${fingerprint}:${startedAt.toISOString()}`
-    });
-  } catch (error) {
-    ctx.logger.warn('GitHub Sync could not persist an issue interaction event.', {
-      companyId: runCtx.companyId,
-      paperclipIssueId,
-      action,
-      error: getErrorMessage(error)
-    });
-  }
+  await persistIssueInteractionEvent(ctx, {
+    schemaVersion: 1,
+    companyId: runCtx.companyId,
+    paperclipIssueId,
+    occurredAt: startedAt.toISOString(),
+    category: action === 'link_github_item'
+      ? 'paperclip_link'
+      : action.includes('comment') || action.includes('reply') ? 'comment' : 'github_write',
+    action,
+    source: 'agent_tool',
+    actor: {
+      agentId: normalizeOptionalToolString(runRecord.agentId),
+      runId,
+      llmModel: normalizeOptionalToolString(input.llmModel)
+    },
+    ...((repository || remoteKind || remoteNumber) ? {
+      remote: {
+        repositoryUrl: repository?.url,
+        kind: remoteKind,
+        number: remoteNumber
+      }
+    } : {}),
+    outcome: trackedMutationOutcome(result),
+    durationMs,
+    dedupeKey: `${dedupeBase}:result`
+  });
   return result;
 }
 
@@ -21196,17 +21263,15 @@ function registerGitHubAgentTools(ctx: PluginSetupContext): void {
           : normalizeToolPositiveInteger(input.milestoneNumber)
         : undefined;
 
+      const milestoneRequested = Object.prototype.hasOwnProperty.call(input, 'milestoneNumber');
+      const currentMilestoneNumber = currentIssue.milestone?.number ?? null;
       const hasChanges =
-        title !== undefined ||
-        body !== undefined ||
-        state !== undefined ||
-        Object.prototype.hasOwnProperty.call(input, 'milestoneNumber') ||
-        normalizeToolStringArray(input.setLabels).length > 0 ||
-        normalizeToolStringArray(input.addLabels).length > 0 ||
-        normalizeToolStringArray(input.removeLabels).length > 0 ||
-        normalizeToolStringArray(input.setAssignees).length > 0 ||
-        normalizeToolStringArray(input.addAssignees).length > 0 ||
-        normalizeToolStringArray(input.removeAssignees).length > 0;
+        (title !== undefined && title !== currentIssue.title) ||
+        (body !== undefined && body !== (currentIssue.body ?? '')) ||
+        (state !== undefined && state !== currentIssue.state) ||
+        (milestoneRequested && milestoneNumber !== currentMilestoneNumber) ||
+        !sameNamedValues(nextLabels, currentLabels) ||
+        !sameNamedValues(nextAssignees, currentAssignees);
 
       const updatedResponse = hasChanges
         ? await octokit.rest.issues.update({
@@ -21216,7 +21281,7 @@ function registerGitHubAgentTools(ctx: PluginSetupContext): void {
             ...(title !== undefined ? { title } : {}),
             ...(body !== undefined ? { body } : {}),
             ...(state ? { state } : {}),
-            ...(Object.prototype.hasOwnProperty.call(input, 'milestoneNumber') ? { milestone: milestoneNumber } : {}),
+            ...(milestoneRequested ? { milestone: milestoneNumber } : {}),
             labels: nextLabels,
             assignees: nextAssignees,
             headers: {
@@ -21639,19 +21704,24 @@ function registerGitHubAgentTools(ctx: PluginSetupContext): void {
       const state = input.state === 'open' || input.state === 'closed' ? input.state : undefined;
       const isDraft = typeof input.isDraft === 'boolean' ? input.isDraft : undefined;
 
-      if (title !== undefined || body !== undefined || base !== undefined || state !== undefined) {
+      let changed = false;
+      const update: { title?: string; body?: string; base?: string; state?: 'open' | 'closed' } = {
+        ...(title !== undefined && title !== currentResponse.data.title ? { title } : {}),
+        ...(body !== undefined && body !== (currentResponse.data.body ?? '') ? { body } : {}),
+        ...(base !== undefined && base !== currentResponse.data.base.ref ? { base } : {}),
+        ...(state !== undefined && state !== currentResponse.data.state ? { state } : {})
+      };
+      if (Object.keys(update).length > 0) {
         currentResponse = await octokit.rest.pulls.update({
           owner: target.repository.owner,
           repo: target.repository.repo,
           pull_number: target.pullRequestNumber,
-          ...(title !== undefined ? { title } : {}),
-          ...(body !== undefined ? { body } : {}),
-          ...(base !== undefined ? { base } : {}),
-          ...(state !== undefined ? { state } : {}),
+          ...update,
           headers: {
             'X-GitHub-Api-Version': GITHUB_API_VERSION
           }
         });
+        changed = true;
       }
 
       if (isDraft !== undefined && currentResponse.data.draft !== isDraft) {
@@ -21660,6 +21730,7 @@ function registerGitHubAgentTools(ctx: PluginSetupContext): void {
         }
 
         await updatePullRequestDraftState(octokit, currentResponse.data.node_id, isDraft);
+        changed = true;
         currentResponse = await octokit.rest.pulls.get({
           owner: target.repository.owner,
           repo: target.repository.repo,
@@ -21671,7 +21742,9 @@ function registerGitHubAgentTools(ctx: PluginSetupContext): void {
       }
 
       return buildToolSuccessResult(
-        `Updated pull request #${currentResponse.data.number} in ${formatRepositoryLabel(target.repository)}.`,
+        changed
+          ? `Updated pull request #${currentResponse.data.number} in ${formatRepositoryLabel(target.repository)}.`
+          : `No GitHub pull request changes were requested for #${currentResponse.data.number} in ${formatRepositoryLabel(target.repository)}.`,
         {
           repository: target.repository.url,
           pullRequest: {
@@ -22176,6 +22249,7 @@ export const __testing = {
   hasUnresolvedPaperclipIssueBlocker,
   isHealthyMaintainerWaitTransition,
   persistIssueInteractionEvent,
+  trackedMutationOutcome,
   resolvePaperclipApiAuthTokens,
   resolveGithubToken,
   resolvePaperclipPullRequestIssueStatus,
