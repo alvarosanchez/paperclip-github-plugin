@@ -8168,7 +8168,7 @@ function isHealthyMaintainerWaitTransition(params: {
 function isClearableMaintainerWaitExecutionState(
   executionState: PaperclipIssueExecutionState | null
 ): boolean {
-  if (executionState === null) {
+  if (executionState === null || executionState.status === 'completed') {
     return true;
   }
 

@@ -7439,22 +7439,28 @@ test('sync.runNow keeps directly linked pull request issues in review when only 
   }
 });
 
-test('sync.runNow reopens directly linked pull request issues when the pull request remains open', async () => {
+test('sync.runNow leaves completed direct pull request reviews in an unassigned maintainer wait', async () => {
   const harness = await createProjectPullRequestsHarness();
   const originalFetch = globalThis.fetch;
   const originalUpdate = harness.ctx.issues.update;
   const originalCreateComment = harness.ctx.issues.createComment;
+  const originalRequestWakeup = harness.ctx.issues.requestWakeup.bind(harness.ctx.issues);
   const statusTransitionComments: Array<{ issueId: string; body: string }> = [];
+  const wakeRequests: Array<{ issueId: string; companyId: string }> = [];
   const issue = await harness.ctx.issues.create({
     companyId: 'company-1',
     projectId: 'project-1',
     title: 'Accidentally closed PR link',
-    description: 'This Paperclip issue was closed while the GitHub PR is still open.'
+    description: 'This Paperclip issue completed internal review while its GitHub PR is still open.'
   });
 
   harness.ctx.issues.createComment = async (issueId, body, companyId) => {
     statusTransitionComments.push({ issueId, body });
     return originalCreateComment(issueId, body, companyId);
+  };
+  harness.ctx.issues.requestWakeup = async (issueId, companyId, options) => {
+    wakeRequests.push({ issueId, companyId });
+    return originalRequestWakeup(issueId, companyId, options);
   };
 
   await harness.ctx.entities.upsert({
@@ -7490,13 +7496,15 @@ test('sync.runNow reopens directly linked pull request issues when the pull requ
       ]
     },
     executionState: {
-      status: 'pending',
-      currentStageId: 'review-stage',
-      currentStageIndex: 0,
-      currentStageType: 'review',
-      currentParticipant: { type: 'agent', agentId: 'agent-2' },
+      status: 'completed',
+      currentStageId: null,
+      currentStageIndex: null,
+      currentStageType: null,
+      currentParticipant: null,
       returnAssignee: { type: 'agent', agentId: 'agent-1' },
-      completedStageIds: []
+      completedStageIds: ['review-stage'],
+      lastDecisionId: 'decision-approved',
+      lastDecisionOutcome: 'approved'
     }
   } as never, 'company-1');
 
@@ -7651,20 +7659,25 @@ test('sync.runNow reopens directly linked pull request issues when the pull requ
     assert.equal(sync.syncState.syncedIssuesCount, 1);
     assert.equal(directStatusUpdateCalls.length, 1);
     assert.equal(directStatusUpdateCalls[0]?.patch.status, 'in_review');
-    assert.equal(directStatusUpdateCalls[0]?.patch.assigneeAgentId, 'agent-2');
+    assert.equal(directStatusUpdateCalls[0]?.patch.assigneeAgentId, null);
+    assert.equal(directStatusUpdateCalls[0]?.patch.assigneeUserId, null);
+    assert.equal(directStatusUpdateCalls[0]?.patch.executionPolicy, null);
     assert.equal(directStatusUpdateCalls[0]?.patch.executionState, null);
 
     const updatedIssue = await harness.ctx.issues.get(issue.id, 'company-1') as Record<string, any> | null;
     assert.equal(updatedIssue?.status, 'in_review');
-    assert.equal(updatedIssue?.assigneeAgentId, 'agent-2');
-    assert.notEqual(updatedIssue?.executionPolicy ?? null, null);
+    assert.equal(updatedIssue?.assigneeAgentId ?? null, null);
+    assert.equal(updatedIssue?.assigneeUserId ?? null, null);
+    assert.equal(updatedIssue?.executionPolicy ?? null, null);
     assert.equal(updatedIssue?.executionState ?? null, null);
+    assert.equal(wakeRequests.length, 0);
     assert.equal(statusTransitionComments.length, 1);
     assert.match(statusTransitionComments[0]?.body ?? '', /from `done` to `in review`/);
     assert.match(statusTransitionComments[0]?.body ?? '', /green CI with all review threads resolved/);
   } finally {
     harness.ctx.issues.createComment = originalCreateComment;
     harness.ctx.issues.update = originalUpdate;
+    harness.ctx.issues.requestWakeup = originalRequestWakeup;
     globalThis.fetch = originalFetch;
   }
 });
