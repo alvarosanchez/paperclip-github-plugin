@@ -7120,6 +7120,130 @@ test('issue.linkGitHubItem links a Paperclip issue to a GitHub issue and tracks 
   }
 });
 
+test('entity-only issue links retain trusted comment watermarks across a failed action and worker restart', async () => {
+  const harness = await createProjectPullRequestsHarness();
+  const issue = await harness.ctx.issues.create({
+    companyId: 'company-1',
+    projectId: 'project-1',
+    title: 'Legacy entity-only issue link'
+  });
+  await harness.ctx.issues.update(issue.id, { status: 'in_progress' }, 'company-1');
+  await harness.ctx.entities.upsert({
+    entityType: 'paperclip-github-plugin.issue-link',
+    scopeKind: 'issue',
+    scopeId: issue.id,
+    externalId: 'https://github.com/external/repo/issues/90',
+    title: 'GitHub issue #90',
+    status: 'open',
+    data: {
+      companyId: 'company-1',
+      paperclipProjectId: 'project-1',
+      repositoryUrl: 'https://github.com/external/repo',
+      githubIssueId: 9000,
+      githubIssueNumber: 90,
+      githubIssueUrl: 'https://github.com/external/repo/issues/90',
+      githubIssueState: 'open',
+      commentsCount: 1,
+      linkedPullRequestNumbers: [],
+      labels: [],
+      syncedAt: '2026-05-01T09:00:00.000Z'
+    }
+  });
+
+  const originalFetch = globalThis.fetch;
+  const originalUpdate = harness.ctx.issues.update;
+  let failStatusUpdate = true;
+  harness.ctx.issues.update = async (issueId, patch, companyId) => {
+    if (failStatusUpdate && issueId === issue.id && patch?.status === 'todo') {
+      failStatusUpdate = false;
+      throw new Error('simulated status action failure');
+    }
+    return originalUpdate(issueId, patch, companyId);
+  };
+  globalThis.fetch = async (input, init) => {
+    const url = new URL(getRequestUrl(input));
+    if (url.pathname === '/repos/paperclipai/example-repo/issues') return jsonResponse([]);
+    if (url.pathname === '/repos/external/repo/issues/90') {
+      return jsonResponse({
+        id: 9000,
+        number: 90,
+        title: 'Legacy entity-only issue link',
+        body: '',
+        html_url: 'https://github.com/external/repo/issues/90',
+        state: 'open',
+        comments: 2,
+        user: { login: 'issue-author' },
+        labels: []
+      });
+    }
+    if (url.pathname === '/repos/external/repo/issues/90/comments') {
+      return jsonResponse([
+        { id: 1, user: { login: 'someone-else', type: 'User' }, author_association: 'NONE' },
+        { id: 2, user: { login: 'issue-author', type: 'User' }, author_association: 'NONE' }
+      ]);
+    }
+    if (url.pathname === '/graphql') {
+      const { query } = getGraphqlRequest(init);
+      if (query.includes('query GitHubRepositoryOpenIssueLinkedPullRequests')) {
+        return graphqlResponse({ repository: { issues: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [] } } });
+      }
+      if (query.includes('query GitHubIssueStatusSnapshot')) {
+        return graphqlResponse({
+          repository: {
+            issue: {
+              number: 90,
+              state: 'OPEN',
+              stateReason: null,
+              comments: { totalCount: 2 },
+              closedByPullRequestsReferences: {
+                pageInfo: { hasNextPage: false, endCursor: null },
+                nodes: []
+              }
+            }
+          }
+        });
+      }
+    }
+    throw new Error(`Unexpected fetch during entity-only retry test: ${url}`);
+  };
+
+  try {
+    await harness.performAction('sync.runNow', {
+      companyId: 'company-1', issueId: issue.id, waitForCompletion: true
+    });
+    await waitFor(() => {
+      const settings = harness.getState({
+        scopeKind: 'instance', stateKey: 'paperclip-github-plugin-settings'
+      }) as { syncStateByCompanyId?: Record<string, { status?: string }> } | undefined;
+      return settings?.syncStateByCompanyId?.['company-1']?.status === 'error';
+    });
+    const afterFailure = harness.getState({
+      scopeKind: 'instance', stateKey: 'paperclip-github-plugin-import-registry'
+    }) as Array<{ paperclipIssueId: string; lastSeenCommentCount?: number }>;
+    assert.equal(afterFailure.find((entry) => entry.paperclipIssueId === issue.id)?.lastSeenCommentCount, 1);
+
+    const restartedWorker = await importFreshWorkerModule();
+    await restartedWorker.default.definition.setup(harness.ctx);
+    await harness.performAction('sync.runNow', {
+      companyId: 'company-1', issueId: issue.id, waitForCompletion: true
+    });
+    await waitFor(() => {
+      const settings = harness.getState({
+        scopeKind: 'instance', stateKey: 'paperclip-github-plugin-settings'
+      }) as { syncStateByCompanyId?: Record<string, { status?: string }> } | undefined;
+      return settings?.syncStateByCompanyId?.['company-1']?.status === 'success';
+    });
+    assert.equal((await harness.ctx.issues.get(issue.id, 'company-1'))?.status, 'todo');
+    const afterRetry = harness.getState({
+      scopeKind: 'instance', stateKey: 'paperclip-github-plugin-import-registry'
+    }) as Array<{ paperclipIssueId: string; lastSeenCommentCount?: number }>;
+    assert.equal(afterRetry.find((entry) => entry.paperclipIssueId === issue.id)?.lastSeenCommentCount, 2);
+  } finally {
+    harness.ctx.issues.update = originalUpdate;
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test('issue.linkGitHubItem links a Paperclip issue to a GitHub pull request for PR-status sync', async () => {
   const harness = await createProjectPullRequestsHarness();
   const originalFetch = globalThis.fetch;
@@ -7518,6 +7642,8 @@ test('sync.runNow keeps directly linked pull request issues in review when only 
   const originalFetch = globalThis.fetch;
   const originalCreateComment = harness.ctx.issues.createComment;
   const statusTransitionComments: Array<{ issueId: string; body: string }> = [];
+  let githubCommentCount = 0;
+  let githubReviewCommentCount = 0;
   const issue = await harness.ctx.issues.create({
     companyId: 'company-1',
     projectId: 'project-1',
@@ -7565,8 +7691,26 @@ test('sync.runNow keeps directly linked pull request issues in review when only 
         body: 'GitHub owns PR readiness.',
         html_url: 'https://github.com/paperclipai/example-repo/pull/43',
         state: 'open',
-        merged: false
+        merged: false,
+        comments: githubCommentCount,
+        review_comments: githubReviewCommentCount,
+        user: { login: 'trusted-author' }
       });
+    }
+
+    if (requestPathname === '/repos/paperclipai/example-repo/issues/43/comments') {
+      return jsonResponse(githubCommentCount === 1
+        ? [{ id: 1, user: { login: 'automation[bot]', type: 'Bot' }, author_association: 'NONE' }]
+        : [
+            { id: 1, user: { login: 'automation[bot]', type: 'Bot' }, author_association: 'NONE' },
+            { id: 2, user: { login: 'trusted-author', type: 'User' }, author_association: 'NONE' }
+          ]);
+    }
+
+    if (requestPathname === '/repos/paperclipai/example-repo/pulls/43/comments') {
+      return jsonResponse([
+        { id: 3, user: { login: 'trusted-author', type: 'User' }, author_association: 'NONE' }
+      ]);
     }
 
     if (requestPathname === '/graphql') {
@@ -7696,9 +7840,39 @@ test('sync.runNow keeps directly linked pull request issues in review when only 
     assert.equal(sync.syncState.status, 'success');
     assert.equal(sync.syncState.syncedIssuesCount, 1);
 
-    const updatedIssue = await harness.ctx.issues.get(issue.id, 'company-1');
+    let updatedIssue = await harness.ctx.issues.get(issue.id, 'company-1');
     assert.equal(updatedIssue?.status, 'in_review');
     assert.equal(statusTransitionComments.length, 0);
+
+    await harness.ctx.issues.update(issue.id, { status: 'blocked' }, 'company-1');
+    githubReviewCommentCount = 1;
+    await harness.performAction('sync.runNow', {
+      companyId: 'company-1',
+      issueId: issue.id,
+      waitForCompletion: true
+    });
+    updatedIssue = await harness.ctx.issues.get(issue.id, 'company-1');
+    assert.equal(updatedIssue?.status, 'todo', 'the PR author review comment should re-arm the direct PR issue');
+
+    await harness.ctx.issues.update(issue.id, { status: 'blocked' }, 'company-1');
+    githubCommentCount = 1;
+    await harness.performAction('sync.runNow', {
+      companyId: 'company-1',
+      issueId: issue.id,
+      waitForCompletion: true
+    });
+    updatedIssue = await harness.ctx.issues.get(issue.id, 'company-1');
+    assert.equal(updatedIssue?.status, 'blocked', 'an untrusted bot comment must not re-arm the direct PR issue');
+
+    githubCommentCount = 2;
+    await harness.performAction('sync.runNow', {
+      companyId: 'company-1',
+      issueId: issue.id,
+      waitForCompletion: true
+    });
+    updatedIssue = await harness.ctx.issues.get(issue.id, 'company-1');
+    assert.equal(updatedIssue?.status, 'todo', 'the PR author top-level comment should re-arm the direct PR issue');
+    assert.equal(statusTransitionComments.length, 2);
   } finally {
     harness.ctx.issues.createComment = originalCreateComment;
     globalThis.fetch = originalFetch;
@@ -8070,6 +8244,20 @@ test('sync.runNow completes directly linked pull request issues when the pull re
       scopeId: issue.id
     });
     assert.equal((pullRequestLinks[0]?.data as { githubPullRequestState?: unknown } | undefined)?.githubPullRequestState, 'closed');
+
+    await originalUpdate(issue.id, { status: 'in_review' }, 'company-1');
+    directStatusUpdateCalls.length = 0;
+    statusTransitionComments.length = 0;
+    const acknowledgedClosure = await harness.performAction('sync.runNow', {
+      companyId: 'company-1',
+      issueId: issue.id,
+      waitForCompletion: true
+    }) as { syncState: { status: string } };
+    assert.equal(acknowledgedClosure.syncState.status, 'success');
+    assert.equal((await harness.ctx.issues.get(issue.id, 'company-1'))?.status, 'in_review');
+    assert.equal(directStatusUpdateCalls.length, 1);
+    assert.equal(directStatusUpdateCalls[0]?.patch.status, 'in_review');
+    assert.equal(statusTransitionComments.length, 0);
   } finally {
     harness.ctx.issues.createComment = originalCreateComment;
     harness.ctx.issues.update = originalUpdate;
@@ -14821,7 +15009,10 @@ test('worker preserves the imported triage assignee when maintainer-authored bac
     assert.equal(wakeupRequests[0]?.companyId, 'company-1');
     assert.match(String(wakeupRequests[0]?.options?.reason ?? ''), /imported/i);
     assert.equal(wakeupRequests[0]?.options?.contextSource, 'github-sync.import');
-    assert.match(String(wakeupRequests[0]?.options?.idempotencyKey ?? ''), /^github-sync:import:/);
+    assert.match(
+      String(wakeupRequests[0]?.options?.idempotencyKey ?? ''),
+      /^github-sync:import:[^:]+:[a-f0-9]{64}$/
+    );
   } finally {
     harness.ctx.issues.create = originalCreate;
     harness.ctx.issues.update = originalUpdate;
@@ -14966,14 +15157,17 @@ test('worker wakes the assignee when a newly imported maintainer-authored issue 
     assert.equal(wakeupRequests[0]?.companyId, 'company-1');
     assert.match(String(wakeupRequests[0]?.options?.reason ?? ''), /imported/i);
     assert.equal(wakeupRequests[0]?.options?.contextSource, 'github-sync.import');
-    assert.match(String(wakeupRequests[0]?.options?.idempotencyKey ?? ''), /^github-sync:import:/);
+    assert.match(
+      String(wakeupRequests[0]?.options?.idempotencyKey ?? ''),
+      /^github-sync:import:[^:]+:[a-f0-9]{64}$/
+    );
   } finally {
     harness.ctx.issues.requestWakeup = originalRequestWakeup;
     globalThis.fetch = originalFetch;
   }
 });
 
-test('worker batches imported-issue assignee wakeups with a small concurrency limit', async () => {
+test('worker processes assignee wakeups sequentially so pending-wake cleanup cannot lose registry updates', async () => {
   const harness = createTestHarness({
     manifest,
     config: {
@@ -15120,8 +15314,12 @@ test('worker batches imported-issue assignee wakeups with a small concurrency li
     assert.equal(sync.syncState.status, 'success');
     assert.equal(sync.syncState.createdIssuesCount, 3);
     assert.equal(wakeupCount, 3);
-    assert.ok(maxInFlightWakeups > 1);
-    assert.ok(maxInFlightWakeups <= 4);
+    assert.equal(maxInFlightWakeups, 1);
+    const remoteActions = harness.getState({
+      scopeKind: 'instance',
+      stateKey: 'paperclip-github-plugin-remote-actions'
+    }) as Array<{ pendingWake?: unknown }> | undefined;
+    assert.ok((remoteActions ?? []).every((entry) => entry.pendingWake === undefined));
   } finally {
     harness.ctx.issues.requestWakeup = originalRequestWakeup;
     globalThis.fetch = originalFetch;
@@ -20011,6 +20209,475 @@ test('worker routes non-review-ready GitHub merge state statuses back to active 
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+test('sync.runNow quiesces an acknowledged unchanged remote action and re-wakes for changed remote evidence', async () => {
+  const harness = createTestHarness({ manifest, config: { githubTokenRef: 'github-secret-ref' } });
+  await plugin.definition.setup(harness.ctx);
+  harness.seed({ agents: [createAgentFixture({
+    id: 'agent-remote-action', companyId: 'company-1', name: 'Remote Action Executor', title: 'Executor'
+  })] });
+  await harness.performAction('settings.saveRegistration', {
+    companyId: 'company-1',
+    mappings: [{
+      id: 'mapping-remote-action', repositoryUrl: 'paperclipai/example-repo',
+      paperclipProjectName: 'Engineering', paperclipProjectId: 'project-1', companyId: 'company-1'
+    }],
+    advancedSettings: {
+      executorAssigneeAgentId: 'agent-remote-action', defaultStatus: 'backlog', ignoredIssueAuthorUsernames: ['renovate']
+    },
+    syncState: { status: 'idle' }
+  });
+
+  const issue = await harness.ctx.issues.create({
+    companyId: 'company-1', projectId: 'project-1', title: 'Durable merge conflict', status: 'blocked'
+  });
+  await harness.ctx.state.set(
+    { scopeKind: 'instance', stateKey: 'paperclip-github-plugin-import-registry' },
+    [{
+      mappingId: 'mapping-remote-action', githubIssueId: 6101, githubIssueNumber: 61,
+      paperclipIssueId: issue.id, importedAt: '2026-06-01T09:00:00.000Z', lastSeenCommentCount: 0,
+      lastSeenGitHubState: 'open', repositoryUrl: 'https://github.com/paperclipai/example-repo',
+      paperclipProjectId: 'project-1', companyId: 'company-1'
+    }]
+  );
+
+  let headSha = 'a'.repeat(40);
+  let checkConclusion = 'SUCCESS';
+  let mergeable: 'CONFLICTING' | 'MERGEABLE' = 'CONFLICTING';
+  let mergeStateStatus: 'DIRTY' | 'CLEAN' = 'DIRTY';
+  let unresolvedReviewThread = false;
+  let issueCommentCount = 0;
+  let issueCommentAuthor = 'trusted-author';
+  const transitionComments: string[] = [];
+  const statusMutations: Array<Record<string, unknown>> = [];
+  const wakeRequests: string[] = [];
+  let failNextStatusMutation = false;
+  let failNextWake = false;
+  const originalCreateComment = harness.ctx.issues.createComment;
+  const originalUpdate = harness.ctx.issues.update;
+  const originalRequestWakeup = harness.ctx.issues.requestWakeup;
+  harness.ctx.issues.createComment = async (issueId, body, companyId) => {
+    transitionComments.push(body);
+    return originalCreateComment(issueId, body, companyId);
+  };
+  harness.ctx.issues.update = async (issueId, patch, companyId) => {
+    if (issueId === issue.id && patch && typeof patch === 'object' && 'status' in patch) {
+      statusMutations.push(patch as Record<string, unknown>);
+      if (failNextStatusMutation) {
+        failNextStatusMutation = false;
+        throw new Error('Injected status mutation failure.');
+      }
+    }
+    return originalUpdate(issueId, patch, companyId);
+  };
+  harness.ctx.issues.requestWakeup = async (issueId, companyId, options) => {
+    wakeRequests.push(issueId);
+    if (failNextWake) {
+      failNextWake = false;
+      throw new Error('Injected wake failure.');
+    }
+    return originalRequestWakeup(issueId, companyId, options);
+  };
+
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input, init) => {
+    const url = new URL(getRequestUrl(input));
+    if (url.pathname === '/repos/paperclipai/example-repo/issues' && ['all', 'open'].includes(url.searchParams.get('state') ?? '')) {
+      return jsonResponse([{
+        id: 6101, number: 61, title: 'Durable merge conflict', body: null,
+        html_url: 'https://github.com/paperclipai/example-repo/issues/61', state: 'open',
+        comments: issueCommentCount, user: { login: 'trusted-author' }
+      }]);
+    }
+    if (url.pathname === '/repos/paperclipai/example-repo/issues/61/comments') {
+      const commentAuthors = issueCommentCount === 2
+        ? ['untrusted-outsider', issueCommentAuthor]
+        : issueCommentCount === 1
+          ? [issueCommentAuthor]
+          : [];
+      return jsonResponse(commentAuthors.map((login, index) => ({
+        id: 61001 + index,
+        body: 'Please retry this now.',
+        user: { login }
+      })));
+    }
+    if (url.pathname === '/repos/paperclipai/example-repo/collaborators/untrusted-outsider/permission') {
+      return jsonResponse({ permission: 'read', role_name: 'read' });
+    }
+    if (url.pathname === '/graphql') {
+      const { query, variables } = getGraphqlRequest(init);
+      if (query.includes('query GitHubIssueParentRelationships')) {
+        return graphqlIssueParentRelationshipsResponse([{ issueNumber: 61 }]);
+      }
+      if (query.includes('query GitHubIssueStatusSnapshot')) {
+        return graphqlResponse({ repository: { issue: {
+          number: 61, state: 'OPEN', stateReason: null, comments: { totalCount: issueCommentCount },
+          closedByPullRequestsReferences: {
+            pageInfo: { hasNextPage: false, endCursor: null }, nodes: [{ number: 610, state: 'OPEN' }]
+          }
+        } } });
+      }
+      if (query.includes('query GitHubPullRequestReviewThreads')) {
+        return graphqlResponse({ repository: { pullRequest: { reviewThreads: {
+          pageInfo: { hasNextPage: false, endCursor: null }, nodes: [{ isResolved: !unresolvedReviewThread }]
+        } } } });
+      }
+      if (query.includes('query GitHubPullRequestCiContexts')) {
+        assert.equal(variables.pullRequestNumber, 610);
+        return graphqlResponse({ repository: { pullRequest: {
+          headRefOid: headSha, mergeable, mergeStateStatus,
+          reviewDecision: unresolvedReviewThread ? 'CHANGES_REQUESTED' : 'REVIEW_REQUIRED',
+          statusCheckRollup: { contexts: {
+            pageInfo: { hasNextPage: false, endCursor: null },
+            nodes: [{ __typename: 'CheckRun', status: 'COMPLETED', conclusion: checkConclusion }]
+          } }
+        } } });
+      }
+    }
+    throw new Error(`Unexpected GitHub request: ${url.toString()}`);
+  };
+
+  const syncAndExpectWake = async () => {
+    const result = await harness.performAction('sync.runNow', {}) as { syncState: { status: string } };
+    assert.equal(result.syncState.status, 'success');
+    assert.equal((await harness.ctx.issues.get(issue.id, 'company-1'))?.status, 'in_progress');
+    assert.equal(transitionComments.length, 1);
+    assert.equal(statusMutations.length, 1);
+    assert.equal(wakeRequests.length, 1);
+  };
+  const acknowledgeAndReset = async (status: 'blocked' | 'in_review' = 'blocked') => {
+    await originalUpdate(issue.id, { status }, 'company-1');
+    transitionComments.length = 0;
+    statusMutations.length = 0;
+    wakeRequests.length = 0;
+  };
+
+  try {
+    await syncAndExpectWake();
+    const registryAfterFirstAction = harness.getState({
+      scopeKind: 'instance', stateKey: 'paperclip-github-plugin-import-registry'
+    }) as Array<{ remoteActionFingerprint?: string }>;
+    assert.match(registryAfterFirstAction[0]?.remoteActionFingerprint ?? '', /^[a-f0-9]{64}$/);
+
+    await acknowledgeAndReset();
+    const unchanged = await harness.performAction('sync.runNow', {}) as { syncState: { status: string } };
+    assert.equal(unchanged.syncState.status, 'success');
+    assert.equal((await harness.ctx.issues.get(issue.id, 'company-1'))?.status, 'blocked');
+    assert.equal(transitionComments.length, 0);
+    assert.equal(statusMutations.length, 0);
+    assert.equal(wakeRequests.length, 0);
+
+    await acknowledgeAndReset('in_review');
+    const unchangedAfterReview = await harness.performAction('sync.runNow', {}) as { syncState: { status: string } };
+    assert.equal(unchangedAfterReview.syncState.status, 'success');
+    assert.equal((await harness.ctx.issues.get(issue.id, 'company-1'))?.status, 'in_review');
+    assert.equal(transitionComments.length, 0);
+    assert.equal(statusMutations.length, 1);
+    assert.equal(statusMutations[0]?.status, 'in_review');
+    assert.equal(wakeRequests.length, 0);
+    statusMutations.length = 0;
+
+    headSha = 'b'.repeat(40);
+    await syncAndExpectWake();
+    await acknowledgeAndReset();
+    checkConclusion = 'FAILURE';
+    const maskedCheckJitter = await harness.performAction('sync.runNow', {}) as { syncState: { status: string } };
+    assert.equal(maskedCheckJitter.syncState.status, 'success');
+    assert.equal((await harness.ctx.issues.get(issue.id, 'company-1'))?.status, 'blocked');
+    assert.equal(transitionComments.length, 0);
+    assert.equal(wakeRequests.length, 0);
+
+    mergeable = 'MERGEABLE';
+    mergeStateStatus = 'CLEAN';
+    await syncAndExpectWake();
+    await acknowledgeAndReset();
+    unresolvedReviewThread = true;
+    const maskedReviewJitter = await harness.performAction('sync.runNow', {}) as { syncState: { status: string } };
+    assert.equal(maskedReviewJitter.syncState.status, 'success');
+    assert.equal((await harness.ctx.issues.get(issue.id, 'company-1'))?.status, 'blocked');
+    assert.equal(transitionComments.length, 0);
+    assert.equal(wakeRequests.length, 0);
+    checkConclusion = 'SUCCESS';
+    const reviewAction = await harness.performAction('sync.runNow', {}) as { syncState: { status: string } };
+    assert.equal(reviewAction.syncState.status, 'success');
+    assert.equal((await harness.ctx.issues.get(issue.id, 'company-1'))?.status, 'in_review');
+    assert.equal(transitionComments.length, 1);
+    assert.equal(statusMutations.length, 1);
+    assert.equal(wakeRequests.length, 0);
+    await acknowledgeAndReset();
+
+    issueCommentAuthor = 'untrusted-outsider';
+    issueCommentCount = 1;
+    const untrustedComment = await harness.performAction('sync.runNow', {}) as { syncState: { status: string } };
+    assert.equal(untrustedComment.syncState.status, 'success');
+    assert.equal((await harness.ctx.issues.get(issue.id, 'company-1'))?.status, 'blocked');
+    assert.equal(transitionComments.length, 0);
+    assert.equal(statusMutations.length, 0);
+    assert.equal(wakeRequests.length, 0);
+
+    issueCommentAuthor = 'trusted-author';
+    issueCommentCount = 2;
+    failNextStatusMutation = true;
+    const failedTrustedAction = await harness.performAction('sync.runNow', {}) as { syncState: { status: string } };
+    assert.equal(failedTrustedAction.syncState.status, 'error');
+    assert.equal((await harness.ctx.issues.get(issue.id, 'company-1'))?.status, 'blocked');
+    transitionComments.length = 0;
+    statusMutations.length = 0;
+    wakeRequests.length = 0;
+    await syncAndExpectWake();
+
+    await acknowledgeAndReset();
+    headSha = 'c'.repeat(40);
+    unresolvedReviewThread = false;
+    checkConclusion = 'FAILURE';
+    failNextWake = true;
+    const failedWake = await harness.performAction('sync.runNow', {}) as { syncState: { status: string } };
+    assert.equal(failedWake.syncState.status, 'error');
+    assert.equal((await harness.ctx.issues.get(issue.id, 'company-1'))?.status, 'in_progress');
+    assert.equal(statusMutations.length, 1);
+    assert.equal(transitionComments.length, 1);
+    statusMutations.length = 0;
+    transitionComments.length = 0;
+    wakeRequests.length = 0;
+
+    const retriedWake = await harness.performAction('sync.runNow', {}) as { syncState: { status: string } };
+    assert.equal(retriedWake.syncState.status, 'success');
+    assert.equal((await harness.ctx.issues.get(issue.id, 'company-1'))?.status, 'in_progress');
+    assert.equal(statusMutations.length, 0);
+    assert.equal(transitionComments.length, 0);
+    assert.equal(wakeRequests.length, 1);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('remote action fingerprints ignore transient raw UNKNOWN jitter that preserves the effective action', async () => {
+  const workerModule = await importFreshWorkerModule();
+  const testing = workerModule.__testing as typeof workerModule.__testing & {
+    buildRemoteActionFingerprint?: (snapshot: Record<string, unknown>) => string;
+  };
+  assert.equal(typeof testing.buildRemoteActionFingerprint, 'function');
+
+  const basePullRequest = {
+    number: 77,
+    repositoryUrl: 'https://github.com/paperclipai/example-repo',
+    headSha: 'a'.repeat(40),
+    hasUnresolvedReviewThreads: false,
+    ciState: 'unfinished',
+    mergeability: 'unknown',
+    mergeStateStatus: 'unknown',
+    reviewDecision: 'unknown'
+  };
+  const baseSnapshot = {
+    issueNumber: 7,
+    state: 'open',
+    commentCount: 10,
+    linkedPullRequests: [basePullRequest]
+  };
+
+  const first = testing.buildRemoteActionFingerprint!(baseSnapshot);
+  const rawJitter = testing.buildRemoteActionFingerprint!({
+    ...baseSnapshot,
+    commentCount: 999,
+    linkedPullRequests: [{
+      ...basePullRequest,
+      mergeability: 'mergeable',
+      mergeStateStatus: 'blocked',
+      reviewDecision: 'review_required'
+    }]
+  });
+  assert.equal(rawJitter, first);
+
+  const actionableChange = testing.buildRemoteActionFingerprint!({
+    ...baseSnapshot,
+    linkedPullRequests: [{ ...basePullRequest, ciState: 'red' }]
+  });
+  assert.notEqual(actionableChange, first);
+});
+
+test('remote action fingerprints ignore lower-priority sibling PR changes masked by the effective action', async () => {
+  const workerModule = await importFreshWorkerModule();
+  const testing = workerModule.__testing as typeof workerModule.__testing & {
+    buildRemoteActionFingerprint?: (snapshot: Record<string, unknown>) => string;
+    buildDirectPullRequestActionFingerprint?: (snapshots: Array<Record<string, unknown>>) => string;
+  };
+  assert.equal(typeof testing.buildDirectPullRequestActionFingerprint, 'function');
+
+  const conflict = {
+    number: 80,
+    repositoryUrl: 'https://github.com/paperclipai/example-repo',
+    headSha: 'a'.repeat(40),
+    hasUnresolvedReviewThreads: false,
+    ciState: 'green',
+    mergeability: 'conflicting',
+    mergeStateStatus: 'dirty',
+    reviewDecision: 'review_required'
+  };
+  const waiting = {
+    number: 81,
+    repositoryUrl: 'https://github.com/paperclipai/example-repo',
+    headSha: 'b'.repeat(40),
+    hasUnresolvedReviewThreads: false,
+    ciState: 'unfinished',
+    mergeability: 'unknown',
+    mergeStateStatus: 'unknown',
+    reviewDecision: 'unknown'
+  };
+  const issueSnapshot = {
+    issueNumber: 8,
+    state: 'open',
+    commentCount: 0,
+    linkedPullRequests: [conflict, waiting]
+  };
+  const issueFingerprint = testing.buildRemoteActionFingerprint!(issueSnapshot);
+  assert.equal(testing.buildRemoteActionFingerprint!({
+    ...issueSnapshot,
+    linkedPullRequests: [conflict, { ...waiting, headSha: 'c'.repeat(40), ciState: 'green', mergeability: 'mergeable' }]
+  }), issueFingerprint);
+
+  const toDirect = (pullRequest: Record<string, unknown>) => ({
+    pullRequestLink: { data: { githubPullRequestNumber: pullRequest.number } },
+    repository: { url: pullRequest.repositoryUrl },
+    lifecycleState: 'open',
+    pullRequest
+  });
+  const directFingerprint = testing.buildDirectPullRequestActionFingerprint!([toDirect(conflict), toDirect(waiting)]);
+  assert.equal(testing.buildDirectPullRequestActionFingerprint!([
+    toDirect(conflict),
+    toDirect({ ...waiting, headSha: 'd'.repeat(40), ciState: 'green', mergeability: 'mergeable' })
+  ]), directFingerprint);
+});
+
+test('remote action registry normalization deduplicates and deterministically caps records while retaining pending wakes', async () => {
+  const workerModule = await importFreshWorkerModule();
+  const testing = workerModule.__testing as typeof workerModule.__testing & {
+    normalizeRemoteActionRegistry?: (value: unknown) => Array<Record<string, unknown>>;
+  };
+  assert.equal(typeof testing.normalizeRemoteActionRegistry, 'function');
+
+  const digest = 'a'.repeat(64);
+  const records: Array<Record<string, unknown>> = Array.from({ length: 300 }, (_, index) => ({
+    key: `direct-pr:company:${String(index).padStart(3, '0')}`,
+    fingerprint: digest
+  }));
+  records[0]!.linkedPullRequestCommentCounts = Array.from({ length: 300 }, (_, index) => ({
+    number: index + 1,
+    repositoryUrl: 'https://github.com/paperclipai/example-repo',
+    topLevelCommentCount: index,
+    reviewCommentCount: index
+  }));
+  records.push({
+    key: 'direct-pr:company:299',
+    fingerprint: 'b'.repeat(64),
+    pendingWake: {
+      fingerprint: 'b'.repeat(64),
+      assigneeAgentId: 'agent-1',
+      reason: 'retry wake',
+      mutation: 'status_transition',
+      nextStatus: 'in_progress'
+    }
+  });
+
+  const normalized: Array<Record<string, unknown>> = testing.normalizeRemoteActionRegistry!(records);
+  assert.equal(normalized.length, 256);
+  assert.equal(new Set(normalized.map((entry: Record<string, unknown>) => entry.key)).size, normalized.length);
+  assert.ok(normalized.some((entry: Record<string, unknown>) => entry.key === 'direct-pr:company:299' && entry.pendingWake));
+  assert.equal(
+    (normalized.find((entry: Record<string, unknown>) => entry.key === 'direct-pr:company:000')
+      ?.linkedPullRequestCommentCounts as unknown[]).length,
+    128
+  );
+  assert.deepEqual(
+    normalized.map((entry: Record<string, unknown>) => entry.key),
+    [...normalized.map((entry: Record<string, unknown>) => entry.key)].sort((left, right) => String(left).localeCompare(String(right)))
+  );
+
+  const overCapacityPending = Array.from({ length: 257 }, (_, index) => ({
+    key: `direct-pr:company:pending-${String(index).padStart(3, '0')}`,
+    pendingWake: {
+      fingerprint: digest,
+      assigneeAgentId: `agent-${index}`,
+      reason: 'retry wake',
+      mutation: 'status_transition',
+      nextStatus: 'in_progress'
+    }
+  }));
+  assert.throws(
+    () => testing.normalizeRemoteActionRegistry!(overCapacityPending),
+    /contains 257 pending wakes; maximum is 256/
+  );
+});
+
+test('REST wake fallback carries the same fingerprint-derived idempotency key as the SDK request', async () => {
+  const harness = createTestHarness({ manifest });
+  await plugin.definition.setup(harness.ctx);
+  const workerModule = await importFreshWorkerModule();
+  const testing = workerModule.__testing as typeof workerModule.__testing & {
+    wakePaperclipIssueAssignee?: unknown;
+  };
+  assert.equal(typeof testing.wakePaperclipIssueAssignee, 'function');
+
+  const originalWake = harness.ctx.issues.requestWakeup;
+  const originalFetch = globalThis.fetch;
+  const fingerprint = 'c'.repeat(64);
+  let fallbackBody: Record<string, unknown> | null = null;
+  harness.ctx.issues.requestWakeup = async () => {
+    throw new Error('force REST fallback');
+  };
+  globalThis.fetch = async (_input, init) => {
+    fallbackBody = getJsonRequestBody(init);
+    return jsonResponse({ ok: true });
+  };
+
+  try {
+    await (testing.wakePaperclipIssueAssignee as (
+      ctx: typeof harness.ctx,
+      params: Record<string, unknown>
+    ) => Promise<void>)(harness.ctx, {
+      assigneeAgentId: 'agent-1',
+      paperclipIssueId: 'issue-1',
+      companyId: 'company-1',
+      paperclipApiBaseUrl: 'http://127.0.0.1:63675',
+      reason: 'retry work',
+      mutation: 'status_transition',
+      actionFingerprint: fingerprint,
+      previousStatus: 'blocked',
+      nextStatus: 'in_progress'
+    });
+    assert.ok(fallbackBody);
+    assert.equal(
+      (fallbackBody as Record<string, unknown>).idempotencyKey,
+      `github-sync:status_transition:issue-1:${fingerprint}`
+    );
+  } finally {
+    harness.ctx.issues.requestWakeup = originalWake;
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('import registry normalization discards malformed legacy remote action state', async () => {
+  const workerModule = await importFreshWorkerModule();
+  const testing = workerModule.__testing as typeof workerModule.__testing & {
+    normalizeImportRegistry?: (value: unknown) => Array<Record<string, unknown>>;
+  };
+  assert.equal(typeof testing.normalizeImportRegistry, 'function');
+
+  const [record] = testing.normalizeImportRegistry!([{
+    mappingId: 'mapping-legacy',
+    githubIssueId: 9,
+    paperclipIssueId: 'issue-legacy',
+    importedAt: '2026-01-01T00:00:00.000Z',
+    remoteActionFingerprint: 'not-a-digest',
+    pendingRemoteActionWake: {
+      fingerprint: 'also-invalid',
+      assigneeAgentId: '',
+      reason: 42
+    }
+  }]);
+
+  assert.equal(record?.remoteActionFingerprint, undefined);
+  assert.equal(record?.pendingRemoteActionWake, undefined);
 });
 
 test('worker routes sync-driven review handoffs to execution-policy assignees and wakes those agents', async () => {
