@@ -20951,35 +20951,121 @@ function trackedMutationOutcome(result: ToolResult): 'changed' | 'noop' | 'faile
   return 'changed';
 }
 
-function deriveTrackedMutationRemote(input: Record<string, unknown>): {
-  repository?: ParsedRepositoryReference;
-  remoteKind?: 'issue' | 'pull_request';
-  remoteNumber?: number;
-} {
+function resolveTrackedMutationRemoteFromInput(input: Record<string, unknown>): {
+  repositoryUrl?: string;
+  kind?: 'issue' | 'pull_request';
+  number?: number;
+} | undefined {
   const reference = normalizeOptionalToolString(input.reference);
   const issueReference = reference ? parseGitHubIssueHtmlUrl(reference) : undefined;
-  const pullRequestReference = reference ? parseGitHubPullRequestHtmlUrl(reference) : undefined;
-  const pullRequestUrlReference = parseGitHubPullRequestHtmlUrl(normalizeOptionalToolString(input.pullRequestUrl) ?? '');
+  const pullRequestReference = (reference ? parseGitHubPullRequestHtmlUrl(reference) : undefined)
+    ?? parseGitHubPullRequestHtmlUrl(normalizeOptionalToolString(input.pullRequestUrl) ?? '');
+  const explicitRepository = parseRepositoryReference(normalizeOptionalToolString(input.repository) ?? '');
+  const explicitKind = normalizeIssueGitHubLinkKind(input.kind);
+  const numericReference = normalizePositiveIntegerReference(input.reference);
+  const explicitIssueNumber = normalizeToolPositiveInteger(input.issueNumber);
+  const explicitPullRequestNumber = normalizeToolPositiveInteger(input.pullRequestNumber);
 
-  const issueNumber = normalizeToolPositiveInteger(input.issueNumber) ?? issueReference?.issueNumber;
-  const pullRequestNumber = normalizeToolPositiveInteger(input.pullRequestNumber)
-    ?? pullRequestReference?.pullRequestNumber
-    ?? pullRequestUrlReference?.pullRequestNumber;
-  const remoteNumber = issueNumber ?? pullRequestNumber;
-  const remoteKind = issueNumber ? 'issue' : pullRequestNumber ? 'pull_request' : undefined;
+  let kind: 'issue' | 'pull_request' | undefined;
+  let number: number | undefined;
+  let repository = explicitRepository;
+  if (explicitKind === 'issue') {
+    kind = 'issue';
+    number = issueReference?.issueNumber ?? numericReference ?? explicitIssueNumber;
+    repository = parseRepositoryReference(issueReference?.repositoryUrl ?? '') ?? explicitRepository;
+  } else if (explicitKind === 'pull_request') {
+    kind = 'pull_request';
+    number = pullRequestReference?.pullRequestNumber ?? explicitPullRequestNumber ?? numericReference;
+    repository = parseRepositoryReference(pullRequestReference?.repositoryUrl ?? '') ?? explicitRepository;
+  } else if (issueReference || explicitIssueNumber) {
+    kind = 'issue';
+    number = issueReference?.issueNumber ?? explicitIssueNumber;
+    repository = parseRepositoryReference(issueReference?.repositoryUrl ?? '') ?? explicitRepository;
+  } else if (pullRequestReference || explicitPullRequestNumber) {
+    kind = 'pull_request';
+    number = pullRequestReference?.pullRequestNumber ?? explicitPullRequestNumber;
+    repository = parseRepositoryReference(pullRequestReference?.repositoryUrl ?? '') ?? explicitRepository;
+  }
 
-  const repository = parseRepositoryReference(normalizeOptionalToolString(input.repository) ?? '')
-    ?? parseRepositoryReference(normalizeOptionalToolString(input.repositoryUrl) ?? '')
-    ?? (issueReference ? parseRepositoryReference(issueReference.repositoryUrl) : null)
-    ?? (pullRequestReference ? parseRepositoryReference(pullRequestReference.repositoryUrl) : null)
-    ?? (pullRequestUrlReference ? parseRepositoryReference(pullRequestUrlReference.repositoryUrl) : null)
-    ?? undefined;
+  if (!repository && !kind && !number) return undefined;
+  return { repositoryUrl: repository?.url, kind, number };
+}
 
-  return {
-    repository: repository ?? undefined,
-    remoteKind,
-    remoteNumber
-  };
+const TRACKED_ISSUE_MUTATIONS = new Set([
+  'update_issue',
+  'assign_to_current_user',
+  'add_issue_comment'
+]);
+const TRACKED_PULL_REQUEST_MUTATIONS = new Set([
+  'update_pull_request',
+  'request_pull_request_reviewers',
+  'add_pull_request_to_project',
+  'upload_pull_request_asset'
+]);
+
+async function resolveTrackedMutationRemote(
+  ctx: PluginSetupContext,
+  action: string,
+  input: Record<string, unknown>,
+  runCtx: ToolRunContext
+): Promise<ReturnType<typeof resolveTrackedMutationRemoteFromInput>> {
+  const fallback = resolveTrackedMutationRemoteFromInput(input);
+  try {
+    if (TRACKED_ISSUE_MUTATIONS.has(action)) {
+      const target = await resolveGitHubIssueToolTarget(ctx, runCtx, input);
+      return { repositoryUrl: target.repository.url, kind: 'issue', number: target.issueNumber };
+    }
+    if (TRACKED_PULL_REQUEST_MUTATIONS.has(action)) {
+      const target = await resolveGitHubPullRequestToolTarget(ctx, runCtx, input);
+      return { repositoryUrl: target.repository.url, kind: 'pull_request', number: target.pullRequestNumber };
+    }
+    if (action === 'create_pull_request') {
+      const explicitRepository = parseRepositoryReference(normalizeOptionalToolString(input.repository) ?? '');
+      const paperclipIssueId = normalizeOptionalToolString(input.paperclipIssueId);
+      const repository = explicitRepository ?? (paperclipIssueId
+        ? (await resolveIssueGitHubLinkMapping(ctx, { companyId: runCtx.companyId, issueId: paperclipIssueId })).repository
+        : undefined);
+      if (repository) return { repositoryUrl: repository.url, kind: 'pull_request' };
+    }
+  } catch {
+    // Attribution must never change mutation behavior; the mutation path returns its own validation error.
+  }
+  return fallback;
+}
+
+function resolveTrackedMutationResultRemote(
+  result: ToolResult,
+  fallback: ReturnType<typeof resolveTrackedMutationRemoteFromInput>
+): ReturnType<typeof resolveTrackedMutationRemoteFromInput> {
+  const data = result.data && typeof result.data === 'object'
+    ? result.data as Record<string, unknown>
+    : {};
+  const pullRequest = data.pullRequest && typeof data.pullRequest === 'object'
+    ? data.pullRequest as Record<string, unknown>
+    : {};
+  const issue = data.issue && typeof data.issue === 'object'
+    ? data.issue as Record<string, unknown>
+    : {};
+  const repository = parseRepositoryReference(
+    normalizeOptionalToolString(data.repository)
+      ?? normalizeOptionalToolString(data.repositoryUrl)
+      ?? fallback?.repositoryUrl
+      ?? ''
+  );
+  const pullRequestNumber = normalizeToolPositiveInteger(data.pullRequestNumber)
+    ?? normalizeToolPositiveInteger(data.githubPullRequestNumber)
+    ?? normalizeToolPositiveInteger(pullRequest.number);
+  const issueNumber = normalizeToolPositiveInteger(data.issueNumber)
+    ?? normalizeToolPositiveInteger(data.githubIssueNumber)
+    ?? normalizeToolPositiveInteger(issue.number);
+  const kind = pullRequestNumber
+    ? 'pull_request'
+    : issueNumber ? 'issue' : fallback?.kind;
+  const number = kind === 'pull_request'
+    ? pullRequestNumber ?? fallback?.number
+    : kind === 'issue' ? issueNumber ?? fallback?.number : fallback?.number;
+  if (!repository && !kind && !number) return undefined;
+  return { repositoryUrl: repository?.url, kind, number };
 }
 
 async function executeTrackedGitHubMutation(
@@ -20989,75 +21075,82 @@ async function executeTrackedGitHubMutation(
   runCtx: ToolRunContext,
   fn: () => Promise<ToolResult>
 ): Promise<ToolResult> {
-  const input = getToolInputRecord(params);
-  const paperclipIssueId = normalizeOptionalToolString(input.paperclipIssueId);
-  if (paperclipIssueId && !await ctx.issues.get(paperclipIssueId, runCtx.companyId)) {
-    return executeGitHubTool(async () => {
+  return executeGitHubTool(async () => {
+    const input = getToolInputRecord(params);
+    const paperclipIssueId = normalizeOptionalToolString(input.paperclipIssueId);
+    if (paperclipIssueId && !await ctx.issues.get(paperclipIssueId, runCtx.companyId)) {
       throw new Error('Paperclip issue was not found in the authenticated company.');
-    });
-  }
-  const startedAt = new Date();
-  if (!paperclipIssueId) return executeGitHubTool(fn);
+    }
+    const startedAt = new Date();
+    if (!paperclipIssueId) return fn();
 
-  const runRecord = runCtx as unknown as Record<string, unknown>;
-  const fingerprintInput = JSON.stringify(input, Object.keys(input).sort());
-  const fingerprint = createHash('sha256').update(fingerprintInput).digest('hex').slice(0, 24);
-  const runId = normalizeOptionalToolString(runRecord.runId);
-  const { repository, remoteKind, remoteNumber } = deriveTrackedMutationRemote(input);
-  const attemptId = createHash('sha256')
-    .update([runId ?? 'no-run-id', action, fingerprint, startedAt.toISOString(), randomUUID()].join('\n'))
-    .digest('hex');
-  const dedupeBase = `agent_tool:${attemptId}`;
+    const runRecord = runCtx as unknown as Record<string, unknown>;
+    const fingerprintInput = JSON.stringify(input, Object.keys(input).sort());
+    const fingerprint = createHash('sha256').update(fingerprintInput).digest('hex').slice(0, 24);
+    const runId = normalizeOptionalToolString(runRecord.runId);
+    const remote = await resolveTrackedMutationRemote(ctx, action, input, runCtx);
+    const attemptId = createHash('sha256')
+      .update([runId ?? 'no-run-id', action, fingerprint, startedAt.toISOString(), randomUUID()].join('\n'))
+      .digest('hex');
+    const dedupeBase = `agent_tool:${attemptId}`;
 
-  const eventBase = {
-    schemaVersion: 1,
-    companyId: runCtx.companyId,
-    paperclipIssueId,
-    occurredAt: startedAt.toISOString(),
-    category: action === 'link_github_item'
-      ? 'paperclip_link'
-      : action.includes('comment') || action.includes('reply') ? 'comment' : 'github_write',
-    action,
-    source: 'agent_tool',
-    actor: {
-      agentId: normalizeOptionalToolString(runRecord.agentId),
-      runId,
-      llmModel: normalizeOptionalToolString(input.llmModel)
-    },
-    ...((repository || remoteKind || remoteNumber) ? {
-      remote: {
-        repositoryUrl: repository?.url,
-        kind: remoteKind,
-        number: remoteNumber
-      }
-    } : {}),
-  } as const;
-
-  try {
     await persistIssueInteractionEvent(ctx, {
-      ...eventBase,
+      schemaVersion: 1,
+      companyId: runCtx.companyId,
+      paperclipIssueId,
+      occurredAt: startedAt.toISOString(),
+      category: action === 'link_github_item'
+        ? 'paperclip_link'
+        : action.includes('comment') || action.includes('reply') ? 'comment' : 'github_write',
+      action,
+      source: 'agent_tool',
+      actor: {
+        agentId: normalizeOptionalToolString(runRecord.agentId),
+        runId,
+        llmModel: normalizeOptionalToolString(input.llmModel)
+      },
+      ...(remote ? { remote } : {}),
       outcome: 'observed',
       durationMs: 0,
       dedupeKey: `${dedupeBase}:intent`
     });
-  } catch (error) {
-    return buildToolErrorResult(error);
-  }
 
-  const result = await executeGitHubTool(fn);
-  const durationMs = Math.max(0, Date.now() - startedAt.getTime());
+    const result = await executeGitHubTool(fn);
+    const resultRemote = resolveTrackedMutationResultRemote(result, remote);
+    const durationMs = Math.max(0, Date.now() - startedAt.getTime());
 
-  try {
-    await persistIssueInteractionEvent(ctx, {
-      ...eventBase,
-      outcome: trackedMutationOutcome(result),
-      durationMs,
-      dedupeKey: `${dedupeBase}:result`
-    });
-  } catch (error) {
-    return buildToolErrorResult(error);
-  }
-  return result;
+    try {
+      await persistIssueInteractionEvent(ctx, {
+        schemaVersion: 1,
+        companyId: runCtx.companyId,
+        paperclipIssueId,
+        occurredAt: startedAt.toISOString(),
+        category: action === 'link_github_item'
+          ? 'paperclip_link'
+          : action.includes('comment') || action.includes('reply') ? 'comment' : 'github_write',
+        action,
+        source: 'agent_tool',
+        actor: {
+          agentId: normalizeOptionalToolString(runRecord.agentId),
+          runId,
+          llmModel: normalizeOptionalToolString(input.llmModel)
+        },
+        ...(resultRemote ? { remote: resultRemote } : {}),
+        outcome: trackedMutationOutcome(result),
+        durationMs,
+        dedupeKey: `${dedupeBase}:result`
+      });
+    } catch (persistenceError) {
+      if (result.error) {
+        throw new AggregateError(
+          [new Error(result.error), persistenceError],
+          `GitHub mutation failed (${result.error}) and its result could not be persisted: ${getErrorMessage(persistenceError)}`
+        );
+      }
+      throw persistenceError;
+    }
+    return result;
+  });
 }
 
 function resolveTrustedWorkspacePath(workspacePath: string, workspaceRelativePath?: string): string {

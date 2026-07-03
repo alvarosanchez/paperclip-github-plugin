@@ -2485,6 +2485,14 @@ test('create_pull_request links the created pull request to the current Papercli
       interactionEvents.map((event) => (event.data as { outcome?: unknown }).outcome).sort(),
       ['changed', 'observed']
     );
+    const createPullRequestEvents = interactionEvents.map((event) => event.data as {
+      outcome?: unknown;
+      remote?: { repositoryUrl?: unknown; kind?: unknown; number?: unknown };
+    });
+    assert.ok(createPullRequestEvents.every((event) => event.remote?.repositoryUrl === 'https://github.com/paperclipai/example-repo'));
+    assert.ok(createPullRequestEvents.every((event) => event.remote?.kind === 'pull_request'));
+    assert.equal(createPullRequestEvents.find((event) => event.outcome === 'observed')?.remote?.number, undefined);
+    assert.equal(createPullRequestEvents.find((event) => event.outcome === 'changed')?.remote?.number, 23);
 
     const getResult = await harness.executeTool('get_pull_request', {
       paperclipIssueId: issue.id
@@ -2496,6 +2504,28 @@ test('create_pull_request links the created pull request to the current Papercli
     });
     assert.ok(!getResult.error);
     assert.equal((getResult.data as { pullRequest: { number: number } }).pullRequest.number, 23);
+
+    const updateResult = await harness.executeTool('update_pull_request', {
+      paperclipIssueId: issue.id,
+      title: 'Updated native issue sync'
+    }, {
+      agentId: 'agent-1',
+      runId: 'run-1',
+      companyId: 'company-1',
+      projectId: 'project-1'
+    });
+    assert.ok(!updateResult.error, updateResult.error);
+    const updatedInteractions = await harness.ctx.entities.list({
+      entityType: 'paperclip-github-plugin.issue-interaction-event',
+      scopeKind: 'issue',
+      scopeId: issue.id
+    });
+    const updateEvents = updatedInteractions
+      .map((event) => event.data as { action?: unknown; remote?: { repositoryUrl?: unknown; kind?: unknown; number?: unknown } })
+      .filter((event) => event.action === 'update_pull_request');
+    assert.equal(updateEvents.length, 2);
+    assert.ok(updateEvents.every((event) => event.remote?.repositoryUrl === 'https://github.com/paperclipai/example-repo'));
+    assert.ok(updateEvents.every((event) => event.remote?.kind === 'pull_request' && event.remote.number === 23));
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -2661,16 +2691,43 @@ test('link_github_item agent tool links third-party pull requests to Paperclip i
     description: 'A local-trusted agent can use plugin tools to record the link.'
   });
 
-  globalThis.fetch = async (input) => {
+  globalThis.fetch = async (input, init) => {
     const requestUrl = getRequestUrl(input);
     const requestPathname = getDecodedRequestPathname(input);
 
-    if (requestPathname === '/repos/third-party/external/pulls/78') {
+    if (requestPathname === '/repos/actual/repo/issues/78') {
       return jsonResponse({
         number: 78,
+        title: 'Issue URL wins over contradictory explicit fields',
+        body: null,
+        state: 'open',
+        html_url: 'https://github.com/actual/repo/issues/78',
+        repository_url: 'https://api.github.com/repos/actual/repo',
+        user: { login: 'octocat' },
+        labels: []
+      });
+    }
+    if (requestPathname === '/graphql') {
+      const { query, variables } = getGraphqlRequest(init);
+      if (query.includes('query GitHubIssueStatusSnapshot') && variables.issueNumber === 78) {
+        return graphqlResponse({
+          repository: {
+            issue: {
+              closedByPullRequestsReferences: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [] },
+              comments: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [] }
+            }
+          }
+        });
+      }
+    }
+    if (requestPathname === '/repos/third-party/external/pulls/78'
+      || requestPathname === '/repos/third-party/external/pulls/79') {
+      const number = Number(requestPathname.split('/').at(-1));
+      return jsonResponse({
+        number,
         title: 'Tool-created external PR link',
         body: 'Created from a local-trusted agent flow.',
-        html_url: 'https://github.com/third-party/external/pull/78',
+        html_url: `https://github.com/third-party/external/pull/${number}`,
         state: 'open',
         merged: false
       });
@@ -2692,31 +2749,156 @@ test('link_github_item agent tool links third-party pull requests to Paperclip i
     assert.equal((result.data as { githubPullRequestNumber?: unknown }).githubPullRequestNumber, 78);
     assert.equal((result.data as { repositoryUrl?: unknown }).repositoryUrl, 'https://github.com/third-party/external');
 
+    const numericResult = await harness.executeTool('link_github_item', {
+      kind: 'pull_request',
+      paperclipIssueId: issue.id,
+      repository: 'third-party/external',
+      reference: '79'
+    }, {
+      companyId: 'company-1'
+    });
+    assert.ok(!numericResult.error);
+    assert.equal((numericResult.data as { githubPullRequestNumber?: unknown }).githubPullRequestNumber, 79);
+
+    const contradictoryIssueResult = await harness.executeTool('link_github_item', {
+      kind: 'issue',
+      paperclipIssueId: issue.id,
+      repository: 'wrong/repo',
+      issueNumber: 99,
+      reference: 'https://github.com/actual/repo/issues/78'
+    }, {
+      companyId: 'company-1'
+    });
+    assert.ok(!contradictoryIssueResult.error, contradictoryIssueResult.error);
+    assert.equal((contradictoryIssueResult.data as { githubIssueNumber?: unknown }).githubIssueNumber, 78);
+    assert.equal((contradictoryIssueResult.data as { repositoryUrl?: unknown }).repositoryUrl, 'https://github.com/actual/repo');
+
     const pullRequestLinks = await harness.ctx.entities.list({
       entityType: 'paperclip-github-plugin.pull-request-link',
       scopeKind: 'issue',
       scopeId: issue.id
     });
-    assert.equal(pullRequestLinks.length, 1);
-    assert.equal(pullRequestLinks[0]?.externalId, 'https://github.com/third-party/external/pull/78');
-    assert.equal((pullRequestLinks[0]?.data as { companyId?: unknown }).companyId, 'company-1');
-    assert.equal((pullRequestLinks[0]?.data as { paperclipProjectId?: unknown }).paperclipProjectId, 'project-1');
+    assert.equal(pullRequestLinks.length, 2);
+    assert.deepEqual(pullRequestLinks.map((row) => row.externalId).sort(), [
+      'https://github.com/third-party/external/pull/78',
+      'https://github.com/third-party/external/pull/79'
+    ]);
+    assert.ok(pullRequestLinks.every((row) => (row.data as { companyId?: unknown }).companyId === 'company-1'));
+    assert.ok(pullRequestLinks.every((row) => (row.data as { paperclipProjectId?: unknown }).paperclipProjectId === 'project-1'));
 
-    const interactionRows = await harness.ctx.entities.list({
+    const interactions = await harness.ctx.entities.list({
       entityType: 'paperclip-github-plugin.issue-interaction-event',
       scopeKind: 'issue',
       scopeId: issue.id
     });
-    assert.equal(interactionRows.length, 2);
-    for (const row of interactionRows) {
-      const remote = (row.data as { remote?: { repositoryUrl?: unknown; kind?: unknown; number?: unknown } }).remote;
-      assert.equal(remote?.repositoryUrl, 'https://github.com/third-party/external');
-      assert.equal(remote?.kind, 'pull_request');
-      assert.equal(remote?.number, 78);
-    }
+    assert.equal(interactions.length, 6);
+    const remotes = interactions.map((row) =>
+      (row.data as { remote?: { repositoryUrl?: unknown; kind?: unknown; number?: unknown } }).remote);
+    const pullRequestRemotes = remotes.filter((remote) => remote?.kind === 'pull_request');
+    assert.equal(pullRequestRemotes.length, 4);
+    assert.ok(pullRequestRemotes.every((remote) => remote?.repositoryUrl === 'https://github.com/third-party/external'));
+    assert.deepEqual(pullRequestRemotes.map((remote) => remote?.number).sort(), [78, 78, 79, 79]);
+    const issueRemotes = remotes.filter((remote) => remote?.kind === 'issue');
+    assert.equal(issueRemotes.length, 2);
+    assert.ok(issueRemotes.every((remote) => remote?.repositoryUrl === 'https://github.com/actual/repo'));
+    assert.deepEqual(issueRemotes.map((remote) => remote?.number), [78, 78]);
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+test('tracked agent tools return structured errors when intent persistence fails', async () => {
+  const harness = createTestHarness({ manifest, config: { githubToken: TEST_GITHUB_TOKEN } });
+  await plugin.definition.setup(harness.ctx);
+  const issue = await harness.ctx.issues.create({
+    companyId: 'company-1', projectId: 'project-1', title: 'Intent failure', description: ''
+  });
+  const originalUpsert = harness.ctx.entities.upsert.bind(harness.ctx.entities);
+  harness.ctx.entities.upsert = async (input) => {
+    if (input.entityType === 'paperclip-github-plugin.issue-interaction-event') throw new Error('intent ledger unavailable');
+    return originalUpsert(input);
+  };
+
+  const result = await harness.executeTool('link_github_item', {
+    kind: 'pull_request', paperclipIssueId: issue.id, reference: 'https://github.com/third-party/external/pull/78'
+  }, { companyId: 'company-1' });
+
+  assert.match(result.error ?? '', /intent ledger unavailable/);
+  const links = await harness.ctx.entities.list({
+    entityType: 'paperclip-github-plugin.pull-request-link', scopeKind: 'issue', scopeId: issue.id
+  });
+  assert.equal(links.length, 0);
+});
+
+test('tracked agent tools return structured errors when result persistence fails after mutation', async () => {
+  const harness = createTestHarness({ manifest, config: { githubToken: TEST_GITHUB_TOKEN } });
+  await plugin.definition.setup(harness.ctx);
+  const originalFetch = globalThis.fetch;
+  const issue = await harness.ctx.issues.create({
+    companyId: 'company-1', projectId: 'project-1', title: 'Result failure', description: ''
+  });
+  const originalUpsert = harness.ctx.entities.upsert.bind(harness.ctx.entities);
+  let interactionWrites = 0;
+  harness.ctx.entities.upsert = async (input) => {
+    if (input.entityType === 'paperclip-github-plugin.issue-interaction-event' && ++interactionWrites === 2) {
+      throw new Error('result ledger unavailable');
+    }
+    return originalUpsert(input);
+  };
+  globalThis.fetch = async (input) => {
+    const requestPathname = getDecodedRequestPathname(input);
+    if (requestPathname === '/repos/third-party/external/pulls/78') {
+      return jsonResponse({ number: 78, title: 'External PR', body: '', html_url: 'https://github.com/third-party/external/pull/78', state: 'open', merged: false });
+    }
+    throw new Error(`Unexpected fetch during result persistence failure test: ${getRequestUrl(input)}`);
+  };
+
+  try {
+    const result = await harness.executeTool('link_github_item', {
+      kind: 'pull_request', paperclipIssueId: issue.id, reference: 'https://github.com/third-party/external/pull/78'
+    }, { companyId: 'company-1' });
+
+    assert.match(result.error ?? '', /result ledger unavailable/);
+    const links = await harness.ctx.entities.list({
+      entityType: 'paperclip-github-plugin.pull-request-link', scopeKind: 'issue', scopeId: issue.id
+    });
+    assert.equal(links.length, 1);
+    const interactions = await harness.ctx.entities.list({
+      entityType: 'paperclip-github-plugin.issue-interaction-event', scopeKind: 'issue', scopeId: issue.id
+    });
+    assert.equal(interactions.length, 1);
+    assert.equal((interactions[0]?.data as { outcome?: unknown }).outcome, 'observed');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('tracked agent tools surface both mutation and result persistence failures', async () => {
+  const harness = createTestHarness({ manifest, config: { githubToken: TEST_GITHUB_TOKEN } });
+  await plugin.definition.setup(harness.ctx);
+  const issue = await harness.ctx.issues.create({
+    companyId: 'company-1', projectId: 'project-1', title: 'Dual failure', description: ''
+  });
+  const originalUpsert = harness.ctx.entities.upsert.bind(harness.ctx.entities);
+  let interactionWrites = 0;
+  harness.ctx.entities.upsert = async (input) => {
+    if (input.entityType === 'paperclip-github-plugin.issue-interaction-event' && ++interactionWrites === 2) {
+      throw new Error('result ledger unavailable');
+    }
+    return originalUpsert(input);
+  };
+
+  const result = await harness.executeTool('link_github_item', {
+    kind: 'unsupported', paperclipIssueId: issue.id, reference: 'https://github.com/third-party/external/pull/78'
+  }, { companyId: 'company-1' });
+
+  assert.match(result.error ?? '', /kind must be "issue" or "pull_request"/);
+  assert.match(result.error ?? '', /result ledger unavailable/);
+  const interactions = await harness.ctx.entities.list({
+    entityType: 'paperclip-github-plugin.issue-interaction-event', scopeKind: 'issue', scopeId: issue.id
+  });
+  assert.equal(interactions.length, 1);
+  assert.equal((interactions[0]?.data as { outcome?: unknown }).outcome, 'observed');
 });
 
 test('company metric API route records Paperclip PR metrics from agent-authenticated gh flows', async () => {
@@ -3633,6 +3815,57 @@ test('issue-targeted tools reject repository overrides that do not match the lin
   assert.match(pullRequestResult.error ?? '', /repository must match the GitHub repository linked to the provided Paperclip issue/);
 });
 
+test('tracked issue mutations attribute linked targets omitted from tool input', async () => {
+  const harness = await createGitHubAgentToolHarness();
+  const originalFetch = globalThis.fetch;
+  harness.seed({ issues: [{
+    id: 'issue-1', companyId: 'company-1', projectId: 'project-1', title: 'Imported issue', description: '', status: 'todo'
+  } as never] });
+  await harness.ctx.entities.upsert({
+    entityType: 'paperclip-github-plugin.issue-link',
+    scopeKind: 'issue',
+    scopeId: 'issue-1',
+    data: {
+      companyId: 'company-1',
+      paperclipProjectId: 'project-1',
+      repositoryUrl: 'https://github.com/cross-org/linked-repo',
+      githubIssueId: 1234,
+      githubIssueNumber: 12,
+      githubIssueUrl: 'https://github.com/cross-org/linked-repo/issues/12',
+      githubIssueState: 'open',
+      commentsCount: 0,
+      linkedPullRequestNumbers: [],
+      labels: [],
+      syncedAt: '2026-04-12T10:00:00Z'
+    }
+  });
+  globalThis.fetch = async (input) => {
+    const url = new URL(getRequestUrl(input));
+    if (url.pathname === '/repos/cross-org/linked-repo/issues/12/comments') {
+      return jsonResponse({ id: 1, body: 'Investigating.', html_url: 'https://github.com/cross-org/linked-repo/issues/12#issuecomment-1' }, 201);
+    }
+    throw new Error(`Unexpected GitHub request: ${url.toString()}`);
+  };
+  try {
+    const result = await harness.executeTool('add_issue_comment', {
+      paperclipIssueId: 'issue-1', body: 'Investigating.', llmModel: 'gpt-5.4'
+    }, { companyId: 'company-1', projectId: 'project-1' });
+    assert.ok(!result.error, result.error);
+    const interactions = await harness.ctx.entities.list({
+      entityType: 'paperclip-github-plugin.issue-interaction-event', scopeKind: 'issue', scopeId: 'issue-1'
+    });
+    assert.equal(interactions.length, 2);
+    assert.ok(interactions.every((row) => {
+      const remote = (row.data as { remote?: { repositoryUrl?: unknown; kind?: unknown; number?: unknown } }).remote;
+      return remote?.repositoryUrl === 'https://github.com/cross-org/linked-repo'
+        && remote.kind === 'issue'
+        && remote.number === 12;
+    }));
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test('get_pull_request_checks returns CI jobs, status contexts, and workflow runs', async () => {
   const harness = await createGitHubAgentToolHarness();
   const originalFetch = globalThis.fetch;
@@ -3813,6 +4046,14 @@ test('review-thread tools list, reply to, resolve, and unresolve GitHub review t
   const harness = await createGitHubAgentToolHarness();
   const originalFetch = globalThis.fetch;
   let repliedBody = '';
+  const issue = await harness.ctx.issues.create({
+    companyId: 'company-1',
+    projectId: 'project-1',
+    title: 'Thread attribution must follow the thread',
+    description: '',
+    status: 'in_progress'
+  });
+  await upsertDirectPullRequestLink(harness, issue.id, 23);
 
   globalThis.fetch = async (input, init) => {
     const url = new URL(getRequestUrl(input));
@@ -3918,6 +4159,7 @@ test('review-thread tools list, reply to, resolve, and unresolve GitHub review t
     assert.equal((listResult.data as { threads: Array<{ id: string }> }).threads[0]?.id, 'THREAD_1');
 
     const replyResult = await harness.executeTool('reply_to_review_thread', {
+      paperclipIssueId: issue.id,
       threadId: 'THREAD_1',
       body: 'Updated the condition and added a guard.',
       llmModel: 'gpt-5.4'
@@ -3929,6 +4171,7 @@ test('review-thread tools list, reply to, resolve, and unresolve GitHub review t
     assert.match(repliedBody, /---\n###### ✨ This comment was AI-generated using gpt-5\.4/);
 
     const resolveResult = await harness.executeTool('resolve_review_thread', {
+      paperclipIssueId: issue.id,
       threadId: 'THREAD_1'
     }, {
       companyId: 'company-1',
@@ -3937,12 +4180,22 @@ test('review-thread tools list, reply to, resolve, and unresolve GitHub review t
     assert.equal((resolveResult.data as { thread: { isResolved: boolean } }).thread.isResolved, true);
 
     const unresolveResult = await harness.executeTool('unresolve_review_thread', {
+      paperclipIssueId: issue.id,
       threadId: 'THREAD_1'
     }, {
       companyId: 'company-1',
       projectId: 'project-1'
     });
     assert.equal((unresolveResult.data as { thread: { isResolved: boolean } }).thread.isResolved, false);
+
+    const interactionEvents = await harness.ctx.entities.list({
+      entityType: 'paperclip-github-plugin.issue-interaction-event',
+      scopeKind: 'issue',
+      scopeId: issue.id
+    });
+    assert.equal(interactionEvents.length, 6);
+    assert.ok(interactionEvents.every((event) =>
+      (event.data as { remote?: unknown }).remote === undefined));
   } finally {
     globalThis.fetch = originalFetch;
   }
