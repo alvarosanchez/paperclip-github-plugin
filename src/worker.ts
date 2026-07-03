@@ -20951,6 +20951,37 @@ function trackedMutationOutcome(result: ToolResult): 'changed' | 'noop' | 'faile
   return 'changed';
 }
 
+function deriveTrackedMutationRemote(input: Record<string, unknown>): {
+  repository?: ParsedRepositoryReference;
+  remoteKind?: 'issue' | 'pull_request';
+  remoteNumber?: number;
+} {
+  const reference = normalizeOptionalToolString(input.reference);
+  const issueReference = reference ? parseGitHubIssueHtmlUrl(reference) : undefined;
+  const pullRequestReference = reference ? parseGitHubPullRequestHtmlUrl(reference) : undefined;
+  const pullRequestUrlReference = parseGitHubPullRequestHtmlUrl(normalizeOptionalToolString(input.pullRequestUrl) ?? '');
+
+  const issueNumber = normalizeToolPositiveInteger(input.issueNumber) ?? issueReference?.issueNumber;
+  const pullRequestNumber = normalizeToolPositiveInteger(input.pullRequestNumber)
+    ?? pullRequestReference?.pullRequestNumber
+    ?? pullRequestUrlReference?.pullRequestNumber;
+  const remoteNumber = issueNumber ?? pullRequestNumber;
+  const remoteKind = issueNumber ? 'issue' : pullRequestNumber ? 'pull_request' : undefined;
+
+  const repository = parseRepositoryReference(normalizeOptionalToolString(input.repository) ?? '')
+    ?? parseRepositoryReference(normalizeOptionalToolString(input.repositoryUrl) ?? '')
+    ?? (issueReference ? parseRepositoryReference(issueReference.repositoryUrl) : null)
+    ?? (pullRequestReference ? parseRepositoryReference(pullRequestReference.repositoryUrl) : null)
+    ?? (pullRequestUrlReference ? parseRepositoryReference(pullRequestUrlReference.repositoryUrl) : null)
+    ?? undefined;
+
+  return {
+    repository: repository ?? undefined,
+    remoteKind,
+    remoteNumber
+  };
+}
+
 async function executeTrackedGitHubMutation(
   ctx: PluginSetupContext,
   action: string,
@@ -20972,17 +21003,13 @@ async function executeTrackedGitHubMutation(
   const fingerprintInput = JSON.stringify(input, Object.keys(input).sort());
   const fingerprint = createHash('sha256').update(fingerprintInput).digest('hex').slice(0, 24);
   const runId = normalizeOptionalToolString(runRecord.runId);
-  const issueNumber = normalizeToolPositiveInteger(input.issueNumber);
-  const pullRequestNumber = normalizeToolPositiveInteger(input.pullRequestNumber);
-  const repository = parseRepositoryReference(normalizeOptionalToolString(input.repository) ?? '');
-  const remoteNumber = issueNumber ?? pullRequestNumber;
-  const remoteKind = issueNumber ? 'issue' : pullRequestNumber ? 'pull_request' : undefined;
+  const { repository, remoteKind, remoteNumber } = deriveTrackedMutationRemote(input);
   const attemptId = createHash('sha256')
     .update([runId ?? 'no-run-id', action, fingerprint, startedAt.toISOString(), randomUUID()].join('\n'))
     .digest('hex');
   const dedupeBase = `agent_tool:${attemptId}`;
 
-  await persistIssueInteractionEvent(ctx, {
+  const eventBase = {
     schemaVersion: 1,
     companyId: runCtx.companyId,
     paperclipIssueId,
@@ -21004,40 +21031,32 @@ async function executeTrackedGitHubMutation(
         number: remoteNumber
       }
     } : {}),
-    outcome: 'observed',
-    durationMs: 0,
-    dedupeKey: `${dedupeBase}:intent`
-  });
+  } as const;
+
+  try {
+    await persistIssueInteractionEvent(ctx, {
+      ...eventBase,
+      outcome: 'observed',
+      durationMs: 0,
+      dedupeKey: `${dedupeBase}:intent`
+    });
+  } catch (error) {
+    return buildToolErrorResult(error);
+  }
 
   const result = await executeGitHubTool(fn);
   const durationMs = Math.max(0, Date.now() - startedAt.getTime());
 
-  await persistIssueInteractionEvent(ctx, {
-    schemaVersion: 1,
-    companyId: runCtx.companyId,
-    paperclipIssueId,
-    occurredAt: startedAt.toISOString(),
-    category: action === 'link_github_item'
-      ? 'paperclip_link'
-      : action.includes('comment') || action.includes('reply') ? 'comment' : 'github_write',
-    action,
-    source: 'agent_tool',
-    actor: {
-      agentId: normalizeOptionalToolString(runRecord.agentId),
-      runId,
-      llmModel: normalizeOptionalToolString(input.llmModel)
-    },
-    ...((repository || remoteKind || remoteNumber) ? {
-      remote: {
-        repositoryUrl: repository?.url,
-        kind: remoteKind,
-        number: remoteNumber
-      }
-    } : {}),
-    outcome: trackedMutationOutcome(result),
-    durationMs,
-    dedupeKey: `${dedupeBase}:result`
-  });
+  try {
+    await persistIssueInteractionEvent(ctx, {
+      ...eventBase,
+      outcome: trackedMutationOutcome(result),
+      durationMs,
+      dedupeKey: `${dedupeBase}:result`
+    });
+  } catch (error) {
+    return buildToolErrorResult(error);
+  }
   return result;
 }
 

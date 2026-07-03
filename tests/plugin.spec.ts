@@ -2701,6 +2701,19 @@ test('link_github_item agent tool links third-party pull requests to Paperclip i
     assert.equal(pullRequestLinks[0]?.externalId, 'https://github.com/third-party/external/pull/78');
     assert.equal((pullRequestLinks[0]?.data as { companyId?: unknown }).companyId, 'company-1');
     assert.equal((pullRequestLinks[0]?.data as { paperclipProjectId?: unknown }).paperclipProjectId, 'project-1');
+
+    const interactionRows = await harness.ctx.entities.list({
+      entityType: 'paperclip-github-plugin.issue-interaction-event',
+      scopeKind: 'issue',
+      scopeId: issue.id
+    });
+    assert.equal(interactionRows.length, 2);
+    for (const row of interactionRows) {
+      const remote = (row.data as { remote?: { repositoryUrl?: unknown; kind?: unknown; number?: unknown } }).remote;
+      assert.equal(remote?.repositoryUrl, 'https://github.com/third-party/external');
+      assert.equal(remote?.kind, 'pull_request');
+      assert.equal(remote?.number, 78);
+    }
   } finally {
     globalThis.fetch = originalFetch;
   }

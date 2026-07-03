@@ -207,6 +207,71 @@ test('issue-scoped mutating tool failures append a sanitized attributed ledger e
   assert.equal(payload.summary?.counts?.uncertainAttempts, 0);
 });
 
+test('tracked mutation intent persistence failures return a structured tool error', async () => {
+  const harness = createTestHarness({ manifest });
+  harness.seed({
+    issues: [{
+      id: 'issue-intent-ledger-failure',
+      companyId: 'company-1',
+      projectId: 'project-1',
+      title: 'Intent failure',
+      description: '',
+      status: 'todo'
+    } as never]
+  });
+  await plugin.definition.setup(harness.ctx);
+  harness.ctx.entities.upsert = async () => { throw new Error('intent ledger unavailable'); };
+
+  const result = await harness.executeTool('update_issue', {
+    paperclipIssueId: 'issue-intent-ledger-failure',
+    body: 'ignored'
+  }, {
+    companyId: 'company-1',
+    projectId: 'project-1'
+  });
+  assert.match(result.error ?? '', /intent ledger unavailable/i);
+});
+
+test('tracked mutation result persistence failures return a structured tool error and keep durable intent', async () => {
+  const harness = createTestHarness({ manifest });
+  harness.seed({
+    issues: [{
+      id: 'issue-agent-result-ledger-failure',
+      companyId: 'company-1',
+      projectId: 'project-1',
+      title: 'Result failure',
+      description: '',
+      status: 'todo'
+    } as never]
+  });
+  await plugin.definition.setup(harness.ctx);
+  const originalUpsert = harness.ctx.entities.upsert.bind(harness.ctx.entities);
+  let interactionWrites = 0;
+  harness.ctx.entities.upsert = async (input) => {
+    if (input.entityType === 'paperclip-github-plugin.issue-interaction-event' && ++interactionWrites === 2) {
+      throw new Error('result ledger unavailable');
+    }
+    return originalUpsert(input);
+  };
+
+  const result = await harness.executeTool('update_issue', {
+    paperclipIssueId: 'issue-agent-result-ledger-failure',
+    body: 'ignored'
+  }, {
+    companyId: 'company-1',
+    projectId: 'project-1'
+  });
+  assert.match(result.error ?? '', /result ledger unavailable/i);
+
+  const rows = await harness.ctx.entities.list({
+    entityType: 'paperclip-github-plugin.issue-interaction-event',
+    scopeKind: 'issue',
+    scopeId: 'issue-agent-result-ledger-failure'
+  });
+  assert.equal(rows.length, 1);
+  assert.equal((rows[0]?.data as { outcome?: unknown }).outcome, 'observed');
+});
+
 test('interaction events are content-addressed under concurrent idempotent and conflicting writes', async () => {
   const harness = createTestHarness({ manifest });
   harness.seed({
