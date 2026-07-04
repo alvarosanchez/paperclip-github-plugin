@@ -8304,17 +8304,6 @@ function isClearableMaintainerWaitExecutionState(
   return !executionState.status || executionState.status === 'idle' || executionState.status === 'completed';
 }
 
-function shouldClearCompletedSyncExecutionPolicy(params: {
-  nextStatus: PaperclipIssueStatus;
-  syncContext: PaperclipIssueSyncContext;
-}): boolean {
-  return (params.nextStatus === 'done' || params.nextStatus === 'cancelled')
-    && (
-      params.syncContext.executionPolicy !== null
-      || params.syncContext.executionState !== null
-    );
-}
-
 function shouldPreserveImportedTriageAssignee(params: {
   currentStatus: PaperclipIssueStatus;
   nextStatus: PaperclipIssueStatus;
@@ -13320,6 +13309,7 @@ async function updatePaperclipIssueState(
         nextStatus
       })).digest('hex')}`
     : interactionDedupeBase;
+  const mutationPatchBase = `${mutationFamilyBase}:patch:${createHash('sha256').update(JSON.stringify(issuePatch)).digest('hex')}`;
   let existingInteractionEvents: IssueInteractionEvent[] = [];
   if (actionFingerprint) {
     const ledger = await listIssueInteractionEvents(ctx, companyId, issueId, {
@@ -13337,17 +13327,17 @@ async function updatePaperclipIssueState(
     const existingIntent = existingInteractionEvents.find((event) => event.dedupeKey === `${interactionDedupeBase}:intent`);
     if (existingIntent) interactionOccurredAt = existingIntent.occurredAt;
   }
-  const completedMutationInFamily = existingInteractionEvents.some((event) =>
-    event.dedupeKey.startsWith(`${mutationFamilyBase}:`)
+  const completedMutationForPatch = existingInteractionEvents.some((event) =>
+    event.dedupeKey.startsWith(`${mutationPatchBase}:`)
     && event.dedupeKey.endsWith(':mutation:result:changed')
   );
-  const mutationDedupeBase = !issuePatchAlreadyApplied && completedMutationInFamily
-    ? `${mutationFamilyBase}:drift:${createHash('sha256').update(JSON.stringify({
+  const mutationDedupeBase = !issuePatchAlreadyApplied && completedMutationForPatch
+    ? `${mutationPatchBase}:drift:${createHash('sha256').update(JSON.stringify({
         currentStatus: liveIssue?.status ?? currentStatus,
         currentIssueState: liveIssue ? getPaperclipIssueSyncContext(liveIssue) : syncContext,
         issuePatch
       })).digest('hex')}`
-    : mutationFamilyBase;
+    : mutationPatchBase;
   await persistIssueInteractionEvent(ctx, {
     schemaVersion: 1,
     companyId,
@@ -13420,7 +13410,7 @@ async function updatePaperclipIssueState(
   if (issuePatchAlreadyApplied) {
     const intentSuffix = ':mutation:intent';
     for (const intent of existingInteractionEvents.filter((event) =>
-      event.dedupeKey.startsWith(`${mutationFamilyBase}:`)
+      event.dedupeKey.startsWith(`${mutationPatchBase}:`)
       && event.dedupeKey.endsWith(intentSuffix)
     )) {
       const dedupeBase = intent.dedupeKey.slice(0, -intentSuffix.length);
@@ -14698,10 +14688,7 @@ async function synchronizePaperclipIssueStatuses(
         nextStatus,
         syncContext: paperclipIssueSyncContext
       });
-      const shouldClearCompletedExecutionPolicy = shouldClearCompletedSyncExecutionPolicy({
-        nextStatus,
-        syncContext: paperclipIssueSyncContext
-      });
+      const shouldClearCompletedExecutionPolicy = nextStatus === 'done' || nextStatus === 'cancelled';
       const shouldPreserveImportedTriageRouting = shouldPreserveImportedTriageAssignee({
         currentStatus: paperclipIssue.status,
         nextStatus,
@@ -14718,8 +14705,7 @@ async function synchronizePaperclipIssueStatuses(
           });
       const shouldClearTransitionAssignee =
         nextStatus === 'in_review'
-        && (nextTransitionAssignee === null || shouldPreserveMaintainerWaitRouting)
-        && paperclipIssueSyncContext.assignee !== null;
+        && (nextTransitionAssignee === null || shouldPreserveMaintainerWaitRouting);
       const nextAssigneeChanged = nextTransitionAssignee
         ? !doesPaperclipIssueAssigneeMatch(paperclipIssueSyncContext.assignee, nextTransitionAssignee.principal)
         : false;
@@ -15172,10 +15158,7 @@ async function synchronizePaperclipPullRequestIssueStatuses(
         nextStatus,
         syncContext: paperclipIssueSyncContext
       });
-      const shouldClearCompletedExecutionPolicy = shouldClearCompletedSyncExecutionPolicy({
-        nextStatus,
-        syncContext: paperclipIssueSyncContext
-      });
+      const shouldClearCompletedExecutionPolicy = nextStatus === 'done' || nextStatus === 'cancelled';
       const nextTransitionAssignee = resolveSyncTransitionAssignee({
         currentStatus: paperclipIssue.status,
         nextStatus,
@@ -15184,8 +15167,7 @@ async function synchronizePaperclipPullRequestIssueStatuses(
       });
       const shouldClearTransitionAssignee =
         nextStatus === 'in_review'
-        && (nextTransitionAssignee === null || shouldPreserveMaintainerWaitRouting)
-        && paperclipIssueSyncContext.assignee !== null;
+        && (nextTransitionAssignee === null || shouldPreserveMaintainerWaitRouting);
       const nextAssigneeChanged = nextTransitionAssignee
         ? !doesPaperclipIssueAssigneeMatch(paperclipIssueSyncContext.assignee, nextTransitionAssignee.principal)
         : false;

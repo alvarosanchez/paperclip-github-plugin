@@ -510,6 +510,75 @@ test('fresh issue state reconciles a completed mutation whose result ledger writ
   );
 });
 
+test('recovery leaves an unmatched intent open when the current desired patch differs', async () => {
+  const harness = createTestHarness({ manifest });
+  harness.seed({
+    issues: [{
+      id: 'issue-different-mutation-patch', companyId: 'company-1', projectId: 'project-1',
+      title: 'Different mutation patch', description: '', status: 'in_review', assigneeAgentId: 'agent-2'
+    } as never]
+  });
+  await plugin.definition.setup(harness.ctx);
+  const originalUpsert = harness.ctx.entities.upsert.bind(harness.ctx.entities);
+  const originalUpdate = harness.ctx.issues.update.bind(harness.ctx.issues);
+  let failMutation = true;
+  let failMutationFailureResult = true;
+  harness.ctx.issues.update = async (...args) => {
+    if (failMutation) {
+      failMutation = false;
+      throw new Error('issue update unavailable');
+    }
+    return originalUpdate(...args);
+  };
+  harness.ctx.entities.upsert = async (input) => {
+    const dedupeKey = String((input.data as { dedupeKey?: unknown } | undefined)?.dedupeKey ?? '');
+    if (failMutationFailureResult && dedupeKey.endsWith(':mutation:result:failed')) {
+      failMutationFailureResult = false;
+      throw new Error('mutation failure result ledger unavailable');
+    }
+    return originalUpsert(input);
+  };
+  const actionFingerprint = 'remote-action-different-mutation-patch';
+
+  await assert.rejects(__testing.updatePaperclipIssueState(harness.ctx, {
+    companyId: 'company-1',
+    issueId: 'issue-different-mutation-patch',
+    currentStatus: 'in_review',
+    syncContext: { assignee: { kind: 'agent', id: 'agent-2' } } as never,
+    nextStatus: 'in_review',
+    clearAssignee: true,
+    transitionComment: '',
+    actionFingerprint
+  }), /issue mutation failed and its mutation result could not be persisted/);
+
+  await __testing.updatePaperclipIssueState(harness.ctx, {
+    companyId: 'company-1',
+    issueId: 'issue-different-mutation-patch',
+    currentStatus: 'in_review',
+    syncContext: { assignee: { kind: 'agent', id: 'agent-2' } } as never,
+    nextStatus: 'in_review',
+    nextAssignee: { kind: 'agent', id: 'agent-2' },
+    transitionComment: '',
+    actionFingerprint
+  });
+
+  const rows = await harness.ctx.entities.list({
+    entityType: 'paperclip-github-plugin.issue-interaction-event',
+    scopeKind: 'issue',
+    scopeId: 'issue-different-mutation-patch'
+  });
+  const mutationEvents = rows.filter((row) => (row.data as { action?: unknown }).action === 'update_issue');
+  assert.deepEqual(mutationEvents.map((row) => (row.data as { outcome?: unknown }).outcome), ['observed']);
+  const to = new Date().toISOString();
+  const summaryResult = await harness.executeTool('get_issue_interaction_summary', {
+    paperclipIssueId: 'issue-different-mutation-patch',
+    from: new Date(Date.parse(to) - 60_000).toISOString(),
+    to
+  }, { companyId: 'company-1', projectId: 'project-1' });
+  const payload = summaryResult.data as { summary?: { counts?: { uncertainAttempts?: number } } };
+  assert.equal(payload.summary?.counts?.uncertainAttempts, 2);
+});
+
 test('status mutation retry reuses a durably completed transition comment', async () => {
   const harness = createTestHarness({ manifest });
   harness.seed({
