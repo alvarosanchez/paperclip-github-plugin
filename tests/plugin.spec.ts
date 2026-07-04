@@ -16010,6 +16010,7 @@ test('worker retries an unmapped-transfer unlink after cancellation without dupl
     assert.match(statusTransitionComments[0]?.body ?? '', /not mapped to a Paperclip project/);
   } finally {
     harness.ctx.entities.upsert = originalEntityUpsert;
+    harness.ctx.issues.createComment = originalCreateComment;
     globalThis.fetch = originalFetch;
   }
 });
