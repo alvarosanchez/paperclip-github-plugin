@@ -444,6 +444,72 @@ test('status result persistence failure retries without repeating a completed st
   assert.equal(statusResults.length, 1);
 });
 
+test('fresh issue state reconciles a completed mutation whose result ledger write failed', async () => {
+  const harness = createTestHarness({ manifest });
+  harness.seed({
+    issues: [{
+      id: 'issue-mutation-result-ledger-failure', companyId: 'company-1', projectId: 'project-1',
+      title: 'Mutation result ledger failure', description: '', status: 'in_progress'
+    } as never]
+  });
+  await plugin.definition.setup(harness.ctx);
+  const originalUpsert = harness.ctx.entities.upsert.bind(harness.ctx.entities);
+  const originalUpdate = harness.ctx.issues.update.bind(harness.ctx.issues);
+  let failMutationResultOnce = true;
+  let statusUpdates = 0;
+  harness.ctx.entities.upsert = async (input) => {
+    const data = input.data as { action?: unknown; dedupeKey?: unknown } | undefined;
+    if (
+      failMutationResultOnce
+      && data?.action === 'update_issue'
+      && String(data.dedupeKey ?? '').endsWith(':mutation:result:changed')
+    ) {
+      failMutationResultOnce = false;
+      throw new Error('mutation result ledger unavailable');
+    }
+    return originalUpsert(input);
+  };
+  harness.ctx.issues.update = async (...args) => {
+    statusUpdates += 1;
+    return originalUpdate(...args);
+  };
+  const actionFingerprint = 'remote-action-mutation-result-ledger';
+
+  await assert.rejects(__testing.updatePaperclipIssueState(harness.ctx, {
+    companyId: 'company-1',
+    issueId: 'issue-mutation-result-ledger-failure',
+    currentStatus: 'in_progress',
+    syncContext: {} as never,
+    nextStatus: 'in_review',
+    transitionComment: 'GitHub Sync moved this issue to review.',
+    actionFingerprint
+  }), /mutation result ledger unavailable/);
+
+  const freshIssue = await harness.ctx.issues.get('issue-mutation-result-ledger-failure', 'company-1');
+  assert.equal(freshIssue?.status, 'in_review');
+  await __testing.updatePaperclipIssueState(harness.ctx, {
+    companyId: 'company-1',
+    issueId: 'issue-mutation-result-ledger-failure',
+    currentStatus: 'in_review',
+    syncContext: {} as never,
+    nextStatus: 'in_review',
+    transitionComment: '',
+    actionFingerprint
+  });
+
+  assert.equal(statusUpdates, 1);
+  const rows = await harness.ctx.entities.list({
+    entityType: 'paperclip-github-plugin.issue-interaction-event',
+    scopeKind: 'issue',
+    scopeId: 'issue-mutation-result-ledger-failure'
+  });
+  const mutationEvents = rows.filter((row) => (row.data as { action?: unknown }).action === 'update_issue');
+  assert.deepEqual(
+    mutationEvents.map((row) => (row.data as { outcome?: unknown }).outcome).sort(),
+    ['changed', 'observed']
+  );
+});
+
 test('status mutation retry reuses a durably completed transition comment', async () => {
   const harness = createTestHarness({ manifest });
   harness.seed({

@@ -13290,11 +13290,14 @@ async function updatePaperclipIssueState(
     throw new Error('This Paperclip runtime does not expose issue comment creation, so GitHub Sync refused to update a Paperclip issue status without an explanatory comment.');
   }
 
-  const issuePatchAlreadyApplied = isPaperclipIssuePatchApplied({
-    currentStatus,
-    syncContext,
-    issuePatch
-  });
+  const liveIssue = await ctx.issues.get(issueId, companyId);
+  const issuePatchAlreadyApplied = liveIssue
+    ? isPaperclipIssuePatchApplied({
+        currentStatus: liveIssue.status,
+        syncContext: getPaperclipIssueSyncContext(liveIssue),
+        issuePatch
+      })
+    : isPaperclipIssuePatchApplied({ currentStatus, syncContext, issuePatch });
   const reasonCode = classifyIssueInteractionReason(transitionCommentAnnotation?.reason ?? trimmedTransitionComment);
   const interactionDedupeBase = actionFingerprint
     ? `sync:${createHash('sha256').update(JSON.stringify({
@@ -13308,6 +13311,15 @@ async function updatePaperclipIssueState(
         issuePatch
       })).digest('hex')}`
     : `sync:${issueId}:${interactionOccurredAt}:${currentStatus}:${nextStatus}`;
+  const mutationFamilyBase = actionFingerprint
+    ? `sync:${createHash('sha256').update(JSON.stringify({
+        companyId,
+        issueId,
+        mutation: 'status_transition',
+        actionFingerprint,
+        nextStatus
+      })).digest('hex')}`
+    : interactionDedupeBase;
   let existingInteractionEvents: IssueInteractionEvent[] = [];
   if (actionFingerprint) {
     const ledger = await listIssueInteractionEvents(ctx, companyId, issueId, {
@@ -13325,6 +13337,17 @@ async function updatePaperclipIssueState(
     const existingIntent = existingInteractionEvents.find((event) => event.dedupeKey === `${interactionDedupeBase}:intent`);
     if (existingIntent) interactionOccurredAt = existingIntent.occurredAt;
   }
+  const completedMutationInFamily = existingInteractionEvents.some((event) =>
+    event.dedupeKey.startsWith(`${mutationFamilyBase}:`)
+    && event.dedupeKey.endsWith(':mutation:result:changed')
+  );
+  const mutationDedupeBase = !issuePatchAlreadyApplied && completedMutationInFamily
+    ? `${mutationFamilyBase}:drift:${createHash('sha256').update(JSON.stringify({
+        currentStatus: liveIssue?.status ?? currentStatus,
+        currentIssueState: liveIssue ? getPaperclipIssueSyncContext(liveIssue) : syncContext,
+        issuePatch
+      })).digest('hex')}`
+    : mutationFamilyBase;
   await persistIssueInteractionEvent(ctx, {
     schemaVersion: 1,
     companyId,
@@ -13366,7 +13389,10 @@ async function updatePaperclipIssueState(
     outcome,
     dedupeKey: `${interactionDedupeBase}:result:${outcome}`
   });
-  const persistMutationPhase = (outcome: 'observed' | 'changed' | 'failed') => persistIssueInteractionEvent(ctx, {
+  const persistMutationPhase = (
+    outcome: 'observed' | 'changed' | 'failed',
+    dedupeBase = mutationDedupeBase
+  ) => persistIssueInteractionEvent(ctx, {
     schemaVersion: 1,
     companyId,
     paperclipIssueId: issueId,
@@ -13383,14 +13409,28 @@ async function updatePaperclipIssueState(
       }
     } : {}),
     outcome,
-    dedupeKey: `${interactionDedupeBase}:mutation:${outcome === 'observed' ? 'intent' : `result:${outcome}`}`
+    dedupeKey: `${dedupeBase}:mutation:${outcome === 'observed' ? 'intent' : `result:${outcome}`}`
   });
-  const priorMutationIntent = existingInteractionEvents.find((event) => event.dedupeKey === `${interactionDedupeBase}:mutation:intent`);
-  const priorMutationChanged = existingInteractionEvents.find((event) => event.dedupeKey === `${interactionDedupeBase}:mutation:result:changed`);
-  const priorMutationFailed = existingInteractionEvents.find((event) => event.dedupeKey === `${interactionDedupeBase}:mutation:result:failed`);
+  const priorMutationIntent = existingInteractionEvents.find((event) => event.dedupeKey === `${mutationDedupeBase}:mutation:intent`);
+  const priorMutationChanged = existingInteractionEvents.find((event) => event.dedupeKey === `${mutationDedupeBase}:mutation:result:changed`);
+  const priorMutationFailed = existingInteractionEvents.find((event) => event.dedupeKey === `${mutationDedupeBase}:mutation:result:failed`);
   let mutationAttemptStarted = false;
   let mutationReturned = false;
-  let mutationComplete = issuePatchAlreadyApplied || Boolean(priorMutationChanged);
+  let mutationComplete = issuePatchAlreadyApplied;
+  if (issuePatchAlreadyApplied) {
+    const intentSuffix = ':mutation:intent';
+    for (const intent of existingInteractionEvents.filter((event) =>
+      event.dedupeKey.startsWith(`${mutationFamilyBase}:`)
+      && event.dedupeKey.endsWith(intentSuffix)
+    )) {
+      const dedupeBase = intent.dedupeKey.slice(0, -intentSuffix.length);
+      const hasResult = existingInteractionEvents.some((event) =>
+        event.dedupeKey === `${dedupeBase}:mutation:result:changed`
+        || event.dedupeKey === `${dedupeBase}:mutation:result:failed`
+      );
+      if (!hasResult) await persistMutationPhase('changed', dedupeBase);
+    }
+  }
 
   try {
   if (statusWillChange) {
@@ -13456,7 +13496,7 @@ async function updatePaperclipIssueState(
   }
 
   if (!mutationComplete) {
-    if (priorMutationIntent && !priorMutationFailed) {
+    if (priorMutationIntent && !priorMutationChanged && !priorMutationFailed) {
       throw new Error('GitHub Sync refused to repeat an uncertain issue mutation; reconcile the durable mutation intent before retrying.');
     }
     await persistMutationPhase('observed');
@@ -14705,25 +14745,23 @@ async function synchronizePaperclipIssueStatuses(
       };
 
       if (paperclipIssue.status === nextStatus) {
-        if (shouldClearTransitionAssignee || shouldClearCompletedExecutionPolicy) {
-          updateSyncFailureContext(syncFailureContext, {
-            phase: 'updating_paperclip_status',
-            repositoryUrl: repository.url,
-            githubIssueNumber: githubIssue.number
-          });
-          await updatePaperclipIssueState(ctx, {
-            companyId: mapping.companyId,
-            issueId: importedIssue.paperclipIssueId,
-            currentStatus: paperclipIssue.status,
-            syncContext: paperclipIssueSyncContext,
-            nextStatus,
-            ...(shouldClearTransitionAssignee ? { clearAssignee: true } : {}),
-            ...(shouldPreserveMaintainerWaitRouting || shouldClearCompletedExecutionPolicy ? { clearExecutionPolicy: true } : {}),
-            transitionComment: '',
-            actionFingerprint: actionJournalFingerprint,
-            paperclipApiBaseUrl
-          });
-        }
+        updateSyncFailureContext(syncFailureContext, {
+          phase: 'updating_paperclip_status',
+          repositoryUrl: repository.url,
+          githubIssueNumber: githubIssue.number
+        });
+        await updatePaperclipIssueState(ctx, {
+          companyId: mapping.companyId,
+          issueId: importedIssue.paperclipIssueId,
+          currentStatus: paperclipIssue.status,
+          syncContext: paperclipIssueSyncContext,
+          nextStatus,
+          ...(shouldClearTransitionAssignee ? { clearAssignee: true } : {}),
+          ...(shouldPreserveMaintainerWaitRouting || shouldClearCompletedExecutionPolicy ? { clearExecutionPolicy: true } : {}),
+          transitionComment: '',
+          actionFingerprint: actionJournalFingerprint,
+          paperclipApiBaseUrl
+        });
 
         if (shouldWakeImportedAssignee && paperclipIssueSyncContext.assignee?.kind === 'agent') {
           const pendingWake: PendingRemoteActionWake = {

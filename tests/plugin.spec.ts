@@ -23404,7 +23404,7 @@ test('worker clears pending execution state before closing and reconciles later 
     }) as {
       syncState: { status: string };
     };
-    assert.equal(stableRetry.syncState.status, 'success');
+    assert.equal(stableRetry.syncState.status, 'success', JSON.stringify(stableRetry.syncState));
     assert.equal(patchRequests.filter((request) => typeof request.body?.status === 'string').length, 2);
   } finally {
     globalThis.fetch = originalFetch;
