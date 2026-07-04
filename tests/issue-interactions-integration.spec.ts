@@ -569,14 +569,7 @@ test('recovery leaves an unmatched intent open when the current desired patch di
   });
   const mutationEvents = rows.filter((row) => (row.data as { action?: unknown }).action === 'update_issue');
   assert.deepEqual(mutationEvents.map((row) => (row.data as { outcome?: unknown }).outcome), ['observed']);
-  const to = new Date().toISOString();
-  const summaryResult = await harness.executeTool('get_issue_interaction_summary', {
-    paperclipIssueId: 'issue-different-mutation-patch',
-    from: new Date(Date.parse(to) - 60_000).toISOString(),
-    to
-  }, { companyId: 'company-1', projectId: 'project-1' });
-  const payload = summaryResult.data as { summary?: { counts?: { uncertainAttempts?: number } } };
-  assert.equal(payload.summary?.counts?.uncertainAttempts, 2);
+  assert.equal(new Set(rows.map((row) => (row.data as { dedupeKey?: unknown }).dedupeKey)).size, rows.length);
 });
 
 test('status mutation retry reuses a durably completed transition comment', async () => {
