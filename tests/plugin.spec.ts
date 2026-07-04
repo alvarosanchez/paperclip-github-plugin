@@ -13302,6 +13302,16 @@ test('settings.updateBoardAccess keeps a board token fallback until the secret r
   await withTemporaryPaperclipHome(async ({ configFilePath }) => {
     const harness = createTestHarness({ manifest });
     await plugin.definition.setup(harness.ctx);
+    await mkdir(dirname(configFilePath), { recursive: true });
+    await writeFile(
+      configFilePath,
+      JSON.stringify({
+        paperclipBoardApiTokenRefs: {
+          'company-1': 'board-secret-ref'
+        }
+      }),
+      'utf8'
+    );
 
     let resolveCount = 0;
     harness.ctx.secrets.resolve = async (secretRef) => {

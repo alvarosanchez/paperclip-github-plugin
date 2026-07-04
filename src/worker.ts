@@ -23364,7 +23364,10 @@ const plugin = definePlugin({
 
     ctx.actions.register('settings.updateBoardAccess', async (input, actionContext) => {
       const previous = normalizeSettings(await ctx.state.get(SETTINGS_SCOPE));
-      const config = await getResolvedConfig(ctx);
+      const [config, trustedConfig] = await Promise.all([
+        getResolvedConfig(ctx),
+        ctx.config.get().then((value) => normalizeConfig(value))
+      ]);
       const record = normalizeActionRecord(input, actionContext);
       const companyId = normalizeCompanyId(record.companyId);
       if (!companyId) {
@@ -23386,7 +23389,7 @@ const plugin = definePlugin({
       if (nextSecretRef) {
         nextPaperclipBoardApiTokenRefs[companyId] = nextSecretRef;
         if (nextBoardApiToken) {
-          const configuredSecretRef = getConfiguredPaperclipBoardApiTokenRef(config, companyId);
+          const configuredSecretRef = getConfiguredPaperclipBoardApiTokenRef(trustedConfig, companyId);
           if (
             configuredSecretRef !== nextSecretRef
             || await shouldSeedExternalPaperclipBoardTokenFallback(ctx, companyId, nextSecretRef)
