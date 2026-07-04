@@ -13200,11 +13200,15 @@ function isPaperclipIssuePatchApplied(params: {
 
   if (
     Object.prototype.hasOwnProperty.call(issuePatch, 'executionPolicy')
-    && JSON.stringify(syncContext.executionPolicy) !== JSON.stringify(issuePatch.executionPolicy)
+    && JSON.stringify(syncContext.executionPolicy) !== JSON.stringify(
+      normalizePaperclipIssueExecutionPolicy(issuePatch.executionPolicy)
+    )
   ) return false;
   if (
     Object.prototype.hasOwnProperty.call(issuePatch, 'executionState')
-    && JSON.stringify(syncContext.executionState) !== JSON.stringify(issuePatch.executionState)
+    && JSON.stringify(syncContext.executionState) !== JSON.stringify(
+      normalizePaperclipIssueExecutionState(issuePatch.executionState)
+    )
   ) return false;
 
   return true;
@@ -22996,6 +23000,7 @@ export const __testing = {
   formatPaperclipApiFetchErrorMessage,
   hasUnresolvedPaperclipIssueBlocker,
   isHealthyMaintainerWaitTransition,
+  isPaperclipIssuePatchApplied,
   normalizeImportRegistry,
   normalizeRemoteActionRegistry,
   persistIssueInteractionEvent,
