@@ -553,7 +553,7 @@ test('direct-PR status transitions and no-op decisions are captured without issu
     scopeKind: 'issue',
     scopeId: 'issue-direct-pr'
   });
-  assert.equal(rows.length, 10);
+  assert.equal(rows.length, 8);
   const changed = rows.find((row) => {
     const data = row.data as { action?: unknown; outcome?: unknown };
     return data.action === 'status_decision' && data.outcome === 'changed';
@@ -565,6 +565,6 @@ test('direct-PR status transitions and no-op decisions are captured without issu
   });
   assert.deepEqual(
     rows.map((row) => (row.data as { outcome?: unknown }).outcome).sort(),
-    ['changed', 'changed', 'changed', 'changed', 'noop', 'observed', 'observed', 'observed', 'observed', 'observed']
+    ['changed', 'changed', 'changed', 'noop', 'observed', 'observed', 'observed', 'observed']
   );
 });

@@ -11748,6 +11748,23 @@ async function unlinkPaperclipIssueFromGitHub(
     !(entry.paperclipIssueId === issueId && (!entry.companyId || entry.companyId === companyId))
   );
   const unlinkedAt = new Date().toISOString();
+  const shouldClearGitHubOrigin =
+    issue.originKind === GITHUB_ISSUE_ORIGIN_KIND || issue.originKind === GITHUB_PULL_REQUEST_ORIGIN_KIND;
+  const nextDescription = removeGitHubIssueLinkMetadataFromDescription(issue.description);
+  const issuePatch: Partial<Pick<Issue, 'description' | 'originKind' | 'originId' | 'originRunId'>> = {};
+  if (shouldClearGitHubOrigin) {
+    issuePatch.originKind = GITHUB_SYNC_BASE_ORIGIN_KIND;
+    issuePatch.originId = null;
+    issuePatch.originRunId = null;
+  }
+
+  if (nextDescription !== undefined) {
+    issuePatch.description = nextDescription;
+  }
+
+  if (Object.keys(issuePatch).length > 0) {
+    await ctx.issues.update(issueId, issuePatch, companyId);
+  }
 
   for (const record of issueLinkRecords) {
     await tombstoneGitHubIssueLinkRecord(ctx, record, unlinkedAt);
@@ -11777,24 +11794,6 @@ async function unlinkPaperclipIssueFromGitHub(
 
   if (removedImportRegistryEntries.length > 0) {
     await ctx.state.set(IMPORT_REGISTRY_SCOPE, nextImportRegistry);
-  }
-
-  const shouldClearGitHubOrigin =
-    issue.originKind === GITHUB_ISSUE_ORIGIN_KIND || issue.originKind === GITHUB_PULL_REQUEST_ORIGIN_KIND;
-  const nextDescription = removeGitHubIssueLinkMetadataFromDescription(issue.description);
-  const issuePatch: Partial<Pick<Issue, 'description' | 'originKind' | 'originId' | 'originRunId'>> = {};
-  if (shouldClearGitHubOrigin) {
-    issuePatch.originKind = GITHUB_SYNC_BASE_ORIGIN_KIND;
-    issuePatch.originId = null;
-    issuePatch.originRunId = null;
-  }
-
-  if (nextDescription !== undefined) {
-    issuePatch.description = nextDescription;
-  }
-
-  if (Object.keys(issuePatch).length > 0) {
-    await ctx.issues.update(issueId, issuePatch, companyId);
   }
 
   await forgetExternalGitHubLinkCompanyIfEmpty(ctx, companyId);
@@ -13191,6 +13190,37 @@ function classifyIssueInteractionReason(value: string): string {
   return 'github_sync_status_decision';
 }
 
+function isPaperclipIssuePatchApplied(params: {
+  currentStatus: PaperclipIssueStatus;
+  syncContext: PaperclipIssueSyncContext;
+  issuePatch: Record<string, unknown>;
+}): boolean {
+  const { currentStatus, syncContext, issuePatch } = params;
+  if (issuePatch.status !== currentStatus) return false;
+
+  const hasAgentAssignee = Object.prototype.hasOwnProperty.call(issuePatch, 'assigneeAgentId');
+  const hasUserAssignee = Object.prototype.hasOwnProperty.call(issuePatch, 'assigneeUserId');
+  if (hasAgentAssignee || hasUserAssignee) {
+    const expectedAssignee = typeof issuePatch.assigneeAgentId === 'string'
+      ? { kind: 'agent', id: issuePatch.assigneeAgentId }
+      : typeof issuePatch.assigneeUserId === 'string'
+        ? { kind: 'user', id: issuePatch.assigneeUserId }
+        : null;
+    if (JSON.stringify(syncContext.assignee) !== JSON.stringify(expectedAssignee)) return false;
+  }
+
+  if (
+    Object.prototype.hasOwnProperty.call(issuePatch, 'executionPolicy')
+    && JSON.stringify(syncContext.executionPolicy) !== JSON.stringify(issuePatch.executionPolicy)
+  ) return false;
+  if (
+    Object.prototype.hasOwnProperty.call(issuePatch, 'executionState')
+    && JSON.stringify(syncContext.executionState) !== JSON.stringify(issuePatch.executionState)
+  ) return false;
+
+  return true;
+}
+
 async function updatePaperclipIssueState(
   ctx: PluginSetupContext,
   params: {
@@ -13260,6 +13290,11 @@ async function updatePaperclipIssueState(
     throw new Error('This Paperclip runtime does not expose issue comment creation, so GitHub Sync refused to update a Paperclip issue status without an explanatory comment.');
   }
 
+  const issuePatchAlreadyApplied = isPaperclipIssuePatchApplied({
+    currentStatus,
+    syncContext,
+    issuePatch
+  });
   const reasonCode = classifyIssueInteractionReason(transitionCommentAnnotation?.reason ?? trimmedTransitionComment);
   const interactionDedupeBase = actionFingerprint
     ? `sync:${createHash('sha256').update(JSON.stringify({
@@ -13268,7 +13303,9 @@ async function updatePaperclipIssueState(
         mutation: 'status_transition',
         actionFingerprint,
         currentStatus,
-        nextStatus
+        nextStatus,
+        currentIssueState: syncContext,
+        issuePatch
       })).digest('hex')}`
     : `sync:${issueId}:${interactionOccurredAt}:${currentStatus}:${nextStatus}`;
   let existingInteractionEvents: IssueInteractionEvent[] = [];
@@ -13353,7 +13390,7 @@ async function updatePaperclipIssueState(
   const priorMutationFailed = existingInteractionEvents.find((event) => event.dedupeKey === `${interactionDedupeBase}:mutation:result:failed`);
   let mutationAttemptStarted = false;
   let mutationReturned = false;
-  let mutationComplete = Boolean(priorMutationChanged);
+  let mutationComplete = issuePatchAlreadyApplied || Boolean(priorMutationChanged);
 
   try {
   if (statusWillChange) {
@@ -14148,11 +14185,6 @@ async function cancelUnmappedTransferredGitHubIssue(
   }
 
   const paperclipIssueSyncContext = getPaperclipIssueSyncContext(paperclipIssue);
-  await unlinkPaperclipIssueFromGitHub(ctx, {
-    companyId,
-    issueId: params.importedIssue.paperclipIssueId
-  });
-
   const nextStatus: PaperclipIssueStatus = 'cancelled';
   await updatePaperclipIssueState(ctx, {
     companyId,
@@ -14160,13 +14192,20 @@ async function cancelUnmappedTransferredGitHubIssue(
     currentStatus: paperclipIssue.status,
     syncContext: paperclipIssueSyncContext,
     nextStatus,
-    transitionComment: buildUnmappedTransferredIssueCancellationComment({
-      previousStatus: paperclipIssue.status,
-      nextStatus,
-      transferredRepository: params.transferredRepository
-    }),
+    transitionComment: paperclipIssue.status === nextStatus
+      ? ''
+      : buildUnmappedTransferredIssueCancellationComment({
+          previousStatus: paperclipIssue.status,
+          nextStatus,
+          transferredRepository: params.transferredRepository
+        }),
     actionFingerprint: `transferred-unmapped:${params.transferredRepository.url}`,
     paperclipApiBaseUrl: params.paperclipApiBaseUrl
+  });
+
+  await unlinkPaperclipIssueFromGitHub(ctx, {
+    companyId,
+    issueId: params.importedIssue.paperclipIssueId
   });
 
   return {
