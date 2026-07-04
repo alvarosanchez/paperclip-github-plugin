@@ -488,10 +488,20 @@ test('status result persistence failure retries without repeating a completed st
 
 test('fresh issue state reconciles a completed mutation whose result ledger write failed', async () => {
   const harness = createTestHarness({ manifest });
+  const pendingExecutionState = {
+    status: 'pending',
+    currentStageId: 'review',
+    currentStageIndex: 0,
+    currentStageType: 'review',
+    currentParticipant: { kind: 'agent', id: 'reviewer-agent' },
+    returnAssignee: null,
+    completedStageIds: []
+  };
   harness.seed({
     issues: [{
       id: 'issue-mutation-result-ledger-failure', companyId: 'company-1', projectId: 'project-1',
-      title: 'Mutation result ledger failure', description: '', status: 'in_progress'
+      title: 'Mutation result ledger failure', description: '', status: 'in_review',
+      executionState: pendingExecutionState
     } as never]
   });
   await plugin.definition.setup(harness.ctx);
@@ -520,21 +530,30 @@ test('fresh issue state reconciles a completed mutation whose result ledger writ
   await assert.rejects(__testing.updatePaperclipIssueState(harness.ctx, {
     companyId: 'company-1',
     issueId: 'issue-mutation-result-ledger-failure',
-    currentStatus: 'in_progress',
-    syncContext: {} as never,
-    nextStatus: 'in_review',
-    transitionComment: 'GitHub Sync moved this issue to review.',
+    currentStatus: 'in_review',
+    syncContext: {
+      assignee: null,
+      executionPolicy: null,
+      executionState: pendingExecutionState
+    } as never,
+    nextStatus: 'todo',
+    transitionComment: 'GitHub Sync returned this issue to active work.',
     actionFingerprint
   }), /mutation result ledger unavailable/);
 
   const freshIssue = await harness.ctx.issues.get('issue-mutation-result-ledger-failure', 'company-1');
-  assert.equal(freshIssue?.status, 'in_review');
+  assert.equal(freshIssue?.status, 'todo');
+  const freshIssueRecord = freshIssue as unknown as Record<string, unknown>;
   await __testing.updatePaperclipIssueState(harness.ctx, {
     companyId: 'company-1',
     issueId: 'issue-mutation-result-ledger-failure',
-    currentStatus: 'in_review',
-    syncContext: {} as never,
-    nextStatus: 'in_review',
+    currentStatus: 'todo',
+    syncContext: {
+      assignee: null,
+      executionPolicy: freshIssueRecord.executionPolicy ?? null,
+      executionState: freshIssueRecord.executionState ?? null
+    } as never,
+    nextStatus: 'todo',
     transitionComment: '',
     actionFingerprint
   });

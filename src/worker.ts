@@ -13290,13 +13290,13 @@ async function updatePaperclipIssueState(
   }
 
   const liveIssue = await ctx.issues.get(issueId, companyId);
-  const issuePatchAlreadyApplied = liveIssue
-    ? isPaperclipIssuePatchApplied({
-        currentStatus: liveIssue.status,
-        syncContext: getPaperclipIssueSyncContext(liveIssue),
-        issuePatch
-      })
-    : isPaperclipIssuePatchApplied({ currentStatus, syncContext, issuePatch });
+  const liveCurrentStatus = liveIssue?.status ?? currentStatus;
+  const liveSyncContext = liveIssue ? getPaperclipIssueSyncContext(liveIssue) : syncContext;
+  const issuePatchAlreadyApplied = isPaperclipIssuePatchApplied({
+    currentStatus: liveCurrentStatus,
+    syncContext: liveSyncContext,
+    issuePatch
+  });
   const reasonCode = classifyIssueInteractionReason(transitionCommentAnnotation?.reason ?? trimmedTransitionComment);
   const interactionDedupeBase = actionFingerprint
     ? `sync:${createHash('sha256').update(JSON.stringify({
@@ -13319,7 +13319,41 @@ async function updatePaperclipIssueState(
         nextStatus
       })).digest('hex')}`
     : interactionDedupeBase;
-  const mutationPatchBase = `${mutationFamilyBase}:patch:${createHash('sha256').update(JSON.stringify(issuePatch)).digest('hex')}`;
+  const hasAssigneePatch = Object.prototype.hasOwnProperty.call(issuePatch, 'assigneeAgentId')
+    || Object.prototype.hasOwnProperty.call(issuePatch, 'assigneeUserId');
+  const mutationExpectedState = {
+    status: issuePatch.status ?? liveCurrentStatus,
+    assignee: hasAssigneePatch
+      ? normalizePaperclipIssueAssigneePrincipal({
+          agentId: issuePatch.assigneeAgentId,
+          userId: issuePatch.assigneeUserId
+        })
+      : liveSyncContext.assignee,
+    executionPolicy: Object.prototype.hasOwnProperty.call(issuePatch, 'executionPolicy')
+      ? normalizePaperclipIssueExecutionPolicy(issuePatch.executionPolicy)
+      : liveSyncContext.executionPolicy,
+    executionState: Object.prototype.hasOwnProperty.call(issuePatch, 'executionState')
+      ? normalizePaperclipIssueExecutionState(issuePatch.executionState)
+      : liveSyncContext.executionState
+  };
+  const liveMutationState = {
+    status: liveCurrentStatus,
+    assignee: liveSyncContext.assignee,
+    executionPolicy: liveSyncContext.executionPolicy,
+    executionState: liveSyncContext.executionState
+  };
+  const mutationExpectedStateFingerprint = createHash('sha256')
+    .update(JSON.stringify(mutationExpectedState))
+    .digest('hex')
+    .slice(0, 32);
+  const liveMutationStateFingerprint = createHash('sha256')
+    .update(JSON.stringify(liveMutationState))
+    .digest('hex')
+    .slice(0, 32);
+  const mutationPatchBase = `${mutationFamilyBase}:patch:${createHash('sha256')
+    .update(JSON.stringify(issuePatch))
+    .digest('hex')
+    .slice(0, 32)}:applied:${mutationExpectedStateFingerprint}`;
   let existingInteractionEvents: IssueInteractionEvent[] = [];
   if (actionFingerprint) {
     const ledger = await listIssueInteractionEvents(ctx, companyId, issueId, {
@@ -13343,10 +13377,10 @@ async function updatePaperclipIssueState(
   );
   const mutationDedupeBase = !issuePatchAlreadyApplied && completedMutationForPatch
     ? `${mutationPatchBase}:drift:${createHash('sha256').update(JSON.stringify({
-        currentStatus: liveIssue?.status ?? currentStatus,
-        currentIssueState: liveIssue ? getPaperclipIssueSyncContext(liveIssue) : syncContext,
+        currentStatus: liveCurrentStatus,
+        currentIssueState: liveSyncContext,
         issuePatch
-      })).digest('hex')}`
+      })).digest('hex').slice(0, 32)}`
     : mutationPatchBase;
   await persistIssueInteractionEvent(ctx, {
     schemaVersion: 1,
@@ -13420,7 +13454,8 @@ async function updatePaperclipIssueState(
   if (issuePatchAlreadyApplied) {
     const intentSuffix = ':mutation:intent';
     for (const intent of existingInteractionEvents.filter((event) =>
-      event.dedupeKey.startsWith(`${mutationPatchBase}:`)
+      event.dedupeKey.startsWith(`${mutationFamilyBase}:`)
+      && event.dedupeKey.includes(`:applied:${liveMutationStateFingerprint}:`)
       && event.dedupeKey.endsWith(intentSuffix)
     )) {
       const dedupeBase = intent.dedupeKey.slice(0, -intentSuffix.length);
