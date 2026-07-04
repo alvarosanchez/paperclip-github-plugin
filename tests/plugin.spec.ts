@@ -13298,9 +13298,45 @@ test('settings.ensureGitHubTokenAvailable overwrites invalid worker-local config
   });
 });
 
-test('settings.updateBoardAccess skips the board token fallback when the saved secret ref resolves', { concurrency: false }, async () => {
+test('settings.updateBoardAccess keeps a board token fallback until the secret ref is mirrored into plugin config', { concurrency: false }, async () => {
   await withTemporaryPaperclipHome(async ({ configFilePath }) => {
     const harness = createTestHarness({ manifest });
+    await plugin.definition.setup(harness.ctx);
+
+    let resolveCount = 0;
+    harness.ctx.secrets.resolve = async (secretRef) => {
+      resolveCount += 1;
+      assert.equal(secretRef, 'board-secret-ref');
+      return 'paperclip-board-token';
+    };
+
+    await harness.performAction('settings.updateBoardAccess', {
+      companyId: 'company-1',
+      paperclipBoardApiTokenRef: 'board-secret-ref',
+      paperclipBoardApiToken: 'paperclip-board-token',
+      paperclipBoardAccessIdentity: 'Jane Operator'
+    });
+
+    const storedConfig = JSON.parse(await readFile(configFilePath, 'utf8')) as {
+      paperclipBoardApiTokensByCompanyId?: Record<string, string>;
+    };
+    assert.deepEqual(storedConfig.paperclipBoardApiTokensByCompanyId, {
+      'company-1': 'paperclip-board-token'
+    });
+    assert.equal(resolveCount, 0);
+  });
+});
+
+test('settings.updateBoardAccess skips the board token fallback after the secret ref is mirrored into plugin config', { concurrency: false }, async () => {
+  await withTemporaryPaperclipHome(async ({ configFilePath }) => {
+    const harness = createTestHarness({
+      manifest,
+      config: {
+        paperclipBoardApiTokenRefs: {
+          'company-1': 'board-secret-ref'
+        }
+      }
+    });
     await plugin.definition.setup(harness.ctx);
 
     let resolveCount = 0;

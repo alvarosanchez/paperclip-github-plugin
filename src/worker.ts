@@ -23386,7 +23386,11 @@ const plugin = definePlugin({
       if (nextSecretRef) {
         nextPaperclipBoardApiTokenRefs[companyId] = nextSecretRef;
         if (nextBoardApiToken) {
-          if (await shouldSeedExternalPaperclipBoardTokenFallback(ctx, companyId, nextSecretRef)) {
+          const configuredSecretRef = getConfiguredPaperclipBoardApiTokenRef(config, companyId);
+          if (
+            configuredSecretRef !== nextSecretRef
+            || await shouldSeedExternalPaperclipBoardTokenFallback(ctx, companyId, nextSecretRef)
+          ) {
             await writeExternalCompanyPaperclipBoardApiTokenFallback(ctx, companyId, nextBoardApiToken);
           } else {
             await clearExternalCompanyPaperclipBoardApiTokenFallback(ctx, companyId);
