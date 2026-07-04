@@ -1143,6 +1143,14 @@ interface GitHubPullRequestCommentCountRecord extends GitHubPullRequestReference
   reviewCommentCount: number;
 }
 
+function canonicalizeGitHubPullRequestCommentCounts(
+  records: GitHubPullRequestCommentCountRecord[]
+): GitHubPullRequestCommentCountRecord[] {
+  return [...records].sort((left, right) =>
+    left.repositoryUrl.localeCompare(right.repositoryUrl) || left.number - right.number
+  );
+}
+
 interface GitHubReviewThreadCommentRecord {
   id: string;
   databaseId?: number;
@@ -14545,7 +14553,9 @@ async function synchronizePaperclipIssueStatuses(
       const actionJournalFingerprint = createHash('sha256').update(JSON.stringify({
         remoteActionFingerprint,
         issueCommentCount: snapshot.commentCount,
-        linkedPullRequestCommentCounts: Object.entries(currentLinkedPullRequestCommentCounts).sort(([left], [right]) => left.localeCompare(right))
+        linkedPullRequestCommentCounts: canonicalizeGitHubPullRequestCommentCounts(
+          currentLinkedPullRequestCommentCounts
+        )
       })).digest('hex');
       if (importedIssue.pendingRemoteActionWake) {
         const pendingWake = importedIssue.pendingRemoteActionWake;
@@ -15052,7 +15062,7 @@ async function synchronizePaperclipPullRequestIssueStatuses(
       const remoteActionFingerprint = buildDirectPullRequestActionFingerprint(pullRequestSnapshots);
       const actionJournalFingerprint = createHash('sha256').update(JSON.stringify({
         remoteActionFingerprint,
-        commentCounts: Object.entries(currentCommentCounts).sort(([left], [right]) => left.localeCompare(right))
+        commentCounts: canonicalizeGitHubPullRequestCommentCounts(currentCommentCounts)
       })).digest('hex');
       const paperclipIssueSyncContext = getPaperclipIssueSyncContext(paperclipIssue);
       const executorTransitionAssignee = resolvePaperclipIssueExecutorAssignee(
@@ -22921,6 +22931,7 @@ export function shouldStartWorkerHost(moduleUrl: string, entry = process.argv[1]
 export const __testing = {
   buildDirectPullRequestActionFingerprint,
   buildRemoteActionFingerprint,
+  canonicalizeGitHubPullRequestCommentCounts,
   buildSyncFallbackExecutionStatePatch,
   createGitHubToolOctokit,
   formatPaperclipApiFetchErrorMessage,

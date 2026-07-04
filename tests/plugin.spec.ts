@@ -20496,6 +20496,37 @@ test('remote action fingerprints ignore transient raw UNKNOWN jitter that preser
   assert.notEqual(actionableChange, first);
 });
 
+test('comment-count journal inputs are canonical across linked pull request order', async () => {
+  const workerModule = await importFreshWorkerModule();
+  const testing = workerModule.__testing as typeof workerModule.__testing & {
+    canonicalizeGitHubPullRequestCommentCounts?: (records: Array<{
+      number: number;
+      repositoryUrl: string;
+      topLevelCommentCount: number;
+      reviewCommentCount: number;
+    }>) => Array<Record<string, unknown>>;
+  };
+  assert.equal(typeof testing.canonicalizeGitHubPullRequestCommentCounts, 'function');
+
+  const first = {
+    number: 81,
+    repositoryUrl: 'https://github.com/paperclipai/zeta',
+    topLevelCommentCount: 3,
+    reviewCommentCount: 2
+  };
+  const second = {
+    number: 12,
+    repositoryUrl: 'https://github.com/paperclipai/alpha',
+    topLevelCommentCount: 5,
+    reviewCommentCount: 1
+  };
+
+  assert.deepEqual(
+    testing.canonicalizeGitHubPullRequestCommentCounts!([first, second]),
+    testing.canonicalizeGitHubPullRequestCommentCounts!([second, first])
+  );
+});
+
 test('remote action fingerprints ignore lower-priority sibling PR changes masked by the effective action', async () => {
   const workerModule = await importFreshWorkerModule();
   const testing = workerModule.__testing as typeof workerModule.__testing & {
