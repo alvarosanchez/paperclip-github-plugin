@@ -7804,6 +7804,12 @@ function normalizePaperclipIssueAssigneePrincipal(value: unknown): PaperclipIssu
   }
 
   const record = value as Record<string, unknown>;
+  const normalizedKind = normalizeOptionalString(record.kind);
+  const normalizedId = normalizeOptionalString(record.id);
+  if ((normalizedKind === 'agent' || normalizedKind === 'user') && normalizedId) {
+    return { kind: normalizedKind, id: normalizedId };
+  }
+
   const principalType = normalizeOptionalString(record.type);
   const agentId = normalizeOptionalString(record.agentId);
   const userId = normalizeOptionalString(record.userId);
@@ -23001,6 +23007,7 @@ export const __testing = {
   hasUnresolvedPaperclipIssueBlocker,
   isHealthyMaintainerWaitTransition,
   isPaperclipIssuePatchApplied,
+  normalizePaperclipIssueAssigneePrincipal,
   normalizeImportRegistry,
   normalizeRemoteActionRegistry,
   persistIssueInteractionEvent,

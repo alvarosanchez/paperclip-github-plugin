@@ -8,12 +8,24 @@ import plugin, { __testing } from '../src/worker.ts';
 import type { IssueInteractionEvent } from '../src/issue-interactions.ts';
 
 test('applied execution state ignores nullable fields omitted by live normalization', () => {
+  assert.deepEqual(
+    __testing.normalizePaperclipIssueAssigneePrincipal({ kind: 'agent', id: 'reviewer-agent' }),
+    { kind: 'agent', id: 'reviewer-agent' }
+  );
+  assert.deepEqual(
+    __testing.normalizePaperclipIssueAssigneePrincipal({ type: 'user', userId: 'reviewer-user' }),
+    { kind: 'user', id: 'reviewer-user' }
+  );
+
   const executionState = {
     status: 'pending',
     currentStageId: 'review',
     currentStageIndex: 0,
     currentStageType: 'review' as const,
-    currentParticipant: { kind: 'agent' as const, id: 'reviewer-agent' },
+    currentParticipant: __testing.normalizePaperclipIssueAssigneePrincipal({
+      kind: 'agent',
+      id: 'reviewer-agent'
+    }),
     returnAssignee: null,
     completedStageIds: []
   };
