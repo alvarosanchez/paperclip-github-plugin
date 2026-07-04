@@ -13599,6 +13599,64 @@ test('settings.registration reports company-specific board access without resolv
   assert.equal(resolveCount, 0);
 });
 
+test('settings.registration does not treat an external board secret ref as trusted config sync', { concurrency: false }, async () => {
+  await withTemporaryPaperclipHome(async ({ configFilePath }) => {
+    await mkdir(dirname(configFilePath), { recursive: true });
+    await writeFile(
+      configFilePath,
+      JSON.stringify({
+        paperclipBoardApiTokenRefs: {
+          'company-1': 'board-secret-ref'
+        }
+      }),
+      'utf8'
+    );
+
+    const harness = createTestHarness({ manifest });
+    await plugin.definition.setup(harness.ctx);
+    await harness.performAction('settings.updateBoardAccess', {
+      companyId: 'company-1',
+      paperclipBoardApiTokenRef: 'board-secret-ref'
+    });
+
+    const result = await harness.getData<{
+      paperclipBoardAccessNeedsConfigSync?: boolean;
+      paperclipBoardAccessConfigSyncRef?: string;
+    }>('settings.registration', {
+      companyId: 'company-1'
+    });
+
+    assert.equal(result.paperclipBoardAccessNeedsConfigSync, true);
+    assert.equal(result.paperclipBoardAccessConfigSyncRef, 'board-secret-ref');
+  });
+});
+
+test('settings.registration requests config sync when the trusted board secret ref differs', async () => {
+  const harness = createTestHarness({
+    manifest,
+    config: {
+      paperclipBoardApiTokenRefs: {
+        'company-1': 'old-board-secret-ref'
+      }
+    }
+  });
+  await plugin.definition.setup(harness.ctx);
+  await harness.performAction('settings.updateBoardAccess', {
+    companyId: 'company-1',
+    paperclipBoardApiTokenRef: 'new-board-secret-ref'
+  });
+
+  const result = await harness.getData<{
+    paperclipBoardAccessNeedsConfigSync?: boolean;
+    paperclipBoardAccessConfigSyncRef?: string;
+  }>('settings.registration', {
+    companyId: 'company-1'
+  });
+
+  assert.equal(result.paperclipBoardAccessNeedsConfigSync, true);
+  assert.equal(result.paperclipBoardAccessConfigSyncRef, 'new-board-secret-ref');
+});
+
 test('settings.updateBoardAccess persists a company-specific board access identity label and exposes Me as an assignee option', async () => {
   const harness = createTestHarness({ manifest });
   await plugin.definition.setup(harness.ctx);
