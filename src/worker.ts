@@ -23073,11 +23073,14 @@ const plugin = definePlugin({
       const saved = await ctx.state.get(SETTINGS_SCOPE);
       const importRegistry = normalizeImportRegistry(await ctx.state.get(IMPORT_REGISTRY_SCOPE));
       const normalizedSettings = normalizeSettings(saved);
-      const config = await getResolvedConfig(ctx);
+      const [config, trustedConfig] = await Promise.all([
+        getResolvedConfig(ctx),
+        ctx.config.get().then((value) => normalizeConfig(value))
+      ]);
       const githubTokenConfigured = hasConfiguredGithubToken(normalizedSettings, config, requestedCompanyId);
-      const configuredGitHubTokenRef = getConfiguredGitHubTokenRef(config, requestedCompanyId);
+      const configuredGitHubTokenRef = getConfiguredGitHubTokenRef(trustedConfig, requestedCompanyId);
       const savedGitHubTokenRef = getSavedGitHubTokenRef(normalizedSettings, requestedCompanyId);
-      const configuredBoardTokenRef = getConfiguredPaperclipBoardApiTokenRef(config, requestedCompanyId);
+      const configuredBoardTokenRef = getConfiguredPaperclipBoardApiTokenRef(trustedConfig, requestedCompanyId);
       const savedBoardTokenRef = getSavedPaperclipBoardApiTokenRef(normalizedSettings, requestedCompanyId);
       const settingsForResponse = sanitizeSettingsForCurrentSetup(
         materializeScopedSettings(normalizedSettings, config, requestedCompanyId),
@@ -23111,7 +23114,9 @@ const plugin = definePlugin({
         ...(savedGitHubTokenRef ? { githubTokenConfigSyncRef: savedGitHubTokenRef } : {}),
         githubTokenNeedsConfigSync: Boolean(savedGitHubTokenRef && configuredGitHubTokenRef !== savedGitHubTokenRef),
         ...(savedBoardTokenRef ? { paperclipBoardAccessConfigSyncRef: savedBoardTokenRef } : {}),
-        paperclipBoardAccessNeedsConfigSync: Boolean(savedBoardTokenRef && !configuredBoardTokenRef)
+        paperclipBoardAccessNeedsConfigSync: Boolean(
+          savedBoardTokenRef && configuredBoardTokenRef !== savedBoardTokenRef
+        )
       };
     });
 
