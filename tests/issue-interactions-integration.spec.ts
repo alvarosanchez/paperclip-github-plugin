@@ -7,6 +7,48 @@ import manifest from '../src/manifest.ts';
 import plugin, { __testing } from '../src/worker.ts';
 import type { IssueInteractionEvent } from '../src/issue-interactions.ts';
 
+test('applied execution state ignores nullable fields omitted by live normalization', () => {
+  assert.deepEqual(
+    __testing.normalizePaperclipIssueAssigneePrincipal({ kind: 'agent', id: 'reviewer-agent' }),
+    { kind: 'agent', id: 'reviewer-agent' }
+  );
+  assert.deepEqual(
+    __testing.normalizePaperclipIssueAssigneePrincipal({ type: 'user', userId: 'reviewer-user' }),
+    { kind: 'user', id: 'reviewer-user' }
+  );
+
+  const executionState = {
+    status: 'pending',
+    currentStageId: 'review',
+    currentStageIndex: 0,
+    currentStageType: 'review' as const,
+    currentParticipant: __testing.normalizePaperclipIssueAssigneePrincipal({
+      kind: 'agent',
+      id: 'reviewer-agent'
+    }),
+    returnAssignee: null,
+    completedStageIds: []
+  };
+
+  assert.equal(__testing.isPaperclipIssuePatchApplied({
+    currentStatus: 'in_review',
+    syncContext: {
+      assignee: { kind: 'agent', id: 'reviewer-agent' },
+      executionPolicy: null,
+      executionState
+    },
+    issuePatch: {
+      status: 'in_review',
+      executionState: {
+        ...executionState,
+        currentParticipant: { type: 'agent', agentId: 'reviewer-agent' },
+        lastDecisionId: null,
+        lastDecisionOutcome: null
+      }
+    }
+  }), true);
+});
+
 test('get_issue_interaction_summary enforces issue company scope and returns compact ledger data', async () => {
   const harness = createTestHarness({ manifest });
   harness.seed({
@@ -444,6 +486,153 @@ test('status result persistence failure retries without repeating a completed st
   assert.equal(statusResults.length, 1);
 });
 
+test('fresh issue state reconciles a completed mutation whose result ledger write failed', async () => {
+  const harness = createTestHarness({ manifest });
+  const pendingExecutionState = {
+    status: 'pending',
+    currentStageId: 'review',
+    currentStageIndex: 0,
+    currentStageType: 'review',
+    currentParticipant: { kind: 'agent', id: 'reviewer-agent' },
+    returnAssignee: null,
+    completedStageIds: []
+  };
+  harness.seed({
+    issues: [{
+      id: 'issue-mutation-result-ledger-failure', companyId: 'company-1', projectId: 'project-1',
+      title: 'Mutation result ledger failure', description: '', status: 'in_review',
+      executionState: pendingExecutionState
+    } as never]
+  });
+  await plugin.definition.setup(harness.ctx);
+  const originalUpsert = harness.ctx.entities.upsert.bind(harness.ctx.entities);
+  const originalUpdate = harness.ctx.issues.update.bind(harness.ctx.issues);
+  let failMutationResultOnce = true;
+  let statusUpdates = 0;
+  harness.ctx.entities.upsert = async (input) => {
+    const data = input.data as { action?: unknown; dedupeKey?: unknown } | undefined;
+    if (
+      failMutationResultOnce
+      && data?.action === 'update_issue'
+      && String(data.dedupeKey ?? '').endsWith(':mutation:result:changed')
+    ) {
+      failMutationResultOnce = false;
+      throw new Error('mutation result ledger unavailable');
+    }
+    return originalUpsert(input);
+  };
+  harness.ctx.issues.update = async (...args) => {
+    statusUpdates += 1;
+    return originalUpdate(...args);
+  };
+  const actionFingerprint = 'remote-action-mutation-result-ledger';
+
+  await assert.rejects(__testing.updatePaperclipIssueState(harness.ctx, {
+    companyId: 'company-1',
+    issueId: 'issue-mutation-result-ledger-failure',
+    currentStatus: 'in_review',
+    syncContext: {
+      assignee: null,
+      executionPolicy: null,
+      executionState: pendingExecutionState
+    } as never,
+    nextStatus: 'todo',
+    transitionComment: 'GitHub Sync returned this issue to active work.',
+    actionFingerprint
+  }), /mutation result ledger unavailable/);
+
+  const freshIssue = await harness.ctx.issues.get('issue-mutation-result-ledger-failure', 'company-1');
+  assert.equal(freshIssue?.status, 'todo');
+  const freshIssueRecord = freshIssue as unknown as Record<string, unknown>;
+  await __testing.updatePaperclipIssueState(harness.ctx, {
+    companyId: 'company-1',
+    issueId: 'issue-mutation-result-ledger-failure',
+    currentStatus: 'todo',
+    syncContext: {
+      assignee: null,
+      executionPolicy: freshIssueRecord.executionPolicy ?? null,
+      executionState: freshIssueRecord.executionState ?? null
+    } as never,
+    nextStatus: 'todo',
+    transitionComment: '',
+    actionFingerprint
+  });
+
+  assert.equal(statusUpdates, 1);
+  const rows = await harness.ctx.entities.list({
+    entityType: 'paperclip-github-plugin.issue-interaction-event',
+    scopeKind: 'issue',
+    scopeId: 'issue-mutation-result-ledger-failure'
+  });
+  const mutationEvents = rows.filter((row) => (row.data as { action?: unknown }).action === 'update_issue');
+  assert.deepEqual(
+    mutationEvents.map((row) => (row.data as { outcome?: unknown }).outcome).sort(),
+    ['changed', 'observed']
+  );
+});
+
+test('recovery leaves an unmatched intent open when the current desired patch differs', async () => {
+  const harness = createTestHarness({ manifest });
+  harness.seed({
+    issues: [{
+      id: 'issue-different-mutation-patch', companyId: 'company-1', projectId: 'project-1',
+      title: 'Different mutation patch', description: '', status: 'in_review', assigneeAgentId: 'agent-2'
+    } as never]
+  });
+  await plugin.definition.setup(harness.ctx);
+  const originalUpsert = harness.ctx.entities.upsert.bind(harness.ctx.entities);
+  const originalUpdate = harness.ctx.issues.update.bind(harness.ctx.issues);
+  let failMutation = true;
+  let failMutationFailureResult = true;
+  harness.ctx.issues.update = async (...args) => {
+    if (failMutation) {
+      failMutation = false;
+      throw new Error('issue update unavailable');
+    }
+    return originalUpdate(...args);
+  };
+  harness.ctx.entities.upsert = async (input) => {
+    const dedupeKey = String((input.data as { dedupeKey?: unknown } | undefined)?.dedupeKey ?? '');
+    if (failMutationFailureResult && dedupeKey.endsWith(':mutation:result:failed')) {
+      failMutationFailureResult = false;
+      throw new Error('mutation failure result ledger unavailable');
+    }
+    return originalUpsert(input);
+  };
+  const actionFingerprint = 'remote-action-different-mutation-patch';
+
+  await assert.rejects(__testing.updatePaperclipIssueState(harness.ctx, {
+    companyId: 'company-1',
+    issueId: 'issue-different-mutation-patch',
+    currentStatus: 'in_review',
+    syncContext: { assignee: { kind: 'agent', id: 'agent-2' } } as never,
+    nextStatus: 'in_review',
+    clearAssignee: true,
+    transitionComment: '',
+    actionFingerprint
+  }), /issue mutation failed and its mutation result could not be persisted/);
+
+  await __testing.updatePaperclipIssueState(harness.ctx, {
+    companyId: 'company-1',
+    issueId: 'issue-different-mutation-patch',
+    currentStatus: 'in_review',
+    syncContext: { assignee: { kind: 'agent', id: 'agent-2' } } as never,
+    nextStatus: 'in_review',
+    nextAssignee: { kind: 'agent', id: 'agent-2' },
+    transitionComment: '',
+    actionFingerprint
+  });
+
+  const rows = await harness.ctx.entities.list({
+    entityType: 'paperclip-github-plugin.issue-interaction-event',
+    scopeKind: 'issue',
+    scopeId: 'issue-different-mutation-patch'
+  });
+  const mutationEvents = rows.filter((row) => (row.data as { action?: unknown }).action === 'update_issue');
+  assert.deepEqual(mutationEvents.map((row) => (row.data as { outcome?: unknown }).outcome), ['observed']);
+  assert.equal(new Set(rows.map((row) => (row.data as { dedupeKey?: unknown }).dedupeKey)).size, rows.length);
+});
+
 test('status mutation retry reuses a durably completed transition comment', async () => {
   const harness = createTestHarness({ manifest });
   harness.seed({
@@ -553,7 +742,7 @@ test('direct-PR status transitions and no-op decisions are captured without issu
     scopeKind: 'issue',
     scopeId: 'issue-direct-pr'
   });
-  assert.equal(rows.length, 10);
+  assert.equal(rows.length, 8);
   const changed = rows.find((row) => {
     const data = row.data as { action?: unknown; outcome?: unknown };
     return data.action === 'status_decision' && data.outcome === 'changed';
@@ -565,6 +754,6 @@ test('direct-PR status transitions and no-op decisions are captured without issu
   });
   assert.deepEqual(
     rows.map((row) => (row.data as { outcome?: unknown }).outcome).sort(),
-    ['changed', 'changed', 'changed', 'changed', 'noop', 'observed', 'observed', 'observed', 'observed', 'observed']
+    ['changed', 'changed', 'changed', 'noop', 'observed', 'observed', 'observed', 'observed']
   );
 });

@@ -15829,7 +15829,7 @@ test('worker moves linked Paperclip issues when their GitHub issue transfers to 
   }
 });
 
-test('worker unlinks and cancels Paperclip issues when their GitHub issue transfers to an unmapped repository', async () => {
+test('worker retries an unmapped-transfer unlink after cancellation without duplicating its comment', async () => {
   const harness = createTestHarness({
     manifest,
     config: {
@@ -15940,7 +15940,41 @@ test('worker unlinks and cancels Paperclip issues when their GitHub issue transf
     throw new Error(`Unexpected fetch during unmapped transfer test: ${requestUrl.toString()}`);
   };
 
+  const originalEntityUpsert = harness.ctx.entities.upsert;
+  let failUnlinkOnce = true;
+  harness.ctx.entities.upsert = async (input) => {
+    if (failUnlinkOnce && input.entityType === 'paperclip-github-plugin.issue-link' && input.status === 'unlinked') {
+      failUnlinkOnce = false;
+      throw new Error('Injected unlink persistence failure');
+    }
+    return originalEntityUpsert(input);
+  };
+
   try {
+    const failedResult = await harness.performAction('sync.runNow', {
+      waitForCompletion: true
+    }) as {
+      syncState: {
+        status: string;
+      };
+    };
+    const issueAfterFailedUnlink = await harness.ctx.issues.get(paperclipIssue.id, 'company-1');
+    const linksAfterFailedUnlink = await harness.ctx.entities.list({
+      entityType: 'paperclip-github-plugin.issue-link',
+      scopeKind: 'issue',
+      scopeId: paperclipIssue.id
+    });
+    const registryAfterFailedUnlink = harness.getState({
+      scopeKind: 'instance',
+      stateKey: 'paperclip-github-plugin-import-registry'
+    }) as unknown[];
+
+    assert.equal(failedResult.syncState.status, 'error');
+    assert.equal(issueAfterFailedUnlink?.status, 'cancelled');
+    assert.equal(linksAfterFailedUnlink[0]?.status, 'open');
+    assert.equal(registryAfterFailedUnlink.length, 1);
+    assert.equal(statusTransitionComments.length, 1);
+
     const result = await harness.performAction('sync.runNow', {
       waitForCompletion: true
     }) as {
@@ -15975,6 +16009,8 @@ test('worker unlinks and cancels Paperclip issues when their GitHub issue transf
     assert.match(statusTransitionComments[0]?.body ?? '', /transferred to `outside\/unmapped-repo`/);
     assert.match(statusTransitionComments[0]?.body ?? '', /not mapped to a Paperclip project/);
   } finally {
+    harness.ctx.entities.upsert = originalEntityUpsert;
+    harness.ctx.issues.createComment = originalCreateComment;
     globalThis.fetch = originalFetch;
   }
 });
@@ -23126,7 +23162,7 @@ test('worker does not perform sync-driven status transitions when the explanator
   }
 });
 
-test('worker clears pending review and approval execution state before closing an imported issue', async () => {
+test('worker clears pending execution state before closing and reconciles later local drift', async () => {
   const harness = createTestHarness({
     manifest,
     config: {
@@ -23324,6 +23360,52 @@ test('worker clears pending review and approval execution state before closing a
     assert.equal(updatedIssue?.assigneeAgentId, 'agent-3');
     assert.equal(updatedIssue?.executionPolicy ?? null, null);
     assert.equal(updatedIssue?.executionState ?? null, null);
+
+    await originalUpdate(
+      importedIssue.id,
+      {
+        executionPolicy: {
+          mode: 'normal',
+          commentRequired: true,
+          stages: [{
+            id: 'stale-review-stage',
+            type: 'review',
+            participants: [{ type: 'agent', agentId: 'agent-2' }]
+          }]
+        },
+        executionState: {
+          status: 'pending',
+          currentStageId: 'stale-review-stage',
+          currentStageIndex: 0,
+          currentStageType: 'review',
+          currentParticipant: { type: 'agent', agentId: 'agent-2' },
+          returnAssignee: null,
+          completedStageIds: []
+        }
+      } as never,
+      'company-1'
+    );
+
+    const retry = await harness.performAction('sync.runNow', {
+      waitForCompletion: true
+    }) as {
+      syncState: { status: string };
+    };
+
+    assert.equal(retry.syncState.status, 'success');
+    assert.equal(patchRequests.filter((request) => typeof request.body?.status === 'string').length, 2);
+    const reconciledIssue = await harness.ctx.issues.get(importedIssue.id, 'company-1') as Record<string, any> | null;
+    assert.equal(reconciledIssue?.status, 'done');
+    assert.equal(reconciledIssue?.executionPolicy ?? null, null);
+    assert.equal(reconciledIssue?.executionState ?? null, null);
+
+    const stableRetry = await harness.performAction('sync.runNow', {
+      waitForCompletion: true
+    }) as {
+      syncState: { status: string };
+    };
+    assert.equal(stableRetry.syncState.status, 'success', JSON.stringify(stableRetry.syncState));
+    assert.equal(patchRequests.filter((request) => typeof request.body?.status === 'string').length, 2);
   } finally {
     globalThis.fetch = originalFetch;
   }
