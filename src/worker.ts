@@ -23375,7 +23375,11 @@ const plugin = definePlugin({
       }
 
       const nextSecretRef = normalizeSecretRef(record.paperclipBoardApiTokenRef);
-      const nextBoardApiToken = normalizeGitHubToken(record.paperclipBoardApiToken);
+      const boardAccessRecord = record.paperclipBoardAccess && typeof record.paperclipBoardAccess === 'object'
+        ? record.paperclipBoardAccess as Record<string, unknown>
+        : {};
+      const nextBoardApiToken = normalizeGitHubToken(record.paperclipBoardApiToken)
+        ?? normalizeGitHubToken(boardAccessRecord.token);
       const nextPaperclipBoardApiTokenRefs = {
         ...(previous.paperclipBoardApiTokenRefs ?? {})
       };

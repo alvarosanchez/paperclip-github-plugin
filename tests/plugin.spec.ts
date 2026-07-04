@@ -13323,7 +13323,9 @@ test('settings.updateBoardAccess keeps a board token fallback until the secret r
     await harness.performAction('settings.updateBoardAccess', {
       companyId: 'company-1',
       paperclipBoardApiTokenRef: 'board-secret-ref',
-      paperclipBoardApiToken: 'paperclip-board-token',
+      paperclipBoardAccess: {
+        token: 'paperclip-board-token'
+      },
       paperclipBoardAccessIdentity: 'Jane Operator'
     });
 
