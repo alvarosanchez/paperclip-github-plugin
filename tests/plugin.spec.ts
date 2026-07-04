@@ -13324,7 +13324,9 @@ test('settings.updateBoardAccess keeps a board token fallback until the secret r
       companyId: 'company-1',
       paperclipBoardApiTokenRef: 'board-secret-ref',
       paperclipBoardAccess: {
-        token: 'paperclip-board-token'
+        authorization: {
+          bearer: 'paperclip-board-token'
+        }
       },
       paperclipBoardAccessIdentity: 'Jane Operator'
     });

@@ -12138,7 +12138,9 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
         companyId,
         paperclipBoardApiTokenRef: secret.id,
         paperclipBoardAccess: {
-          token: boardApiToken
+          authorization: {
+            bearer: boardApiToken
+          }
         },
         paperclipBoardAccessIdentity: boardIdentity.label ?? '',
         paperclipBoardAccessUserId: boardIdentity.userId ?? ''
