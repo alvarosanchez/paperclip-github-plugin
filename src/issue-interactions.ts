@@ -202,8 +202,8 @@ export function buildIssueInteractionSummary(input: {
     })
     .sort((left, right) => left.occurredAt.localeCompare(right.occurredAt) || left.dedupeKey.localeCompare(right.dedupeKey));
   const resultDedupeBases = new Set(events
-    .filter((entry) => entry.dedupeKey.endsWith(':result'))
-    .map((entry) => entry.dedupeKey.slice(0, -':result'.length)));
+    .filter((entry) => /:result(?::(?:changed|noop|failed))?$/.test(entry.dedupeKey))
+    .map((entry) => entry.dedupeKey.replace(/:result(?::(?:changed|noop|failed))?$/, '')));
   const uncertainAttempts = events.filter((entry) => entry.outcome === 'observed'
     && entry.dedupeKey.endsWith(':intent')
     && !resultDedupeBases.has(entry.dedupeKey.slice(0, -':intent'.length)));
