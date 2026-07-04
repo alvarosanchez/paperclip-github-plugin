@@ -20338,11 +20338,11 @@ test('sync.runNow quiesces an acknowledged unchanged remote action and re-wakes 
     throw new Error(`Unexpected GitHub request: ${url.toString()}`);
   };
 
-  const syncAndExpectWake = async () => {
+  const syncAndExpectWake = async (expectedTransitionComments = 1) => {
     const result = await harness.performAction('sync.runNow', {}) as { syncState: { status: string } };
     assert.equal(result.syncState.status, 'success');
     assert.equal((await harness.ctx.issues.get(issue.id, 'company-1'))?.status, 'in_progress');
-    assert.equal(transitionComments.length, 1);
+    assert.equal(transitionComments.length, expectedTransitionComments);
     assert.equal(statusMutations.length, 1);
     assert.equal(wakeRequests.length, 1);
   };
@@ -20425,7 +20425,7 @@ test('sync.runNow quiesces an acknowledged unchanged remote action and re-wakes 
     transitionComments.length = 0;
     statusMutations.length = 0;
     wakeRequests.length = 0;
-    await syncAndExpectWake();
+    await syncAndExpectWake(0);
 
     await acknowledgeAndReset();
     headSha = 'c'.repeat(40);

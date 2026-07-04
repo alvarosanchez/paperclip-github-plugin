@@ -13196,6 +13196,7 @@ async function updatePaperclipIssueState(
     clearExecutionPolicy?: boolean;
     transitionComment: string;
     transitionCommentAnnotation?: StoredStatusTransitionCommentAnnotation;
+    actionFingerprint?: string;
     paperclipApiBaseUrl?: string;
   }
 ): Promise<void> {
@@ -13210,12 +13211,14 @@ async function updatePaperclipIssueState(
     clearExecutionPolicy,
     transitionComment,
     transitionCommentAnnotation,
+    actionFingerprint,
     paperclipApiBaseUrl
   } = params;
   const trimmedTransitionComment = transitionComment.trim();
-  const interactionOccurredAt = new Date().toISOString();
+  let interactionOccurredAt = new Date().toISOString();
   const statusWillChange = currentStatus !== nextStatus;
   let createdTransitionComment: IssueComment | null = null;
+  let transitionCommentComplete = false;
   let issueUpdated = false;
   const syncExecutionStatePatch = buildSyncFallbackExecutionStatePatch({
     currentStatus,
@@ -13250,7 +13253,33 @@ async function updatePaperclipIssueState(
   }
 
   const reasonCode = classifyIssueInteractionReason(transitionCommentAnnotation?.reason ?? trimmedTransitionComment);
-  const interactionDedupeBase = `sync:${issueId}:${interactionOccurredAt}:${currentStatus}:${nextStatus}`;
+  const interactionDedupeBase = actionFingerprint
+    ? `sync:${createHash('sha256').update(JSON.stringify({
+        companyId,
+        issueId,
+        mutation: 'status_transition',
+        actionFingerprint,
+        currentStatus,
+        nextStatus
+      })).digest('hex')}`
+    : `sync:${issueId}:${interactionOccurredAt}:${currentStatus}:${nextStatus}`;
+  let existingInteractionEvents: IssueInteractionEvent[] = [];
+  if (actionFingerprint) {
+    const ledger = await listIssueInteractionEvents(ctx, companyId, issueId, {
+      from: '1970-01-01T00:00:00.000Z',
+      to: '9999-12-31T23:59:59.999Z'
+    });
+    if (
+      ledger.integrity.malformedRows > 0
+      || ledger.integrity.conflictingKeys > 0
+      || ledger.integrity.scanTruncated
+    ) {
+      throw new Error('GitHub Sync refused a status transition because its issue interaction ledger is incomplete or conflicting.');
+    }
+    existingInteractionEvents = ledger.events;
+    const existingIntent = existingInteractionEvents.find((event) => event.dedupeKey === `${interactionDedupeBase}:intent`);
+    if (existingIntent) interactionOccurredAt = existingIntent.occurredAt;
+  }
   await persistIssueInteractionEvent(ctx, {
     schemaVersion: 1,
     companyId,
@@ -13290,13 +13319,103 @@ async function updatePaperclipIssueState(
     } : {}),
     transition: { from: currentStatus, to: nextStatus, reasonCode },
     outcome,
-    dedupeKey: `${interactionDedupeBase}:result`
+    dedupeKey: `${interactionDedupeBase}:result:${outcome}`
   });
+  const persistMutationPhase = (outcome: 'observed' | 'changed' | 'failed') => persistIssueInteractionEvent(ctx, {
+    schemaVersion: 1,
+    companyId,
+    paperclipIssueId: issueId,
+    occurredAt: interactionOccurredAt,
+    category: 'sync',
+    action: 'update_issue',
+    source: 'sync',
+    ...(transitionCommentAnnotation ? {
+      remote: {
+        repositoryUrl: transitionCommentAnnotation.repositoryUrl,
+        kind: 'issue' as const,
+        number: transitionCommentAnnotation.githubIssueNumber,
+        url: transitionCommentAnnotation.githubIssueUrl
+      }
+    } : {}),
+    outcome,
+    dedupeKey: `${interactionDedupeBase}:mutation:${outcome === 'observed' ? 'intent' : `result:${outcome}`}`
+  });
+  const priorMutationIntent = existingInteractionEvents.find((event) => event.dedupeKey === `${interactionDedupeBase}:mutation:intent`);
+  const priorMutationChanged = existingInteractionEvents.find((event) => event.dedupeKey === `${interactionDedupeBase}:mutation:result:changed`);
+  const priorMutationFailed = existingInteractionEvents.find((event) => event.dedupeKey === `${interactionDedupeBase}:mutation:result:failed`);
+  let mutationAttemptStarted = false;
+  let mutationReturned = false;
+  let mutationComplete = Boolean(priorMutationChanged);
 
   try {
   if (statusWillChange) {
-    createdTransitionComment = await ctx.issues.createComment(issueId, trimmedTransitionComment, companyId);
+    const commentIntentKey = `${interactionDedupeBase}:comment:intent`;
+    const commentChangedKey = `${interactionDedupeBase}:comment:result:changed`;
+    const priorCommentIntent = existingInteractionEvents.find((event) => event.dedupeKey === commentIntentKey);
+    const priorCommentChanged = existingInteractionEvents.find((event) => event.dedupeKey === commentChangedKey);
+    if (priorCommentChanged) {
+      transitionCommentComplete = true;
+    } else if (priorCommentIntent) {
+      throw new Error('GitHub Sync refused to repeat an uncertain transition comment; reconcile the durable interaction intent before retrying.');
+    } else {
+      const commentEventBase = {
+        schemaVersion: 1 as const,
+        companyId,
+        paperclipIssueId: issueId,
+        occurredAt: interactionOccurredAt,
+        category: 'comment' as const,
+        action: 'add_issue_comment',
+        source: 'sync' as const,
+        ...(transitionCommentAnnotation ? {
+          remote: {
+            repositoryUrl: transitionCommentAnnotation.repositoryUrl,
+            kind: 'issue' as const,
+            number: transitionCommentAnnotation.githubIssueNumber,
+            url: transitionCommentAnnotation.githubIssueUrl
+          }
+        } : {})
+      };
+      await persistIssueInteractionEvent(ctx, {
+        ...commentEventBase,
+        outcome: 'observed',
+        dedupeKey: commentIntentKey
+      });
+      try {
+        createdTransitionComment = await ctx.issues.createComment(issueId, trimmedTransitionComment, companyId);
+        if (transitionCommentAnnotation) {
+          await upsertStatusTransitionCommentAnnotation(ctx, {
+            issueId,
+            commentId: createdTransitionComment.id,
+            annotation: {
+              ...transitionCommentAnnotation,
+              companyId,
+              paperclipIssueId: issueId
+            }
+          });
+        }
+        await persistIssueInteractionEvent(ctx, {
+          ...commentEventBase,
+          outcome: 'changed',
+          dedupeKey: commentChangedKey
+        });
+        transitionCommentComplete = true;
+      } catch (error) {
+        await persistIssueInteractionEvent(ctx, {
+          ...commentEventBase,
+          outcome: 'failed',
+          dedupeKey: `${interactionDedupeBase}:comment:result:failed`
+        });
+        throw error;
+      }
+    }
   }
+
+  if (!mutationComplete) {
+    if (priorMutationIntent && !priorMutationFailed) {
+      throw new Error('GitHub Sync refused to repeat an uncertain issue mutation; reconcile the durable mutation intent before retrying.');
+    }
+    await persistMutationPhase('observed');
+    mutationAttemptStarted = true;
 
   if (paperclipApiBaseUrl) {
     try {
@@ -13387,19 +13506,11 @@ async function updatePaperclipIssueState(
 
     await ctx.issues.update(issueId, sdkIssuePatch as PaperclipIssueUpdatePatchWithLabels, companyId);
   }
-  if (createdTransitionComment) {
-    if (transitionCommentAnnotation) {
-      await upsertStatusTransitionCommentAnnotation(ctx, {
-        issueId,
-        commentId: createdTransitionComment.id,
-        annotation: {
-          ...transitionCommentAnnotation,
-          companyId,
-          paperclipIssueId: issueId
-        }
-      });
-    }
-  } else if (trimmedTransitionComment && typeof ctx.issues.createComment === 'function') {
+  mutationReturned = true;
+  await persistMutationPhase('changed');
+  mutationComplete = true;
+  }
+  if (!statusWillChange && trimmedTransitionComment && typeof ctx.issues.createComment === 'function') {
     const createdComment = await ctx.issues.createComment(issueId, trimmedTransitionComment, companyId);
     if (transitionCommentAnnotation) {
       await upsertStatusTransitionCommentAnnotation(ctx, {
@@ -13413,8 +13524,18 @@ async function updatePaperclipIssueState(
       });
     }
   }
+  if (statusWillChange && !transitionCommentComplete) {
+    throw new Error('GitHub Sync refused to complete a status transition without a durable transition comment result.');
+  }
 
   } catch (error) {
+    if (mutationAttemptStarted && !mutationReturned) {
+      try {
+        await persistMutationPhase('failed');
+      } catch (mutationLedgerError) {
+        throw new AggregateError([error, mutationLedgerError], 'GitHub Sync issue mutation failed and its mutation result could not be persisted.');
+      }
+    }
     try {
       await persistSyncResult('failed');
     } catch (ledgerError) {
@@ -14036,6 +14157,7 @@ async function cancelUnmappedTransferredGitHubIssue(
       nextStatus,
       transferredRepository: params.transferredRepository
     }),
+    actionFingerprint: `transferred-unmapped:${params.transferredRepository.url}`,
     paperclipApiBaseUrl: params.paperclipApiBaseUrl
   });
 
@@ -14420,6 +14542,11 @@ async function synchronizePaperclipIssueStatuses(
             });
       const hasTrustedNewComment = hasTrustedNewIssueComment || hasTrustedNewLinkedPullRequestComment;
       const remoteActionFingerprint = buildRemoteActionFingerprint(snapshot);
+      const actionJournalFingerprint = createHash('sha256').update(JSON.stringify({
+        remoteActionFingerprint,
+        issueCommentCount: snapshot.commentCount,
+        linkedPullRequestCommentCounts: Object.entries(currentLinkedPullRequestCommentCounts).sort(([left], [right]) => left.localeCompare(right))
+      })).digest('hex');
       if (importedIssue.pendingRemoteActionWake) {
         const pendingWake = importedIssue.pendingRemoteActionWake;
         await wakePaperclipIssueAssignee(ctx, {
@@ -14544,6 +14671,7 @@ async function synchronizePaperclipIssueStatuses(
             ...(shouldClearTransitionAssignee ? { clearAssignee: true } : {}),
             ...(shouldPreserveMaintainerWaitRouting || shouldClearCompletedExecutionPolicy ? { clearExecutionPolicy: true } : {}),
             transitionComment: '',
+            actionFingerprint: actionJournalFingerprint,
             paperclipApiBaseUrl
           });
         }
@@ -14602,6 +14730,7 @@ async function synchronizePaperclipIssueStatuses(
         ...(shouldPreserveMaintainerWaitRouting || shouldClearCompletedExecutionPolicy ? { clearExecutionPolicy: true } : {}),
         transitionComment: transitionComment.body,
         transitionCommentAnnotation: transitionComment.annotation,
+        actionFingerprint: actionJournalFingerprint,
         paperclipApiBaseUrl
       });
       const pendingWake: PendingRemoteActionWake | undefined =
@@ -14921,6 +15050,10 @@ async function synchronizePaperclipPullRequestIssueStatuses(
         }
       }
       const remoteActionFingerprint = buildDirectPullRequestActionFingerprint(pullRequestSnapshots);
+      const actionJournalFingerprint = createHash('sha256').update(JSON.stringify({
+        remoteActionFingerprint,
+        commentCounts: Object.entries(currentCommentCounts).sort(([left], [right]) => left.localeCompare(right))
+      })).digest('hex');
       const paperclipIssueSyncContext = getPaperclipIssueSyncContext(paperclipIssue);
       const executorTransitionAssignee = resolvePaperclipIssueExecutorAssignee(
         paperclipIssueSyncContext,
@@ -14991,6 +15124,7 @@ async function synchronizePaperclipPullRequestIssueStatuses(
             ...(shouldClearTransitionAssignee ? { clearAssignee: true } : {}),
             ...(shouldPreserveMaintainerWaitRouting || shouldClearCompletedExecutionPolicy ? { clearExecutionPolicy: true } : {}),
             transitionComment: '',
+            actionFingerprint: actionJournalFingerprint,
             paperclipApiBaseUrl
           });
         }
@@ -15030,6 +15164,7 @@ async function synchronizePaperclipPullRequestIssueStatuses(
         ...(shouldClearTransitionAssignee ? { clearAssignee: true } : {}),
         ...(shouldPreserveMaintainerWaitRouting || shouldClearCompletedExecutionPolicy ? { clearExecutionPolicy: true } : {}),
         transitionComment,
+        actionFingerprint: actionJournalFingerprint,
         paperclipApiBaseUrl
       });
       const pendingWake = shouldWakeTransitionAssignee && nextTransitionAssignee?.principal.kind === 'agent'

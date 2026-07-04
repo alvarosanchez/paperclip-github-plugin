@@ -63,6 +63,8 @@ If a company already has a Paperclip project bound to a GitHub repository worksp
 
 The plugin does more than mirror issue text. It looks at linked pull requests, mergeability, CI, review decisions, review threads, and trusted new GitHub comments so imported Paperclip issues can reflect where the work actually is. When GitHub links an issue to a pull request in another repository, GitHub Sync now follows that pull request's actual repository for status checks, review state, and deep links instead of assuming the issue repository. When sync closes an imported issue as `done` or `cancelled`, it also clears any pending Paperclip review or approval execution policy/state so the host accepts the terminal transition cleanly and does not keep waking stale review participants.
 
+Sync-driven transitions use a phase-aware durable action journal keyed by a fixed-length hash of the Paperclip issue, effective remote action, comment watermarks, and target state. A retry reuses an already completed explanatory comment or issue mutation instead of repeating it. If the worker can see an intent but cannot prove whether the corresponding side effect completed, it fails closed for operator reconciliation rather than risking a duplicate comment or status write.
+
 ### Company KPI dashboard
 
 GitHub Sync exposes a dedicated KPI dashboard widget alongside the operational sync widget. During full company syncs, the worker snapshots the current open GitHub backlog and records when already-imported GitHub issues move from open to closed. The KPI widget turns that worker-owned state into backlog, issue-closure, and Paperclip PR-creation cards with recent history and comparisons against older periods.
