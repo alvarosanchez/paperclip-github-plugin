@@ -14961,7 +14961,7 @@ test('worker lists only open GitHub issues when bootstrapping a repository with 
   }
 });
 
-test('worker imports GitHub issues as top-level Paperclip issues and skips them on repeat syncs without parent lookups', async () => {
+test('worker durably activates non-waking agent defaults while importing top-level issues and deduplicating repeat syncs', async () => {
   const harness = createTestHarness({
     manifest,
     config: {
@@ -14969,8 +14969,19 @@ test('worker imports GitHub issues as top-level Paperclip issues and skips them 
     }
   });
   await plugin.definition.setup(harness.ctx);
+  harness.seed({
+    agents: [
+      createAgentFixture({
+        id: 'agent-1',
+        companyId: 'company-1',
+        name: 'Triage Agent',
+        title: 'Triage'
+      })
+    ]
+  });
 
   await harness.performAction('settings.saveRegistration', {
+    companyId: 'company-1',
     mappings: [
       {
         id: 'mapping-a',
@@ -14980,10 +14991,38 @@ test('worker imports GitHub issues as top-level Paperclip issues and skips them 
         companyId: 'company-1'
       }
     ],
+    advancedSettings: {
+      defaultAssigneeAgentId: 'agent-1',
+      defaultStatus: 'backlog',
+      ignoredIssueAuthorUsernames: []
+    },
     syncState: {
       status: 'idle'
     }
   });
+
+  const activationPersistedBeforeAssignments: boolean[] = [];
+  const originalUpdateIssue = harness.ctx.issues.update.bind(harness.ctx.issues);
+  harness.ctx.issues.update = async (issueId, patch, companyId) => {
+    if (patch.assigneeAgentId === 'agent-1') {
+      const registry = harness.getState({
+        scopeKind: 'instance',
+        stateKey: 'paperclip-github-plugin-import-registry'
+      }) as Array<{ paperclipIssueId: string; activationPending?: boolean }> | undefined;
+      activationPersistedBeforeAssignments.push(
+        Boolean(registry?.some((record) =>
+          record.paperclipIssueId === issueId && record.activationPending === true
+        ))
+      );
+    }
+    return originalUpdateIssue(issueId, patch, companyId);
+  };
+  const originalRequestWakeup = harness.ctx.issues.requestWakeup.bind(harness.ctx.issues);
+  let wakeupCount = 0;
+  harness.ctx.issues.requestWakeup = async (...args) => {
+    wakeupCount += 1;
+    return originalRequestWakeup(...args);
+  };
 
   const statusTransitionComments: Array<{ issueId: string; body: string }> = [];
   const originalCreateComment = harness.ctx.issues.createComment;
@@ -15114,6 +15153,10 @@ test('worker imports GitHub issues as top-level Paperclip issues and skips them 
     assert.ok(!importedChild?.parentId);
     assert.equal(importedParent?.status, 'backlog');
     assert.equal(importedChild?.status, 'backlog');
+    assert.equal(importedParent?.assigneeAgentId, 'agent-1');
+    assert.equal(importedChild?.assigneeAgentId, 'agent-1');
+    assert.deepEqual(activationPersistedBeforeAssignments, [true, true]);
+    assert.equal(wakeupCount, 0);
     assert.deepEqual(createIssueInputs.map((input) => input.status), ['backlog', 'backlog']);
     assert.equal(parentRelationshipQueryCount, 0);
     assert.equal(statusTransitionComments.length, 0);
@@ -15148,9 +15191,13 @@ test('worker imports GitHub issues as top-level Paperclip issues and skips them 
     assert.ok(!importedChildAfterSecondSync?.parentId);
     assert.equal(importedParentAfterSecondSync?.status, 'backlog');
     assert.equal(importedChildAfterSecondSync?.status, 'backlog');
+    assert.deepEqual(activationPersistedBeforeAssignments, [true, true]);
+    assert.equal(wakeupCount, 0);
     assert.equal(parentRelationshipQueryCount, 0);
     assert.equal(statusTransitionComments.length, 0);
   } finally {
+    harness.ctx.issues.update = originalUpdateIssue;
+    harness.ctx.issues.requestWakeup = originalRequestWakeup;
     globalThis.fetch = originalFetch;
   }
 });
@@ -15461,7 +15508,7 @@ test('worker imports maintainer-authored open issues without linked pull request
   }
 });
 
-test('worker passes a configured board-user default assignee through issue import creation', async () => {
+test('worker durably activates a configured board-user default after neutral issue creation', async () => {
   const harness = createTestHarness({
     manifest,
     config: {
@@ -15494,6 +15541,7 @@ test('worker passes a configured board-user default assignee through issue impor
 
   const originalUpdate = harness.ctx.issues.update.bind(harness.ctx.issues);
   const assigneePatchRequests: Array<{ issueId: string; body: Record<string, unknown> | null }> = [];
+  let activationPersistedBeforeUserAssignment = false;
   const originalFetch = globalThis.fetch;
 
   globalThis.fetch = async (input, init) => {
@@ -15505,6 +15553,15 @@ test('worker passes a configured board-user default assignee through issue impor
       const issueId = url.pathname.split('/').pop() ?? '';
       const body = getJsonRequestBody(init);
       assigneePatchRequests.push({ issueId, body });
+      if (body?.assigneeUserId === 'user-1') {
+        const registry = harness.getState({
+          scopeKind: 'instance',
+          stateKey: 'paperclip-github-plugin-import-registry'
+        }) as Array<{ paperclipIssueId: string; activationPending?: boolean }> | undefined;
+        activationPersistedBeforeUserAssignment = Boolean(registry?.some((record) =>
+          record.paperclipIssueId === issueId && record.activationPending === true
+        ));
+      }
 
       const patch: Record<string, unknown> = {};
       if (body && Object.prototype.hasOwnProperty.call(body, 'assigneeAgentId')) {
@@ -15585,6 +15642,7 @@ test('worker passes a configured board-user default assignee through issue impor
     assert.ok(
       assigneePatchRequests.some((request) => request.body?.assigneeUserId === 'user-1')
     );
+    assert.equal(activationPersistedBeforeUserAssignment, true);
 
     const importedIssue = (await harness.ctx.issues.list({
       companyId: 'company-1'
@@ -15595,7 +15653,7 @@ test('worker passes a configured board-user default assignee through issue impor
   }
 });
 
-test('worker promotes newly imported member-authored backlog issues to todo on first sync', { concurrency: false }, async () => {
+test('worker durably activates unassigned member-authored backlog issues as todo on first sync', { concurrency: false }, async () => {
   const harness = createTestHarness({
     manifest,
     config: {
@@ -15624,6 +15682,19 @@ test('worker promotes newly imported member-authored backlog issues to todo on f
   harness.ctx.issues.create = async (input) => {
     const created = await originalCreate(input);
     return originalUpdate(created.id, { status: 'backlog' }, input.companyId);
+  };
+  let activationPersistedBeforeUnassignedStatusUpdate = false;
+  harness.ctx.issues.update = async (issueId, patch, companyId) => {
+    if (patch.status === 'todo') {
+      const registry = harness.getState({
+        scopeKind: 'instance',
+        stateKey: 'paperclip-github-plugin-import-registry'
+      }) as Array<{ paperclipIssueId: string; activationPending?: boolean }> | undefined;
+      activationPersistedBeforeUnassignedStatusUpdate = Boolean(registry?.some((record) =>
+        record.paperclipIssueId === issueId && record.activationPending === true
+      ));
+    }
+    return originalUpdate(issueId, patch, companyId);
   };
 
   const statusTransitionComments: Array<{ issueId: string; body: string }> = [];
@@ -15734,6 +15805,7 @@ test('worker promotes newly imported member-authored backlog issues to todo on f
 
     assert.equal(importedIssues.find((issue) => issue.title === 'Member-authored issue')?.status, 'todo');
     assert.equal(importedIssues.find((issue) => issue.title === 'Reporter-authored issue')?.status, 'backlog');
+    assert.equal(activationPersistedBeforeUnassignedStatusUpdate, true);
     assert.equal(statusTransitionComments.length, 1);
     assert.match(statusTransitionComments[0]?.body ?? '', /from `backlog` to `todo`/);
     assert.match(
@@ -15741,6 +15813,7 @@ test('worker promotes newly imported member-authored backlog issues to todo on f
       /created by a repository maintainer/
     );
   } finally {
+    harness.ctx.issues.update = originalUpdate;
     globalThis.fetch = originalFetch;
   }
 });

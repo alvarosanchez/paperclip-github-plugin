@@ -15208,10 +15208,8 @@ async function synchronizePaperclipIssueStatuses(
                   nextStatus
                 }, createWakeFingerprint)
               : undefined;
-        if (pendingWake) {
-          importedIssue.pendingRemoteActionWake = pendingWake;
-          await persistImportRegistry();
-        }
+        if (pendingWake) importedIssue.pendingRemoteActionWake = pendingWake;
+        if (pendingWake || isPendingInitialActivation) await persistImportRegistry();
         updateSyncFailureContext(syncFailureContext, {
           phase: 'updating_paperclip_status',
           repositoryUrl: repository.url,
@@ -15287,10 +15285,8 @@ async function synchronizePaperclipIssueStatuses(
                 nextStatus
               }, createWakeFingerprint)
             : undefined;
-      if (pendingWake) {
-        importedIssue.pendingRemoteActionWake = pendingWake;
-        await persistImportRegistry();
-      }
+      if (pendingWake) importedIssue.pendingRemoteActionWake = pendingWake;
+      if (pendingWake || isPendingInitialActivation) await persistImportRegistry();
       await updatePaperclipIssueState(ctx, {
         companyId: mapping.companyId,
         issueId: importedIssue.paperclipIssueId,
