@@ -664,6 +664,52 @@ test('PR link metadata refresh cannot overwrite a concurrent explicit owner upda
   assert.equal((stored?.data as { title?: unknown }).title, 'Explicit owner update');
 });
 
+test('PR link metadata refresh reuses case-insensitive repository identity', async () => {
+  const workerModule = await importFreshWorkerModule();
+  const harness = createTestHarness({ manifest, config: { githubToken: TEST_GITHUB_TOKEN } });
+  const base = {
+    companyId: 'company-1',
+    projectId: 'project-1',
+    issueId: 'issue-1',
+    repositoryUrl: 'https://github.com/PaperclipAI/Example-Repo',
+    pullRequestNumber: 78,
+    pullRequestUrl: 'https://github.com/PaperclipAI/Example-Repo/pull/78',
+    pullRequestTitle: 'Initial title',
+    pullRequestState: 'open' as const
+  };
+  await workerModule.__testing.upsertGitHubPullRequestLinkRecord(harness.ctx, {
+    ...base,
+    followThroughAssigneeAgentId: 'owner-a'
+  });
+  const [initial] = await harness.ctx.entities.list({
+    entityType: 'paperclip-github-plugin.pull-request-link',
+    scopeKind: 'issue',
+    scopeId: base.issueId
+  });
+  const initialData = initial?.data as {
+    followThroughAssigneeAgentId?: unknown;
+    followThroughAssigneeUpdatedAt?: unknown;
+  };
+
+  await workerModule.__testing.upsertGitHubPullRequestLinkRecord(harness.ctx, {
+    ...base,
+    repositoryUrl: 'https://github.com/paperclipai/example-repo',
+    pullRequestUrl: 'https://github.com/paperclipai/example-repo/pull/78',
+    pullRequestTitle: 'Refreshed title'
+  });
+
+  const stored = await harness.ctx.entities.list({
+    entityType: 'paperclip-github-plugin.pull-request-link',
+    scopeKind: 'issue',
+    scopeId: base.issueId
+  });
+  assert.equal(stored.length, 1);
+  assert.equal(stored[0]?.externalId, initial?.externalId);
+  assert.equal(stored[0]?.data.followThroughAssigneeAgentId, 'owner-a');
+  assert.equal(stored[0]?.data.followThroughAssigneeUpdatedAt, initialData.followThroughAssigneeUpdatedAt);
+  assert.equal(stored[0]?.data.title, 'Refreshed title');
+});
+
 test('sync preserves blocked maintainer approval waits for green mergeable pull requests', async () => {
   const workerModule = await importFreshWorkerModule();
   const testing = workerModule.__testing as typeof workerModule.__testing & {

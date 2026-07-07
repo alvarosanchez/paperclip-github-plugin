@@ -11448,14 +11448,18 @@ async function upsertGitHubPullRequestLinkRecord(
   }
 ): Promise<GitHubPullRequestLinkEntityData> {
   const repositoryUrl = getNormalizedMappingRepositoryUrl({ repositoryUrl: params.repositoryUrl });
-  const mutationKey = `${params.companyId}:${params.issueId}:${repositoryUrl.toLowerCase()}:${params.pullRequestNumber}`;
+  const referenceKey = buildGitHubPullRequestReferenceKey({
+    repositoryUrl,
+    number: params.pullRequestNumber
+  });
+  const mutationKey = `${params.companyId}:${params.issueId}:${referenceKey}`;
   return withPullRequestLinkMutationLock(mutationKey, async () => {
     const existing = (await listGitHubPullRequestLinkRecords(ctx, {
       paperclipIssueId: params.issueId
-    })).find((record) =>
-      record.data.githubPullRequestNumber === params.pullRequestNumber
-      && getNormalizedMappingRepositoryUrl({ repositoryUrl: record.data.repositoryUrl }) === repositoryUrl
-    );
+    })).find((record) => buildGitHubPullRequestReferenceKey({
+      repositoryUrl: record.data.repositoryUrl,
+      number: record.data.githubPullRequestNumber
+    }) === referenceKey);
     const previousOwner = existing?.data.followThroughAssigneeAgentId;
     const nextOwner = params.followThroughAssigneeAgentId === undefined
       ? previousOwner
