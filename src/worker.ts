@@ -440,6 +440,13 @@ interface RemoteActionRecord {
   selectedPullRequestGate?: GitHubPullRequestReference;
 }
 
+function createRemoteActionWakeFingerprint(remoteActionFingerprint: string): string {
+  return createHash('sha256').update(JSON.stringify({
+    remoteActionFingerprint,
+    wakeEpisodeId: randomUUID()
+  })).digest('hex');
+}
+
 interface GitHubIssueLinkEntityData {
   companyId?: string;
   paperclipProjectId?: string;
@@ -13616,7 +13623,7 @@ async function updatePaperclipIssueState(
     issuePatch
   });
   const reasonCode = classifyIssueInteractionReason(transitionCommentAnnotation?.reason ?? trimmedTransitionComment);
-  const interactionDedupeBase = actionFingerprint
+  const interactionFamilyBase = actionFingerprint
     ? `sync:${createHash('sha256').update(JSON.stringify({
         companyId,
         issueId,
@@ -13627,7 +13634,7 @@ async function updatePaperclipIssueState(
         currentIssueState: syncContext,
         issuePatch
       })).digest('hex')}`
-    : `sync:${issueId}:${interactionOccurredAt}:${currentStatus}:${nextStatus}`;
+    : undefined;
   const mutationFamilyBase = actionFingerprint
     ? `sync:${createHash('sha256').update(JSON.stringify({
         companyId,
@@ -13636,7 +13643,7 @@ async function updatePaperclipIssueState(
         actionFingerprint,
         nextStatus
       })).digest('hex')}`
-    : interactionDedupeBase;
+    : `sync:${issueId}:${interactionOccurredAt}:${currentStatus}:${nextStatus}`;
   const hasAssigneePatch = Object.prototype.hasOwnProperty.call(issuePatch, 'assigneeAgentId')
     || Object.prototype.hasOwnProperty.call(issuePatch, 'assigneeUserId');
   const mutationExpectedState = {
@@ -13668,12 +13675,10 @@ async function updatePaperclipIssueState(
     .update(JSON.stringify(liveMutationState))
     .digest('hex')
     .slice(0, 32);
-  const mutationPatchBase = `${mutationFamilyBase}:patch:${createHash('sha256')
-    .update(JSON.stringify(issuePatch))
-    .digest('hex')
-    .slice(0, 32)}:applied:${mutationExpectedStateFingerprint}`;
   let existingInteractionEvents: IssueInteractionEvent[] = [];
-  if (actionFingerprint) {
+  let interactionDedupeBase = mutationFamilyBase;
+  let reconciliationAttemptId: string | undefined;
+  if (actionFingerprint && interactionFamilyBase) {
     const ledger = await listIssueInteractionEvents(ctx, companyId, issueId, {
       from: '1970-01-01T00:00:00.000Z',
       to: '9999-12-31T23:59:59.999Z'
@@ -13686,20 +13691,38 @@ async function updatePaperclipIssueState(
       throw new Error('GitHub Sync refused a status transition because its issue interaction ledger is incomplete or conflicting.');
     }
     existingInteractionEvents = ledger.events;
-    const existingIntent = existingInteractionEvents.find((event) => event.dedupeKey === `${interactionDedupeBase}:intent`);
-    if (existingIntent) interactionOccurredAt = existingIntent.occurredAt;
+    const attemptPrefix = `${interactionFamilyBase}:attempt:`;
+    const latestOpenAttemptIntent = existingInteractionEvents
+      .filter((event) => {
+        if (!event.dedupeKey.startsWith(attemptPrefix)) return false;
+        const suffix = event.dedupeKey.slice(attemptPrefix.length);
+        return /^[^:]+:intent$/.test(suffix);
+      })
+      .sort((left, right) =>
+        right.occurredAt.localeCompare(left.occurredAt)
+        || right.dedupeKey.localeCompare(left.dedupeKey)
+      )
+      .find((intent) => {
+        const attemptBase = intent.dedupeKey.slice(0, -':intent'.length);
+        return !existingInteractionEvents.some((event) =>
+          event.dedupeKey.startsWith(`${attemptBase}:result:`)
+          && !event.dedupeKey.endsWith(':result:failed')
+        );
+      });
+    if (latestOpenAttemptIntent) {
+      interactionDedupeBase = latestOpenAttemptIntent.dedupeKey.slice(0, -':intent'.length);
+      reconciliationAttemptId = interactionDedupeBase.slice(attemptPrefix.length);
+      interactionOccurredAt = latestOpenAttemptIntent.occurredAt;
+    } else {
+      reconciliationAttemptId = randomUUID();
+      interactionDedupeBase = `${attemptPrefix}${reconciliationAttemptId}`;
+    }
   }
-  const completedMutationForPatch = existingInteractionEvents.some((event) =>
-    event.dedupeKey.startsWith(`${mutationPatchBase}:`)
-    && event.dedupeKey.endsWith(':mutation:result:changed')
-  );
-  const mutationDedupeBase = !issuePatchAlreadyApplied && completedMutationForPatch
-    ? `${mutationPatchBase}:drift:${createHash('sha256').update(JSON.stringify({
-        currentStatus: liveCurrentStatus,
-        currentIssueState: liveSyncContext,
-        issuePatch
-      })).digest('hex').slice(0, 32)}`
-    : mutationPatchBase;
+  const mutationPatchBase = `${mutationFamilyBase}${reconciliationAttemptId ? `:attempt:${reconciliationAttemptId}` : ''}:patch:${createHash('sha256')
+    .update(JSON.stringify(issuePatch))
+    .digest('hex')
+    .slice(0, 32)}:applied:${mutationExpectedStateFingerprint}`;
+  const mutationDedupeBase = mutationPatchBase;
   await persistIssueInteractionEvent(ctx, {
     schemaVersion: 1,
     companyId,
@@ -15013,6 +15036,7 @@ async function synchronizePaperclipIssueStatuses(
           currentLinkedPullRequestCommentCounts
         )
       })).digest('hex');
+      const createWakeFingerprint = () => createRemoteActionWakeFingerprint(remoteActionFingerprint);
       if (importedIssue.pendingRemoteActionWake) {
         const pendingWake = importedIssue.pendingRemoteActionWake;
         await wakePaperclipIssueAssignee(ctx, {
@@ -15139,7 +15163,7 @@ async function synchronizePaperclipIssueStatuses(
         const pendingWake: PendingRemoteActionWake | undefined =
           shouldWakeImportedAssignee && paperclipIssueSyncContext.assignee?.kind === 'agent'
             ? {
-                fingerprint: remoteActionFingerprint,
+                fingerprint: createWakeFingerprint(),
                 assigneeAgentId: paperclipIssueSyncContext.assignee.id,
                 reason: IMPORTED_ISSUE_WAKE_REASON,
                 mutation: 'import',
@@ -15147,7 +15171,7 @@ async function synchronizePaperclipIssueStatuses(
               }
             : shouldWakeTransitionAssignee && nextTransitionAssignee?.principal.kind === 'agent'
               ? {
-                  fingerprint: remoteActionFingerprint,
+                  fingerprint: createWakeFingerprint(),
                   assigneeAgentId: nextTransitionAssignee.principal.id,
                   reason: STATUS_TRANSITION_WAKE_REASON,
                   mutation: 'status_transition',
@@ -15209,7 +15233,7 @@ async function synchronizePaperclipIssueStatuses(
       const pendingWake: PendingRemoteActionWake | undefined =
         shouldWakeImportedAssignee && paperclipIssueSyncContext.assignee?.kind === 'agent'
           ? {
-              fingerprint: remoteActionFingerprint,
+              fingerprint: createWakeFingerprint(),
               assigneeAgentId: paperclipIssueSyncContext.assignee.id,
               reason: IMPORTED_ISSUE_WAKE_REASON,
               mutation: 'import',
@@ -15218,7 +15242,7 @@ async function synchronizePaperclipIssueStatuses(
             }
           : shouldWakeTransitionAssignee && nextTransitionAssignee?.principal.kind === 'agent'
             ? {
-                fingerprint: remoteActionFingerprint,
+                fingerprint: createWakeFingerprint(),
                 assigneeAgentId: nextTransitionAssignee.principal.id,
                 reason: STATUS_TRANSITION_WAKE_REASON,
                 mutation: 'status_transition',
@@ -15541,6 +15565,7 @@ async function synchronizePaperclipPullRequestIssueStatuses(
         remoteActionFingerprint,
         commentCounts: canonicalizeGitHubPullRequestCommentCounts(currentCommentCounts)
       })).digest('hex');
+      const createWakeFingerprint = () => createRemoteActionWakeFingerprint(remoteActionFingerprint);
       const paperclipIssueSyncContext = getPaperclipIssueSyncContext(paperclipIssue);
       const executorTransitionAssignee = resolvePaperclipIssueExecutorAssignee(
         paperclipIssueSyncContext,
@@ -15619,7 +15644,7 @@ async function synchronizePaperclipPullRequestIssueStatuses(
 
         const pendingWake = shouldWakeTransitionAssignee && nextTransitionAssignee?.principal.kind === 'agent'
           ? {
-              fingerprint: remoteActionFingerprint,
+              fingerprint: createWakeFingerprint(),
               assigneeAgentId: nextTransitionAssignee.principal.id,
               reason: STATUS_TRANSITION_WAKE_REASON,
               mutation: 'status_transition',
@@ -15689,7 +15714,7 @@ async function synchronizePaperclipPullRequestIssueStatuses(
       });
       const pendingWake = shouldWakeTransitionAssignee && nextTransitionAssignee?.principal.kind === 'agent'
         ? {
-            fingerprint: remoteActionFingerprint,
+            fingerprint: createWakeFingerprint(),
             assigneeAgentId: nextTransitionAssignee.principal.id,
             reason: STATUS_TRANSITION_WAKE_REASON,
             mutation: 'status_transition',
@@ -22782,6 +22807,7 @@ function registerGitHubAgentTools(ctx: PluginSetupContext): void {
       }
 
       let persistedFollowThroughAssigneeAgentId = followThroughAssigneeAgentId ?? undefined;
+      let persistedFollowThroughAssigneeUpdatedAt: string | undefined;
       if (paperclipIssueId) {
         const pullRequestUrl =
           normalizeGitHubPullRequestHtmlUrl(pullRequestData.html_url)
@@ -22802,6 +22828,7 @@ function registerGitHubAgentTools(ctx: PluginSetupContext): void {
           followThroughAssigneeAgentId
         });
         persistedFollowThroughAssigneeAgentId = persistedLink.followThroughAssigneeAgentId;
+        persistedFollowThroughAssigneeUpdatedAt = persistedLink.followThroughAssigneeUpdatedAt;
         invalidateProjectPullRequestCaches({
           companyId: runCtx.companyId,
           projectId: issueProjectId,
@@ -22833,7 +22860,12 @@ function registerGitHubAgentTools(ctx: PluginSetupContext): void {
             remoteRef: publishedBranch.remoteRef
           },
           ...(persistedFollowThroughAssigneeAgentId
-            ? { followThroughAssigneeAgentId: persistedFollowThroughAssigneeAgentId }
+            ? {
+                followThroughAssigneeAgentId: persistedFollowThroughAssigneeAgentId,
+                ...(persistedFollowThroughAssigneeUpdatedAt
+                  ? { followThroughAssigneeUpdatedAt: persistedFollowThroughAssigneeUpdatedAt }
+                  : {})
+              }
             : {}),
           pullRequest: {
             number: pullRequestData.number,

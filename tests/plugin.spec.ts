@@ -2935,6 +2935,9 @@ test('create_pull_request auto-records Paperclip PR metrics and API route attrib
 
 test('create_pull_request links the created pull request to the current Paperclip issue', async () => {
   const harness = await createGitHubAgentToolHarness();
+  harness.seed({ agents: [createAgentFixture({
+    id: 'agent-1', companyId: 'company-1', name: 'PR Owner', title: 'Engineer'
+  })] });
   const originalFetch = globalThis.fetch;
   const issue = await harness.ctx.issues.create({
     companyId: 'company-1',
@@ -3029,7 +3032,8 @@ test('create_pull_request links the created pull request to the current Papercli
       head: 'feature/native-paperclip-issue',
       headCommitSha: TEST_HEAD_COMMIT_SHA,
       base: 'main',
-      title: 'Fix native issue sync'
+      title: 'Fix native issue sync',
+      followThroughAssigneeAgentId: 'agent-1'
     }, {
       agentId: 'agent-1',
       runId: 'run-1',
@@ -3037,7 +3041,13 @@ test('create_pull_request links the created pull request to the current Papercli
       projectId: 'project-1'
     });
 
-    assert.ok(!createResult.error);
+    assert.ok(!createResult.error, createResult.error);
+    const createResultData = createResult.data as {
+      followThroughAssigneeAgentId?: unknown;
+      followThroughAssigneeUpdatedAt?: unknown;
+    };
+    assert.equal(createResultData.followThroughAssigneeAgentId, 'agent-1');
+    assert.match(String(createResultData.followThroughAssigneeUpdatedAt), /^\d{4}-\d{2}-\d{2}T/);
 
     const pullRequestLinks = await harness.ctx.entities.list({
       entityType: 'paperclip-github-plugin.pull-request-link',
@@ -12068,6 +12078,7 @@ test('sync.runNow reconciles local drift under unchanged direct pull request sta
   const statusTransitionComments: Array<{ issueId: string; body: string }> = [];
   const statusMutations: Array<Record<string, unknown>> = [];
   const wakeRequests: string[] = [];
+  const queuedWakeKeys = new Set<string>();
   const triggeredMonitorExecutionState = {
     status: 'idle',
     currentStageId: null,
@@ -12113,7 +12124,13 @@ test('sync.runNow reconciles local drift under unchanged direct pull request sta
     return originalUpdate(issueId, patch, companyId);
   };
   harness.ctx.issues.requestWakeup = async (issueId, companyId, options) => {
-    wakeRequests.push(issueId);
+    const idempotencyKey = options?.idempotencyKey;
+    assert.ok(idempotencyKey);
+    if (queuedWakeKeys.has(idempotencyKey)) {
+      return { queued: false } as never;
+    }
+    queuedWakeKeys.add(idempotencyKey);
+    wakeRequests.push(idempotencyKey);
     return originalRequestWakeup(issueId, companyId, options);
   };
 
@@ -12265,6 +12282,18 @@ test('sync.runNow reconciles local drift under unchanged direct pull request sta
     assert.equal(statusMutations.length, 0);
     assert.equal(wakeRequests.length, 0);
 
+    await originalUpdate(issue.id, { status: 'done' }, 'company-1');
+    const recurringStatusDrift = await syncIssue();
+    assert.equal(recurringStatusDrift.syncState.status, 'success');
+    assert.equal((await harness.ctx.issues.get(issue.id, 'company-1'))?.status, 'in_progress');
+    assert.equal(statusTransitionComments.length, 1);
+    assert.equal(statusMutations.length, 1);
+    assert.equal(wakeRequests.length, 1);
+    assert.equal(queuedWakeKeys.size, 3);
+
+    statusTransitionComments.length = 0;
+    statusMutations.length = 0;
+    wakeRequests.length = 0;
     await originalUpdate(issue.id, { assigneeAgentId: null }, 'company-1');
     const assigneeDrift = await syncIssue();
     assert.equal(assigneeDrift.syncState.status, 'success');
@@ -21161,6 +21190,7 @@ test('sync.runNow converges local drift, quiesces stable state, and re-wakes for
   const transitionComments: string[] = [];
   const statusMutations: Array<Record<string, unknown>> = [];
   const wakeRequests: string[] = [];
+  const queuedWakeKeys = new Set<string>();
   let failNextStatusMutation = false;
   let failNextWake = false;
   const originalCreateComment = harness.ctx.issues.createComment;
@@ -21181,11 +21211,17 @@ test('sync.runNow converges local drift, quiesces stable state, and re-wakes for
     return originalUpdate(issueId, patch, companyId);
   };
   harness.ctx.issues.requestWakeup = async (issueId, companyId, options) => {
-    wakeRequests.push(issueId);
     if (failNextWake) {
       failNextWake = false;
       throw new Error('Injected wake failure.');
     }
+    const idempotencyKey = options?.idempotencyKey;
+    assert.ok(idempotencyKey);
+    if (queuedWakeKeys.has(idempotencyKey)) {
+      return { queued: false } as never;
+    }
+    queuedWakeKeys.add(idempotencyKey);
+    wakeRequests.push(idempotencyKey);
     return originalRequestWakeup(issueId, companyId, options);
   };
 
@@ -21282,6 +21318,20 @@ test('sync.runNow converges local drift, quiesces stable state, and re-wakes for
     assert.equal(statusMutations.length, 0);
     assert.equal(wakeRequests.length, 0);
 
+    await acknowledgeAndReset();
+    mergeable = 'MERGEABLE';
+    mergeStateStatus = 'CLEAN';
+    checkConclusion = 'SUCCESS';
+    const healthyBetweenRecurringConflicts = await harness.performAction('sync.runNow', {}) as { syncState: { status: string } };
+    assert.equal(healthyBetweenRecurringConflicts.syncState.status, 'success');
+    assert.equal((await harness.ctx.issues.get(issue.id, 'company-1'))?.status, 'in_review');
+    assert.equal(wakeRequests.length, 0);
+
+    await acknowledgeAndReset();
+    mergeable = 'CONFLICTING';
+    mergeStateStatus = 'DIRTY';
+    await syncAndExpectWake();
+
     await acknowledgeAndReset('in_review');
     await syncAndExpectWake();
 
@@ -21290,7 +21340,7 @@ test('sync.runNow converges local drift, quiesces stable state, and re-wakes for
     await syncAndExpectWake();
     await acknowledgeAndReset();
     checkConclusion = 'FAILURE';
-    await syncAndExpectWake(0);
+    await syncAndExpectWake();
 
     await acknowledgeAndReset();
     mergeable = 'MERGEABLE';
@@ -21298,7 +21348,7 @@ test('sync.runNow converges local drift, quiesces stable state, and re-wakes for
     await syncAndExpectWake();
     await acknowledgeAndReset();
     unresolvedReviewThread = true;
-    await syncAndExpectWake(0);
+    await syncAndExpectWake();
     transitionComments.length = 0;
     statusMutations.length = 0;
     wakeRequests.length = 0;
