@@ -292,6 +292,59 @@ test('direct PR routing selects one deterministic gate for status, fingerprint, 
   assert.deepEqual(reversedTiedGate, tiedGate);
 });
 
+test('issue-linked PR routing keeps trusted comment evidence attached to the source PR', async () => {
+  const workerModule = await importFreshWorkerModule();
+  const pullRequest = (
+    number: number,
+    condition: 'healthy' | 'red' = 'healthy',
+    repositoryUrl = 'https://github.com/paperclipai/example-repo'
+  ) => ({
+    number,
+    repositoryUrl,
+    headSha: `head-${number}`,
+    hasUnresolvedReviewThreads: false,
+    ciState: condition === 'red' ? 'red' : 'green',
+    mergeability: 'mergeable',
+    mergeStateStatus: 'clean',
+    reviewDecision: 'review_required'
+  });
+
+  for (const kind of ['top_level', 'review'] as const) {
+    const pullRequests = [pullRequest(10), pullRequest(20)];
+    const sources = [{
+      repositoryUrl: 'HTTPS://GITHUB.COM/paperclipai/example-repo/',
+      number: 20,
+      kind
+    }];
+    const selected = workerModule.__testing.selectEffectiveIssueLinkedPullRequestAction(
+      pullRequests as never,
+      sources,
+      false
+    );
+    const reversed = workerModule.__testing.selectEffectiveIssueLinkedPullRequestAction(
+      [...pullRequests].reverse() as never,
+      sources,
+      false
+    );
+    assert.equal(selected?.number, 20, `${kind} evidence must route to its source PR owner`);
+    assert.deepEqual(reversed, selected, `${kind} selection must not depend on input order`);
+  }
+
+  const actionable = workerModule.__testing.selectEffectiveIssueLinkedPullRequestAction(
+    [pullRequest(20), pullRequest(10, 'red')] as never,
+    [{ repositoryUrl: 'https://github.com/paperclipai/example-repo', number: 20, kind: 'top_level' }],
+    false
+  );
+  assert.equal(actionable?.number, 10, 'higher-priority actionable PR work still wins');
+
+  const issueCommentSelection = workerModule.__testing.selectEffectiveIssueLinkedPullRequestAction(
+    [pullRequest(20), pullRequest(10)] as never,
+    [],
+    true
+  );
+  assert.equal(issueCommentSelection?.number, 10, 'issue comments retain deterministic repository/number routing');
+});
+
 test('trusted direct PR comment evidence preserves normalized PR identity and stream kind', async () => {
   const workerModule = await importFreshWorkerModule();
   const octokit = {
