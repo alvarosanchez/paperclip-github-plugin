@@ -15061,13 +15061,7 @@ async function synchronizePaperclipIssueStatuses(
       ) {
         nextStatus = 'blocked';
       }
-      if (
-        paperclipIssue.status !== nextStatus
-        && !hasTrustedNewComment
-        && importedIssue.remoteActionFingerprint === remoteActionFingerprint
-      ) {
-        nextStatus = paperclipIssue.status;
-      }
+
       const shouldPreserveMaintainerWaitRouting = isHealthyMaintainerWaitTransition({
         currentStatus: paperclipIssue.status,
         nextStatus,
@@ -15103,7 +15097,6 @@ async function synchronizePaperclipIssueStatuses(
       const shouldWakeTransitionAssignee =
         nextTransitionAssignee?.principal.kind === 'agent'
         && isActionablePaperclipIssueStatus(nextStatus)
-        && (hasTrustedNewComment || importedIssue.remoteActionFingerprint !== remoteActionFingerprint)
         && (nextAssigneeChanged || paperclipIssue.status !== nextStatus);
 
       const persistObservedRemoteState = async (pendingWake?: PendingRemoteActionWake): Promise<void> => {
@@ -15564,13 +15557,7 @@ async function synchronizePaperclipPullRequestIssueStatuses(
       ) {
         nextStatus = 'blocked';
       }
-      if (
-        paperclipIssue.status !== nextStatus
-        && remoteAction.fingerprint === remoteActionFingerprint
-        && !hasTrustedNewComment
-      ) {
-        nextStatus = paperclipIssue.status;
-      }
+
       const shouldPreserveMaintainerWaitRouting = isHealthyMaintainerWaitTransition({
         currentStatus: paperclipIssue.status,
         nextStatus,
@@ -15593,7 +15580,6 @@ async function synchronizePaperclipPullRequestIssueStatuses(
       const shouldWakeTransitionAssignee =
         nextTransitionAssignee?.principal.kind === 'agent'
         && isActionablePaperclipIssueStatus(nextStatus)
-        && (hasTrustedNewComment || remoteAction.fingerprint !== remoteActionFingerprint)
         && (nextAssigneeChanged || paperclipIssue.status !== nextStatus);
 
       if (paperclipIssue.status === nextStatus) {

@@ -8239,7 +8239,7 @@ test('sync.runNow monitors Paperclip issues created from pull requests without c
   }
 });
 
-test('sync.runNow preserves a non-first direct PR gate after trusted comment evidence is consumed', async () => {
+test('sync.runNow keeps the non-first direct PR gate selected after trusted comment evidence is consumed', async () => {
   const harness = await createProjectPullRequestsHarness();
   const originalFetch = globalThis.fetch;
   const originalUpdate = harness.ctx.issues.update;
@@ -8476,13 +8476,13 @@ test('sync.runNow preserves a non-first direct PR gate after trusted comment evi
     const registryAfterSecondPoll = harness.getState({
       scopeKind: 'instance', stateKey: 'paperclip-github-plugin-remote-action-registry'
     }) as Array<{ fingerprint?: string; selectedPullRequestGate?: { number?: number } }>;
-    assert.equal(updatedIssue?.status, 'in_progress');
-    assert.equal(updatedIssue?.assigneeAgentId, 'owner-43');
+    assert.equal(updatedIssue?.status, 'in_review');
+    assert.equal(updatedIssue?.assigneeAgentId, null);
     assert.equal(registryAfterSecondPoll[0]?.fingerprint, firstFingerprint);
     assert.equal(registryAfterSecondPoll[0]?.selectedPullRequestGate?.number, 43);
-    assert.equal(statusUpdates.length, 1, 'the unchanged second poll must not mutate status or ownership');
-    assert.equal(statusTransitionComments.length, 1, 'the unchanged second poll must not add a comment');
-    assert.equal(wakeRequests.length, 1, 'the unchanged second poll must not wake the owner again');
+    assert.equal(statusUpdates.length, 2, 'the consumed trusted action must converge to the selected healthy-review gate');
+    assert.equal(statusTransitionComments.length, 2, 'the converged healthy-review wait must be explained once');
+    assert.equal(wakeRequests.length, 1, 'the healthy-review wait must not wake the former owner');
   } finally {
     harness.ctx.issues.update = originalUpdate;
     harness.ctx.issues.createComment = originalCreateComment;
@@ -8870,10 +8870,12 @@ test('sync.runNow completes directly linked pull request issues when the pull re
       waitForCompletion: true
     }) as { syncState: { status: string } };
     assert.equal(acknowledgedClosure.syncState.status, 'success');
-    assert.equal((await harness.ctx.issues.get(issue.id, 'company-1'))?.status, 'in_review');
+    assert.equal((await harness.ctx.issues.get(issue.id, 'company-1'))?.status, 'done');
     assert.equal(directStatusUpdateCalls.length, 1);
-    assert.equal(directStatusUpdateCalls[0]?.patch.status, 'in_review');
-    assert.equal(statusTransitionComments.length, 0);
+    assert.equal(directStatusUpdateCalls[0]?.patch.status, 'done');
+    assert.equal(statusTransitionComments.length, 1);
+    assert.match(statusTransitionComments[0]?.body ?? '', /from `in review` to `done`/);
+    assert.match(statusTransitionComments[0]?.body ?? '', /pull request was merged/);
   } finally {
     harness.ctx.issues.createComment = originalCreateComment;
     harness.ctx.issues.update = originalUpdate;
@@ -12008,11 +12010,18 @@ test('sync.runNow can target a Paperclip issue linked directly to a GitHub pull 
   }
 });
 
-test('sync.runNow reconciles a done issue with a triggered monitor when its linked pull request is still open', async () => {
+test('sync.runNow reconciles local drift under unchanged direct pull request state', async () => {
   const harness = await createProjectPullRequestsHarness();
+  harness.seed({ agents: [createAgentFixture({
+    id: 'agent-1', companyId: 'company-1', name: 'Direct PR Executor', title: 'Executor'
+  })] });
   const originalFetch = globalThis.fetch;
   const originalCreateComment = harness.ctx.issues.createComment;
+  const originalUpdate = harness.ctx.issues.update;
+  const originalRequestWakeup = harness.ctx.issues.requestWakeup;
   const statusTransitionComments: Array<{ issueId: string; body: string }> = [];
+  const statusMutations: Array<Record<string, unknown>> = [];
+  const wakeRequests: string[] = [];
   const triggeredMonitorExecutionState = {
     status: 'idle',
     currentStageId: null,
@@ -12051,6 +12060,16 @@ test('sync.runNow reconciles a done issue with a triggered monitor when its link
     statusTransitionComments.push({ issueId, body });
     return originalCreateComment(issueId, body, companyId);
   };
+  harness.ctx.issues.update = async (issueId, patch, companyId) => {
+    if (issueId === issue.id && patch && typeof patch === 'object' && 'status' in patch) {
+      statusMutations.push(patch as Record<string, unknown>);
+    }
+    return originalUpdate(issueId, patch, companyId);
+  };
+  harness.ctx.issues.requestWakeup = async (issueId, companyId, options) => {
+    wakeRequests.push(issueId);
+    return originalRequestWakeup(issueId, companyId, options);
+  };
 
   await harness.ctx.entities.upsert({
     entityType: 'paperclip-github-plugin.pull-request-link',
@@ -12066,6 +12085,7 @@ test('sync.runNow reconciles a done issue with a triggered monitor when its link
       githubPullRequestNumber: 90,
       githubPullRequestUrl: 'https://github.com/paperclipai/example-repo/pull/90',
       githubPullRequestState: 'open',
+      followThroughAssigneeAgentId: 'agent-1',
       title: 'Triggered monitor direct PR sync',
       syncedAt: '2026-04-27T09:30:00.000Z'
     }
@@ -12079,6 +12099,7 @@ test('sync.runNow reconciles a done issue with a triggered monitor when its link
     } as never,
     'company-1'
   );
+  statusMutations.length = 0;
 
   globalThis.fetch = async (input, init) => {
     const requestUrl = getRequestUrl(input);
@@ -12154,27 +12175,70 @@ test('sync.runNow reconciles a done issue with a triggered monitor when its link
     throw new Error(`Unexpected fetch during triggered monitor PR link sync test: ${requestUrl}`);
   };
 
+  const syncIssue = () => harness.performAction('sync.runNow', {
+    companyId: 'company-1',
+    issueId: issue.id,
+    waitForCompletion: true
+  }) as Promise<{ syncState: { status: string; syncedIssuesCount?: number } }>;
+
   try {
-    const sync = await harness.performAction('sync.runNow', {
-      companyId: 'company-1',
-      issueId: issue.id,
-      waitForCompletion: true
-    }) as {
-      syncState: { status: string; syncedIssuesCount?: number };
-    };
+    const sync = await syncIssue();
 
     assert.equal(sync.syncState.status, 'success');
     assert.equal(sync.syncState.syncedIssuesCount, 1);
 
-    const updatedIssue = await harness.ctx.issues.get(issue.id, 'company-1') as Record<string, any> | null;
-    assert.equal(updatedIssue?.status, 'todo');
+    let updatedIssue = await harness.ctx.issues.get(issue.id, 'company-1') as Record<string, any> | null;
+    assert.equal(updatedIssue?.status, 'in_progress');
     assert.equal(updatedIssue?.assigneeAgentId, 'agent-1');
     assert.equal(updatedIssue?.executionState ?? null, null);
     assert.equal(statusTransitionComments.length, 1);
-    assert.match(statusTransitionComments[0]?.body ?? '', /from `done` to `todo`/);
+    assert.match(statusTransitionComments[0]?.body ?? '', /from `done` to `in progress`/);
     assert.match(statusTransitionComments[0]?.body ?? '', /failing CI/);
+    assert.equal(statusMutations.length, 1);
+    assert.equal(wakeRequests.length, 1);
+
+    statusTransitionComments.length = 0;
+    statusMutations.length = 0;
+    wakeRequests.length = 0;
+    await originalUpdate(issue.id, { status: 'done' }, 'company-1');
+    const statusDrift = await syncIssue();
+    assert.equal(statusDrift.syncState.status, 'success');
+    updatedIssue = await harness.ctx.issues.get(issue.id, 'company-1') as Record<string, any> | null;
+    assert.equal(updatedIssue?.status, 'in_progress');
+    assert.equal(updatedIssue?.assigneeAgentId, 'agent-1');
+    assert.equal(statusTransitionComments.length, 1);
+    assert.equal(statusMutations.length, 1);
+    assert.equal(wakeRequests.length, 1);
+
+    statusTransitionComments.length = 0;
+    statusMutations.length = 0;
+    wakeRequests.length = 0;
+    const stableAfterStatusRepair = await syncIssue();
+    assert.equal(stableAfterStatusRepair.syncState.status, 'success');
+    assert.equal(statusTransitionComments.length, 0);
+    assert.equal(statusMutations.length, 0);
+    assert.equal(wakeRequests.length, 0);
+
+    await originalUpdate(issue.id, { assigneeAgentId: null }, 'company-1');
+    const assigneeDrift = await syncIssue();
+    assert.equal(assigneeDrift.syncState.status, 'success');
+    updatedIssue = await harness.ctx.issues.get(issue.id, 'company-1') as Record<string, any> | null;
+    assert.equal(updatedIssue?.status, 'in_progress');
+    assert.equal(updatedIssue?.assigneeAgentId, 'agent-1');
+    assert.equal(statusTransitionComments.length, 0);
+    assert.equal(statusMutations.length, 1);
+    assert.equal(wakeRequests.length, 1);
+
+    statusMutations.length = 0;
+    wakeRequests.length = 0;
+    const stableAfterAssigneeRepair = await syncIssue();
+    assert.equal(stableAfterAssigneeRepair.syncState.status, 'success');
+    assert.equal(statusMutations.length, 0);
+    assert.equal(wakeRequests.length, 0);
   } finally {
     harness.ctx.issues.createComment = originalCreateComment;
+    harness.ctx.issues.update = originalUpdate;
+    harness.ctx.issues.requestWakeup = originalRequestWakeup;
     globalThis.fetch = originalFetch;
   }
 });
@@ -21010,7 +21074,7 @@ test('worker routes non-review-ready GitHub merge state statuses back to active 
   }
 });
 
-test('sync.runNow quiesces an acknowledged unchanged remote action and re-wakes for changed remote evidence', async () => {
+test('sync.runNow converges local drift, quiesces stable state, and re-wakes for changed remote evidence', async () => {
   const harness = createTestHarness({ manifest, config: { githubTokenRef: 'github-secret-ref' } });
   await plugin.definition.setup(harness.ctx);
   harness.seed({ agents: [createAgentFixture({
@@ -21160,43 +21224,38 @@ test('sync.runNow quiesces an acknowledged unchanged remote action and re-wakes 
     assert.match(registryAfterFirstAction[0]?.remoteActionFingerprint ?? '', /^[a-f0-9]{64}$/);
 
     await acknowledgeAndReset();
-    const unchanged = await harness.performAction('sync.runNow', {}) as { syncState: { status: string } };
-    assert.equal(unchanged.syncState.status, 'success');
-    assert.equal((await harness.ctx.issues.get(issue.id, 'company-1'))?.status, 'blocked');
+    await syncAndExpectWake();
+
+    transitionComments.length = 0;
+    statusMutations.length = 0;
+    wakeRequests.length = 0;
+    const stableRetry = await harness.performAction('sync.runNow', {}) as { syncState: { status: string } };
+    assert.equal(stableRetry.syncState.status, 'success');
+    assert.equal((await harness.ctx.issues.get(issue.id, 'company-1'))?.status, 'in_progress');
     assert.equal(transitionComments.length, 0);
     assert.equal(statusMutations.length, 0);
     assert.equal(wakeRequests.length, 0);
 
     await acknowledgeAndReset('in_review');
-    const unchangedAfterReview = await harness.performAction('sync.runNow', {}) as { syncState: { status: string } };
-    assert.equal(unchangedAfterReview.syncState.status, 'success');
-    assert.equal((await harness.ctx.issues.get(issue.id, 'company-1'))?.status, 'in_review');
-    assert.equal(transitionComments.length, 0);
-    assert.equal(statusMutations.length, 1);
-    assert.equal(statusMutations[0]?.status, 'in_review');
-    assert.equal(wakeRequests.length, 0);
-    statusMutations.length = 0;
+    await syncAndExpectWake();
 
+    await acknowledgeAndReset();
     headSha = 'b'.repeat(40);
     await syncAndExpectWake();
     await acknowledgeAndReset();
     checkConclusion = 'FAILURE';
-    const maskedCheckJitter = await harness.performAction('sync.runNow', {}) as { syncState: { status: string } };
-    assert.equal(maskedCheckJitter.syncState.status, 'success');
-    assert.equal((await harness.ctx.issues.get(issue.id, 'company-1'))?.status, 'blocked');
-    assert.equal(transitionComments.length, 0);
-    assert.equal(wakeRequests.length, 0);
+    await syncAndExpectWake(0);
 
+    await acknowledgeAndReset();
     mergeable = 'MERGEABLE';
     mergeStateStatus = 'CLEAN';
     await syncAndExpectWake();
     await acknowledgeAndReset();
     unresolvedReviewThread = true;
-    const maskedReviewJitter = await harness.performAction('sync.runNow', {}) as { syncState: { status: string } };
-    assert.equal(maskedReviewJitter.syncState.status, 'success');
-    assert.equal((await harness.ctx.issues.get(issue.id, 'company-1'))?.status, 'blocked');
-    assert.equal(transitionComments.length, 0);
-    assert.equal(wakeRequests.length, 0);
+    await syncAndExpectWake(0);
+    transitionComments.length = 0;
+    statusMutations.length = 0;
+    wakeRequests.length = 0;
     checkConclusion = 'SUCCESS';
     const reviewAction = await harness.performAction('sync.runNow', {}) as { syncState: { status: string } };
     assert.equal(reviewAction.syncState.status, 'success');
@@ -21210,17 +21269,19 @@ test('sync.runNow quiesces an acknowledged unchanged remote action and re-wakes 
     issueCommentCount = 1;
     const untrustedComment = await harness.performAction('sync.runNow', {}) as { syncState: { status: string } };
     assert.equal(untrustedComment.syncState.status, 'success');
-    assert.equal((await harness.ctx.issues.get(issue.id, 'company-1'))?.status, 'blocked');
-    assert.equal(transitionComments.length, 0);
-    assert.equal(statusMutations.length, 0);
+    assert.equal((await harness.ctx.issues.get(issue.id, 'company-1'))?.status, 'in_review');
+    assert.equal(transitionComments.length, 1);
+    assert.equal(statusMutations.length, 1);
     assert.equal(wakeRequests.length, 0);
 
+    transitionComments.length = 0;
+    statusMutations.length = 0;
     issueCommentAuthor = 'trusted-author';
     issueCommentCount = 2;
     failNextStatusMutation = true;
     const failedTrustedAction = await harness.performAction('sync.runNow', {}) as { syncState: { status: string } };
     assert.equal(failedTrustedAction.syncState.status, 'error');
-    assert.equal((await harness.ctx.issues.get(issue.id, 'company-1'))?.status, 'blocked');
+    assert.equal((await harness.ctx.issues.get(issue.id, 'company-1'))?.status, 'in_review');
     transitionComments.length = 0;
     statusMutations.length = 0;
     wakeRequests.length = 0;
