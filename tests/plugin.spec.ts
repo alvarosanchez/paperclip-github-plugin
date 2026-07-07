@@ -343,6 +343,133 @@ test('issue-linked PR routing keeps trusted comment evidence attached to the sou
     true
   );
   assert.equal(issueCommentSelection?.number, 10, 'issue comments retain deterministic repository/number routing');
+
+  const links = [
+    {
+      data: {
+        repositoryUrl: 'https://github.com/paperclipai/example-repo',
+        githubPullRequestNumber: 10,
+        followThroughAssigneeAgentId: 'owner-10'
+      }
+    },
+    {
+      data: {
+        repositoryUrl: 'HTTPS://GITHUB.COM/paperclipai/example-repo/',
+        githubPullRequestNumber: 20,
+        followThroughAssigneeAgentId: 'owner-20'
+      }
+    }
+  ];
+  const effectiveGate = workerModule.__testing.selectEffectiveIssueLinkedPullRequestGate(
+    [pullRequest(10), pullRequest(20)] as never,
+    [{ repositoryUrl: 'HTTPS://GITHUB.COM/paperclipai/example-repo/', number: 20, kind: 'review' }],
+    false,
+    links as never
+  );
+  const reversedGate = workerModule.__testing.selectEffectiveIssueLinkedPullRequestGate(
+    [pullRequest(20), pullRequest(10)] as never,
+    [{ repositoryUrl: 'https://github.com/paperclipai/example-repo', number: 20, kind: 'review' }],
+    false,
+    [...links].reverse() as never
+  );
+  assert.deepEqual(reversedGate, effectiveGate);
+  assert.equal(effectiveGate?.number, 20);
+  assert.equal(effectiveGate?.repositoryUrl, 'https://github.com/paperclipai/example-repo');
+  assert.equal(effectiveGate?.condition, 'trusted_comment');
+  assert.equal(effectiveGate?.remoteCondition, 'ready');
+  assert.deepEqual(effectiveGate?.trustedCommentKinds, ['review']);
+  assert.equal(effectiveGate?.ownerCandidate, 'owner-20');
+
+  const issueSnapshot = {
+    issueNumber: 7,
+    state: 'open',
+    commentCount: 1,
+    linkedPullRequests: [pullRequest(10), pullRequest(20)]
+  };
+  assert.equal(
+    workerModule.__testing.buildRemoteActionFingerprint(issueSnapshot as never, effectiveGate as never),
+    workerModule.__testing.buildRemoteActionFingerprint({
+      ...issueSnapshot,
+      linkedPullRequests: [...issueSnapshot.linkedPullRequests].reverse()
+    } as never, reversedGate as never),
+    'the issue fingerprint must derive from the same deterministic effective gate'
+  );
+});
+
+test('issue-linked effective gate aligns status, owner, fingerprint, and wake routing', async () => {
+  const workerModule = await importFreshWorkerModule();
+  const pullRequest = (number: number, repositoryUrl = 'https://github.com/paperclipai/example-repo') => ({
+    number,
+    repositoryUrl,
+    headSha: `head-${number}`,
+    hasUnresolvedReviewThreads: false,
+    ciState: 'green',
+    mergeability: 'mergeable',
+    mergeStateStatus: 'clean',
+    reviewDecision: 'review_required'
+  });
+  const pullRequests = [pullRequest(10), pullRequest(20)];
+  const sources = [{
+    repositoryUrl: 'HTTPS://GITHUB.COM/paperclipai/example-repo/',
+    number: 20,
+    kind: 'top_level' as const
+  }];
+  const links = pullRequests.map((entry) => ({
+    data: {
+      repositoryUrl: entry.repositoryUrl,
+      githubPullRequestNumber: entry.number,
+      followThroughAssigneeAgentId: `owner-${entry.number}`
+    }
+  }));
+  const gate = workerModule.__testing.selectEffectiveIssueLinkedPullRequestGate(
+    pullRequests as never,
+    sources,
+    false,
+    links as never
+  );
+  const reversedGate = workerModule.__testing.selectEffectiveIssueLinkedPullRequestGate(
+    [...pullRequests].reverse() as never,
+    sources,
+    false,
+    [...links].reverse() as never
+  );
+  assert.deepEqual(reversedGate, gate);
+  assert.equal(gate?.number, 20);
+  assert.equal(gate?.ownerCandidate, 'owner-20');
+
+  const snapshot = {
+    issueNumber: 7,
+    state: 'open',
+    commentCount: 1,
+    linkedPullRequests: pullRequests
+  };
+  const status = workerModule.__testing.resolvePaperclipIssueStatus({
+    currentStatus: 'in_review',
+    snapshot,
+    effectiveGate: gate,
+    hasTrustedNewComment: true,
+    wasImportedThisRun: false,
+    defaultImportedStatus: 'backlog',
+    hasExecutorHandoffTarget: Boolean(gate?.ownerCandidate)
+  } as never);
+  assert.equal(status, 'in_progress');
+  assert.deepEqual(workerModule.__testing.resolveSyncTransitionAssignee({
+    currentStatus: 'in_review',
+    nextStatus: status,
+    syncContext: { assignee: null, executionPolicy: null, executionState: null },
+    advancedSettings: { defaultStatus: 'backlog', ignoredIssueAuthorUsernames: [] },
+    followThroughAssigneeAgentId: gate?.ownerCandidate
+  } as never), {
+    principal: { kind: 'agent', id: 'owner-20' },
+    role: 'executor'
+  });
+  assert.equal(
+    workerModule.__testing.buildRemoteActionFingerprint(snapshot as never, gate as never),
+    workerModule.__testing.buildRemoteActionFingerprint({
+      ...snapshot,
+      linkedPullRequests: [...pullRequests].reverse()
+    } as never, reversedGate as never)
+  );
 });
 
 test('trusted direct PR comment evidence preserves normalized PR identity and stream kind', async () => {

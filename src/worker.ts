@@ -7827,28 +7827,45 @@ function getEffectiveDirectPullRequestGateCondition(
   };
 }
 
+function selectHighestPriorityEffectivePullRequestGate(
+  gates: EffectiveDirectPullRequestGate[]
+): EffectiveDirectPullRequestGate | undefined {
+  return gates.sort((left, right) =>
+    getEffectiveDirectPullRequestGatePriority(left.condition)
+      - getEffectiveDirectPullRequestGatePriority(right.condition)
+    || left.repositoryUrl.localeCompare(right.repositoryUrl)
+    || left.number - right.number
+  )[0];
+}
+
+function buildTrustedCommentKindsByPullRequest(
+  trustedCommentSources: GitHubTrustedPullRequestCommentSource[]
+): Map<string, Array<GitHubTrustedPullRequestCommentSource['kind']>> {
+  const kindsByPullRequest = new Map<string, Set<GitHubTrustedPullRequestCommentSource['kind']>>();
+  for (const source of trustedCommentSources) {
+    const key = buildGitHubPullRequestReferenceKey(source);
+    const kinds = kindsByPullRequest.get(key) ?? new Set<GitHubTrustedPullRequestCommentSource['kind']>();
+    kinds.add(source.kind);
+    kindsByPullRequest.set(key, kinds);
+  }
+  return new Map([...kindsByPullRequest].map(([key, kinds]) => [key, [...kinds].sort()]));
+}
+
 function selectEffectiveDirectPullRequestGate(
   pullRequests: GitHubDirectPullRequestSyncSnapshot[],
   trustedCommentSources: GitHubTrustedPullRequestCommentSource[]
 ): EffectiveDirectPullRequestGate | undefined {
-  const trustedCommentKindsByPullRequest = new Map<string, Set<GitHubTrustedPullRequestCommentSource['kind']>>();
-  for (const source of trustedCommentSources) {
-    const key = buildGitHubPullRequestReferenceKey(source);
-    const kinds = trustedCommentKindsByPullRequest.get(key) ?? new Set<GitHubTrustedPullRequestCommentSource['kind']>();
-    kinds.add(source.kind);
-    trustedCommentKindsByPullRequest.set(key, kinds);
-  }
-
-  return pullRequests
+  const trustedCommentKindsByPullRequest = buildTrustedCommentKindsByPullRequest(trustedCommentSources);
+  return selectHighestPriorityEffectivePullRequestGate(pullRequests
     .filter((entry): entry is GitHubDirectPullRequestSyncSnapshot & { pullRequest: GitHubPullRequestStatusSnapshot } =>
       entry.lifecycleState === 'open' && Boolean(entry.pullRequest)
     )
     .map((entry): EffectiveDirectPullRequestGate => {
       const repositoryUrl = getNormalizedMappingRepositoryUrl({ repositoryUrl: entry.repository.url }).toLowerCase();
       const number = entry.pullRequestLink.data.githubPullRequestNumber;
-      const trustedCommentKinds = [...(trustedCommentKindsByPullRequest.get(
+      const trustedCommentKinds = trustedCommentKindsByPullRequest.get(
         buildGitHubPullRequestReferenceKey({ repositoryUrl, number })
-      ) ?? [])].sort();
+      ) ?? [];
       const { condition, remoteCondition } = getEffectiveDirectPullRequestGateCondition(
         entry.pullRequest,
         trustedCommentKinds.length > 0
@@ -7863,13 +7880,44 @@ function selectEffectiveDirectPullRequestGate(
         ownerCandidate: entry.pullRequestLink.data.followThroughAssigneeAgentId,
         pullRequest: entry.pullRequest
       };
-    })
-    .sort((left, right) =>
-      getEffectiveDirectPullRequestGatePriority(left.condition)
-        - getEffectiveDirectPullRequestGatePriority(right.condition)
-      || left.repositoryUrl.localeCompare(right.repositoryUrl)
-      || left.number - right.number
-    )[0];
+    }));
+}
+
+function selectEffectiveIssueLinkedPullRequestGate(
+  pullRequests: GitHubPullRequestStatusSnapshot[],
+  trustedCommentSources: GitHubTrustedPullRequestCommentSource[],
+  hasTrustedIssueComment: boolean,
+  pullRequestLinks: GitHubPullRequestLinkRecord[] = []
+): EffectiveDirectPullRequestGate | undefined {
+  const trustedCommentKindsByPullRequest = buildTrustedCommentKindsByPullRequest(trustedCommentSources);
+  const ownerByPullRequest = new Map(pullRequestLinks.map((link) => [
+    buildGitHubPullRequestReferenceKey({
+      repositoryUrl: link.data.repositoryUrl,
+      number: link.data.githubPullRequestNumber
+    }),
+    link.data.followThroughAssigneeAgentId
+  ]));
+
+  return selectHighestPriorityEffectivePullRequestGate(pullRequests.map((pullRequest) => {
+    const repositoryUrl = getNormalizedMappingRepositoryUrl({ repositoryUrl: pullRequest.repositoryUrl }).toLowerCase();
+    const number = pullRequest.number;
+    const key = buildGitHubPullRequestReferenceKey({ repositoryUrl, number });
+    const trustedCommentKinds = trustedCommentKindsByPullRequest.get(key) ?? [];
+    const { condition, remoteCondition } = getEffectiveDirectPullRequestGateCondition(
+      pullRequest,
+      hasTrustedIssueComment || trustedCommentKinds.length > 0
+    );
+    return {
+      repositoryUrl,
+      number,
+      headSha: pullRequest.headSha ?? null,
+      condition,
+      remoteCondition,
+      trustedCommentKinds,
+      ownerCandidate: ownerByPullRequest.get(key),
+      pullRequest
+    };
+  }));
 }
 
 function selectEffectiveIssueLinkedPullRequestAction(
@@ -7877,26 +7925,11 @@ function selectEffectiveIssueLinkedPullRequestAction(
   trustedCommentSources: GitHubTrustedPullRequestCommentSource[],
   hasTrustedIssueComment: boolean
 ): GitHubPullRequestStatusSnapshot | undefined {
-  const trustedPullRequestKeys = new Set(trustedCommentSources.map(buildGitHubPullRequestReferenceKey));
-  const condition = (pullRequest: GitHubPullRequestStatusSnapshot) =>
-    getEffectiveDirectPullRequestGateCondition(
-      pullRequest,
-      trustedPullRequestKeys.has(buildGitHubPullRequestReferenceKey(pullRequest))
-    ).condition;
-
-  return pullRequests
-    .filter((pullRequest) =>
-      hasTrustedIssueComment
-      || trustedPullRequestKeys.has(buildGitHubPullRequestReferenceKey(pullRequest))
-      || !['ready', 'waiting'].includes(condition(pullRequest))
-    )
-    .sort((left, right) =>
-      getEffectiveDirectPullRequestGatePriority(condition(left))
-        - getEffectiveDirectPullRequestGatePriority(condition(right))
-      || getNormalizedMappingRepositoryUrl({ repositoryUrl: left.repositoryUrl }).toLowerCase()
-        .localeCompare(getNormalizedMappingRepositoryUrl({ repositoryUrl: right.repositoryUrl }).toLowerCase())
-      || left.number - right.number
-    )[0];
+  return selectEffectiveIssueLinkedPullRequestGate(
+    pullRequests,
+    trustedCommentSources,
+    hasTrustedIssueComment
+  )?.pullRequest;
 }
 
 function isActionableDirectPullRequestGate(
@@ -7913,30 +7946,6 @@ async function resolveValidFollowThroughAssigneeAgentId(
   if (!candidate) return undefined;
   const agent = await ctx.agents.get(candidate, companyId);
   return agent?.companyId === companyId ? candidate : undefined;
-}
-
-async function resolveActionableIssueLinkedPullRequestOwner(
-  ctx: PluginSetupContext,
-  companyId: string,
-  paperclipIssueId: string,
-  pullRequests: GitHubPullRequestStatusSnapshot[],
-  trustedPullRequestCommentSources: GitHubTrustedPullRequestCommentSource[],
-  hasTrustedNewIssueComment: boolean
-): Promise<string | undefined> {
-  const effectiveAction = selectEffectiveIssueLinkedPullRequestAction(
-    pullRequests,
-    trustedPullRequestCommentSources,
-    hasTrustedNewIssueComment
-  );
-  if (!effectiveAction) return undefined;
-
-  const links = await listGitHubPullRequestLinkRecords(ctx, { paperclipIssueId });
-  const ownerCandidate = links.find((link) =>
-    link.data.githubPullRequestNumber === effectiveAction.number
-    && getNormalizedMappingRepositoryUrl({ repositoryUrl: link.data.repositoryUrl })
-      === getNormalizedMappingRepositoryUrl({ repositoryUrl: effectiveAction.repositoryUrl })
-  )?.data.followThroughAssigneeAgentId;
-  return resolveValidFollowThroughAssigneeAgentId(ctx, companyId, ownerCandidate);
 }
 
 function formatPaperclipIssueStatus(status: PaperclipIssueStatus): string {
@@ -8780,6 +8789,7 @@ function describeGitHubDirectPullRequestIssueStatusReason(
 function resolvePaperclipIssueStatus(params: {
   currentStatus: PaperclipIssueStatus;
   snapshot: GitHubIssueStatusSnapshot;
+  effectiveGate?: EffectiveDirectPullRequestGate;
   hasTrustedNewComment?: boolean;
   wasImportedThisRun: boolean;
   defaultImportedStatus: PaperclipIssueStatus;
@@ -8789,6 +8799,7 @@ function resolvePaperclipIssueStatus(params: {
   const {
     currentStatus,
     snapshot,
+    effectiveGate,
     hasTrustedNewComment,
     wasImportedThisRun,
     defaultImportedStatus,
@@ -8807,18 +8818,33 @@ function resolvePaperclipIssueStatus(params: {
     return 'backlog';
   }
 
-  if (hasTrustedNewComment) {
+  if (hasTrustedNewComment && snapshot.linkedPullRequests.length === 0) {
     return hasExecutorHandoffTarget ? 'in_progress' : 'todo';
   }
 
-  if (snapshot.linkedPullRequests.length > 0) {
-    if (shouldPreserveBlockedExternalPullRequestWait({
-      currentStatus,
-      linkedPullRequests: snapshot.linkedPullRequests
-    })) {
-      return 'blocked';
+  if (effectiveGate) {
+    if (effectiveGate.condition === 'trusted_comment') {
+      return hasExecutorHandoffTarget ? 'in_progress' : 'todo';
     }
+    if (isActionableDirectPullRequestGate(effectiveGate)) {
+      if (shouldPreserveBlockedExternalPullRequestWait({
+        currentStatus,
+        linkedPullRequests: [effectiveGate.pullRequest]
+      })) {
+        return 'blocked';
+      }
+      return hasExecutorHandoffTarget ? 'in_progress' : 'todo';
+    }
+    if (effectiveGate.condition === 'waiting') {
+      return (currentStatus === 'done' || currentStatus === 'in_review')
+        && isGitHubPullRequestTransientUnknownMergeabilityWait(effectiveGate.pullRequest)
+        ? 'in_review'
+        : 'in_progress';
+    }
+    return 'in_review';
+  }
 
+  if (snapshot.linkedPullRequests.length > 0) {
     return resolvePaperclipStatusFromLinkedPullRequests(snapshot.linkedPullRequests, {
       preferInProgress: hasExecutorHandoffTarget,
       preserveTransientUnknownMergeabilityWait: currentStatus === 'done' || currentStatus === 'in_review'
@@ -13371,55 +13397,36 @@ function getEffectivePullRequestActionCondition(
   return 'waiting';
 }
 
-function getEffectivePullRequestActionPriority(condition: ReturnType<typeof getEffectivePullRequestActionCondition>): number {
-  switch (condition) {
-    case 'conflict': return 0;
-    case 'ci_failed': return 1;
-    case 'review_actionable': return 2;
-    case 'waiting': return 3;
-    case 'ready': return 4;
-  }
-}
-
-function selectEffectivePullRequestFingerprintEntries(
-  pullRequests: Array<{
-    repositoryUrl: string;
-    number: number;
-    headSha: string | null;
-    condition: ReturnType<typeof getEffectivePullRequestActionCondition>;
-  }>
-) {
-  const highestPriority = Math.min(...pullRequests.map((pullRequest) =>
-    getEffectivePullRequestActionPriority(pullRequest.condition)
-  ));
-  return pullRequests
-    .filter((pullRequest) => getEffectivePullRequestActionPriority(pullRequest.condition) === highestPriority)
-    .sort((left, right) => left.repositoryUrl.localeCompare(right.repositoryUrl) || left.number - right.number);
-}
-
-function buildRemoteActionFingerprint(snapshot: GitHubIssueStatusSnapshot): string {
-  const allPullRequests = snapshot.linkedPullRequests.map((pullRequest) => ({
-    repositoryUrl: pullRequest.repositoryUrl.toLowerCase(),
-    number: pullRequest.number,
-    headSha: pullRequest.headSha ?? null,
-    condition: getEffectivePullRequestActionCondition(pullRequest)
-  }));
-  const pullRequests = snapshot.state === 'closed' || allPullRequests.length === 0
-    ? []
-    : selectEffectivePullRequestFingerprintEntries(allPullRequests);
+function buildRemoteActionFingerprint(
+  snapshot: GitHubIssueStatusSnapshot,
+  effectiveGate = snapshot.state === 'closed'
+    ? undefined
+    : selectEffectiveIssueLinkedPullRequestGate(snapshot.linkedPullRequests, [], false)
+): string {
+  const gate = snapshot.state === 'closed' || !effectiveGate
+    ? null
+    : {
+        repositoryUrl: effectiveGate.repositoryUrl,
+        number: effectiveGate.number,
+        headSha: effectiveGate.headSha,
+        condition: effectiveGate.condition === 'trusted_comment'
+          ? effectiveGate.condition
+          : getEffectivePullRequestActionCondition(effectiveGate.pullRequest),
+        trustedCommentKinds: effectiveGate.trustedCommentKinds
+      };
   const reasonCode = snapshot.state === 'closed'
     ? `issue_closed_${snapshot.stateReason ?? 'completed'}`
-    : pullRequests.length === 0
-      ? 'issue_open'
-      : `pr_${pullRequests[0]?.condition ?? 'waiting'}`;
+    : gate
+      ? `pr_${gate.condition}`
+      : 'issue_open';
 
   return createHash('sha256').update(JSON.stringify({
-    version: 3,
+    version: 4,
     issue: {
       state: snapshot.state,
       stateReason: snapshot.stateReason ?? null
     },
-    pullRequests,
+    gate,
     reasonCode
   })).digest('hex');
 }
@@ -14940,16 +14947,26 @@ async function synchronizePaperclipIssueStatuses(
             });
       const hasTrustedNewLinkedPullRequestComment = trustedNewLinkedPullRequestCommentSources.length > 0;
       const hasTrustedNewComment = hasTrustedNewIssueComment || hasTrustedNewLinkedPullRequestComment;
-      const followThroughAssigneeAgentId = await resolveActionableIssueLinkedPullRequestOwner(
-        ctx,
-        mapping.companyId,
-        importedIssue.paperclipIssueId,
+      const issueLinkedPullRequestLinks = snapshot.linkedPullRequests.length === 0
+        ? []
+        : await listGitHubPullRequestLinkRecords(ctx, {
+            paperclipIssueId: importedIssue.paperclipIssueId
+          });
+      const effectiveGate = selectEffectiveIssueLinkedPullRequestGate(
         snapshot.linkedPullRequests,
         trustedNewLinkedPullRequestCommentSources,
-        hasTrustedNewIssueComment
+        hasTrustedNewIssueComment,
+        issueLinkedPullRequestLinks
+      );
+      const followThroughAssigneeAgentId = await resolveValidFollowThroughAssigneeAgentId(
+        ctx,
+        mapping.companyId,
+        effectiveGate && isActionableDirectPullRequestGate(effectiveGate)
+          ? effectiveGate.ownerCandidate
+          : undefined
       );
       const remoteActionFingerprint = createHash('sha256').update(JSON.stringify({
-        issue: buildRemoteActionFingerprint(snapshot),
+        issue: buildRemoteActionFingerprint(snapshot, effectiveGate),
         followThroughAssigneeAgentId
       })).digest('hex');
       const actionJournalFingerprint = createHash('sha256').update(JSON.stringify({
@@ -14997,6 +15014,7 @@ async function synchronizePaperclipIssueStatuses(
       let nextStatus = resolvePaperclipIssueStatus({
         currentStatus: paperclipIssue.status,
         snapshot,
+        effectiveGate,
         hasTrustedNewComment,
         wasImportedThisRun,
         defaultImportedStatus: advancedSettings.defaultStatus,
@@ -23424,8 +23442,10 @@ export const __testing = {
   trackedMutationOutcome,
   selectEffectiveDirectPullRequestGate,
   selectEffectiveIssueLinkedPullRequestAction,
+  selectEffectiveIssueLinkedPullRequestGate,
   resolvePaperclipApiAuthTokens,
   resolveGithubToken,
+  resolvePaperclipIssueStatus,
   resolvePaperclipPullRequestIssueStatus,
   resolveSyncTransitionAssignee,
   resolveTrustedWorkspacePath,
