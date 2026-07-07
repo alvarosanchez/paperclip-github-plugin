@@ -416,6 +416,7 @@ interface ImportedIssueRecord {
   lastSeenGitHubState?: 'open' | 'closed';
   linkedPullRequestCommentCounts?: GitHubPullRequestCommentCountRecord[];
   remoteActionFingerprint?: string;
+  selectedPullRequestGate?: GitHubPullRequestReference;
   pendingRemoteActionWake?: PendingRemoteActionWake;
   repositoryUrl?: string;
   paperclipProjectId?: string;
@@ -436,6 +437,7 @@ interface RemoteActionRecord {
   fingerprint?: string;
   pendingWake?: PendingRemoteActionWake;
   linkedPullRequestCommentCounts?: GitHubPullRequestCommentCountRecord[];
+  selectedPullRequestGate?: GitHubPullRequestReference;
 }
 
 interface GitHubIssueLinkEntityData {
@@ -6759,6 +6761,24 @@ function recordCompanyActivityMetricEvent(
   };
 }
 
+function normalizeSelectedPullRequestGate(value: unknown): GitHubPullRequestReference | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const record = value as Record<string, unknown>;
+  const repositoryUrl = normalizeOptionalString(record.repositoryUrl);
+  const number = typeof record.number === 'number' && Number.isInteger(record.number) && record.number > 0
+    ? record.number
+    : undefined;
+  if (!repositoryUrl || !number) return undefined;
+  try {
+    return {
+      repositoryUrl: getNormalizedMappingRepositoryUrl({ repositoryUrl }).toLowerCase(),
+      number
+    };
+  } catch {
+    return undefined;
+  }
+}
+
 function normalizeImportRegistry(value: unknown): ImportedIssueRecord[] {
   if (!Array.isArray(value)) {
     return [];
@@ -6803,6 +6823,7 @@ function normalizeImportRegistry(value: unknown): ImportedIssueRecord[] {
         typeof record.remoteActionFingerprint === 'string' && /^[a-f0-9]{64}$/.test(record.remoteActionFingerprint)
           ? record.remoteActionFingerprint
           : undefined;
+      const selectedPullRequestGate = normalizeSelectedPullRequestGate(record.selectedPullRequestGate);
       const pendingRemoteActionWake = normalizePendingRemoteActionWake(record.pendingRemoteActionWake);
 
       if (!mappingId || Number.isNaN(githubIssueId) || !paperclipIssueId || !importedAt) {
@@ -6822,6 +6843,7 @@ function normalizeImportRegistry(value: unknown): ImportedIssueRecord[] {
         ...(lastSeenGitHubState ? { lastSeenGitHubState } : {}),
         ...(linkedPullRequestCommentCounts.length > 0 ? { linkedPullRequestCommentCounts } : {}),
         ...(remoteActionFingerprint ? { remoteActionFingerprint } : {}),
+        ...(selectedPullRequestGate ? { selectedPullRequestGate } : {}),
         ...(pendingRemoteActionWake ? { pendingRemoteActionWake } : {})
       };
     })
@@ -6865,6 +6887,7 @@ function normalizeRemoteActionRegistry(value: unknown): RemoteActionRecord[] {
     const linkedPullRequestCommentCounts = normalizeGitHubPullRequestCommentCountRecords(
       record.linkedPullRequestCommentCounts
     );
+    const selectedPullRequestGate = normalizeSelectedPullRequestGate(record.selectedPullRequestGate);
     const previous = recordsByKey.get(key);
     recordsByKey.set(key, {
       key,
@@ -6874,6 +6897,11 @@ function normalizeRemoteActionRegistry(value: unknown): RemoteActionRecord[] {
         ? { linkedPullRequestCommentCounts }
         : previous?.linkedPullRequestCommentCounts
           ? { linkedPullRequestCommentCounts: previous.linkedPullRequestCommentCounts }
+          : {}),
+      ...(selectedPullRequestGate
+        ? { selectedPullRequestGate }
+        : previous?.selectedPullRequestGate
+          ? { selectedPullRequestGate: previous.selectedPullRequestGate }
           : {})
     });
   }
@@ -7828,11 +7856,15 @@ function getEffectiveDirectPullRequestGateCondition(
 }
 
 function selectHighestPriorityEffectivePullRequestGate(
-  gates: EffectiveDirectPullRequestGate[]
+  gates: EffectiveDirectPullRequestGate[],
+  preferredGate?: GitHubPullRequestReference
 ): EffectiveDirectPullRequestGate | undefined {
+  const preferredGateKey = preferredGate ? buildGitHubPullRequestReferenceKey(preferredGate) : undefined;
   return gates.sort((left, right) =>
     getEffectiveDirectPullRequestGatePriority(left.condition)
       - getEffectiveDirectPullRequestGatePriority(right.condition)
+    || Number(buildGitHubPullRequestReferenceKey(right) === preferredGateKey)
+      - Number(buildGitHubPullRequestReferenceKey(left) === preferredGateKey)
     || left.repositoryUrl.localeCompare(right.repositoryUrl)
     || left.number - right.number
   )[0];
@@ -7853,7 +7885,8 @@ function buildTrustedCommentKindsByPullRequest(
 
 function selectEffectiveDirectPullRequestGate(
   pullRequests: GitHubDirectPullRequestSyncSnapshot[],
-  trustedCommentSources: GitHubTrustedPullRequestCommentSource[]
+  trustedCommentSources: GitHubTrustedPullRequestCommentSource[],
+  preferredGate?: GitHubPullRequestReference
 ): EffectiveDirectPullRequestGate | undefined {
   const trustedCommentKindsByPullRequest = buildTrustedCommentKindsByPullRequest(trustedCommentSources);
   return selectHighestPriorityEffectivePullRequestGate(pullRequests
@@ -7880,14 +7913,15 @@ function selectEffectiveDirectPullRequestGate(
         ownerCandidate: entry.pullRequestLink.data.followThroughAssigneeAgentId,
         pullRequest: entry.pullRequest
       };
-    }));
+    }), preferredGate);
 }
 
 function selectEffectiveIssueLinkedPullRequestGate(
   pullRequests: GitHubPullRequestStatusSnapshot[],
   trustedCommentSources: GitHubTrustedPullRequestCommentSource[],
   hasTrustedIssueComment: boolean,
-  pullRequestLinks: GitHubPullRequestLinkRecord[] = []
+  pullRequestLinks: GitHubPullRequestLinkRecord[] = [],
+  preferredGate?: GitHubPullRequestReference
 ): EffectiveDirectPullRequestGate | undefined {
   const trustedCommentKindsByPullRequest = buildTrustedCommentKindsByPullRequest(trustedCommentSources);
   const ownerByPullRequest = new Map(pullRequestLinks.map((link) => [
@@ -7917,7 +7951,7 @@ function selectEffectiveIssueLinkedPullRequestGate(
       ownerCandidate: ownerByPullRequest.get(key),
       pullRequest
     };
-  }));
+  }), preferredGate);
 }
 
 function selectEffectiveIssueLinkedPullRequestAction(
@@ -14953,15 +14987,17 @@ async function synchronizePaperclipIssueStatuses(
         snapshot.linkedPullRequests,
         trustedNewLinkedPullRequestCommentSources,
         hasTrustedNewIssueComment,
-        issueLinkedPullRequestLinks
+        issueLinkedPullRequestLinks,
+        importedIssue.selectedPullRequestGate
       );
       const followThroughAssigneeAgentId = await resolveValidFollowThroughAssigneeAgentId(
         ctx,
         mapping.companyId,
-        effectiveGate && isActionableDirectPullRequestGate(effectiveGate)
-          ? effectiveGate.ownerCandidate
-          : undefined
+        effectiveGate?.ownerCandidate
       );
+      const transitionFollowThroughAssigneeAgentId = isActionableDirectPullRequestGate(effectiveGate)
+        ? followThroughAssigneeAgentId
+        : undefined;
       const remoteActionFingerprint = createHash('sha256').update(JSON.stringify({
         issue: buildRemoteActionFingerprint(snapshot, effectiveGate),
         followThroughAssigneeAgentId
@@ -15006,7 +15042,7 @@ async function synchronizePaperclipIssueStatuses(
       const executorTransitionAssignee = resolvePaperclipIssueExecutorAssignee(
         paperclipIssueSyncContext,
         advancedSettings,
-        followThroughAssigneeAgentId
+        transitionFollowThroughAssigneeAgentId
       );
       let nextStatus = resolvePaperclipIssueStatus({
         currentStatus: paperclipIssue.status,
@@ -15051,7 +15087,7 @@ async function synchronizePaperclipIssueStatuses(
             nextStatus,
             syncContext: paperclipIssueSyncContext,
             advancedSettings,
-            followThroughAssigneeAgentId
+            followThroughAssigneeAgentId: transitionFollowThroughAssigneeAgentId
           });
       const shouldClearTransitionAssignee =
         nextStatus === 'in_review'
@@ -15076,6 +15112,9 @@ async function synchronizePaperclipIssueStatuses(
         importedIssue.lastSeenGitHubState = snapshot.state;
         importedIssue.linkedPullRequestCommentCounts = currentLinkedPullRequestCommentCounts;
         importedIssue.remoteActionFingerprint = remoteActionFingerprint;
+        importedIssue.selectedPullRequestGate = effectiveGate
+          ? { repositoryUrl: effectiveGate.repositoryUrl, number: effectiveGate.number }
+          : undefined;
         if (pendingWake) importedIssue.pendingRemoteActionWake = pendingWake;
         await persistImportRegistry();
       };
@@ -15483,15 +15522,20 @@ async function synchronizePaperclipPullRequestIssueStatuses(
           }));
         }
       }
-      const effectiveGate = selectEffectiveDirectPullRequestGate(pullRequestSnapshots, trustedCommentSources);
+      const effectiveGate = selectEffectiveDirectPullRequestGate(
+        pullRequestSnapshots,
+        trustedCommentSources,
+        remoteAction.selectedPullRequestGate
+      );
       const hasTrustedNewComment = Boolean(effectiveGate?.trustedCommentKinds.length);
       const followThroughAssigneeAgentId = await resolveValidFollowThroughAssigneeAgentId(
         ctx,
         mapping.companyId,
-        effectiveGate && isActionableDirectPullRequestGate(effectiveGate)
-          ? effectiveGate.ownerCandidate
-          : undefined
+        effectiveGate?.ownerCandidate
       );
+      const transitionFollowThroughAssigneeAgentId = isActionableDirectPullRequestGate(effectiveGate)
+        ? followThroughAssigneeAgentId
+        : undefined;
       const remoteActionFingerprint = createHash('sha256').update(JSON.stringify({
         pullRequest: buildDirectPullRequestActionFingerprint(pullRequestSnapshots, effectiveGate),
         followThroughAssigneeAgentId
@@ -15504,7 +15548,7 @@ async function synchronizePaperclipPullRequestIssueStatuses(
       const executorTransitionAssignee = resolvePaperclipIssueExecutorAssignee(
         paperclipIssueSyncContext,
         advancedSettings,
-        followThroughAssigneeAgentId
+        transitionFollowThroughAssigneeAgentId
       );
       let nextStatus = resolvePaperclipDirectPullRequestIssueStatus({
         currentStatus: paperclipIssue.status,
@@ -15538,7 +15582,7 @@ async function synchronizePaperclipPullRequestIssueStatuses(
         nextStatus,
         syncContext: paperclipIssueSyncContext,
         advancedSettings,
-        followThroughAssigneeAgentId
+        followThroughAssigneeAgentId: transitionFollowThroughAssigneeAgentId
       });
       const shouldClearTransitionAssignee =
         nextStatus === 'in_review'
@@ -15595,6 +15639,9 @@ async function synchronizePaperclipPullRequestIssueStatuses(
           : undefined;
         remoteAction.fingerprint = remoteActionFingerprint;
         remoteAction.linkedPullRequestCommentCounts = currentCommentCounts;
+        remoteAction.selectedPullRequestGate = effectiveGate
+          ? { repositoryUrl: effectiveGate.repositoryUrl, number: effectiveGate.number }
+          : undefined;
         if (pendingWake) remoteAction.pendingWake = pendingWake;
         await persistRemoteActionRegistry();
         if (pendingWake) {
@@ -15662,6 +15709,9 @@ async function synchronizePaperclipPullRequestIssueStatuses(
         : undefined;
       remoteAction.fingerprint = remoteActionFingerprint;
       remoteAction.linkedPullRequestCommentCounts = currentCommentCounts;
+      remoteAction.selectedPullRequestGate = effectiveGate
+        ? { repositoryUrl: effectiveGate.repositoryUrl, number: effectiveGate.number }
+        : undefined;
       if (pendingWake) remoteAction.pendingWake = pendingWake;
       await persistRemoteActionRegistry();
       updatedStatusesCount += 1;
