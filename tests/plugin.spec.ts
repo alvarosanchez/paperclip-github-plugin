@@ -384,7 +384,7 @@ test('issue-linked PR routing keeps trusted comment evidence attached to the sou
     issueNumber: 7,
     state: 'open',
     commentCount: 1,
-    linkedPullRequests: [pullRequest(10), pullRequest(20)]
+    linkedPullRequests: [pullRequest(20)]
   };
   assert.equal(
     workerModule.__testing.buildRemoteActionFingerprint(issueSnapshot as never, effectiveGate as never),
@@ -393,6 +393,19 @@ test('issue-linked PR routing keeps trusted comment evidence attached to the sou
       linkedPullRequests: [...issueSnapshot.linkedPullRequests].reverse()
     } as never, reversedGate as never),
     'the issue fingerprint must derive from the same deterministic effective gate'
+  );
+
+  const unchangedNextPollGate = workerModule.__testing.selectEffectiveIssueLinkedPullRequestGate(
+    issueSnapshot.linkedPullRequests as never,
+    [],
+    false,
+    links as never
+  );
+  assert.equal(unchangedNextPollGate?.condition, 'ready');
+  assert.equal(
+    workerModule.__testing.buildRemoteActionFingerprint(issueSnapshot as never, effectiveGate as never),
+    workerModule.__testing.buildRemoteActionFingerprint(issueSnapshot as never, unchangedNextPollGate as never),
+    'one-shot trusted comment evidence must not destabilize the next unchanged poll'
   );
 });
 

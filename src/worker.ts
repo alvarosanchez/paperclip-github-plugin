@@ -13409,10 +13409,7 @@ function buildRemoteActionFingerprint(
         repositoryUrl: effectiveGate.repositoryUrl,
         number: effectiveGate.number,
         headSha: effectiveGate.headSha,
-        condition: effectiveGate.condition === 'trusted_comment'
-          ? effectiveGate.condition
-          : getEffectivePullRequestActionCondition(effectiveGate.pullRequest),
-        trustedCommentKinds: effectiveGate.trustedCommentKinds
+        condition: getEffectivePullRequestActionCondition(effectiveGate.pullRequest)
       };
   const reasonCode = snapshot.state === 'closed'
     ? `issue_closed_${snapshot.stateReason ?? 'completed'}`
