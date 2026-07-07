@@ -16395,6 +16395,7 @@ test('worker repairs missing import registry entries by reusing existing importe
   await plugin.definition.setup(harness.ctx);
 
   await harness.performAction('settings.saveRegistration', {
+    companyId: 'company-1',
     mappings: [
       {
         id: 'mapping-a',
@@ -16404,6 +16405,11 @@ test('worker repairs missing import registry entries by reusing existing importe
         companyId: 'company-1'
       }
     ],
+    advancedSettings: {
+      defaultAssigneeAgentId: 'agent-1',
+      defaultStatus: 'todo',
+      ignoredIssueAuthorUsernames: ['renovate']
+    },
     syncState: {
       status: 'idle'
     }
@@ -16415,11 +16421,24 @@ test('worker repairs missing import registry entries by reusing existing importe
     title: 'Repair dedupe from source link',
     description: 'Imported from https://github.com/paperclipai/example-repo/issues/25\n\nBody'
   });
+  const originalUpdateIssue = harness.ctx.issues.update.bind(harness.ctx.issues);
+  const activationPatches: Array<Record<string, unknown>> = [];
+  harness.ctx.issues.update = async (issueId, issuePatch, companyId) => {
+    if (issueId === existingImportedIssue.id) activationPatches.push(issuePatch as Record<string, unknown>);
+    return originalUpdateIssue(issueId, issuePatch, companyId);
+  };
 
   const originalListIssues = harness.ctx.issues.list.bind(harness.ctx.issues);
   harness.ctx.issues.list = async (input: Parameters<typeof originalListIssues>[0]) => {
     assert.equal((input as { projectId?: string }).projectId, undefined);
     return originalListIssues(input);
+  };
+
+  const originalRequestWakeup = harness.ctx.issues.requestWakeup.bind(harness.ctx.issues);
+  const wakeupRequests: Array<{ issueId: string; idempotencyKey?: string | null }> = [];
+  harness.ctx.issues.requestWakeup = async (issueId, companyId, options) => {
+    wakeupRequests.push({ issueId, idempotencyKey: options?.idempotencyKey });
+    return originalRequestWakeup(issueId, companyId, options);
   };
 
   const originalFetch = globalThis.fetch;
@@ -16436,9 +16455,18 @@ test('worker repairs missing import registry entries by reusing existing importe
           title: 'Repair dedupe from source link',
           body: 'Body',
           html_url: 'https://github.com/paperclipai/example-repo/issues/25',
+          user: { login: 'repo-maintainer' },
           state: 'open'
         }
       ]);
+    }
+
+    if (url.pathname === '/repos/paperclipai/example-repo/collaborators/repo-maintainer/permission') {
+      return jsonResponse({
+        permission: 'admin',
+        role_name: 'maintain',
+        user: { login: 'repo-maintainer' }
+      });
     }
 
     if (url.pathname === '/graphql') {
@@ -16491,7 +16519,18 @@ test('worker repairs missing import registry entries by reusing existing importe
     const importedIssues = await harness.ctx.issues.list({
       companyId: 'company-1'
     });
+    const repairedIssue = importedIssues.find((issue) => issue.id === existingImportedIssue.id);
     assert.equal(importedIssues.filter((issue) => issue.title === 'Repair dedupe from source link').length, 1);
+    assert.equal(repairedIssue?.status, 'todo');
+    assert.equal(
+      activationPatches.some((issuePatch) => issuePatch.assigneeAgentId === 'agent-1'),
+      true,
+      JSON.stringify(activationPatches)
+    );
+    assert.equal(repairedIssue?.assigneeAgentId, 'agent-1');
+    assert.equal(wakeupRequests.length, 1);
+    assert.equal(wakeupRequests[0]?.issueId, existingImportedIssue.id);
+    assert.match(wakeupRequests[0]?.idempotencyKey ?? '', /^github-sync:import:[^:]+:[a-f0-9]{64}$/);
 
     const importRegistry = harness.getState({
       scopeKind: 'instance',
@@ -16519,6 +16558,8 @@ test('worker repairs missing import registry entries by reusing existing importe
     assert.equal(importRegistry[0]?.companyId, 'company-1');
     assert.match(importRegistry[0]?.importedAt ?? '', /^\d{4}-\d{2}-\d{2}T/);
   } finally {
+    harness.ctx.issues.update = originalUpdateIssue;
+    harness.ctx.issues.requestWakeup = originalRequestWakeup;
     globalThis.fetch = originalFetch;
   }
 });
@@ -20118,7 +20159,9 @@ test('sync applies company-wide advanced defaults and ignores configured GitHub 
     assert.equal(importedHumanIssue?.assigneeAgentId, 'agent-1');
     assert.equal(importedHumanIssue?.status, 'todo');
     assert.equal(ignoredIssue, undefined);
-    assert.equal(statusTransitionComments.length, 0);
+    assert.equal(statusTransitionComments.length, 1);
+    assert.equal(statusTransitionComments[0]?.issueId, importedHumanIssue?.id);
+    assert.match(statusTransitionComments[0]?.body ?? '', /from `backlog` to `todo`/);
 
     const importRegistry = harness.getState({
       scopeKind: 'instance',
@@ -21446,6 +21489,32 @@ test('sync.runNow converges local drift, quiesces stable state, and re-wakes for
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+test('pending-wake capacity preserves retries without admitting a 257th effect', async () => {
+  const workerModule = await importFreshWorkerModule();
+  const canReservePendingWake = (workerModule.__testing as typeof workerModule.__testing & {
+    canReservePendingWake?: (
+      registry: Array<Record<string, unknown>>,
+      currentRecord: Record<string, unknown>
+    ) => boolean;
+  }).canReservePendingWake;
+  assert.equal(typeof canReservePendingWake, 'function');
+
+  const fullRegistry = Array.from({ length: 256 }, (_, index) => ({
+    key: `pending-${index}`,
+    pendingWake: {
+      fingerprint: (index + 1).toString(16).padStart(64, '0'),
+      assigneeAgentId: 'agent-1',
+      reason: 'capacity regression fixture',
+      mutation: 'status_transition' as const,
+      nextStatus: 'in_progress' as const
+    }
+  }));
+
+  assert.equal(canReservePendingWake!(fullRegistry, fullRegistry[0]!), true);
+  assert.equal(canReservePendingWake!(fullRegistry, { key: 'new-effect' }), false);
+  assert.equal(canReservePendingWake!(fullRegistry.slice(0, 255), { key: 'new-effect' }), true);
 });
 
 test('remote action fingerprints ignore transient raw UNKNOWN jitter that preserves the effective action', async () => {

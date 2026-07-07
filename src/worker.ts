@@ -418,6 +418,7 @@ interface ImportedIssueRecord {
   remoteActionFingerprint?: string;
   selectedPullRequestGate?: GitHubPullRequestReference;
   pendingRemoteActionWake?: PendingRemoteActionWake;
+  activationPending?: boolean;
   repositoryUrl?: string;
   paperclipProjectId?: string;
   companyId?: string;
@@ -456,6 +457,14 @@ function reuseOrCreatePendingWake<T extends Omit<PendingRemoteActionWake, 'finge
     return existing as T & { fingerprint: string };
   }
   return { fingerprint: createFingerprint(), ...next };
+}
+
+function canReservePendingWake(
+  registry: RemoteActionRecord[],
+  currentRecord: RemoteActionRecord
+): boolean {
+  return Boolean(currentRecord.pendingWake)
+    || registry.filter((record) => record.pendingWake).length < MAX_REMOTE_ACTION_REGISTRY_RECORDS;
 }
 
 interface RemoteActionRecord {
@@ -6858,6 +6867,7 @@ function normalizeImportRegistry(value: unknown): ImportedIssueRecord[] {
           : undefined;
       const selectedPullRequestGate = normalizeSelectedPullRequestGate(record.selectedPullRequestGate);
       const pendingRemoteActionWake = normalizePendingRemoteActionWake(record.pendingRemoteActionWake);
+      const activationPending = record.activationPending === true;
 
       if (!mappingId || Number.isNaN(githubIssueId) || !paperclipIssueId || !importedAt) {
         return null;
@@ -6877,7 +6887,8 @@ function normalizeImportRegistry(value: unknown): ImportedIssueRecord[] {
         ...(linkedPullRequestCommentCounts.length > 0 ? { linkedPullRequestCommentCounts } : {}),
         ...(remoteActionFingerprint ? { remoteActionFingerprint } : {}),
         ...(selectedPullRequestGate ? { selectedPullRequestGate } : {}),
-        ...(pendingRemoteActionWake ? { pendingRemoteActionWake } : {})
+        ...(pendingRemoteActionWake ? { pendingRemoteActionWake } : {}),
+        ...(activationPending ? { activationPending: true } : {})
       };
     })
     .filter((entry): entry is ImportedIssueRecord => entry !== null);
@@ -7106,7 +7117,8 @@ function buildImportedIssueRecord(
   mapping: RepositoryMapping,
   issue: GitHubIssueRecord,
   paperclipIssueId: string,
-  importedAt: string
+  importedAt: string,
+  activationPending = false
 ): ImportedIssueRecord {
   return {
     mappingId: mapping.id,
@@ -7119,7 +7131,8 @@ function buildImportedIssueRecord(
     linkedPullRequestCommentCounts: [],
     repositoryUrl: getNormalizedMappingRepositoryUrl(mapping),
     paperclipProjectId: mapping.paperclipProjectId,
-    companyId: mapping.companyId
+    companyId: mapping.companyId,
+    ...(activationPending ? { activationPending: true } : {})
   };
 }
 
@@ -14238,7 +14251,6 @@ async function createPaperclipIssue(
 
   const title = issue.title;
   const description = buildPaperclipIssueDescription(issue);
-  const defaultAssignee = getConfiguredAdvancedAssigneePrincipal(advancedSettings, 'default');
   const createdIssue = await ensurePaperclipIssueStandardWorkMode(
     ctx,
     await ctx.issues.create({
@@ -14246,29 +14258,15 @@ async function createPaperclipIssue(
       projectId: mapping.paperclipProjectId,
       title,
       ...(description ? { description } : {}),
-      status: advancedSettings.defaultStatus,
+      status: 'backlog',
       originKind: GITHUB_ISSUE_ORIGIN_KIND,
-      originId: normalizeGitHubIssueHtmlUrl(issue.htmlUrl) ?? issue.htmlUrl,
-      ...(defaultAssignee?.kind === 'agent'
-        ? { assigneeAgentId: defaultAssignee.id }
-        : defaultAssignee?.kind === 'user'
-          ? { assigneeUserId: defaultAssignee.id }
-        : {})
+      originId: normalizeGitHubIssueHtmlUrl(issue.htmlUrl) ?? issue.htmlUrl
     }),
     mapping.companyId
   );
   const ensuredCreatedIssueId = createdIssue.id;
   const normalizedCreatedIssueDescription = createdIssue.description ?? undefined;
   const createPath: IssueDescriptionUpdatePath = 'sdk';
-
-  if (defaultAssignee?.kind === 'user') {
-    await assignImportedPaperclipIssueToUser(ctx, {
-      companyId: mapping.companyId,
-      issueId: ensuredCreatedIssueId,
-      assigneeUserId: defaultAssignee.id,
-      paperclipApiBaseUrl
-    });
-  }
 
   if (normalizeIssueDescriptionValue(normalizedCreatedIssueDescription) !== description) {
     logIssueDescriptionDiagnostic(
@@ -14384,7 +14382,8 @@ async function ensurePaperclipIssueImported(
         mapping,
         issue,
         existingImportedPaperclipIssue.id,
-        coerceDate(existingImportedPaperclipIssue.createdAt ?? new Date()).toISOString()
+        coerceDate(existingImportedPaperclipIssue.createdAt ?? new Date()).toISOString(),
+        true
       )
     );
 
@@ -14405,7 +14404,7 @@ async function ensurePaperclipIssueImported(
   );
   const registryRecord = upsertImportedIssueRecord(
     nextRegistry,
-    buildImportedIssueRecord(mapping, issue, createdIssue.id, new Date().toISOString())
+    buildImportedIssueRecord(mapping, issue, createdIssue.id, new Date().toISOString(), true)
   );
   importRegistryByIssueId.set(issue.id, registryRecord);
   ensuredPaperclipIssueIds.set(issue.id, createdIssue.id);
@@ -15086,12 +15085,14 @@ async function synchronizePaperclipIssueStatuses(
         });
         if (admitted) {
           delete importedIssue.pendingRemoteActionWake;
+          delete importedIssue.activationPending;
           await persistImportRegistry();
         }
       }
       const wasImportedThisRun = createdIssueIds.has(importedIssue.githubIssueId);
+      const isPendingInitialActivation = wasImportedThisRun || importedIssue.activationPending === true;
       const maintainerAuthoredImportedIssue =
-        wasImportedThisRun &&
+        isPendingInitialActivation &&
         advancedSettings.defaultStatus !== 'todo' &&
         snapshot.state === 'open' &&
         snapshot.linkedPullRequests.length === 0
@@ -15113,7 +15114,7 @@ async function synchronizePaperclipIssueStatuses(
         snapshot,
         effectiveGate,
         hasTrustedNewComment,
-        wasImportedThisRun,
+        wasImportedThisRun: isPendingInitialActivation,
         defaultImportedStatus: advancedSettings.defaultStatus,
         maintainerAuthoredImportedIssue,
         hasExecutorHandoffTarget: Boolean(executorTransitionAssignee)
@@ -15132,15 +15133,20 @@ async function synchronizePaperclipIssueStatuses(
         syncContext: paperclipIssueSyncContext
       });
       const shouldClearCompletedExecutionPolicy = nextStatus === 'done' || nextStatus === 'cancelled';
-      const shouldPreserveImportedTriageRouting = shouldPreserveImportedTriageAssignee({
-        currentStatus: paperclipIssue.status,
-        nextStatus,
-        wasImportedThisRun,
-        maintainerAuthoredImportedIssue
-      });
-      const nextTransitionAssignee = shouldPreserveImportedTriageRouting
-        ? null
-        : resolveSyncTransitionAssignee({
+      const shouldPreserveImportedTriageRouting = Boolean(paperclipIssueSyncContext.assignee)
+        && shouldPreserveImportedTriageAssignee({
+          currentStatus: paperclipIssue.status,
+          nextStatus,
+          wasImportedThisRun: isPendingInitialActivation,
+          maintainerAuthoredImportedIssue
+        });
+      const configuredDefaultAssignee = getConfiguredAdvancedAssigneePrincipal(advancedSettings, 'default');
+      const nextTransitionAssignee = isPendingInitialActivation
+        && configuredDefaultAssignee
+        ? { principal: configuredDefaultAssignee, role: 'executor' as const }
+        : shouldPreserveImportedTriageRouting
+          ? null
+          : resolveSyncTransitionAssignee({
             currentStatus: paperclipIssue.status,
             nextStatus,
             syncContext: paperclipIssueSyncContext,
@@ -15153,11 +15159,15 @@ async function synchronizePaperclipIssueStatuses(
       const nextAssigneeChanged = nextTransitionAssignee
         ? !doesPaperclipIssueAssigneeMatch(paperclipIssueSyncContext.assignee, nextTransitionAssignee.principal)
         : false;
+      const importedActivationAssignee = paperclipIssueSyncContext.assignee?.kind === 'agent'
+        ? paperclipIssueSyncContext.assignee
+        : nextTransitionAssignee?.principal.kind === 'agent'
+          ? nextTransitionAssignee.principal
+          : undefined;
       const shouldWakeImportedAssignee =
-        wasImportedThisRun
+        isPendingInitialActivation
         && nextStatus === 'todo'
-        && (paperclipIssue.status === nextStatus || shouldPreserveImportedTriageRouting)
-        && paperclipIssueSyncContext.assignee?.kind === 'agent';
+        && Boolean(importedActivationAssignee);
       const shouldWakeTransitionAssignee =
         nextTransitionAssignee?.principal.kind === 'agent'
         && isActionablePaperclipIssueStatus(nextStatus)
@@ -15173,14 +15183,15 @@ async function synchronizePaperclipIssueStatuses(
           ? { repositoryUrl: effectiveGate.repositoryUrl, number: effectiveGate.number }
           : undefined;
         if (pendingWake) importedIssue.pendingRemoteActionWake = pendingWake;
+        else delete importedIssue.activationPending;
         await persistImportRegistry();
       };
 
       if (paperclipIssue.status === nextStatus) {
         const pendingWake: PendingRemoteActionWake | undefined =
-          shouldWakeImportedAssignee && paperclipIssueSyncContext.assignee?.kind === 'agent'
+          shouldWakeImportedAssignee && importedActivationAssignee
             ? reuseOrCreatePendingWake(importedIssue.pendingRemoteActionWake, {
-                assigneeAgentId: paperclipIssueSyncContext.assignee.id,
+                assigneeAgentId: importedActivationAssignee.id,
                 reason: IMPORTED_ISSUE_WAKE_REASON,
                 mutation: 'import',
                 nextStatus
@@ -15230,6 +15241,7 @@ async function synchronizePaperclipIssueStatuses(
             onSuccess: async () => {
               if (importedIssue.pendingRemoteActionWake?.fingerprint === pendingWake.fingerprint) {
                 delete importedIssue.pendingRemoteActionWake;
+                delete importedIssue.activationPending;
                 await persistImportRegistry();
               }
             }
@@ -15255,9 +15267,9 @@ async function synchronizePaperclipIssueStatuses(
         githubIssueNumber: githubIssue.number
       });
       const pendingWake: PendingRemoteActionWake | undefined =
-        shouldWakeImportedAssignee && paperclipIssueSyncContext.assignee?.kind === 'agent'
+        shouldWakeImportedAssignee && importedActivationAssignee
           ? reuseOrCreatePendingWake(importedIssue.pendingRemoteActionWake, {
-              assigneeAgentId: paperclipIssueSyncContext.assignee.id,
+              assigneeAgentId: importedActivationAssignee.id,
               reason: IMPORTED_ISSUE_WAKE_REASON,
               mutation: 'import',
               previousStatus: paperclipIssue.status,
@@ -15305,6 +15317,7 @@ async function synchronizePaperclipIssueStatuses(
           onSuccess: async () => {
             if (importedIssue.pendingRemoteActionWake?.fingerprint === pendingWake.fingerprint) {
               delete importedIssue.pendingRemoteActionWake;
+              delete importedIssue.activationPending;
               await persistImportRegistry();
             }
           }
@@ -15664,7 +15677,7 @@ async function synchronizePaperclipPullRequestIssueStatuses(
         if (
           shouldWakeTransitionAssignee
           && nextTransitionAssignee?.principal.kind === 'agent'
-          && remoteActionRegistry.filter((record) => record.pendingWake).length >= MAX_REMOTE_ACTION_REGISTRY_RECORDS
+          && !canReservePendingWake(remoteActionRegistry, remoteAction)
         ) {
           throw new Error(
             `Remote action registry pending-wake capacity ${MAX_REMOTE_ACTION_REGISTRY_RECORDS} reached; refusing an untracked assignment update`
@@ -15746,7 +15759,7 @@ async function synchronizePaperclipPullRequestIssueStatuses(
       if (
         shouldWakeTransitionAssignee
         && nextTransitionAssignee?.principal.kind === 'agent'
-        && remoteActionRegistry.filter((record) => record.pendingWake).length >= MAX_REMOTE_ACTION_REGISTRY_RECORDS
+        && !canReservePendingWake(remoteActionRegistry, remoteAction)
       ) {
         throw new Error(
           `Remote action registry pending-wake capacity ${MAX_REMOTE_ACTION_REGISTRY_RECORDS} reached; refusing an untracked status transition`
@@ -23557,6 +23570,7 @@ export function shouldStartWorkerHost(moduleUrl: string, entry = process.argv[1]
 export const __testing = {
   buildDirectPullRequestActionFingerprint,
   buildRemoteActionFingerprint,
+  canReservePendingWake,
   canonicalizeGitHubPullRequestCommentCounts,
   buildSyncFallbackExecutionStatePatch,
   createGitHubToolOctokit,
