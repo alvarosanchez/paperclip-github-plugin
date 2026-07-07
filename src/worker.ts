@@ -22744,12 +22744,13 @@ function registerGitHubAgentTools(ctx: PluginSetupContext): void {
         pullRequestData = existingPullRequest;
       }
 
+      let persistedFollowThroughAssigneeAgentId = followThroughAssigneeAgentId ?? undefined;
       if (paperclipIssueId) {
         const pullRequestUrl =
           normalizeGitHubPullRequestHtmlUrl(pullRequestData.html_url)
           ?? `${repository.url}/pull/${pullRequestData.number}`;
 
-        await upsertGitHubPullRequestLinkRecord(ctx, {
+        const persistedLink = await upsertGitHubPullRequestLinkRecord(ctx, {
           companyId: runCtx.companyId,
           projectId: issueProjectId,
           issueId: paperclipIssueId,
@@ -22763,6 +22764,7 @@ function registerGitHubAgentTools(ctx: PluginSetupContext): void {
           }),
           followThroughAssigneeAgentId
         });
+        persistedFollowThroughAssigneeAgentId = persistedLink.followThroughAssigneeAgentId;
         invalidateProjectPullRequestCaches({
           companyId: runCtx.companyId,
           projectId: issueProjectId,
@@ -22793,7 +22795,9 @@ function registerGitHubAgentTools(ctx: PluginSetupContext): void {
             commitSha: publishedBranch.commitSha,
             remoteRef: publishedBranch.remoteRef
           },
-          ...(followThroughAssigneeAgentId ? { followThroughAssigneeAgentId } : {}),
+          ...(persistedFollowThroughAssigneeAgentId
+            ? { followThroughAssigneeAgentId: persistedFollowThroughAssigneeAgentId }
+            : {}),
           pullRequest: {
             number: pullRequestData.number,
             title: pullRequestData.title,

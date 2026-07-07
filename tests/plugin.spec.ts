@@ -2664,6 +2664,18 @@ test('create_pull_request recovers an existing exact-SHA pull request after a re
     assigneeAgentId: 'agent-1',
     executionWorkspaceId: 'execution-workspace-1'
   });
+  const workerModule = await importFreshWorkerModule();
+  await workerModule.__testing.upsertGitHubPullRequestLinkRecord(harness.ctx, {
+    companyId: 'company-1',
+    projectId: 'project-1',
+    issueId: issue.id,
+    repositoryUrl: 'https://github.com/paperclipai/example-repo',
+    pullRequestNumber: 24,
+    pullRequestUrl: 'https://github.com/paperclipai/example-repo/pull/24',
+    pullRequestTitle: 'Retry-safe pull request',
+    pullRequestState: 'open',
+    followThroughAssigneeAgentId: 'agent-1'
+  });
   const originalFetch = globalThis.fetch;
   const seenRequests: string[] = [];
   globalThis.fetch = async (input, init) => {
@@ -2713,6 +2725,11 @@ test('create_pull_request recovers an existing exact-SHA pull request after a re
       'GET /repos/paperclipai/example-repo/pulls'
     ]);
     assert.equal((result.data as { pullRequest: { number: number } }).pullRequest.number, 24);
+    assert.equal(
+      (result.data as { followThroughAssigneeAgentId?: string }).followThroughAssigneeAgentId,
+      'agent-1',
+      'idempotent retries must return the owner preserved by the persisted PR link'
+    );
     const links = await harness.ctx.entities.list({
       entityType: 'paperclip-github-plugin.pull-request-link',
       scopeKind: 'issue',
