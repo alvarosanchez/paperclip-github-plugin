@@ -7773,18 +7773,24 @@ function resolveActionableDirectPullRequestOwnerCandidate(
   pullRequests: GitHubDirectPullRequestSyncSnapshot[],
   hasTrustedNewComment: boolean
 ): string | undefined {
-  const actionable = pullRequests.find((entry) =>
-    entry.lifecycleState === 'open'
-    && Boolean(entry.pullRequestLink.data.followThroughAssigneeAgentId)
-    && Boolean(entry.pullRequest)
-    && (
-      hasTrustedNewComment
-      || entry.pullRequest!.ciState === 'red'
-      || entry.pullRequest!.hasUnresolvedReviewThreads
-      || isGitHubPullRequestActionRequiredForSync(entry.pullRequest!)
+  const effectiveAction = pullRequests
+    .filter((entry): entry is GitHubDirectPullRequestSyncSnapshot & { pullRequest: GitHubPullRequestStatusSnapshot } =>
+      entry.lifecycleState === 'open'
+      && Boolean(entry.pullRequest)
+      && (
+        hasTrustedNewComment
+        || entry.pullRequest!.ciState === 'red'
+        || entry.pullRequest!.hasUnresolvedReviewThreads
+        || isGitHubPullRequestActionRequiredForSync(entry.pullRequest!)
+      )
     )
-  );
-  return actionable?.pullRequestLink.data.followThroughAssigneeAgentId;
+    .sort((left, right) =>
+      getEffectivePullRequestActionPriority(getEffectivePullRequestActionCondition(left.pullRequest))
+        - getEffectivePullRequestActionPriority(getEffectivePullRequestActionCondition(right.pullRequest))
+      || left.repository.url.localeCompare(right.repository.url)
+      || left.pullRequestLink.data.githubPullRequestNumber - right.pullRequestLink.data.githubPullRequestNumber
+    )[0];
+  return effectiveAction?.pullRequestLink.data.followThroughAssigneeAgentId;
 }
 
 async function resolveValidFollowThroughAssigneeAgentId(
@@ -7804,23 +7810,27 @@ async function resolveActionableIssueLinkedPullRequestOwner(
   pullRequests: GitHubPullRequestStatusSnapshot[],
   hasTrustedNewComment: boolean
 ): Promise<string | undefined> {
-  const actionablePullRequests = pullRequests.filter((pullRequest) =>
-    hasTrustedNewComment
-    || pullRequest.ciState === 'red'
-    || pullRequest.hasUnresolvedReviewThreads
-    || isGitHubPullRequestActionRequiredForSync(pullRequest)
-  );
-  if (actionablePullRequests.length === 0) return undefined;
+  const effectiveAction = pullRequests
+    .filter((pullRequest) =>
+      hasTrustedNewComment
+      || pullRequest.ciState === 'red'
+      || pullRequest.hasUnresolvedReviewThreads
+      || isGitHubPullRequestActionRequiredForSync(pullRequest)
+    )
+    .sort((left, right) =>
+      getEffectivePullRequestActionPriority(getEffectivePullRequestActionCondition(left))
+        - getEffectivePullRequestActionPriority(getEffectivePullRequestActionCondition(right))
+      || left.repositoryUrl.localeCompare(right.repositoryUrl)
+      || left.number - right.number
+    )[0];
+  if (!effectiveAction) return undefined;
 
   const links = await listGitHubPullRequestLinkRecords(ctx, { paperclipIssueId });
-  const ownerCandidate = actionablePullRequests
-    .map((pullRequest) => links.find((link) =>
-      link.data.githubPullRequestNumber === pullRequest.number
-      && getNormalizedMappingRepositoryUrl({ repositoryUrl: link.data.repositoryUrl })
-        === getNormalizedMappingRepositoryUrl({ repositoryUrl: pullRequest.repositoryUrl })
-      && Boolean(link.data.followThroughAssigneeAgentId)
-    ))
-    .find(Boolean)?.data.followThroughAssigneeAgentId;
+  const ownerCandidate = links.find((link) =>
+    link.data.githubPullRequestNumber === effectiveAction.number
+    && getNormalizedMappingRepositoryUrl({ repositoryUrl: link.data.repositoryUrl })
+      === getNormalizedMappingRepositoryUrl({ repositoryUrl: effectiveAction.repositoryUrl })
+  )?.data.followThroughAssigneeAgentId;
   return resolveValidFollowThroughAssigneeAgentId(ctx, companyId, ownerCandidate);
 }
 
@@ -8284,7 +8294,13 @@ function resolvePaperclipIssueExecutorAssignee(
   followThroughAssigneeAgentId?: string
 ): SyncTransitionAssigneeResolution | null {
   const returnAssignee = syncContext.executionState?.returnAssignee;
-  if (returnAssignee && syncContext.executionState?.status !== 'completed') {
+  if (
+    returnAssignee
+    && (
+      syncContext.executionState?.status === 'pending'
+      || syncContext.executionState?.status === 'changes_requested'
+    )
+  ) {
     return {
       principal: returnAssignee,
       role: 'executor'
@@ -11224,6 +11240,27 @@ async function upsertGitHubIssueLinkRecord(
   });
 }
 
+const pullRequestLinkMutationTails = new Map<string, Promise<void>>();
+
+async function withPullRequestLinkMutationLock<T>(key: string, mutation: () => Promise<T>): Promise<T> {
+  const previousTail = pullRequestLinkMutationTails.get(key) ?? Promise.resolve();
+  let release!: () => void;
+  const currentMutation = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const currentTail = previousTail.catch(() => undefined).then(() => currentMutation);
+  pullRequestLinkMutationTails.set(key, currentTail);
+  await previousTail.catch(() => undefined);
+  try {
+    return await mutation();
+  } finally {
+    release();
+    if (pullRequestLinkMutationTails.get(key) === currentTail) {
+      pullRequestLinkMutationTails.delete(key);
+    }
+  }
+}
+
 async function upsertGitHubPullRequestLinkRecord(
   ctx: PluginSetupContext,
   params: {
@@ -11238,43 +11275,47 @@ async function upsertGitHubPullRequestLinkRecord(
     followThroughAssigneeAgentId?: string | null;
   }
 ): Promise<GitHubPullRequestLinkEntityData> {
-  const existing = (await listGitHubPullRequestLinkRecords(ctx, {
-    paperclipIssueId: params.issueId,
-    externalId: params.pullRequestUrl
-  }))[0];
-  const previousOwner = existing?.data.followThroughAssigneeAgentId;
-  const nextOwner = params.followThroughAssigneeAgentId === undefined
-    ? previousOwner
-    : params.followThroughAssigneeAgentId ?? undefined;
-  const ownerChanged = params.followThroughAssigneeAgentId !== undefined && previousOwner !== nextOwner;
-  const data: GitHubPullRequestLinkEntityData = {
-    companyId: params.companyId,
-    ...(params.projectId ? { paperclipProjectId: params.projectId } : {}),
-    repositoryUrl: getNormalizedMappingRepositoryUrl({
-      repositoryUrl: params.repositoryUrl
-    }),
-    githubPullRequestNumber: params.pullRequestNumber,
-    githubPullRequestUrl: params.pullRequestUrl,
-    githubPullRequestState: params.pullRequestState,
-    title: params.pullRequestTitle,
-    ...(nextOwner ? { followThroughAssigneeAgentId: nextOwner } : {}),
-    ...(ownerChanged
-      ? { followThroughAssigneeUpdatedAt: new Date().toISOString() }
-      : existing?.data.followThroughAssigneeUpdatedAt
-        ? { followThroughAssigneeUpdatedAt: existing.data.followThroughAssigneeUpdatedAt }
-        : {}),
-    syncedAt: new Date().toISOString()
-  };
-  await ctx.entities.upsert({
-    entityType: PULL_REQUEST_LINK_ENTITY_TYPE,
-    scopeKind: 'issue',
-    scopeId: params.issueId,
-    externalId: params.pullRequestUrl,
-    title: `GitHub pull request #${params.pullRequestNumber}`,
-    status: params.pullRequestState,
-    data: data as unknown as Record<string, unknown>
+  const repositoryUrl = getNormalizedMappingRepositoryUrl({ repositoryUrl: params.repositoryUrl });
+  const mutationKey = `${params.companyId}:${params.issueId}:${repositoryUrl.toLowerCase()}:${params.pullRequestNumber}`;
+  return withPullRequestLinkMutationLock(mutationKey, async () => {
+    const existing = (await listGitHubPullRequestLinkRecords(ctx, {
+      paperclipIssueId: params.issueId
+    })).find((record) =>
+      record.data.githubPullRequestNumber === params.pullRequestNumber
+      && getNormalizedMappingRepositoryUrl({ repositoryUrl: record.data.repositoryUrl }) === repositoryUrl
+    );
+    const previousOwner = existing?.data.followThroughAssigneeAgentId;
+    const nextOwner = params.followThroughAssigneeAgentId === undefined
+      ? previousOwner
+      : params.followThroughAssigneeAgentId ?? undefined;
+    const ownerChanged = params.followThroughAssigneeAgentId !== undefined && previousOwner !== nextOwner;
+    const data: GitHubPullRequestLinkEntityData = {
+      companyId: params.companyId,
+      ...(params.projectId ? { paperclipProjectId: params.projectId } : {}),
+      repositoryUrl,
+      githubPullRequestNumber: params.pullRequestNumber,
+      githubPullRequestUrl: params.pullRequestUrl,
+      githubPullRequestState: params.pullRequestState,
+      title: params.pullRequestTitle,
+      ...(nextOwner ? { followThroughAssigneeAgentId: nextOwner } : {}),
+      ...(ownerChanged
+        ? { followThroughAssigneeUpdatedAt: new Date().toISOString() }
+        : existing?.data.followThroughAssigneeUpdatedAt
+          ? { followThroughAssigneeUpdatedAt: existing.data.followThroughAssigneeUpdatedAt }
+          : {}),
+      syncedAt: new Date().toISOString()
+    };
+    await ctx.entities.upsert({
+      entityType: PULL_REQUEST_LINK_ENTITY_TYPE,
+      scopeKind: 'issue',
+      scopeId: params.issueId,
+      externalId: existing?.externalId ?? params.pullRequestUrl,
+      title: `GitHub pull request #${params.pullRequestNumber}`,
+      status: params.pullRequestState,
+      data: data as unknown as Record<string, unknown>
+    });
+    return data;
   });
-  return data;
 }
 
 async function validateFollowThroughAssigneeAgentId(
@@ -23265,12 +23306,14 @@ export const __testing = {
   normalizeRemoteActionRegistry,
   persistIssueInteractionEvent,
   trackedMutationOutcome,
+  resolveActionableDirectPullRequestOwnerCandidate,
   resolvePaperclipApiAuthTokens,
   resolveGithubToken,
   resolvePaperclipPullRequestIssueStatus,
   resolveSyncTransitionAssignee,
   resolveTrustedWorkspacePath,
   updatePaperclipIssueState,
+  upsertGitHubPullRequestLinkRecord,
   wakePaperclipIssueAssignee,
   setCreatePullRequestBranchPublisher(
     publisher?: CreatePullRequestBranchPublisher

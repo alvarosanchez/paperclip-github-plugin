@@ -154,6 +154,156 @@ test('sync still starts internal review for active implementation handoffs', asy
   );
 });
 
+test('executor routing only lets active execution states override a durable PR owner', async () => {
+  const workerModule = await importFreshWorkerModule();
+  const advancedSettings = {
+    defaultStatus: 'backlog' as const,
+    ignoredIssueAuthorUsernames: []
+  };
+  const resolve = (status: string | undefined) => workerModule.__testing.resolveSyncTransitionAssignee({
+    currentStatus: 'in_review',
+    nextStatus: 'in_progress',
+    syncContext: {
+      assignee: null,
+      executionPolicy: null,
+      executionState: {
+        status,
+        currentStageId: null,
+        currentStageIndex: null,
+        currentStageType: null,
+        currentParticipant: null,
+        returnAssignee: { kind: 'agent' as const, id: 'historical-agent' },
+        completedStageIds: [],
+        lastDecisionId: null,
+        lastDecisionOutcome: null
+      }
+    },
+    advancedSettings,
+    followThroughAssigneeAgentId: 'durable-owner'
+  });
+
+  for (const status of [undefined, 'idle', 'completed', 'settled']) {
+    assert.deepEqual(resolve(status), {
+      principal: { kind: 'agent', id: 'durable-owner' },
+      role: 'executor'
+    });
+  }
+  for (const status of ['pending', 'changes_requested']) {
+    assert.deepEqual(resolve(status), {
+      principal: { kind: 'agent', id: 'historical-agent' },
+      role: 'executor'
+    });
+  }
+});
+
+test('direct PR routing selects the owner from the same highest-priority gate as the action fingerprint', async () => {
+  const workerModule = await importFreshWorkerModule();
+  const snapshot = (number: number, owner: string, condition: 'red' | 'conflict') => ({
+    pullRequestLink: {
+      paperclipIssueId: 'issue-1',
+      externalId: `https://github.com/paperclipai/example-repo/pull/${number}`,
+      data: {
+        companyId: 'company-1',
+        repositoryUrl: 'https://github.com/paperclipai/example-repo',
+        githubPullRequestNumber: number,
+        githubPullRequestUrl: `https://github.com/paperclipai/example-repo/pull/${number}`,
+        githubPullRequestState: 'open',
+        followThroughAssigneeAgentId: owner,
+        syncedAt: '2026-07-07T00:00:00.000Z'
+      }
+    },
+    repository: {
+      owner: 'paperclipai',
+      repo: 'example-repo',
+      url: 'https://github.com/paperclipai/example-repo'
+    },
+    lifecycleState: 'open',
+    pullRequest: {
+      number,
+      repositoryUrl: 'https://github.com/paperclipai/example-repo',
+      hasUnresolvedReviewThreads: false,
+      ciState: condition === 'red' ? 'red' : 'green',
+      mergeability: condition === 'conflict' ? 'conflicting' : 'mergeable',
+      mergeStateStatus: condition === 'conflict' ? 'dirty' : 'clean',
+      reviewDecision: 'review_required'
+    }
+  });
+
+  assert.equal(
+    workerModule.__testing.resolveActionableDirectPullRequestOwnerCandidate([
+      snapshot(10, 'lower-priority-red-owner', 'red'),
+      snapshot(20, 'highest-priority-conflict-owner', 'conflict')
+    ] as never, false),
+    'highest-priority-conflict-owner'
+  );
+});
+
+test('PR link metadata refresh cannot overwrite a concurrent explicit owner update', async () => {
+  const workerModule = await importFreshWorkerModule();
+  const harness = createTestHarness({ manifest, config: { githubToken: TEST_GITHUB_TOKEN } });
+  const base = {
+    companyId: 'company-1',
+    projectId: 'project-1',
+    issueId: 'issue-1',
+    repositoryUrl: 'https://github.com/paperclipai/example-repo',
+    pullRequestNumber: 77,
+    pullRequestUrl: 'https://github.com/paperclipai/example-repo/pull/77',
+    pullRequestTitle: 'Initial title',
+    pullRequestState: 'open' as const
+  };
+  await workerModule.__testing.upsertGitHubPullRequestLinkRecord(harness.ctx, {
+    ...base,
+    followThroughAssigneeAgentId: 'owner-a'
+  });
+
+  const originalList = harness.ctx.entities.list.bind(harness.ctx.entities);
+  let releaseRefresh!: () => void;
+  const refreshCanContinue = new Promise<void>((resolve) => {
+    releaseRefresh = resolve;
+  });
+  let markRefreshRead!: () => void;
+  const refreshHasRead = new Promise<void>((resolve) => {
+    markRefreshRead = resolve;
+  });
+  let pauseNextLinkRead = true;
+  harness.ctx.entities.list = async (input) => {
+    const rows = await originalList(input);
+    if (pauseNextLinkRead && input.entityType === 'paperclip-github-plugin.pull-request-link') {
+      pauseNextLinkRead = false;
+      markRefreshRead();
+      await refreshCanContinue;
+    }
+    return rows;
+  };
+
+  const refresh = workerModule.__testing.upsertGitHubPullRequestLinkRecord(harness.ctx, {
+    ...base,
+    pullRequestTitle: 'Refreshed title'
+  });
+  await refreshHasRead;
+  let ownerUpdateSettled = false;
+  const ownerUpdate = workerModule.__testing.upsertGitHubPullRequestLinkRecord(harness.ctx, {
+    ...base,
+    pullRequestTitle: 'Explicit owner update',
+    followThroughAssigneeAgentId: 'owner-b'
+  }).finally(() => {
+    ownerUpdateSettled = true;
+  });
+  await delay(10);
+  assert.equal(ownerUpdateSettled, false, 'the explicit update must wait for the in-flight refresh critical section');
+  releaseRefresh();
+  await Promise.all([refresh, ownerUpdate]);
+  harness.ctx.entities.list = originalList;
+
+  const [stored] = await originalList({
+    entityType: 'paperclip-github-plugin.pull-request-link',
+    scopeKind: 'issue',
+    scopeId: 'issue-1'
+  });
+  assert.equal((stored?.data as { followThroughAssigneeAgentId?: unknown }).followThroughAssigneeAgentId, 'owner-b');
+  assert.equal((stored?.data as { title?: unknown }).title, 'Explicit owner update');
+});
+
 test('sync preserves blocked maintainer approval waits for green mergeable pull requests', async () => {
   const workerModule = await importFreshWorkerModule();
   const testing = workerModule.__testing as typeof workerModule.__testing & {
