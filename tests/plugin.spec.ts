@@ -760,6 +760,7 @@ async function upsertDirectPullRequestLink(
     state?: 'open' | 'closed';
     repositoryUrl?: string;
     title?: string;
+    followThroughAssigneeAgentId?: string;
   } = {}
 ): Promise<void> {
   const repositoryUrl = options.repositoryUrl ?? 'https://github.com/paperclipai/example-repo';
@@ -780,6 +781,9 @@ async function upsertDirectPullRequestLink(
       githubPullRequestUrl: `${repositoryUrl}/pull/${pullRequestNumber}`,
       githubPullRequestState: options.state ?? 'open',
       title,
+      ...(options.followThroughAssigneeAgentId
+        ? { followThroughAssigneeAgentId: options.followThroughAssigneeAgentId }
+        : {}),
       syncedAt: '2026-04-27T09:30:00.000Z'
     }
   });
@@ -2683,6 +2687,12 @@ test('link_github_item agent tool links third-party pull requests to Paperclip i
     }
   });
   await plugin.definition.setup(harness.ctx);
+  harness.ctx.agents.get = async (agentId, companyId) => {
+    if (companyId === 'company-1' && (agentId === 'engineer-agent' || agentId === 'writer-agent')) {
+      return { id: agentId, companyId, name: agentId } as never;
+    }
+    return null;
+  };
   const originalFetch = globalThis.fetch;
   const issue = await harness.ctx.issues.create({
     companyId: 'company-1',
@@ -2740,7 +2750,8 @@ test('link_github_item agent tool links third-party pull requests to Paperclip i
     const result = await harness.executeTool('link_github_item', {
       kind: 'pull_request',
       paperclipIssueId: issue.id,
-      reference: 'https://github.com/third-party/external/pull/78'
+      reference: 'https://github.com/third-party/external/pull/78',
+      followThroughAssigneeAgentId: 'engineer-agent'
     }, {
       companyId: 'company-1'
     });
@@ -2748,17 +2759,28 @@ test('link_github_item agent tool links third-party pull requests to Paperclip i
     assert.ok(!result.error);
     assert.equal((result.data as { githubPullRequestNumber?: unknown }).githubPullRequestNumber, 78);
     assert.equal((result.data as { repositoryUrl?: unknown }).repositoryUrl, 'https://github.com/third-party/external');
+    assert.equal((result.data as { followThroughAssigneeAgentId?: unknown }).followThroughAssigneeAgentId, 'engineer-agent');
 
     const numericResult = await harness.executeTool('link_github_item', {
       kind: 'pull_request',
       paperclipIssueId: issue.id,
       repository: 'third-party/external',
-      reference: '79'
+      reference: '79',
+      followThroughAssigneeAgentId: 'writer-agent'
     }, {
       companyId: 'company-1'
     });
     assert.ok(!numericResult.error);
     assert.equal((numericResult.data as { githubPullRequestNumber?: unknown }).githubPullRequestNumber, 79);
+
+    const ownerUpdate = await harness.executeTool('link_github_item', {
+      kind: 'pull_request',
+      paperclipIssueId: issue.id,
+      reference: 'https://github.com/third-party/external/pull/78',
+      followThroughAssigneeAgentId: 'writer-agent'
+    }, { companyId: 'company-1' });
+    assert.ok(!ownerUpdate.error);
+    assert.equal((ownerUpdate.data as { followThroughAssigneeAgentId?: unknown }).followThroughAssigneeAgentId, 'writer-agent');
 
     const contradictoryIssueResult = await harness.executeTool('link_github_item', {
       kind: 'issue',
@@ -2785,23 +2807,68 @@ test('link_github_item agent tool links third-party pull requests to Paperclip i
     ]);
     assert.ok(pullRequestLinks.every((row) => (row.data as { companyId?: unknown }).companyId === 'company-1'));
     assert.ok(pullRequestLinks.every((row) => (row.data as { paperclipProjectId?: unknown }).paperclipProjectId === 'project-1'));
+    assert.ok(pullRequestLinks.every((row) => (row.data as { followThroughAssigneeAgentId?: unknown }).followThroughAssigneeAgentId === 'writer-agent'));
+    assert.ok(pullRequestLinks.every((row) => typeof (row.data as { followThroughAssigneeUpdatedAt?: unknown }).followThroughAssigneeUpdatedAt === 'string'));
 
     const interactions = await harness.ctx.entities.list({
       entityType: 'paperclip-github-plugin.issue-interaction-event',
       scopeKind: 'issue',
       scopeId: issue.id
     });
-    assert.equal(interactions.length, 6);
+    assert.equal(interactions.length, 8);
     const remotes = interactions.map((row) =>
       (row.data as { remote?: { repositoryUrl?: unknown; kind?: unknown; number?: unknown } }).remote);
     const pullRequestRemotes = remotes.filter((remote) => remote?.kind === 'pull_request');
-    assert.equal(pullRequestRemotes.length, 4);
+    assert.equal(pullRequestRemotes.length, 6);
     assert.ok(pullRequestRemotes.every((remote) => remote?.repositoryUrl === 'https://github.com/third-party/external'));
-    assert.deepEqual(pullRequestRemotes.map((remote) => remote?.number).sort(), [78, 78, 79, 79]);
+    assert.deepEqual(pullRequestRemotes.map((remote) => remote?.number).sort(), [78, 78, 78, 78, 79, 79]);
     const issueRemotes = remotes.filter((remote) => remote?.kind === 'issue');
     assert.equal(issueRemotes.length, 2);
     assert.ok(issueRemotes.every((remote) => remote?.repositoryUrl === 'https://github.com/actual/repo'));
     assert.deepEqual(issueRemotes.map((remote) => remote?.number), [78, 78]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('link_github_item rejects missing and cross-company follow-through owners before linking', async () => {
+  const harness = createTestHarness({ manifest, config: { githubToken: TEST_GITHUB_TOKEN } });
+  await plugin.definition.setup(harness.ctx);
+  const issue = await harness.ctx.issues.create({
+    companyId: 'company-1', projectId: 'project-1', title: 'Owner validation', description: ''
+  });
+  harness.ctx.agents.get = async (agentId) => agentId === 'other-company-agent'
+    ? { id: agentId, companyId: 'company-2', name: 'Other company' } as never
+    : null;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    const pathname = getDecodedRequestPathname(input);
+    if (pathname === '/repos/third-party/external/pulls/80') {
+      return jsonResponse({
+        number: 80,
+        title: 'Owner validation PR',
+        html_url: 'https://github.com/third-party/external/pull/80',
+        state: 'open',
+        merged: false
+      });
+    }
+    throw new Error(`Unexpected fetch during owner validation test: ${getRequestUrl(input)}`);
+  };
+
+  try {
+    for (const followThroughAssigneeAgentId of ['missing-agent', 'other-company-agent']) {
+      const result = await harness.executeTool('link_github_item', {
+        kind: 'pull_request',
+        paperclipIssueId: issue.id,
+        reference: 'https://github.com/third-party/external/pull/80',
+        followThroughAssigneeAgentId
+      }, { companyId: 'company-1' });
+      assert.match(result.error ?? '', /same Paperclip company/);
+    }
+    const links = await harness.ctx.entities.list({
+      entityType: 'paperclip-github-plugin.pull-request-link', scopeKind: 'issue', scopeId: issue.id
+    });
+    assert.equal(links.length, 0);
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -7472,6 +7539,9 @@ test('sync.runNow monitors Paperclip issues created from pull requests without c
   const harness = await createProjectPullRequestsHarness();
   const originalFetch = globalThis.fetch;
   const originalCreateComment = harness.ctx.issues.createComment;
+  harness.ctx.agents.get = async (agentId, companyId) => agentId === 'writer-agent' && companyId === 'company-1'
+    ? { id: agentId, companyId, name: 'Writer' } as never
+    : null;
   const statusTransitionComments: Array<{ issueId: string; body: string }> = [];
 
   harness.ctx.issues.createComment = async (issueId, body, companyId) => {
@@ -7601,7 +7671,9 @@ test('sync.runNow monitors Paperclip issues created from pull requests without c
         githubPullRequestNumber: 42,
         githubPullRequestUrl: 'https://github.com/paperclipai/example-repo/pull/42',
         githubPullRequestState: 'closed',
-        title: 'Fix orphan PR workflow',
+        title: 'Document orphan PR workflow',
+        followThroughAssigneeAgentId: 'writer-agent',
+        followThroughAssigneeUpdatedAt: '2026-04-27T09:30:00.000Z',
         syncedAt: '2026-04-27T09:30:00.000Z'
       }
     });
@@ -7617,9 +7689,10 @@ test('sync.runNow monitors Paperclip issues created from pull requests without c
     assert.equal(sync.syncState.syncedIssuesCount, 1);
 
     const updatedIssue = await harness.ctx.issues.get(created.paperclipIssueId, 'company-1');
-    assert.equal(updatedIssue?.status, 'todo');
+    assert.equal(updatedIssue?.status, 'in_progress');
+    assert.equal(updatedIssue?.assigneeAgentId, 'writer-agent');
     assert.equal(statusTransitionComments.length, 1);
-    assert.match(statusTransitionComments[0]?.body ?? '', /from `in review` to `todo`/);
+    assert.match(statusTransitionComments[0]?.body ?? '', /from `in review` to `in progress`/);
     assert.match(statusTransitionComments[0]?.body ?? '', /unresolved review threads/);
 
     const pullRequestLinks = await harness.ctx.entities.list({
@@ -7631,6 +7704,8 @@ test('sync.runNow monitors Paperclip issues created from pull requests without c
       entry.externalId === 'https://github.com/paperclipai/example-repo/pull/42'
     );
     assert.equal((refreshedLink?.data as { githubPullRequestState?: unknown } | undefined)?.githubPullRequestState, 'open');
+    assert.equal((refreshedLink?.data as { followThroughAssigneeAgentId?: unknown } | undefined)?.followThroughAssigneeAgentId, 'writer-agent');
+    assert.equal((refreshedLink?.data as { followThroughAssigneeUpdatedAt?: unknown } | undefined)?.followThroughAssigneeUpdatedAt, '2026-04-27T09:30:00.000Z');
   } finally {
     harness.ctx.issues.createComment = originalCreateComment;
     globalThis.fetch = originalFetch;
@@ -7885,6 +7960,9 @@ test('sync.runNow leaves completed direct pull request reviews in an unassigned 
   const originalUpdate = harness.ctx.issues.update;
   const originalCreateComment = harness.ctx.issues.createComment;
   const originalRequestWakeup = harness.ctx.issues.requestWakeup.bind(harness.ctx.issues);
+  harness.ctx.agents.get = async (agentId, companyId) => agentId === 'engineer-agent' && companyId === 'company-1'
+    ? { id: agentId, companyId, name: 'Engineer' } as never
+    : null;
   const statusTransitionComments: Array<{ issueId: string; body: string }> = [];
   const wakeRequests: Array<{ issueId: string; companyId: string }> = [];
   const issue = await harness.ctx.issues.create({
@@ -7918,6 +7996,7 @@ test('sync.runNow leaves completed direct pull request reviews in an unassigned 
       githubPullRequestUrl: 'https://github.com/paperclipai/example-repo/pull/44',
       githubPullRequestState: 'open',
       title: 'Accidentally closed PR link',
+      followThroughAssigneeAgentId: 'engineer-agent',
       syncedAt: '2026-04-27T09:30:00.000Z'
     }
   });
@@ -8359,10 +8438,19 @@ test('sync.runNow cancels directly linked pull request issues when every linked 
   }
 });
 
-test('sync.runNow lets open direct PRs drive status when another linked PR is already merged', async () => {
+test('sync.runNow preserves and deduplicates durable direct-PR ownership across worker restart when another linked PR is merged', async () => {
   const harness = await createProjectPullRequestsHarness();
   const originalFetch = globalThis.fetch;
   const originalCreateComment = harness.ctx.issues.createComment;
+  const originalRequestWakeup = harness.ctx.issues.requestWakeup.bind(harness.ctx.issues);
+  const wakeRequests: Array<{ issueId: string; options: unknown }> = [];
+  harness.ctx.agents.get = async (agentId, companyId) => agentId === 'engineer-agent' && companyId === 'company-1'
+    ? { id: agentId, companyId, name: 'Engineer' } as never
+    : null;
+  harness.ctx.issues.requestWakeup = async (issueId, companyId, options) => {
+    wakeRequests.push({ issueId, options });
+    return originalRequestWakeup(issueId, companyId, options);
+  };
   const statusTransitionComments: Array<{ issueId: string; body: string }> = [];
   const issue = await harness.ctx.issues.create({
     companyId: 'company-1',
@@ -8372,7 +8460,8 @@ test('sync.runNow lets open direct PRs drive status when another linked PR is al
   });
 
   await upsertDirectPullRequestLink(harness, issue.id, 48, {
-    title: 'Failing direct PR link'
+    title: 'Failing direct PR link',
+    followThroughAssigneeAgentId: 'engineer-agent'
   });
   await upsertDirectPullRequestLink(harness, issue.id, 49, {
     title: 'Merged direct PR link'
@@ -8488,12 +8577,28 @@ test('sync.runNow lets open direct PRs drive status when another linked PR is al
     assert.equal(sync.syncState.syncedIssuesCount, 2);
 
     const updatedIssue = await harness.ctx.issues.get(issue.id, 'company-1');
-    assert.equal(updatedIssue?.status, 'todo');
+    assert.equal(updatedIssue?.status, 'in_progress');
+    assert.equal(updatedIssue?.assigneeAgentId, 'engineer-agent');
+    assert.equal(wakeRequests.length, 1);
     assert.equal(statusTransitionComments.length, 1);
-    assert.match(statusTransitionComments[0]?.body ?? '', /from `in review` to `todo`/);
+    assert.match(statusTransitionComments[0]?.body ?? '', /from `in review` to `in progress`/);
     assert.match(statusTransitionComments[0]?.body ?? '', /failing CI/);
+
+    const linksAfterSync = await harness.ctx.entities.list({
+      entityType: 'paperclip-github-plugin.pull-request-link', scopeKind: 'issue', scopeId: issue.id
+    });
+    const failingLink = linksAfterSync.find((row) => row.externalId?.endsWith('/pull/48'));
+    assert.equal((failingLink?.data as { followThroughAssigneeAgentId?: unknown }).followThroughAssigneeAgentId, 'engineer-agent');
+
+    const restartedWorker = await importFreshWorkerModule();
+    await restartedWorker.default.definition.setup(harness.ctx);
+    await harness.performAction('sync.runNow', {
+      companyId: 'company-1', issueId: issue.id, waitForCompletion: true
+    });
+    assert.equal(wakeRequests.length, 1, `unchanged remote state must not wake the durable owner twice: ${JSON.stringify(wakeRequests)}`);
   } finally {
     harness.ctx.issues.createComment = originalCreateComment;
+    harness.ctx.issues.requestWakeup = originalRequestWakeup;
     globalThis.fetch = originalFetch;
   }
 });
@@ -11230,6 +11335,9 @@ test('sync.runNow can target a Paperclip issue linked directly to a GitHub pull 
   const harness = await createProjectPullRequestsHarness();
   const originalFetch = globalThis.fetch;
   const originalCreateComment = harness.ctx.issues.createComment;
+  harness.ctx.agents.get = async (agentId, companyId) => agentId === 'engineer-agent' && companyId === 'company-1'
+    ? { id: agentId, companyId, name: 'Engineer' } as never
+    : null;
   const statusTransitionComments: Array<{ issueId: string; body: string }> = [];
   const issue = await harness.ctx.issues.create({
     companyId: 'company-1',
@@ -11258,6 +11366,7 @@ test('sync.runNow can target a Paperclip issue linked directly to a GitHub pull 
       githubPullRequestUrl: 'https://github.com/paperclipai/example-repo/pull/89',
       githubPullRequestState: 'open',
       title: 'GitHub PR linked later',
+      followThroughAssigneeAgentId: 'engineer-agent',
       syncedAt: '2026-04-27T09:30:00.000Z'
     }
   });
@@ -11350,10 +11459,12 @@ test('sync.runNow can target a Paperclip issue linked directly to a GitHub pull 
     assert.equal(sync.syncState.syncedIssuesCount, 1);
 
     const updatedIssue = await harness.ctx.issues.get(issue.id, 'company-1');
-    assert.equal(updatedIssue?.status, 'todo');
+    assert.equal(updatedIssue?.status, 'in_progress');
+    assert.equal(updatedIssue?.assigneeAgentId, 'engineer-agent');
     assert.equal(statusTransitionComments.length, 1);
-    assert.match(statusTransitionComments[0]?.body ?? '', /from `in review` to `todo`/);
+    assert.match(statusTransitionComments[0]?.body ?? '', /from `in review` to `in progress`/);
     assert.match(statusTransitionComments[0]?.body ?? '', /failing CI/);
+    assert.match(statusTransitionComments[0]?.body ?? '', /merge conflicts/);
   } finally {
     harness.ctx.issues.createComment = originalCreateComment;
     globalThis.fetch = originalFetch;

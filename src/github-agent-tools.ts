@@ -15,6 +15,11 @@ const paperclipIssueIdProperty = {
   description: 'Paperclip issue id used to infer the linked GitHub issue and repository when available.'
 } as const;
 
+const followThroughAssigneeAgentIdProperty = {
+  type: ['string', 'null'],
+  description: 'Optional durable Paperclip agent owner for actionable follow-through on this linked pull request. The agent must belong to the authenticated company. Pass null to clear an existing owner.'
+} as const;
+
 const issueNumberProperty = {
   type: 'integer',
   minimum: 1,
@@ -281,6 +286,7 @@ export const GITHUB_AGENT_TOOLS: PluginToolDeclaration[] = [
           type: 'string',
           description: 'Paperclip issue id used to resolve the trusted execution workspace and durable pull-request link.'
         },
+        followThroughAssigneeAgentId: followThroughAssigneeAgentIdProperty,
         head: {
           type: 'string',
           description: 'Plain local branch name to publish. Owner-qualified branches and arbitrary refspecs are rejected.'
@@ -644,7 +650,8 @@ export const GITHUB_AGENT_TOOLS: PluginToolDeclaration[] = [
         pullRequestUrl: {
           type: 'string',
           description: 'Full GitHub pull request URL.'
-        }
+        },
+        followThroughAssigneeAgentId: followThroughAssigneeAgentIdProperty
       }
     }
   },
