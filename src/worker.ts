@@ -13443,7 +13443,7 @@ function buildRemoteActionFingerprint(
         repositoryUrl: effectiveGate.repositoryUrl,
         number: effectiveGate.number,
         headSha: effectiveGate.headSha,
-        condition: getEffectivePullRequestActionCondition(effectiveGate.pullRequest)
+        condition: effectiveGate.remoteCondition
       };
   const reasonCode = snapshot.state === 'closed'
     ? `issue_closed_${snapshot.stateReason ?? 'completed'}`

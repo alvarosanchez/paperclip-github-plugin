@@ -409,6 +409,49 @@ test('issue-linked PR routing keeps trusted comment evidence attached to the sou
   );
 });
 
+test('issue-linked remote fingerprints distinguish waiting from action-required', async () => {
+  const workerModule = await importFreshWorkerModule();
+  const pullRequest = (mergeStateStatus: 'unknown' | 'behind') => ({
+    number: 88,
+    repositoryUrl: 'https://github.com/paperclipai/example-repo',
+    headSha: 'same-head',
+    hasUnresolvedReviewThreads: false,
+    ciState: 'unfinished',
+    mergeability: 'mergeable',
+    mergeStateStatus,
+    reviewDecision: 'review_required'
+  });
+  const links = [{
+    data: {
+      repositoryUrl: 'https://github.com/paperclipai/example-repo',
+      githubPullRequestNumber: 88,
+      followThroughAssigneeAgentId: 'owner-88'
+    }
+  }];
+  const snapshot = (linkedPullRequest: ReturnType<typeof pullRequest>) => ({
+    issueNumber: 7,
+    state: 'open',
+    commentCount: 0,
+    linkedPullRequests: [linkedPullRequest]
+  });
+  const waitingSnapshot = snapshot(pullRequest('unknown'));
+  const actionableSnapshot = snapshot(pullRequest('behind'));
+  const waitingGate = workerModule.__testing.selectEffectiveIssueLinkedPullRequestGate(
+    waitingSnapshot.linkedPullRequests as never, [], false, links as never
+  );
+  const actionableGate = workerModule.__testing.selectEffectiveIssueLinkedPullRequestGate(
+    actionableSnapshot.linkedPullRequests as never, [], false, links as never
+  );
+
+  assert.equal(waitingGate?.remoteCondition, 'waiting');
+  assert.equal(actionableGate?.remoteCondition, 'action_required');
+  assert.notEqual(
+    workerModule.__testing.buildRemoteActionFingerprint(waitingSnapshot as never, waitingGate as never),
+    workerModule.__testing.buildRemoteActionFingerprint(actionableSnapshot as never, actionableGate as never),
+    'an actionable behind PR must re-arm issue-linked routing'
+  );
+});
+
 test('issue-linked effective gate aligns status, owner, fingerprint, and wake routing', async () => {
   const workerModule = await importFreshWorkerModule();
   const pullRequest = (number: number, repositoryUrl = 'https://github.com/paperclipai/example-repo') => ({
@@ -20658,10 +20701,16 @@ test('worker routes non-review-ready GitHub merge state statuses back to active 
   });
 
   const statusTransitionComments: Array<{ issueId: string; body: string }> = [];
+  const wakeRequests: string[] = [];
   const originalCreateComment = harness.ctx.issues.createComment;
+  const originalRequestWakeup = harness.ctx.issues.requestWakeup;
   harness.ctx.issues.createComment = async (issueId, body, companyId) => {
     statusTransitionComments.push({ issueId, body });
     return originalCreateComment(issueId, body, companyId);
+  };
+  harness.ctx.issues.requestWakeup = async (issueId, companyId, options) => {
+    wakeRequests.push(issueId);
+    return originalRequestWakeup(issueId, companyId, options);
   };
 
   const scenarios = [
@@ -20937,6 +20986,7 @@ test('worker routes non-review-ready GitHub merge state statuses back to active 
 
       if (scenario.expectedStatus === 'in_progress') {
         assert.equal(issue?.assigneeAgentId, 'agent-1');
+        assert.equal(wakeRequests.includes(issue?.id ?? ''), true);
         assert.match(
           statusTransitionComments.find((comment) => comment.issueId === issue?.id)?.body ?? '',
           /from `in review` to `in progress`/
@@ -21232,7 +21282,7 @@ test('remote action fingerprints ignore transient raw UNKNOWN jitter that preser
     linkedPullRequests: [{
       ...basePullRequest,
       mergeability: 'mergeable',
-      mergeStateStatus: 'blocked',
+      mergeStateStatus: 'unknown',
       reviewDecision: 'review_required'
     }]
   });
