@@ -12075,10 +12075,14 @@ test('sync.runNow reconciles local drift under unchanged direct pull request sta
   const originalCreateComment = harness.ctx.issues.createComment;
   const originalUpdate = harness.ctx.issues.update;
   const originalRequestWakeup = harness.ctx.issues.requestWakeup;
+  const originalStateSet = harness.ctx.state.set.bind(harness.ctx.state);
   const statusTransitionComments: Array<{ issueId: string; body: string }> = [];
   const statusMutations: Array<Record<string, unknown>> = [];
   const wakeRequests: string[] = [];
+  const wakeAttempts: string[] = [];
+  const outboxOrder: string[] = [];
   const queuedWakeKeys = new Set<string>();
+  let rejectNextWake = false;
   const triggeredMonitorExecutionState = {
     status: 'idle',
     currentStageId: null,
@@ -12120,12 +12124,28 @@ test('sync.runNow reconciles local drift under unchanged direct pull request sta
   harness.ctx.issues.update = async (issueId, patch, companyId) => {
     if (issueId === issue.id && patch && typeof patch === 'object' && 'status' in patch) {
       statusMutations.push(patch as Record<string, unknown>);
+      outboxOrder.push('mutation');
     }
     return originalUpdate(issueId, patch, companyId);
+  };
+  harness.ctx.state.set = async (scope, value) => {
+    if (
+      scope.stateKey === 'paperclip-github-plugin-remote-action-registry'
+      && Array.isArray(value)
+      && value.some((record) => record && typeof record === 'object' && 'pendingWake' in record)
+    ) {
+      outboxOrder.push('pending-wake');
+    }
+    return originalStateSet(scope, value);
   };
   harness.ctx.issues.requestWakeup = async (issueId, companyId, options) => {
     const idempotencyKey = options?.idempotencyKey;
     assert.ok(idempotencyKey);
+    wakeAttempts.push(idempotencyKey);
+    if (rejectNextWake) {
+      rejectNextWake = false;
+      return { queued: false } as never;
+    }
     if (queuedWakeKeys.has(idempotencyKey)) {
       return { queued: false } as never;
     }
@@ -12163,6 +12183,7 @@ test('sync.runNow reconciles local drift under unchanged direct pull request sta
     'company-1'
   );
   statusMutations.length = 0;
+  outboxOrder.length = 0;
 
   globalThis.fetch = async (input, init) => {
     const requestUrl = getRequestUrl(input);
@@ -12259,6 +12280,10 @@ test('sync.runNow reconciles local drift under unchanged direct pull request sta
     assert.match(statusTransitionComments[0]?.body ?? '', /failing CI/);
     assert.equal(statusMutations.length, 1);
     assert.equal(wakeRequests.length, 1);
+    assert.ok(
+      outboxOrder.indexOf('pending-wake') < outboxOrder.indexOf('mutation'),
+      `pending wake must be durable before issue mutation: ${JSON.stringify(outboxOrder)}`
+    );
 
     statusTransitionComments.length = 0;
     statusMutations.length = 0;
@@ -12294,6 +12319,8 @@ test('sync.runNow reconciles local drift under unchanged direct pull request sta
     statusTransitionComments.length = 0;
     statusMutations.length = 0;
     wakeRequests.length = 0;
+    wakeAttempts.length = 0;
+    rejectNextWake = true;
     await originalUpdate(issue.id, { assigneeAgentId: null }, 'company-1');
     const assigneeDrift = await syncIssue();
     assert.equal(assigneeDrift.syncState.status, 'success');
@@ -12302,18 +12329,31 @@ test('sync.runNow reconciles local drift under unchanged direct pull request sta
     assert.equal(updatedIssue?.assigneeAgentId, 'agent-1');
     assert.equal(statusTransitionComments.length, 0);
     assert.equal(statusMutations.length, 1);
-    assert.equal(wakeRequests.length, 1);
+    assert.equal(wakeRequests.length, 0);
+    assert.equal(wakeAttempts.length, 1);
+    const rejectedWakeKey = wakeAttempts[0];
+    const registryAfterRejectedWake = harness.getState({
+      scopeKind: 'instance', stateKey: 'paperclip-github-plugin-remote-action-registry'
+    }) as Array<{ pendingWake?: { fingerprint?: string } }>;
+    assert.ok(registryAfterRejectedWake[0]?.pendingWake, 'queued:false must retain the durable pending wake');
 
     statusMutations.length = 0;
     wakeRequests.length = 0;
+    wakeAttempts.length = 0;
     const stableAfterAssigneeRepair = await syncIssue();
     assert.equal(stableAfterAssigneeRepair.syncState.status, 'success');
     assert.equal(statusMutations.length, 0);
-    assert.equal(wakeRequests.length, 0);
+    assert.deepEqual(wakeAttempts, [rejectedWakeKey]);
+    assert.deepEqual(wakeRequests, [rejectedWakeKey]);
+    const registryAfterAcceptedRetry = harness.getState({
+      scopeKind: 'instance', stateKey: 'paperclip-github-plugin-remote-action-registry'
+    }) as Array<{ pendingWake?: unknown }>;
+    assert.equal(registryAfterAcceptedRetry[0]?.pendingWake, undefined);
   } finally {
     harness.ctx.issues.createComment = originalCreateComment;
     harness.ctx.issues.update = originalUpdate;
     harness.ctx.issues.requestWakeup = originalRequestWakeup;
+    harness.ctx.state.set = originalStateSet;
     globalThis.fetch = originalFetch;
   }
 });

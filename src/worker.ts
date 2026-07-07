@@ -432,6 +432,32 @@ interface PendingRemoteActionWake {
   nextStatus?: PaperclipIssueStatus;
 }
 
+function isPendingWakeApplied(
+  pendingWake: PendingRemoteActionWake,
+  status: PaperclipIssueStatus,
+  assignee: PaperclipIssueAssigneePrincipal | null | undefined
+): boolean {
+  return (!pendingWake.nextStatus || pendingWake.nextStatus === status)
+    && assignee?.kind === 'agent'
+    && assignee.id === pendingWake.assigneeAgentId;
+}
+
+function reuseOrCreatePendingWake<T extends Omit<PendingRemoteActionWake, 'fingerprint'>>(
+  existing: PendingRemoteActionWake | undefined,
+  next: T,
+  createFingerprint: () => string
+): T & { fingerprint: string } {
+  if (
+    existing
+    && existing.assigneeAgentId === next.assigneeAgentId
+    && existing.mutation === next.mutation
+    && existing.nextStatus === next.nextStatus
+  ) {
+    return existing as T & { fingerprint: string };
+  }
+  return { fingerprint: createFingerprint(), ...next };
+}
+
 interface RemoteActionRecord {
   key: string;
   fingerprint?: string;
@@ -12347,14 +12373,14 @@ async function wakePaperclipIssueAssignee(
     previousStatus?: PaperclipIssueStatus;
     nextStatus?: PaperclipIssueStatus;
   }
-): Promise<void> {
+): Promise<boolean> {
   if (!params.assigneeAgentId) {
-    return;
+    return false;
   }
 
   if (ctx.issues && typeof ctx.issues.requestWakeup === 'function' && params.companyId) {
     try {
-      await ctx.issues.requestWakeup(params.paperclipIssueId, params.companyId, {
+      const result = await ctx.issues.requestWakeup(params.paperclipIssueId, params.companyId, {
         reason: params.reason,
         contextSource: `github-sync.${params.mutation}`,
         ...(params.actionFingerprint
@@ -12363,7 +12389,7 @@ async function wakePaperclipIssueAssignee(
             ? { idempotencyKey: ['github-sync', params.mutation, params.paperclipIssueId].join(':') }
             : {})
       });
-      return;
+      return result?.queued !== false;
     } catch (error) {
       if (!params.paperclipApiBaseUrl) {
         throw new Error(
@@ -12420,6 +12446,7 @@ async function wakePaperclipIssueAssignee(
     if (!response.ok) {
       throw new Error(`Wakeup request failed with status ${response.status}.`);
     }
+    return true;
   } catch (error) {
     throw new Error(
       `GitHub sync could not wake the assignee for Paperclip issue ${params.paperclipIssueId}: ${getErrorMessage(error)}`,
@@ -15037,9 +15064,16 @@ async function synchronizePaperclipIssueStatuses(
         )
       })).digest('hex');
       const createWakeFingerprint = () => createRemoteActionWakeFingerprint(remoteActionFingerprint);
-      if (importedIssue.pendingRemoteActionWake) {
+      if (
+        importedIssue.pendingRemoteActionWake
+        && isPendingWakeApplied(
+          importedIssue.pendingRemoteActionWake,
+          paperclipIssue.status,
+          getPaperclipIssueSyncContext(paperclipIssue).assignee
+        )
+      ) {
         const pendingWake = importedIssue.pendingRemoteActionWake;
-        await wakePaperclipIssueAssignee(ctx, {
+        const admitted = await wakePaperclipIssueAssignee(ctx, {
           assigneeAgentId: pendingWake.assigneeAgentId,
           paperclipIssueId: importedIssue.paperclipIssueId,
           companyId: mapping.companyId,
@@ -15050,8 +15084,10 @@ async function synchronizePaperclipIssueStatuses(
           previousStatus: pendingWake.previousStatus,
           nextStatus: pendingWake.nextStatus
         });
-        delete importedIssue.pendingRemoteActionWake;
-        await persistImportRegistry();
+        if (admitted) {
+          delete importedIssue.pendingRemoteActionWake;
+          await persistImportRegistry();
+        }
       }
       const wasImportedThisRun = createdIssueIds.has(importedIssue.githubIssueId);
       const maintainerAuthoredImportedIssue =
@@ -15141,6 +15177,27 @@ async function synchronizePaperclipIssueStatuses(
       };
 
       if (paperclipIssue.status === nextStatus) {
+        const pendingWake: PendingRemoteActionWake | undefined =
+          shouldWakeImportedAssignee && paperclipIssueSyncContext.assignee?.kind === 'agent'
+            ? reuseOrCreatePendingWake(importedIssue.pendingRemoteActionWake, {
+                assigneeAgentId: paperclipIssueSyncContext.assignee.id,
+                reason: IMPORTED_ISSUE_WAKE_REASON,
+                mutation: 'import',
+                nextStatus
+              }, createWakeFingerprint)
+            : shouldWakeTransitionAssignee && nextTransitionAssignee?.principal.kind === 'agent'
+              ? reuseOrCreatePendingWake(importedIssue.pendingRemoteActionWake, {
+                  assigneeAgentId: nextTransitionAssignee.principal.id,
+                  reason: STATUS_TRANSITION_WAKE_REASON,
+                  mutation: 'status_transition',
+                  previousStatus: paperclipIssue.status,
+                  nextStatus
+                }, createWakeFingerprint)
+              : undefined;
+        if (pendingWake) {
+          importedIssue.pendingRemoteActionWake = pendingWake;
+          await persistImportRegistry();
+        }
         updateSyncFailureContext(syncFailureContext, {
           phase: 'updating_paperclip_status',
           repositoryUrl: repository.url,
@@ -15160,25 +15217,6 @@ async function synchronizePaperclipIssueStatuses(
           paperclipApiBaseUrl
         });
 
-        const pendingWake: PendingRemoteActionWake | undefined =
-          shouldWakeImportedAssignee && paperclipIssueSyncContext.assignee?.kind === 'agent'
-            ? {
-                fingerprint: createWakeFingerprint(),
-                assigneeAgentId: paperclipIssueSyncContext.assignee.id,
-                reason: IMPORTED_ISSUE_WAKE_REASON,
-                mutation: 'import',
-                nextStatus
-              }
-            : shouldWakeTransitionAssignee && nextTransitionAssignee?.principal.kind === 'agent'
-              ? {
-                  fingerprint: createWakeFingerprint(),
-                  assigneeAgentId: nextTransitionAssignee.principal.id,
-                  reason: STATUS_TRANSITION_WAKE_REASON,
-                  mutation: 'status_transition',
-                  previousStatus: paperclipIssue.status,
-                  nextStatus
-                }
-              : undefined;
         if (pendingWake) {
           await persistObservedRemoteState(pendingWake);
           queuedIssueWakeups.push({
@@ -15216,6 +15254,28 @@ async function synchronizePaperclipIssueStatuses(
         repositoryUrl: repository.url,
         githubIssueNumber: githubIssue.number
       });
+      const pendingWake: PendingRemoteActionWake | undefined =
+        shouldWakeImportedAssignee && paperclipIssueSyncContext.assignee?.kind === 'agent'
+          ? reuseOrCreatePendingWake(importedIssue.pendingRemoteActionWake, {
+              assigneeAgentId: paperclipIssueSyncContext.assignee.id,
+              reason: IMPORTED_ISSUE_WAKE_REASON,
+              mutation: 'import',
+              previousStatus: paperclipIssue.status,
+              nextStatus
+            }, createWakeFingerprint)
+          : shouldWakeTransitionAssignee && nextTransitionAssignee?.principal.kind === 'agent'
+            ? reuseOrCreatePendingWake(importedIssue.pendingRemoteActionWake, {
+                assigneeAgentId: nextTransitionAssignee.principal.id,
+                reason: STATUS_TRANSITION_WAKE_REASON,
+                mutation: 'status_transition',
+                previousStatus: paperclipIssue.status,
+                nextStatus
+              }, createWakeFingerprint)
+            : undefined;
+      if (pendingWake) {
+        importedIssue.pendingRemoteActionWake = pendingWake;
+        await persistImportRegistry();
+      }
       await updatePaperclipIssueState(ctx, {
         companyId: mapping.companyId,
         issueId: importedIssue.paperclipIssueId,
@@ -15230,26 +15290,6 @@ async function synchronizePaperclipIssueStatuses(
         actionFingerprint: actionJournalFingerprint,
         paperclipApiBaseUrl
       });
-      const pendingWake: PendingRemoteActionWake | undefined =
-        shouldWakeImportedAssignee && paperclipIssueSyncContext.assignee?.kind === 'agent'
-          ? {
-              fingerprint: createWakeFingerprint(),
-              assigneeAgentId: paperclipIssueSyncContext.assignee.id,
-              reason: IMPORTED_ISSUE_WAKE_REASON,
-              mutation: 'import',
-              previousStatus: paperclipIssue.status,
-              nextStatus
-            }
-          : shouldWakeTransitionAssignee && nextTransitionAssignee?.principal.kind === 'agent'
-            ? {
-                fingerprint: createWakeFingerprint(),
-                assigneeAgentId: nextTransitionAssignee.principal.id,
-                reason: STATUS_TRANSITION_WAKE_REASON,
-                mutation: 'status_transition',
-                previousStatus: paperclipIssue.status,
-                nextStatus
-              }
-            : undefined;
       await persistObservedRemoteState(pendingWake);
       updatedStatusesCount += 1;
 
@@ -15295,7 +15335,7 @@ async function synchronizePaperclipIssueStatuses(
     queuedIssueWakeups,
     IMPORTED_ISSUE_WAKEUP_CONCURRENCY,
     async (queuedWakeup) => {
-      await wakePaperclipIssueAssignee(ctx, {
+      const admitted = await wakePaperclipIssueAssignee(ctx, {
         assigneeAgentId: queuedWakeup.assigneeAgentId,
         paperclipIssueId: queuedWakeup.paperclipIssueId,
         companyId: mapping.companyId,
@@ -15306,7 +15346,7 @@ async function synchronizePaperclipIssueStatuses(
         previousStatus: queuedWakeup.previousStatus,
         nextStatus: queuedWakeup.nextStatus
       });
-      await queuedWakeup.onSuccess?.();
+      if (admitted) await queuedWakeup.onSuccess?.();
     }
   );
 
@@ -15510,9 +15550,16 @@ async function synchronizePaperclipPullRequestIssueStatuses(
         remoteAction = { key: remoteActionKey };
         remoteActionRegistry.push(remoteAction);
       }
-      if (remoteAction.pendingWake) {
+      if (
+        remoteAction.pendingWake
+        && isPendingWakeApplied(
+          remoteAction.pendingWake,
+          paperclipIssue.status,
+          getPaperclipIssueSyncContext(paperclipIssue).assignee
+        )
+      ) {
         const pendingWake = remoteAction.pendingWake;
-        await wakePaperclipIssueAssignee(ctx, {
+        const admitted = await wakePaperclipIssueAssignee(ctx, {
           assigneeAgentId: pendingWake.assigneeAgentId,
           paperclipIssueId,
           companyId: mapping.companyId,
@@ -15523,8 +15570,10 @@ async function synchronizePaperclipPullRequestIssueStatuses(
           previousStatus: pendingWake.previousStatus,
           nextStatus: pendingWake.nextStatus
         });
-        delete remoteAction.pendingWake;
-        await persistRemoteActionRegistry();
+        if (admitted) {
+          delete remoteAction.pendingWake;
+          await persistRemoteActionRegistry();
+        }
       }
       const currentCommentCounts = pullRequestSnapshots
         .map((snapshot) => snapshot.commentCounts)
@@ -15621,6 +15670,20 @@ async function synchronizePaperclipPullRequestIssueStatuses(
             `Remote action registry pending-wake capacity ${MAX_REMOTE_ACTION_REGISTRY_RECORDS} reached; refusing an untracked assignment update`
           );
         }
+        const pendingWake = shouldWakeTransitionAssignee && nextTransitionAssignee?.principal.kind === 'agent'
+          ? reuseOrCreatePendingWake(remoteAction.pendingWake, {
+              assigneeAgentId: nextTransitionAssignee.principal.id,
+              reason: STATUS_TRANSITION_WAKE_REASON,
+              mutation: 'status_transition',
+              previousStatus: paperclipIssue.status,
+              nextStatus
+            }, createWakeFingerprint)
+          : undefined;
+        if (pendingWake) {
+          remoteAction.pendingWake = pendingWake;
+          await persistRemoteActionRegistry();
+          remoteAction = remoteActionRegistry.find((record) => record.key === remoteActionKey) ?? remoteAction;
+        }
         if (shouldClearTransitionAssignee || shouldClearCompletedExecutionPolicy || nextAssigneeChanged) {
           updateSyncFailureContext(syncFailureContext, {
             phase: 'updating_paperclip_status',
@@ -15642,16 +15705,6 @@ async function synchronizePaperclipPullRequestIssueStatuses(
           });
         }
 
-        const pendingWake = shouldWakeTransitionAssignee && nextTransitionAssignee?.principal.kind === 'agent'
-          ? {
-              fingerprint: createWakeFingerprint(),
-              assigneeAgentId: nextTransitionAssignee.principal.id,
-              reason: STATUS_TRANSITION_WAKE_REASON,
-              mutation: 'status_transition',
-              previousStatus: paperclipIssue.status,
-              nextStatus
-            } satisfies PendingRemoteActionWake
-          : undefined;
         remoteAction.fingerprint = remoteActionFingerprint;
         remoteAction.linkedPullRequestCommentCounts = currentCommentCounts;
         remoteAction.selectedPullRequestGate = effectiveGate
@@ -15664,7 +15717,7 @@ async function synchronizePaperclipPullRequestIssueStatuses(
             assigneeAgentId: pendingWake.assigneeAgentId,
             paperclipIssueId,
             reason: pendingWake.reason,
-            mutation: pendingWake.mutation,
+            mutation: 'status_transition',
             actionFingerprint: pendingWake.fingerprint,
             previousStatus: pendingWake.previousStatus,
             nextStatus: pendingWake.nextStatus,
@@ -15699,6 +15752,20 @@ async function synchronizePaperclipPullRequestIssueStatuses(
           `Remote action registry pending-wake capacity ${MAX_REMOTE_ACTION_REGISTRY_RECORDS} reached; refusing an untracked status transition`
         );
       }
+      const pendingWake = shouldWakeTransitionAssignee && nextTransitionAssignee?.principal.kind === 'agent'
+        ? reuseOrCreatePendingWake(remoteAction.pendingWake, {
+            assigneeAgentId: nextTransitionAssignee.principal.id,
+            reason: STATUS_TRANSITION_WAKE_REASON,
+            mutation: 'status_transition',
+            previousStatus: paperclipIssue.status,
+            nextStatus
+          }, createWakeFingerprint)
+        : undefined;
+      if (pendingWake) {
+        remoteAction.pendingWake = pendingWake;
+        await persistRemoteActionRegistry();
+        remoteAction = remoteActionRegistry.find((record) => record.key === remoteActionKey) ?? remoteAction;
+      }
       await updatePaperclipIssueState(ctx, {
         companyId: mapping.companyId,
         issueId: paperclipIssueId,
@@ -15712,16 +15779,6 @@ async function synchronizePaperclipPullRequestIssueStatuses(
         actionFingerprint: actionJournalFingerprint,
         paperclipApiBaseUrl
       });
-      const pendingWake = shouldWakeTransitionAssignee && nextTransitionAssignee?.principal.kind === 'agent'
-        ? {
-            fingerprint: createWakeFingerprint(),
-            assigneeAgentId: nextTransitionAssignee.principal.id,
-            reason: STATUS_TRANSITION_WAKE_REASON,
-            mutation: 'status_transition',
-            previousStatus: paperclipIssue.status,
-            nextStatus
-          } satisfies PendingRemoteActionWake
-        : undefined;
       remoteAction.fingerprint = remoteActionFingerprint;
       remoteAction.linkedPullRequestCommentCounts = currentCommentCounts;
       remoteAction.selectedPullRequestGate = effectiveGate
@@ -15762,7 +15819,7 @@ async function synchronizePaperclipPullRequestIssueStatuses(
     queuedIssueWakeups,
     IMPORTED_ISSUE_WAKEUP_CONCURRENCY,
     async (queuedWakeup) => {
-      await wakePaperclipIssueAssignee(ctx, {
+      const admitted = await wakePaperclipIssueAssignee(ctx, {
         assigneeAgentId: queuedWakeup.assigneeAgentId,
         paperclipIssueId: queuedWakeup.paperclipIssueId,
         companyId: mapping.companyId,
@@ -15773,7 +15830,7 @@ async function synchronizePaperclipPullRequestIssueStatuses(
         previousStatus: queuedWakeup.previousStatus,
         nextStatus: queuedWakeup.nextStatus
       });
-      await queuedWakeup.onSuccess?.();
+      if (admitted) await queuedWakeup.onSuccess?.();
     }
   );
 
