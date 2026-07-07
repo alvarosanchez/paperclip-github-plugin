@@ -196,17 +196,22 @@ test('executor routing only lets active execution states override a durable PR o
   }
 });
 
-test('direct PR routing selects the owner from the same highest-priority gate as the action fingerprint', async () => {
+test('direct PR routing selects one deterministic gate for status, fingerprint, and owner', async () => {
   const workerModule = await importFreshWorkerModule();
-  const snapshot = (number: number, owner: string, condition: 'red' | 'conflict') => ({
+  const snapshot = (
+    number: number,
+    owner: string,
+    condition: 'healthy' | 'red' | 'conflict',
+    repositoryUrl = 'https://github.com/paperclipai/example-repo'
+  ) => ({
     pullRequestLink: {
       paperclipIssueId: 'issue-1',
-      externalId: `https://github.com/paperclipai/example-repo/pull/${number}`,
+      externalId: `${repositoryUrl}/pull/${number}`,
       data: {
         companyId: 'company-1',
-        repositoryUrl: 'https://github.com/paperclipai/example-repo',
+        repositoryUrl,
         githubPullRequestNumber: number,
-        githubPullRequestUrl: `https://github.com/paperclipai/example-repo/pull/${number}`,
+        githubPullRequestUrl: `${repositoryUrl}/pull/${number}`,
         githubPullRequestState: 'open',
         followThroughAssigneeAgentId: owner,
         syncedAt: '2026-07-07T00:00:00.000Z'
@@ -214,13 +219,14 @@ test('direct PR routing selects the owner from the same highest-priority gate as
     },
     repository: {
       owner: 'paperclipai',
-      repo: 'example-repo',
-      url: 'https://github.com/paperclipai/example-repo'
+      repo: repositoryUrl.split('/').at(-1)!,
+      url: repositoryUrl
     },
     lifecycleState: 'open',
     pullRequest: {
       number,
-      repositoryUrl: 'https://github.com/paperclipai/example-repo',
+      repositoryUrl,
+      headSha: `head-${number}`,
       hasUnresolvedReviewThreads: false,
       ciState: condition === 'red' ? 'red' : 'green',
       mergeability: condition === 'conflict' ? 'conflicting' : 'mergeable',
@@ -229,12 +235,130 @@ test('direct PR routing selects the owner from the same highest-priority gate as
     }
   });
 
-  assert.equal(
-    workerModule.__testing.resolveActionableDirectPullRequestOwnerCandidate([
-      snapshot(10, 'lower-priority-red-owner', 'red'),
-      snapshot(20, 'highest-priority-conflict-owner', 'conflict')
-    ] as never, false),
-    'highest-priority-conflict-owner'
+  const competingGates = [
+    snapshot(10, 'lower-priority-red-owner', 'red'),
+    snapshot(20, 'highest-priority-conflict-owner', 'conflict')
+  ];
+  const conflictGate = workerModule.__testing.selectEffectiveDirectPullRequestGate(competingGates as never, []);
+  assert.equal(conflictGate?.number, 20);
+  assert.equal(conflictGate?.condition, 'conflict');
+  assert.equal(conflictGate?.ownerCandidate, 'highest-priority-conflict-owner');
+
+  for (const kind of ['top_level', 'review'] as const) {
+    const healthyPullRequests = [
+      snapshot(10, 'first-owner', 'healthy'),
+      snapshot(20, `${kind}-comment-owner`, 'healthy')
+    ];
+    const trustedCommentSources = [{
+      repositoryUrl: 'HTTPS://GITHUB.COM/paperclipai/example-repo/',
+      number: 20,
+      kind
+    }];
+    const selected = workerModule.__testing.selectEffectiveDirectPullRequestGate(
+      healthyPullRequests as never,
+      trustedCommentSources
+    );
+    const reversed = workerModule.__testing.selectEffectiveDirectPullRequestGate(
+      [...healthyPullRequests].reverse() as never,
+      trustedCommentSources
+    );
+
+    assert.equal(selected?.number, 20, `${kind} evidence must remain attached to its source PR`);
+    assert.equal(selected?.condition, 'trusted_comment');
+    assert.deepEqual(selected?.trustedCommentKinds, [kind]);
+    assert.equal(selected?.ownerCandidate, `${kind}-comment-owner`);
+    assert.deepEqual(reversed, selected, `${kind} selection must not depend on input order`);
+    assert.equal(
+      workerModule.__testing.buildDirectPullRequestActionFingerprint(healthyPullRequests as never, selected as never),
+      workerModule.__testing.buildDirectPullRequestActionFingerprint([...healthyPullRequests].reverse() as never, reversed as never)
+    );
+  }
+
+  const tiedPullRequests = [
+    snapshot(20, 'second-owner', 'healthy'),
+    snapshot(10, 'deterministic-owner', 'healthy')
+  ];
+  const tiedSources = tiedPullRequests.map((entry) => ({
+    repositoryUrl: entry.repository.url,
+    number: entry.pullRequest.number,
+    kind: 'top_level' as const
+  }));
+  const tiedGate = workerModule.__testing.selectEffectiveDirectPullRequestGate(tiedPullRequests as never, tiedSources);
+  const reversedTiedGate = workerModule.__testing.selectEffectiveDirectPullRequestGate(
+    [...tiedPullRequests].reverse() as never,
+    [...tiedSources].reverse()
+  );
+  assert.equal(tiedGate?.number, 10, 'equal-priority gates use normalized repository URL then PR number');
+  assert.deepEqual(reversedTiedGate, tiedGate);
+});
+
+test('trusted direct PR comment evidence preserves normalized PR identity and stream kind', async () => {
+  const workerModule = await importFreshWorkerModule();
+  const octokit = {
+    rest: {
+      issues: {
+        listComments: async ({ issue_number: issueNumber }: { issue_number: number }) => ({
+          data: issueNumber === 20
+            ? [{
+                id: 2001,
+                body: 'Please follow up',
+                html_url: 'https://github.com/paperclipai/example-repo/pull/20#issuecomment-2001',
+                user: { login: 'pr-author' },
+                author_association: 'NONE',
+                created_at: '2026-07-07T01:00:00.000Z',
+                updated_at: '2026-07-07T01:00:00.000Z'
+              }]
+            : []
+        })
+      },
+      pulls: {
+        listReviewComments: async ({ pull_number: pullRequestNumber }: { pull_number: number }) => ({
+          data: pullRequestNumber === 30
+            ? [{
+                id: 3001,
+                body: 'Thread follow-up',
+                html_url: 'https://github.com/paperclipai/example-repo/pull/30#discussion_r3001',
+                user: { login: 'pr-author' },
+                author_association: 'NONE',
+                created_at: '2026-07-07T01:00:00.000Z',
+                updated_at: '2026-07-07T01:00:00.000Z'
+              }]
+            : []
+        })
+      }
+    }
+  };
+  const previous = [20, 30].map((number) => ({
+    repositoryUrl: 'https://github.com/paperclipai/example-repo',
+    number,
+    topLevelCommentCount: 0,
+    reviewCommentCount: 0
+  }));
+  const current = [
+    { ...previous[0]!, repositoryUrl: 'HTTPS://GITHUB.COM/paperclipai/example-repo/', topLevelCommentCount: 1 },
+    { ...previous[1]!, repositoryUrl: 'HTTPS://GITHUB.COM/paperclipai/example-repo/', reviewCommentCount: 1 }
+  ];
+
+  assert.deepEqual(
+    await workerModule.__testing.listTrustedNewLinkedPullRequestCommentSources({
+      octokit: octokit as never,
+      originalPosterLogin: 'pr-author',
+      previousCommentCounts: previous,
+      currentCommentCounts: current,
+      maintainerCache: new Map()
+    }),
+    [
+      {
+        repositoryUrl: 'https://github.com/paperclipai/example-repo',
+        number: 20,
+        kind: 'top_level'
+      },
+      {
+        repositoryUrl: 'https://github.com/paperclipai/example-repo',
+        number: 30,
+        kind: 'review'
+      }
+    ]
   );
 });
 
