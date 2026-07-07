@@ -16418,8 +16418,10 @@ test('worker repairs missing import registry entries by reusing existing importe
   const existingImportedIssue = await harness.ctx.issues.create({
     companyId: 'company-1',
     projectId: 'project-1',
-    title: 'Repair dedupe from source link',
-    description: 'Imported from https://github.com/paperclipai/example-repo/issues/25\n\nBody'
+    title: 'Repair dedupe from durable origin',
+    description: 'Body without a hidden import marker.',
+    originKind: 'plugin:paperclip-github-plugin:github-issue',
+    originId: 'https://github.com/paperclipai/example-repo/issues/25'
   });
   const originalUpdateIssue = harness.ctx.issues.update.bind(harness.ctx.issues);
   const activationPatches: Array<Record<string, unknown>> = [];
@@ -16520,7 +16522,8 @@ test('worker repairs missing import registry entries by reusing existing importe
       companyId: 'company-1'
     });
     const repairedIssue = importedIssues.find((issue) => issue.id === existingImportedIssue.id);
-    assert.equal(importedIssues.filter((issue) => issue.title === 'Repair dedupe from source link').length, 1);
+    assert.equal(importedIssues.length, 1);
+    assert.equal(repairedIssue?.id, existingImportedIssue.id);
     assert.equal(repairedIssue?.status, 'todo');
     assert.equal(
       activationPatches.some((issuePatch) => issuePatch.assigneeAgentId === 'agent-1'),

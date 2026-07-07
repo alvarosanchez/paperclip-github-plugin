@@ -10611,7 +10611,10 @@ async function listImportedPaperclipIssuesForMapping(
         continue;
       }
 
-      const githubIssueUrl = extractImportedGitHubIssueUrlFromDescription(issue.description);
+      const originLink = resolvePaperclipIssueOriginGitHubIssueLink(issue, mapping.companyId);
+      const githubIssueUrl = originLink?.repositoryUrl === normalizedRepositoryUrl
+        ? originLink.githubIssueUrl
+        : extractImportedGitHubIssueUrlFromDescription(issue.description);
       if (!githubIssueUrl) {
         continue;
       }
