@@ -710,6 +710,58 @@ test('PR link metadata refresh reuses case-insensitive repository identity', asy
   assert.equal(stored[0]?.data.title, 'Refreshed title');
 });
 
+test('PR link metadata refresh uses the exact external id before scanning issue links', async () => {
+  const workerModule = await importFreshWorkerModule();
+  const harness = createTestHarness({ manifest, config: { githubToken: TEST_GITHUB_TOKEN } });
+  const params = {
+    companyId: 'company-1',
+    projectId: 'project-1',
+    issueId: 'issue-1',
+    repositoryUrl: 'https://github.com/paperclipai/example-repo',
+    pullRequestNumber: 79,
+    pullRequestUrl: 'https://github.com/paperclipai/example-repo/pull/79',
+    pullRequestTitle: 'Initial title',
+    pullRequestState: 'open' as const
+  };
+  await workerModule.__testing.upsertGitHubPullRequestLinkRecord(harness.ctx, params);
+
+  const originalList = harness.ctx.entities.list.bind(harness.ctx.entities);
+  const linkQueries: Array<{ externalId?: string; scopeId?: string }> = [];
+  harness.ctx.entities.list = async (input) => {
+    if (input.entityType === 'paperclip-github-plugin.pull-request-link') {
+      linkQueries.push({ externalId: input.externalId, scopeId: input.scopeId });
+    }
+    return originalList(input);
+  };
+
+  await workerModule.__testing.upsertGitHubPullRequestLinkRecord(harness.ctx, {
+    ...params,
+    pullRequestTitle: 'Refreshed title'
+  });
+
+  assert.deepEqual(linkQueries, [{ externalId: params.pullRequestUrl, scopeId: params.issueId }]);
+});
+
+test('effective pull request gate selection does not mutate its candidates', async () => {
+  const workerModule = await importFreshWorkerModule();
+  const ready = {
+    repositoryUrl: 'https://github.com/paperclipai/example-repo',
+    number: 80,
+    condition: 'ready'
+  };
+  const conflict = {
+    repositoryUrl: 'https://github.com/paperclipai/example-repo',
+    number: 81,
+    condition: 'conflict'
+  };
+  const gates = [ready, conflict];
+
+  const selected = workerModule.__testing.selectHighestPriorityEffectivePullRequestGate(gates as never);
+
+  assert.equal(selected?.number, 81);
+  assert.deepEqual(gates, [ready, conflict]);
+});
+
 test('sync preserves blocked maintainer approval waits for green mergeable pull requests', async () => {
   const workerModule = await importFreshWorkerModule();
   const testing = workerModule.__testing as typeof workerModule.__testing & {

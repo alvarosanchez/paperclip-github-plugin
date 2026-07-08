@@ -7906,7 +7906,7 @@ function selectHighestPriorityEffectivePullRequestGate(
   preferredGate?: GitHubPullRequestReference
 ): EffectiveDirectPullRequestGate | undefined {
   const preferredGateKey = preferredGate ? buildGitHubPullRequestReferenceKey(preferredGate) : undefined;
-  return gates.sort((left, right) =>
+  return [...gates].sort((left, right) =>
     getEffectiveDirectPullRequestGatePriority(left.condition)
       - getEffectiveDirectPullRequestGatePriority(right.condition)
     || Number(buildGitHubPullRequestReferenceKey(right) === preferredGateKey)
@@ -11503,12 +11503,19 @@ async function upsertGitHubPullRequestLinkRecord(
   });
   const mutationKey = `${params.companyId}:${params.issueId}:${referenceKey}`;
   return withPullRequestLinkMutationLock(mutationKey, async () => {
-    const existing = (await listGitHubPullRequestLinkRecords(ctx, {
+    const findMatchingRecord = (records: GitHubPullRequestLinkRecord[]) => records.find((record) =>
+      buildGitHubPullRequestReferenceKey({
+        repositoryUrl: record.data.repositoryUrl,
+        number: record.data.githubPullRequestNumber
+      }) === referenceKey
+    );
+    const exactExternalIdMatch = findMatchingRecord(await listGitHubPullRequestLinkRecords(ctx, {
+      paperclipIssueId: params.issueId,
+      externalId: params.pullRequestUrl
+    }));
+    const existing = exactExternalIdMatch ?? findMatchingRecord(await listGitHubPullRequestLinkRecords(ctx, {
       paperclipIssueId: params.issueId
-    })).find((record) => buildGitHubPullRequestReferenceKey({
-      repositoryUrl: record.data.repositoryUrl,
-      number: record.data.githubPullRequestNumber
-    }) === referenceKey);
+    }));
     const previousOwner = existing?.data.followThroughAssigneeAgentId;
     const nextOwner = params.followThroughAssigneeAgentId === undefined
       ? previousOwner
@@ -23629,6 +23636,7 @@ export const __testing = {
   normalizeRemoteActionRegistry,
   persistIssueInteractionEvent,
   trackedMutationOutcome,
+  selectHighestPriorityEffectivePullRequestGate,
   selectEffectiveDirectPullRequestGate,
   selectEffectiveIssueLinkedPullRequestAction,
   selectEffectiveIssueLinkedPullRequestGate,
