@@ -7585,8 +7585,12 @@ test('project.pullRequests.detail returns the GitHub conversation in timeline or
   }
 });
 
-test('project.pullRequests.createIssue creates and then reuses the linked Paperclip issue', async () => {
+test('project.pullRequests.createIssue creates, reuses, updates, and clears a durable follow-through owner', async () => {
   const harness = await createProjectPullRequestsHarness();
+  harness.ctx.agents.get = async (agentId, companyId) =>
+    ['owner-a', 'owner-b'].includes(agentId) && companyId === 'company-1'
+      ? { id: agentId, companyId, name: agentId } as never
+      : null;
   const originalCreateIssue = harness.ctx.issues.create.bind(harness.ctx.issues);
   const originalUpdateIssue = harness.ctx.issues.update.bind(harness.ctx.issues);
   const createIssueInputs: Array<Parameters<typeof originalCreateIssue>[0]> = [];
@@ -7616,25 +7620,46 @@ test('project.pullRequests.createIssue creates and then reuses the linked Paperc
     throw new Error(`Unexpected fetch during project.pullRequests.createIssue test: ${requestUrl}`);
   };
 
+  type CreateIssueResult = {
+    paperclipIssueId: string;
+    alreadyLinked?: boolean;
+    followThroughAssigneeAgentId?: string;
+    followThroughAssigneeUpdatedAt?: string;
+  };
+
   try {
-    const firstResult = await harness.performAction<{
-      paperclipIssueId: string;
-      alreadyLinked?: boolean;
-    }>('project.pullRequests.createIssue', {
+    const firstResult = await harness.performAction<CreateIssueResult>('project.pullRequests.createIssue', {
+      companyId: 'company-1',
+      projectId: 'project-1',
+      pullRequestNumber: 42,
+      title: 'Track PR queue delivery',
+      followThroughAssigneeAgentId: 'owner-a'
+    });
+    const createdIssue = await harness.ctx.issues.get(firstResult.paperclipIssueId, 'company-1');
+    const secondResult = await harness.performAction<CreateIssueResult>('project.pullRequests.createIssue', {
       companyId: 'company-1',
       projectId: 'project-1',
       pullRequestNumber: 42,
       title: 'Track PR queue delivery'
     });
-    const createdIssue = await harness.ctx.issues.get(firstResult.paperclipIssueId, 'company-1');
-    const secondResult = await harness.performAction<{
-      paperclipIssueId: string;
-      alreadyLinked?: boolean;
-    }>('project.pullRequests.createIssue', {
+    const updatedResult = await harness.performAction<CreateIssueResult>('project.pullRequests.createIssue', {
       companyId: 'company-1',
       projectId: 'project-1',
       pullRequestNumber: 42,
-      title: 'Track PR queue delivery'
+      title: 'Track PR queue delivery',
+      followThroughAssigneeAgentId: 'owner-b'
+    });
+    const clearedResult = await harness.performAction<CreateIssueResult>('project.pullRequests.createIssue', {
+      companyId: 'company-1',
+      projectId: 'project-1',
+      pullRequestNumber: 42,
+      title: 'Track PR queue delivery',
+      followThroughAssigneeAgentId: null
+    });
+    const links = await harness.ctx.entities.list({
+      entityType: 'paperclip-github-plugin.pull-request-link',
+      scopeKind: 'issue',
+      scopeId: firstResult.paperclipIssueId
     });
 
     assert.ok(createdIssue);
@@ -7646,8 +7671,55 @@ test('project.pullRequests.createIssue creates and then reuses the linked Paperc
     assert.equal(createdIssue?.originId, 'https://github.com/paperclipai/example-repo/pull/42');
     assert.match(createdIssue?.description ?? '', /Imported from GitHub pull request \[#42\]/);
     assert.equal(firstResult.alreadyLinked, false);
+    assert.equal(firstResult.followThroughAssigneeAgentId, 'owner-a');
+    assert.match(firstResult.followThroughAssigneeUpdatedAt ?? '', /^\d{4}-\d{2}-\d{2}T/);
     assert.equal(secondResult.alreadyLinked, true);
     assert.equal(secondResult.paperclipIssueId, firstResult.paperclipIssueId);
+    assert.equal(secondResult.followThroughAssigneeAgentId, 'owner-a');
+    assert.equal(secondResult.followThroughAssigneeUpdatedAt, firstResult.followThroughAssigneeUpdatedAt);
+    assert.equal(updatedResult.followThroughAssigneeAgentId, 'owner-b');
+    assert.match(updatedResult.followThroughAssigneeUpdatedAt ?? '', /^\d{4}-\d{2}-\d{2}T/);
+    assert.equal(clearedResult.followThroughAssigneeAgentId, undefined);
+    assert.match(clearedResult.followThroughAssigneeUpdatedAt ?? '', /^\d{4}-\d{2}-\d{2}T/);
+    assert.equal(links.length, 1);
+    assert.equal((links[0]?.data as { followThroughAssigneeAgentId?: unknown }).followThroughAssigneeAgentId, undefined);
+    assert.match(
+      String((links[0]?.data as { followThroughAssigneeUpdatedAt?: unknown }).followThroughAssigneeUpdatedAt),
+      /^\d{4}-\d{2}-\d{2}T/
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('project.pullRequests.createIssue rejects cross-company follow-through owners before linking', async () => {
+  const harness = await createProjectPullRequestsHarness();
+  harness.ctx.agents.get = async (agentId) => agentId === 'other-company-agent'
+    ? { id: agentId, companyId: 'company-2', name: 'Other company' } as never
+    : null;
+  let fetchCount = 0;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => {
+    fetchCount += 1;
+    throw new Error('GitHub must not be called for an invalid owner.');
+  };
+
+  try {
+    await assert.rejects(
+      harness.performAction('project.pullRequests.createIssue', {
+        companyId: 'company-1',
+        projectId: 'project-1',
+        pullRequestNumber: 42,
+        followThroughAssigneeAgentId: 'other-company-agent'
+      }),
+      /same Paperclip company/
+    );
+    assert.equal(fetchCount, 0);
+    const links = await harness.ctx.entities.list({
+      entityType: 'paperclip-github-plugin.pull-request-link',
+      scopeKind: 'issue'
+    });
+    assert.equal(links.length, 0);
   } finally {
     globalThis.fetch = originalFetch;
   }

@@ -19912,6 +19912,11 @@ async function createProjectPullRequestPaperclipIssue(
   }
 
   const scope = await requireProjectPullRequestScope(ctx, input);
+  const followThroughAssigneeAgentId = await validateFollowThroughAssigneeAgentId(
+    ctx,
+    scope.companyId,
+    input.followThroughAssigneeAgentId
+  );
   const octokit = await createGitHubToolOctokit(ctx, scope.companyId);
   const pullRequestResponse = await octokit.rest.pulls.get({
     owner: scope.repository.owner,
@@ -19923,6 +19928,12 @@ async function createProjectPullRequestPaperclipIssue(
   });
   const pullRequest = pullRequestResponse.data;
   const pullRequestUrl = pullRequest.html_url;
+  const pullRequestState = getPullRequestApiState({
+    state: pullRequest.state,
+    merged: pullRequest.merged
+  }) === 'open'
+    ? 'open'
+    : 'closed';
   const existingLinks = await listGitHubPullRequestLinkRecords(ctx, {
     externalId: pullRequestUrl
   });
@@ -19937,9 +19948,27 @@ async function createProjectPullRequestPaperclipIssue(
     : null;
 
   if (existingLink && existingIssue) {
+    const persistedLink = await upsertGitHubPullRequestLinkRecord(ctx, {
+      companyId: scope.companyId,
+      projectId: scope.projectId,
+      issueId: existingIssue.id,
+      repositoryUrl: scope.repository.url,
+      pullRequestNumber,
+      pullRequestUrl,
+      pullRequestTitle: pullRequest.title,
+      pullRequestState,
+      followThroughAssigneeAgentId
+    });
+    invalidateProjectPullRequestCaches(scope);
     return {
       paperclipIssueId: existingIssue.id,
       ...(existingIssue.identifier ? { paperclipIssueKey: existingIssue.identifier } : {}),
+      ...(persistedLink.followThroughAssigneeAgentId
+        ? { followThroughAssigneeAgentId: persistedLink.followThroughAssigneeAgentId }
+        : {}),
+      ...(persistedLink.followThroughAssigneeUpdatedAt
+        ? { followThroughAssigneeUpdatedAt: persistedLink.followThroughAssigneeUpdatedAt }
+        : {}),
       alreadyLinked: true
     };
   }
@@ -19965,7 +19994,7 @@ async function createProjectPullRequestPaperclipIssue(
   );
   const resolvedIssue = await ctx.issues.get(createdIssue.id, scope.companyId) ?? createdIssue;
 
-  await upsertGitHubPullRequestLinkRecord(ctx, {
+  const persistedLink = await upsertGitHubPullRequestLinkRecord(ctx, {
     companyId: scope.companyId,
     projectId: scope.projectId,
     issueId: resolvedIssue.id,
@@ -19973,18 +20002,20 @@ async function createProjectPullRequestPaperclipIssue(
     pullRequestNumber,
     pullRequestUrl,
     pullRequestTitle: pullRequest.title,
-    pullRequestState: getPullRequestApiState({
-      state: pullRequest.state,
-      merged: pullRequest.merged
-    }) === 'open'
-      ? 'open'
-      : 'closed'
+    pullRequestState,
+    followThroughAssigneeAgentId
   });
   invalidateProjectPullRequestCaches(scope);
 
   return {
     paperclipIssueId: resolvedIssue.id,
     ...(resolvedIssue.identifier ? { paperclipIssueKey: resolvedIssue.identifier } : {}),
+    ...(persistedLink.followThroughAssigneeAgentId
+      ? { followThroughAssigneeAgentId: persistedLink.followThroughAssigneeAgentId }
+      : {}),
+    ...(persistedLink.followThroughAssigneeUpdatedAt
+      ? { followThroughAssigneeUpdatedAt: persistedLink.followThroughAssigneeUpdatedAt }
+      : {}),
     alreadyLinked: false
   };
 }
