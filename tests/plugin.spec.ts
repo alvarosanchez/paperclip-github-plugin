@@ -7909,8 +7909,8 @@ test('project.pullRequests.createIssue skips a stale exact link and reuses a val
     title: 'GitHub pull request #42',
     status: 'open',
     data: {
-      companyId: 'company-1',
-      paperclipProjectId: 'project-1',
+      companyId: 'stale-company',
+      paperclipProjectId: 'stale-project',
       repositoryUrl: 'https://github.com/PaperclipAI/Example-Repo',
       githubPullRequestNumber: 42,
       githubPullRequestUrl: 'https://github.com/PaperclipAI/Example-Repo/pull/42',
@@ -7954,6 +7954,94 @@ test('project.pullRequests.createIssue skips a stale exact link and reuses a val
     assert.notEqual(result.paperclipIssueId, misplacedIssue.id);
     assert.equal(result.paperclipIssueId, validIssue.id);
     assert.equal(result.alreadyLinked, true);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('project.pullRequests.createIssue deterministically selects among multiple valid exact links', async () => {
+  const harness = await createProjectPullRequestsHarness();
+  const firstIssue = await harness.ctx.issues.create({
+    companyId: 'company-1',
+    projectId: 'project-1',
+    title: 'First linked issue'
+  });
+  const secondIssue = await harness.ctx.issues.create({
+    companyId: 'company-1',
+    projectId: 'project-1',
+    title: 'Second linked issue'
+  });
+  const pullRequestUrl = 'https://github.com/paperclipai/example-repo/pull/42';
+  for (const issue of [firstIssue, secondIssue]) {
+    await harness.ctx.entities.upsert({
+      entityType: 'paperclip-github-plugin.pull-request-link',
+      scopeKind: 'issue',
+      scopeId: issue.id,
+      externalId: pullRequestUrl,
+      title: 'GitHub pull request #42',
+      status: 'open',
+      data: {
+        companyId: 'company-1',
+        paperclipProjectId: 'project-1',
+        repositoryUrl: 'https://github.com/paperclipai/example-repo',
+        githubPullRequestNumber: 42,
+        githubPullRequestUrl: pullRequestUrl,
+        githubPullRequestState: 'open',
+        title: 'Ship the live project PR queue',
+        syncedAt: '2026-04-27T09:30:00.000Z'
+      }
+    });
+  }
+  const originalCreateIssue = harness.ctx.issues.create.bind(harness.ctx.issues);
+  let createCount = 0;
+  harness.ctx.issues.create = async (input) => {
+    createCount += 1;
+    return originalCreateIssue(input);
+  };
+  const originalListEntities = harness.ctx.entities.list.bind(harness.ctx.entities);
+  let reverseExactReads = false;
+  harness.ctx.entities.list = async (input) => {
+    const records = await originalListEntities(input);
+    return reverseExactReads && input.externalId === pullRequestUrl
+      ? [...records].reverse()
+      : records;
+  };
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    const requestUrl = new URL(getRequestUrl(input));
+    if (requestUrl.pathname === '/repos/paperclipai/example-repo/pulls/42') {
+      return jsonResponse({
+        number: 42,
+        title: 'Ship the live project PR queue',
+        body: 'Implements the live PR queue.',
+        html_url: pullRequestUrl,
+        state: 'open',
+        merged: false
+      });
+    }
+    throw new Error(`Unexpected fetch during deterministic PR link test: ${requestUrl}`);
+  };
+
+  try {
+    const input = {
+      companyId: 'company-1',
+      projectId: 'project-1',
+      pullRequestNumber: 42
+    };
+    const firstResult = await harness.performAction<{ paperclipIssueId: string }>(
+      'project.pullRequests.createIssue',
+      input
+    );
+    reverseExactReads = true;
+    const secondResult = await harness.performAction<{ paperclipIssueId: string }>(
+      'project.pullRequests.createIssue',
+      input
+    );
+    const expectedIssueId = [firstIssue.id, secondIssue.id].sort()[0];
+
+    assert.equal(createCount, 0);
+    assert.equal(firstResult.paperclipIssueId, expectedIssueId);
+    assert.equal(secondResult.paperclipIssueId, expectedIssueId);
   } finally {
     globalThis.fetch = originalFetch;
   }

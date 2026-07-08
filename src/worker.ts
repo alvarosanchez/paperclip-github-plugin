@@ -19949,17 +19949,20 @@ async function createProjectPullRequestPaperclipIssue(
   const creationLockKey = `hosted-create:${scope.companyId}:${scope.projectId}:${pullRequestReferenceKey}`;
 
   return withPullRequestLinkMutationLock(creationLockKey, async () => {
-    const filterMatchingLinks = (records: GitHubPullRequestLinkRecord[]) => records.filter((record) =>
-      record.data.githubPullRequestNumber === pullRequestNumber &&
-      buildGitHubPullRequestReferenceKey({
-        repositoryUrl: record.data.repositoryUrl,
-        number: record.data.githubPullRequestNumber
-      }) === pullRequestReferenceKey &&
-      (!record.data.companyId || record.data.companyId === scope.companyId) &&
-      (!record.data.paperclipProjectId || record.data.paperclipProjectId === scope.projectId)
-    );
+    const sortMatchingLinks = (records: GitHubPullRequestLinkRecord[]) => records
+      .filter((record) =>
+        record.data.githubPullRequestNumber === pullRequestNumber &&
+        buildGitHubPullRequestReferenceKey({
+          repositoryUrl: record.data.repositoryUrl,
+          number: record.data.githubPullRequestNumber
+        }) === pullRequestReferenceKey
+      )
+      .sort((left, right) =>
+        left.paperclipIssueId.localeCompare(right.paperclipIssueId) ||
+        (left.externalId ?? '').localeCompare(right.externalId ?? '')
+      );
     const findReusableLinkedIssue = async (records: GitHubPullRequestLinkRecord[]) => {
-      for (const link of filterMatchingLinks(records)) {
+      for (const link of sortMatchingLinks(records)) {
         const issue = await ctx.issues.get(link.paperclipIssueId, scope.companyId);
         if (issue?.companyId === scope.companyId && issue.projectId === scope.projectId) {
           return { link, issue };
