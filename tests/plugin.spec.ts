@@ -7744,7 +7744,7 @@ test('project.pullRequests.createIssue creates, reuses, updates, and clears a du
   }
 });
 
-test('project.pullRequests.createIssue repairs a missing link from the durable PR origin after interruption', async () => {
+test('project.pullRequests.createIssue repairs a missing link from a case-variant durable PR origin after interruption', async () => {
   const harness = await createProjectPullRequestsHarness();
   harness.ctx.agents.get = async (agentId) => agentId === 'owner-a'
     ? { id: agentId, companyId: 'company-1', name: 'Owner A', title: 'Engineer' } as Agent
@@ -7755,7 +7755,7 @@ test('project.pullRequests.createIssue repairs a missing link from the durable P
     title: 'Ship the live project PR queue',
     status: 'todo',
     originKind: 'plugin:paperclip-github-plugin:github-pull-request',
-    originId: 'https://github.com/paperclipai/example-repo/pull/42'
+    originId: 'https://github.com/PaperclipAI/Example-Repo/pull/42'
   });
   const originalCreateIssue = harness.ctx.issues.create.bind(harness.ctx.issues);
   let createCount = 0;
@@ -12299,6 +12299,53 @@ test('sync.runNow can target a Paperclip issue linked directly to a GitHub pull 
     assert.match(statusTransitionComments[0]?.body ?? '', /merge conflicts/);
   } finally {
     harness.ctx.issues.createComment = originalCreateComment;
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('sync.runNow ignores an issue-targeted pull request link owned by another company', async () => {
+  const harness = await createProjectPullRequestsHarness();
+  const issue = await harness.ctx.issues.create({
+    companyId: 'company-1',
+    projectId: 'project-1',
+    title: 'Company-scoped direct PR sync'
+  });
+  await harness.ctx.entities.upsert({
+    entityType: 'paperclip-github-plugin.pull-request-link',
+    scopeKind: 'issue',
+    scopeId: issue.id,
+    externalId: 'https://github.com/other-company/private-repo/pull/91',
+    title: 'GitHub pull request #91',
+    status: 'open',
+    data: {
+      companyId: 'company-2',
+      paperclipProjectId: 'project-2',
+      repositoryUrl: 'https://github.com/other-company/private-repo',
+      githubPullRequestNumber: 91,
+      githubPullRequestUrl: 'https://github.com/other-company/private-repo/pull/91',
+      githubPullRequestState: 'open',
+      title: 'Other company PR',
+      syncedAt: '2026-04-27T09:30:00.000Z'
+    }
+  });
+  const originalFetch = globalThis.fetch;
+  let fetchCount = 0;
+  globalThis.fetch = async () => {
+    fetchCount += 1;
+    throw new Error('Cross-company PR link must not authorize GitHub access.');
+  };
+
+  try {
+    await assert.rejects(
+      harness.performAction('sync.runNow', {
+        companyId: 'company-1',
+        issueId: issue.id,
+        waitForCompletion: true
+      }),
+      /not linked to a GitHub issue or pull request/i
+    );
+    assert.equal(fetchCount, 0);
+  } finally {
     globalThis.fetch = originalFetch;
   }
 });

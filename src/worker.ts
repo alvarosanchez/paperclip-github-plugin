@@ -11114,7 +11114,8 @@ function doesGitHubPullRequestLinkRecordMatchTarget(
       return (!record.data.companyId || record.data.companyId === target.companyId)
         && (!record.data.paperclipProjectId || record.data.paperclipProjectId === target.projectId);
     case 'issue':
-      return Boolean(target.issueId && record.paperclipIssueId === target.issueId);
+      return Boolean(target.issueId && record.paperclipIssueId === target.issueId)
+        && (!record.data.companyId || record.data.companyId === target.companyId);
     default:
       return true;
   }
@@ -19941,10 +19942,11 @@ async function createProjectPullRequestPaperclipIssue(
   }) === 'open'
     ? 'open'
     : 'closed';
-  const creationLockKey = `hosted-create:${scope.companyId}:${scope.projectId}:${buildGitHubPullRequestReferenceKey({
+  const pullRequestReferenceKey = buildGitHubPullRequestReferenceKey({
     repositoryUrl: scope.repository.url,
     number: pullRequestNumber
-  })}`;
+  });
+  const creationLockKey = `hosted-create:${scope.companyId}:${scope.projectId}:${pullRequestReferenceKey}`;
 
   return withPullRequestLinkMutationLock(creationLockKey, async () => {
     const existingLinks = await listGitHubPullRequestLinkRecords(ctx, {
@@ -19952,7 +19954,10 @@ async function createProjectPullRequestPaperclipIssue(
     });
     const existingLink = existingLinks.find((record) =>
       record.data.githubPullRequestNumber === pullRequestNumber &&
-      record.data.repositoryUrl === scope.repository.url &&
+      buildGitHubPullRequestReferenceKey({
+        repositoryUrl: record.data.repositoryUrl,
+        number: record.data.githubPullRequestNumber
+      }) === pullRequestReferenceKey &&
       (!record.data.companyId || record.data.companyId === scope.companyId) &&
       (!record.data.paperclipProjectId || record.data.paperclipProjectId === scope.projectId)
     );
@@ -19963,8 +19968,13 @@ async function createProjectPullRequestPaperclipIssue(
       ? null
       : (await listPaperclipIssuesForProject(ctx, scope.companyId, scope.projectId)).find((issue) => {
           const originLink = resolvePaperclipIssueOriginGitHubPullRequestLink(issue);
-          return originLink?.repositoryUrl === scope.repository.url
-            && originLink.githubPullRequestNumber === pullRequestNumber;
+          if (!originLink) {
+            return false;
+          }
+          return buildGitHubPullRequestReferenceKey({
+            repositoryUrl: originLink.repositoryUrl,
+            number: originLink.githubPullRequestNumber
+          }) === pullRequestReferenceKey;
         }) ?? null;
     const reusableIssue = existingIssue ?? recoveredOriginIssue;
 
