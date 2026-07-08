@@ -7692,6 +7692,57 @@ test('project.pullRequests.createIssue creates, reuses, updates, and clears a du
   }
 });
 
+test('project.pullRequests.createIssue serializes concurrent creation for the same pull request', async () => {
+  const harness = await createProjectPullRequestsHarness();
+  const originalCreateIssue = harness.ctx.issues.create.bind(harness.ctx.issues);
+  let createCount = 0;
+  harness.ctx.issues.create = async (input) => {
+    createCount += 1;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    return originalCreateIssue(input);
+  };
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    const requestUrl = new URL(getRequestUrl(input));
+    if (requestUrl.pathname === '/repos/paperclipai/example-repo/pulls/42') {
+      return jsonResponse({
+        number: 42,
+        title: 'Ship the live project PR queue',
+        body: 'Implements the live PR queue.',
+        html_url: 'https://github.com/paperclipai/example-repo/pull/42',
+        state: 'open',
+        merged: false
+      });
+    }
+    throw new Error(`Unexpected fetch during concurrent project.pullRequests.createIssue test: ${requestUrl}`);
+  };
+
+  try {
+    const [first, second] = await Promise.all([
+      harness.performAction<{ paperclipIssueId: string; alreadyLinked?: boolean }>(
+        'project.pullRequests.createIssue',
+        { companyId: 'company-1', projectId: 'project-1', pullRequestNumber: 42 }
+      ),
+      harness.performAction<{ paperclipIssueId: string; alreadyLinked?: boolean }>(
+        'project.pullRequests.createIssue',
+        { companyId: 'company-1', projectId: 'project-1', pullRequestNumber: 42 }
+      )
+    ]);
+    const links = await harness.ctx.entities.list({
+      entityType: 'paperclip-github-plugin.pull-request-link',
+      scopeKind: 'issue'
+    });
+
+    assert.equal(createCount, 1);
+    assert.equal(first.paperclipIssueId, second.paperclipIssueId);
+    assert.deepEqual([first.alreadyLinked, second.alreadyLinked].sort(), [false, true]);
+    assert.equal(links.length, 1);
+    assert.equal(links[0]?.scopeId, first.paperclipIssueId);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test('project.pullRequests.createIssue rejects cross-company follow-through owners before linking', async () => {
   const harness = await createProjectPullRequestsHarness();
   harness.ctx.agents.get = async (agentId) => agentId === 'other-company-agent'

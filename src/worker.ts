@@ -19934,9 +19934,15 @@ async function createProjectPullRequestPaperclipIssue(
   }) === 'open'
     ? 'open'
     : 'closed';
-  const existingLinks = await listGitHubPullRequestLinkRecords(ctx, {
-    externalId: pullRequestUrl
-  });
+  const creationLockKey = `hosted-create:${scope.companyId}:${scope.projectId}:${buildGitHubPullRequestReferenceKey({
+    repositoryUrl: scope.repository.url,
+    number: pullRequestNumber
+  })}`;
+
+  return withPullRequestLinkMutationLock(creationLockKey, async () => {
+    const existingLinks = await listGitHubPullRequestLinkRecords(ctx, {
+      externalId: pullRequestUrl
+    });
   const existingLink = existingLinks.find((record) =>
     record.data.githubPullRequestNumber === pullRequestNumber &&
     record.data.repositoryUrl === scope.repository.url &&
@@ -20013,11 +20019,12 @@ async function createProjectPullRequestPaperclipIssue(
     ...(persistedLink.followThroughAssigneeAgentId
       ? { followThroughAssigneeAgentId: persistedLink.followThroughAssigneeAgentId }
       : {}),
-    ...(persistedLink.followThroughAssigneeUpdatedAt
-      ? { followThroughAssigneeUpdatedAt: persistedLink.followThroughAssigneeUpdatedAt }
-      : {}),
-    alreadyLinked: false
-  };
+      ...(persistedLink.followThroughAssigneeUpdatedAt
+        ? { followThroughAssigneeUpdatedAt: persistedLink.followThroughAssigneeUpdatedAt }
+        : {}),
+      alreadyLinked: false
+    };
+  });
 }
 
 async function refreshProjectPullRequests(
