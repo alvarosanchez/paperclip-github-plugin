@@ -19949,10 +19949,7 @@ async function createProjectPullRequestPaperclipIssue(
   const creationLockKey = `hosted-create:${scope.companyId}:${scope.projectId}:${pullRequestReferenceKey}`;
 
   return withPullRequestLinkMutationLock(creationLockKey, async () => {
-    const existingLinks = await listGitHubPullRequestLinkRecords(ctx, {
-      externalId: pullRequestUrl
-    });
-    const existingLink = existingLinks.find((record) =>
+    const findMatchingLink = (records: GitHubPullRequestLinkRecord[]) => records.find((record) =>
       record.data.githubPullRequestNumber === pullRequestNumber &&
       buildGitHubPullRequestReferenceKey({
         repositoryUrl: record.data.repositoryUrl,
@@ -19961,6 +19958,11 @@ async function createProjectPullRequestPaperclipIssue(
       (!record.data.companyId || record.data.companyId === scope.companyId) &&
       (!record.data.paperclipProjectId || record.data.paperclipProjectId === scope.projectId)
     );
+    const exactLinks = await listGitHubPullRequestLinkRecords(ctx, {
+      externalId: pullRequestUrl
+    });
+    const existingLink = findMatchingLink(exactLinks)
+      ?? findMatchingLink(await listGitHubPullRequestLinkRecords(ctx));
     const existingIssue = existingLink
       ? await ctx.issues.get(existingLink.paperclipIssueId, scope.companyId)
       : null;

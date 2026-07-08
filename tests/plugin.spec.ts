@@ -7806,6 +7806,71 @@ test('project.pullRequests.createIssue repairs a missing link from a case-varian
   }
 });
 
+test('project.pullRequests.createIssue reuses a case-variant durable PR link on a native issue', async () => {
+  const harness = await createProjectPullRequestsHarness();
+  const linkedIssue = await harness.ctx.issues.create({
+    companyId: 'company-1',
+    projectId: 'project-1',
+    title: 'Native issue linked to a hosted pull request'
+  });
+  await harness.ctx.entities.upsert({
+    entityType: 'paperclip-github-plugin.pull-request-link',
+    scopeKind: 'issue',
+    scopeId: linkedIssue.id,
+    externalId: 'https://github.com/PaperclipAI/Example-Repo/pull/42',
+    title: 'GitHub pull request #42',
+    status: 'open',
+    data: {
+      companyId: 'company-1',
+      paperclipProjectId: 'project-1',
+      repositoryUrl: 'https://github.com/PaperclipAI/Example-Repo',
+      githubPullRequestNumber: 42,
+      githubPullRequestUrl: 'https://github.com/PaperclipAI/Example-Repo/pull/42',
+      githubPullRequestState: 'open',
+      title: 'Ship the live project PR queue',
+      syncedAt: '2026-04-27T09:30:00.000Z'
+    }
+  });
+  const originalCreateIssue = harness.ctx.issues.create.bind(harness.ctx.issues);
+  let createCount = 0;
+  harness.ctx.issues.create = async (input) => {
+    createCount += 1;
+    return originalCreateIssue(input);
+  };
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    const requestUrl = new URL(getRequestUrl(input));
+    if (requestUrl.pathname === '/repos/paperclipai/example-repo/pulls/42') {
+      return jsonResponse({
+        number: 42,
+        title: 'Ship the live project PR queue',
+        body: 'Implements the live PR queue.',
+        html_url: 'https://github.com/paperclipai/example-repo/pull/42',
+        state: 'open',
+        merged: false
+      });
+    }
+    throw new Error(`Unexpected fetch during case-variant durable PR link test: ${requestUrl}`);
+  };
+
+  try {
+    const result = await harness.performAction<{
+      paperclipIssueId: string;
+      alreadyLinked?: boolean;
+    }>('project.pullRequests.createIssue', {
+      companyId: 'company-1',
+      projectId: 'project-1',
+      pullRequestNumber: 42
+    });
+
+    assert.equal(createCount, 0);
+    assert.equal(result.paperclipIssueId, linkedIssue.id);
+    assert.equal(result.alreadyLinked, true);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test('project.pullRequests.createIssue serializes concurrent creation for the same pull request', async () => {
   const harness = await createProjectPullRequestsHarness();
   const originalCreateIssue = harness.ctx.issues.create.bind(harness.ctx.issues);
