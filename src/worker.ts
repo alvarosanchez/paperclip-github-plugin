@@ -19943,44 +19943,52 @@ async function createProjectPullRequestPaperclipIssue(
     const existingLinks = await listGitHubPullRequestLinkRecords(ctx, {
       externalId: pullRequestUrl
     });
-  const existingLink = existingLinks.find((record) =>
-    record.data.githubPullRequestNumber === pullRequestNumber &&
-    record.data.repositoryUrl === scope.repository.url &&
-    (!record.data.companyId || record.data.companyId === scope.companyId) &&
-    (!record.data.paperclipProjectId || record.data.paperclipProjectId === scope.projectId)
-  );
-  const existingIssue = existingLink
-    ? await ctx.issues.get(existingLink.paperclipIssueId, scope.companyId)
-    : null;
+    const existingLink = existingLinks.find((record) =>
+      record.data.githubPullRequestNumber === pullRequestNumber &&
+      record.data.repositoryUrl === scope.repository.url &&
+      (!record.data.companyId || record.data.companyId === scope.companyId) &&
+      (!record.data.paperclipProjectId || record.data.paperclipProjectId === scope.projectId)
+    );
+    const existingIssue = existingLink
+      ? await ctx.issues.get(existingLink.paperclipIssueId, scope.companyId)
+      : null;
+    const recoveredOriginIssue = existingIssue
+      ? null
+      : (await listPaperclipIssuesForProject(ctx, scope.companyId, scope.projectId)).find((issue) => {
+          const originLink = resolvePaperclipIssueOriginGitHubPullRequestLink(issue);
+          return originLink?.repositoryUrl === scope.repository.url
+            && originLink.githubPullRequestNumber === pullRequestNumber;
+        }) ?? null;
+    const reusableIssue = existingIssue ?? recoveredOriginIssue;
 
-  if (existingLink && existingIssue) {
-    const persistedLink = await upsertGitHubPullRequestLinkRecord(ctx, {
-      companyId: scope.companyId,
-      projectId: scope.projectId,
-      issueId: existingIssue.id,
-      repositoryUrl: scope.repository.url,
-      pullRequestNumber,
-      pullRequestUrl,
-      pullRequestTitle: pullRequest.title,
-      pullRequestState,
-      followThroughAssigneeAgentId
-    });
-    invalidateProjectPullRequestCaches(scope);
-    return {
-      paperclipIssueId: existingIssue.id,
-      ...(existingIssue.identifier ? { paperclipIssueKey: existingIssue.identifier } : {}),
-      ...(persistedLink.followThroughAssigneeAgentId
-        ? { followThroughAssigneeAgentId: persistedLink.followThroughAssigneeAgentId }
-        : {}),
-      ...(persistedLink.followThroughAssigneeUpdatedAt
-        ? { followThroughAssigneeUpdatedAt: persistedLink.followThroughAssigneeUpdatedAt }
-        : {}),
-      alreadyLinked: true
-    };
-  }
+    if (reusableIssue) {
+      const persistedLink = await upsertGitHubPullRequestLinkRecord(ctx, {
+        companyId: scope.companyId,
+        projectId: scope.projectId,
+        issueId: reusableIssue.id,
+        repositoryUrl: scope.repository.url,
+        pullRequestNumber,
+        pullRequestUrl,
+        pullRequestTitle: pullRequest.title,
+        pullRequestState,
+        followThroughAssigneeAgentId
+      });
+      invalidateProjectPullRequestCaches(scope);
+      return {
+        paperclipIssueId: reusableIssue.id,
+        ...(reusableIssue.identifier ? { paperclipIssueKey: reusableIssue.identifier } : {}),
+        ...(persistedLink.followThroughAssigneeAgentId
+          ? { followThroughAssigneeAgentId: persistedLink.followThroughAssigneeAgentId }
+          : {}),
+        ...(persistedLink.followThroughAssigneeUpdatedAt
+          ? { followThroughAssigneeUpdatedAt: persistedLink.followThroughAssigneeUpdatedAt }
+          : {}),
+        alreadyLinked: Boolean(existingLink && existingIssue)
+      };
+    }
 
-  const requestedTitle = typeof input.title === 'string' && input.title.trim() ? input.title.trim() : pullRequest.title.trim();
-  const createdIssue = await ensurePaperclipIssueStandardWorkMode(
+    const requestedTitle = typeof input.title === 'string' && input.title.trim() ? input.title.trim() : pullRequest.title.trim();
+    const createdIssue = await ensurePaperclipIssueStandardWorkMode(
     ctx,
     await ctx.issues.create({
       companyId: scope.companyId,

@@ -7692,6 +7692,68 @@ test('project.pullRequests.createIssue creates, reuses, updates, and clears a du
   }
 });
 
+test('project.pullRequests.createIssue repairs a missing link from the durable PR origin after interruption', async () => {
+  const harness = await createProjectPullRequestsHarness();
+  harness.ctx.agents.get = async (agentId) => agentId === 'owner-a'
+    ? { id: agentId, companyId: 'company-1', name: 'Owner A', title: 'Engineer' } as Agent
+    : null;
+  const interruptedIssue = await harness.ctx.issues.create({
+    companyId: 'company-1',
+    projectId: 'project-1',
+    title: 'Ship the live project PR queue',
+    status: 'todo',
+    originKind: 'plugin:paperclip-github-plugin:github-pull-request',
+    originId: 'https://github.com/paperclipai/example-repo/pull/42'
+  });
+  const originalCreateIssue = harness.ctx.issues.create.bind(harness.ctx.issues);
+  let createCount = 0;
+  harness.ctx.issues.create = async (input) => {
+    createCount += 1;
+    return originalCreateIssue(input);
+  };
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    const requestUrl = new URL(getRequestUrl(input));
+    if (requestUrl.pathname === '/repos/paperclipai/example-repo/pulls/42') {
+      return jsonResponse({
+        number: 42,
+        title: 'Ship the live project PR queue',
+        body: 'Implements the live PR queue.',
+        html_url: 'https://github.com/paperclipai/example-repo/pull/42',
+        state: 'open',
+        merged: false
+      });
+    }
+    throw new Error(`Unexpected fetch during interrupted project.pullRequests.createIssue test: ${requestUrl}`);
+  };
+
+  try {
+    const result = await harness.performAction<{
+      paperclipIssueId: string;
+      alreadyLinked?: boolean;
+      followThroughAssigneeAgentId?: string;
+    }>('project.pullRequests.createIssue', {
+      companyId: 'company-1',
+      projectId: 'project-1',
+      pullRequestNumber: 42,
+      followThroughAssigneeAgentId: 'owner-a'
+    });
+    const links = await harness.ctx.entities.list({
+      entityType: 'paperclip-github-plugin.pull-request-link',
+      scopeKind: 'issue'
+    });
+
+    assert.equal(createCount, 0);
+    assert.equal(result.paperclipIssueId, interruptedIssue.id);
+    assert.equal(result.alreadyLinked, false);
+    assert.equal(result.followThroughAssigneeAgentId, 'owner-a');
+    assert.equal(links.length, 1);
+    assert.equal(links[0]?.scopeId, interruptedIssue.id);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test('project.pullRequests.createIssue serializes concurrent creation for the same pull request', async () => {
   const harness = await createProjectPullRequestsHarness();
   const originalCreateIssue = harness.ctx.issues.create.bind(harness.ctx.issues);
