@@ -19963,8 +19963,12 @@ async function createProjectPullRequestPaperclipIssue(
     });
     const existingLink = findMatchingLink(exactLinks)
       ?? findMatchingLink(await listGitHubPullRequestLinkRecords(ctx));
-    const existingIssue = existingLink
+    const linkedIssue = existingLink
       ? await ctx.issues.get(existingLink.paperclipIssueId, scope.companyId)
+      : null;
+    const existingIssue = linkedIssue?.companyId === scope.companyId
+      && linkedIssue.projectId === scope.projectId
+      ? linkedIssue
       : null;
     const recoveredOriginIssue = existingIssue
       ? null
