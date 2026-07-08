@@ -7871,7 +7871,7 @@ test('project.pullRequests.createIssue reuses a case-variant durable PR link on 
   }
 });
 
-test('project.pullRequests.createIssue rejects a PR link whose issue belongs to another project', async () => {
+test('project.pullRequests.createIssue skips a stale exact link and reuses a valid canonical fallback', async () => {
   const harness = await createProjectPullRequestsHarness();
   const misplacedIssue = await harness.ctx.issues.create({
     companyId: 'company-1',
@@ -7896,6 +7896,35 @@ test('project.pullRequests.createIssue rejects a PR link whose issue belongs to 
       syncedAt: '2026-04-27T09:30:00.000Z'
     }
   });
+  const validIssue = await harness.ctx.issues.create({
+    companyId: 'company-1',
+    projectId: 'project-1',
+    title: 'Native issue in the requested project'
+  });
+  await harness.ctx.entities.upsert({
+    entityType: 'paperclip-github-plugin.pull-request-link',
+    scopeKind: 'issue',
+    scopeId: validIssue.id,
+    externalId: 'https://github.com/PaperclipAI/Example-Repo/pull/42',
+    title: 'GitHub pull request #42',
+    status: 'open',
+    data: {
+      companyId: 'company-1',
+      paperclipProjectId: 'project-1',
+      repositoryUrl: 'https://github.com/PaperclipAI/Example-Repo',
+      githubPullRequestNumber: 42,
+      githubPullRequestUrl: 'https://github.com/PaperclipAI/Example-Repo/pull/42',
+      githubPullRequestState: 'open',
+      title: 'Ship the live project PR queue',
+      syncedAt: '2026-04-27T09:30:00.000Z'
+    }
+  });
+  const originalCreateIssue = harness.ctx.issues.create.bind(harness.ctx.issues);
+  let createCount = 0;
+  harness.ctx.issues.create = async (input) => {
+    createCount += 1;
+    return originalCreateIssue(input);
+  };
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (input) => {
     const requestUrl = new URL(getRequestUrl(input));
@@ -7921,11 +7950,10 @@ test('project.pullRequests.createIssue rejects a PR link whose issue belongs to 
       projectId: 'project-1',
       pullRequestNumber: 42
     });
-    const createdIssue = await harness.ctx.issues.get(result.paperclipIssueId, 'company-1');
-
+    assert.equal(createCount, 0);
     assert.notEqual(result.paperclipIssueId, misplacedIssue.id);
-    assert.equal(result.alreadyLinked, false);
-    assert.equal(createdIssue?.projectId, 'project-1');
+    assert.equal(result.paperclipIssueId, validIssue.id);
+    assert.equal(result.alreadyLinked, true);
   } finally {
     globalThis.fetch = originalFetch;
   }

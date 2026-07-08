@@ -19949,7 +19949,7 @@ async function createProjectPullRequestPaperclipIssue(
   const creationLockKey = `hosted-create:${scope.companyId}:${scope.projectId}:${pullRequestReferenceKey}`;
 
   return withPullRequestLinkMutationLock(creationLockKey, async () => {
-    const findMatchingLink = (records: GitHubPullRequestLinkRecord[]) => records.find((record) =>
+    const filterMatchingLinks = (records: GitHubPullRequestLinkRecord[]) => records.filter((record) =>
       record.data.githubPullRequestNumber === pullRequestNumber &&
       buildGitHubPullRequestReferenceKey({
         repositoryUrl: record.data.repositoryUrl,
@@ -19958,18 +19958,22 @@ async function createProjectPullRequestPaperclipIssue(
       (!record.data.companyId || record.data.companyId === scope.companyId) &&
       (!record.data.paperclipProjectId || record.data.paperclipProjectId === scope.projectId)
     );
+    const findReusableLinkedIssue = async (records: GitHubPullRequestLinkRecord[]) => {
+      for (const link of filterMatchingLinks(records)) {
+        const issue = await ctx.issues.get(link.paperclipIssueId, scope.companyId);
+        if (issue?.companyId === scope.companyId && issue.projectId === scope.projectId) {
+          return { link, issue };
+        }
+      }
+      return null;
+    };
     const exactLinks = await listGitHubPullRequestLinkRecords(ctx, {
       externalId: pullRequestUrl
     });
-    const existingLink = findMatchingLink(exactLinks)
-      ?? findMatchingLink(await listGitHubPullRequestLinkRecords(ctx));
-    const linkedIssue = existingLink
-      ? await ctx.issues.get(existingLink.paperclipIssueId, scope.companyId)
-      : null;
-    const existingIssue = linkedIssue?.companyId === scope.companyId
-      && linkedIssue.projectId === scope.projectId
-      ? linkedIssue
-      : null;
+    const linkedMatch = await findReusableLinkedIssue(exactLinks)
+      ?? await findReusableLinkedIssue(await listGitHubPullRequestLinkRecords(ctx));
+    const existingLink = linkedMatch?.link ?? null;
+    const existingIssue = linkedMatch?.issue ?? null;
     const recoveredOriginIssue = existingIssue
       ? null
       : (await listPaperclipIssuesForProject(ctx, scope.companyId, scope.projectId)).find((issue) => {
