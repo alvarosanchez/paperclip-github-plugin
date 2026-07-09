@@ -871,6 +871,7 @@ type GitHubApiIssueLabelRecord =
     };
 
 type GitHubIssueStateReason = 'completed' | 'not_planned' | 'duplicate';
+type GitHubIssueMutationStateReason = GitHubIssueStateReason | 'reopened';
 type GitHubPullRequestCiState = 'green' | 'red' | 'unfinished';
 type GitHubPullRequestMergeability = 'mergeable' | 'conflicting' | 'unknown';
 type GitHubPullRequestReviewDecision = 'approved' | 'changes_requested' | 'review_required' | 'unknown';
@@ -22605,7 +22606,40 @@ function registerGitHubAgentTools(ctx: PluginSetupContext): void {
     getGitHubAgentToolDeclaration('update_issue'),
     async (params, runCtx) => executeTrackedGitHubMutation(ctx, 'update_issue', params, runCtx, async () => {
       const input = getToolInputRecord(params);
+      const state = input.state === 'open' || input.state === 'closed' ? input.state : undefined;
+      const stateReason = input.stateReason === 'completed'
+        || input.stateReason === 'not_planned'
+        || input.stateReason === 'duplicate'
+        || input.stateReason === 'reopened'
+        ? input.stateReason as GitHubIssueMutationStateReason
+        : undefined;
+      const stateReasonRequested = Object.prototype.hasOwnProperty.call(input, 'stateReason');
+      const duplicateIssueNumberRequested = Object.prototype.hasOwnProperty.call(input, 'duplicateIssueNumber');
+      const duplicateIssueNumber = duplicateIssueNumberRequested
+        ? normalizeToolPositiveInteger(input.duplicateIssueNumber)
+        : undefined;
+      if (stateReasonRequested && !stateReason) {
+        throw new Error('stateReason must be completed, not_planned, duplicate, or reopened.');
+      }
+      if (stateReason && !state) {
+        throw new Error('stateReason requires state.');
+      }
+      if (stateReason === 'reopened' && state !== 'open') {
+        throw new Error('stateReason reopened requires state=open.');
+      }
+      if (stateReason && stateReason !== 'reopened' && state !== 'closed') {
+        throw new Error(`stateReason ${stateReason} requires state=closed.`);
+      }
+      if (stateReason === 'duplicate' && duplicateIssueNumber === undefined) {
+        throw new Error('stateReason duplicate requires duplicateIssueNumber.');
+      }
+      if (duplicateIssueNumberRequested && stateReason !== 'duplicate') {
+        throw new Error('duplicateIssueNumber requires stateReason=duplicate.');
+      }
       const target = await resolveGitHubIssueToolTarget(ctx, runCtx, input);
+      if (duplicateIssueNumber === target.issueNumber) {
+        throw new Error('An issue cannot be marked as a duplicate of itself.');
+      }
       const octokit = await createAgentToolOctokit(runCtx, 'update_issue', target.repository);
       const currentResponse = await octokit.rest.issues.get({
         owner: target.repository.owner,
@@ -22637,7 +22671,6 @@ function registerGitHubAgentTools(ctx: PluginSetupContext): void {
       const body = Object.prototype.hasOwnProperty.call(input, 'body') && typeof input.body === 'string'
         ? appendOptionalAiAuthorshipFooter(input.body, 'issue description', llmModel)
         : undefined;
-      const state = input.state === 'open' || input.state === 'closed' ? input.state : undefined;
       const milestoneNumber = Object.prototype.hasOwnProperty.call(input, 'milestoneNumber')
         ? input.milestoneNumber === null
           ? null
@@ -22646,6 +22679,18 @@ function registerGitHubAgentTools(ctx: PluginSetupContext): void {
 
       const milestoneRequested = Object.prototype.hasOwnProperty.call(input, 'milestoneNumber');
       const currentMilestoneNumber = currentIssue.milestone?.number ?? null;
+      const currentStateReason = normalizeGitHubIssueStateReason((currentIssue as GitHubApiIssueRecord).state_reason);
+      if (
+        stateReason
+        && state === currentIssue.state
+        && state === 'closed'
+        && stateReason !== currentStateReason
+      ) {
+        throw new Error(
+          `GitHub only applies stateReason when state changes; reopen issue #${target.issueNumber} before closing it as ${stateReason}.`
+        );
+      }
+      const effectiveStateReason = state === currentIssue.state ? currentStateReason : stateReason;
       const hasChanges =
         (title !== undefined && title !== currentIssue.title) ||
         (body !== undefined && body !== (currentIssue.body ?? '')) ||
@@ -22654,6 +22699,16 @@ function registerGitHubAgentTools(ctx: PluginSetupContext): void {
         !sameNamedValues(nextLabels, currentLabels) ||
         !sameNamedValues(nextAssignees, currentAssignees);
 
+      const duplicateIssueId = hasChanges && stateReason === 'duplicate' && duplicateIssueNumber !== undefined
+        ? (await octokit.rest.issues.get({
+            owner: target.repository.owner,
+            repo: target.repository.repo,
+            issue_number: duplicateIssueNumber,
+            headers: {
+              'X-GitHub-Api-Version': GITHUB_API_VERSION
+            }
+          })).data.id
+        : undefined;
       const updatedResponse = hasChanges
         ? await octokit.rest.issues.update({
             owner: target.repository.owner,
@@ -22662,6 +22717,8 @@ function registerGitHubAgentTools(ctx: PluginSetupContext): void {
             ...(title !== undefined ? { title } : {}),
             ...(body !== undefined ? { body } : {}),
             ...(state ? { state } : {}),
+            ...(stateReason ? { state_reason: stateReason } : {}),
+            ...(duplicateIssueId !== undefined ? { duplicate_issue_id: duplicateIssueId } : {}),
             ...(milestoneRequested ? { milestone: milestoneNumber } : {}),
             labels: nextLabels,
             assignees: nextAssignees,
@@ -22684,7 +22741,7 @@ function registerGitHubAgentTools(ctx: PluginSetupContext): void {
             body: updatedIssue.body,
             url: updatedIssue.htmlUrl,
             state: updatedIssue.state,
-            stateReason: updatedIssue.stateReason,
+            stateReason: updatedIssue.stateReason ?? effectiveStateReason,
             labels: normalizeGitHubIssueLabels((updatedResponse.data as GitHubApiIssueRecord).labels),
             assignees: (updatedResponse.data.assignees ?? []).map((assignee) => assignee?.login ?? '').filter(Boolean),
             milestone: updatedResponse.data.milestone

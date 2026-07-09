@@ -163,7 +163,7 @@ export const GITHUB_AGENT_TOOLS: PluginToolDeclaration[] = [
   {
     name: 'update_issue',
     displayName: 'Update Issue',
-    description: 'Update GitHub issue fields such as title, body, state, labels, assignees, or milestone. When a non-empty body is provided, the plugin appends an AI-authorship footer and includes llmModel when supplied.',
+    description: 'Update GitHub issue fields such as title, body, state, closure reason, labels, assignees, or milestone. When a non-empty body is provided, the plugin appends an AI-authorship footer and includes llmModel when supplied.',
     parametersSchema: {
       type: 'object',
       additionalProperties: false,
@@ -183,6 +183,16 @@ export const GITHUB_AGENT_TOOLS: PluginToolDeclaration[] = [
         state: {
           type: 'string',
           enum: ['open', 'closed']
+        },
+        stateReason: {
+          type: 'string',
+          enum: ['completed', 'not_planned', 'duplicate', 'reopened'],
+          description: 'Native GitHub state reason. Use completed, not_planned, or duplicate with state=closed; use reopened with state=open.'
+        },
+        duplicateIssueNumber: {
+          type: 'integer',
+          minimum: 1,
+          description: 'Canonical issue number in the same repository. Required only when stateReason=duplicate.'
         },
         setLabels: {
           type: 'array',

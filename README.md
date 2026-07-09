@@ -259,7 +259,7 @@ For private LAN, Docker, Kubernetes, custom DNS, or self-signed-certificate depl
 The plugin exposes GitHub workflow tools to Paperclip agents, including:
 
 - repository-scoped search for issues and pull requests
-- issue reads, comment reads, comment writes, metadata updates, and `assign_to_current_user` assignment to the saved token owner
+- issue reads, comment reads, comment writes, metadata updates, native `completed`/`not_planned`/`duplicate` closure and `reopened` transitions, and `assign_to_current_user` assignment to the saved token owner
 - pull request creation, reads, updates, changed-file inspection, CI-check inspection, and asset upload for PR visual evidence
 - review-thread reads, replies, resolve and unresolve actions, and `request_pull_request_reviewers` reviewer requests
 - organization-level GitHub Project search/listing and pull-request-to-project association
@@ -272,7 +272,9 @@ The call is ordered and retry-safe rather than a cross-system transaction: a pub
 
 After that durable link is written, pull-request tools can use the same `paperclipIssueId` to read or update the PR immediately, even when the Paperclip issue was created natively and has no linked GitHub issue. If one Paperclip issue has same-number PRs in different repositories, the caller must also supply the repository so the worker can reject ambiguous or unlinked selections.
 
-When an agent sends GitHub body content through the plugin, including issue bodies, pull request descriptions, comments, and review-thread replies, the plugin adds a GitHub-flavored Markdown footer with a horizontal rule and compact heading that discloses AI authorship. If the tool caller supplies `llmModel`, the footer also includes the model name, for example `###### ✨ This comment was AI-generated using gpt-5.4`.
+When an agent sends GitHub body content through the plugin, including issue bodies, pull request descriptions, comments, and review-thread replies, the plugin adds a GitHub-flavored Markdown footer with a horizontal rule and compact heading that discloses AI authorship. If the tool caller supplies an `llmModel`, the footer also includes the model name, for example `###### ✨ This comment was AI-generated using gpt-5.4`.
+
+`update_issue` accepts `stateReason` with GitHub's native values `completed`, `not_planned`, `duplicate`, and `reopened`. Closing uses `state: "closed"` with one of the first three reasons; reopening uses `state: "open"` with `stateReason: "reopened"`. Duplicate closure also requires `duplicateIssueNumber`, which the worker resolves to GitHub's canonical database id in the same repository. GitHub only applies a reason while changing state, so changing the reason of an already-closed issue fails clearly and requires reopening it first.
 
 ### KPI attribution API route
 

@@ -4110,6 +4110,242 @@ test('sync.runNow records backlog snapshots and closed-issue KPI activity for th
   }
 });
 
+test('update_issue declares every GitHub-native state reason', () => {
+  const declaration = manifest.tools?.find((tool) => tool.name === 'update_issue');
+  const properties = declaration?.parametersSchema?.properties as Record<string, { enum?: unknown[]; minimum?: number }> | undefined;
+
+  assert.deepEqual(properties?.stateReason?.enum, ['completed', 'not_planned', 'duplicate', 'reopened']);
+  assert.equal(properties?.duplicateIssueNumber?.minimum, 1);
+});
+
+test('update_issue sends each native non-duplicate state reason', async (t) => {
+  for (const scenario of [
+    { state: 'closed', stateReason: 'completed', currentState: 'open' },
+    { state: 'closed', stateReason: 'not_planned', currentState: 'open' },
+    { state: 'open', stateReason: 'reopened', currentState: 'closed' }
+  ] as const) {
+    await t.test(scenario.stateReason, async () => {
+      const harness = await createGitHubAgentToolHarness();
+      const originalFetch = globalThis.fetch;
+      let patchRequestBody: Record<string, unknown> | null = null;
+
+      globalThis.fetch = async (input, init) => {
+        const url = new URL(getRequestUrl(input));
+        if (url.pathname === '/repos/paperclipai/example-repo/issues/12' && init?.method === 'PATCH') {
+          patchRequestBody = getJsonRequestBody(init);
+          return jsonResponse({
+            id: 1200,
+            number: 12,
+            title: 'Importer bug',
+            body: 'Original issue body.',
+            html_url: 'https://github.com/paperclipai/example-repo/issues/12',
+            state: scenario.state,
+            state_reason: scenario.stateReason,
+            comments: 3,
+            user: { login: 'octocat' },
+            assignees: [],
+            labels: [],
+            milestone: null
+          });
+        }
+        if (url.pathname === '/repos/paperclipai/example-repo/issues/12') {
+          return jsonResponse({
+            id: 1200,
+            number: 12,
+            title: 'Importer bug',
+            body: 'Original issue body.',
+            html_url: 'https://github.com/paperclipai/example-repo/issues/12',
+            state: scenario.currentState,
+            state_reason: scenario.currentState === 'closed' ? 'completed' : null,
+            comments: 3,
+            user: { login: 'octocat' },
+            assignees: [],
+            labels: [],
+            milestone: null
+          });
+        }
+        throw new Error(`Unexpected GitHub request: ${url.toString()}`);
+      };
+
+      try {
+        const result = await harness.executeTool('update_issue', {
+          issueNumber: 12,
+          state: scenario.state,
+          stateReason: scenario.stateReason
+        }, {
+          companyId: 'company-1',
+          projectId: 'project-1'
+        });
+
+        assert.ok(!result.error, result.error);
+        assert.deepEqual(patchRequestBody, {
+          state: scenario.state,
+          state_reason: scenario.stateReason,
+          labels: [],
+          assignees: []
+        });
+        assert.equal((result.data as { issue: { stateReason?: string } }).issue.stateReason, scenario.stateReason);
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    });
+  }
+});
+
+test('update_issue resolves duplicateIssueNumber to GitHub duplicate_issue_id', async () => {
+  const harness = await createGitHubAgentToolHarness();
+  const originalFetch = globalThis.fetch;
+  let patchRequestBody: Record<string, unknown> | null = null;
+
+  globalThis.fetch = async (input, init) => {
+    const url = new URL(getRequestUrl(input));
+    if (url.pathname === '/repos/paperclipai/example-repo/issues/12' && init?.method === 'PATCH') {
+      patchRequestBody = getJsonRequestBody(init);
+      return jsonResponse({
+        id: 1200,
+        number: 12,
+        title: 'Duplicate importer bug',
+        body: '',
+        html_url: 'https://github.com/paperclipai/example-repo/issues/12',
+        state: 'closed',
+        state_reason: 'duplicate',
+        comments: 0,
+        user: { login: 'octocat' },
+        assignees: [],
+        labels: [],
+        milestone: null
+      });
+    }
+    if (url.pathname === '/repos/paperclipai/example-repo/issues/99') {
+      return jsonResponse({ id: 9900, number: 99, state: 'open' });
+    }
+    if (url.pathname === '/repos/paperclipai/example-repo/issues/12') {
+      return jsonResponse({
+        id: 1200,
+        number: 12,
+        title: 'Duplicate importer bug',
+        body: '',
+        html_url: 'https://github.com/paperclipai/example-repo/issues/12',
+        state: 'open',
+        state_reason: null,
+        comments: 0,
+        user: { login: 'octocat' },
+        assignees: [],
+        labels: [],
+        milestone: null
+      });
+    }
+    throw new Error(`Unexpected GitHub request: ${url.toString()}`);
+  };
+
+  try {
+    const result = await harness.executeTool('update_issue', {
+      issueNumber: 12,
+      state: 'closed',
+      stateReason: 'duplicate',
+      duplicateIssueNumber: 99
+    }, {
+      companyId: 'company-1',
+      projectId: 'project-1'
+    });
+
+    assert.ok(!result.error, result.error);
+    assert.deepEqual(patchRequestBody, {
+      state: 'closed',
+      state_reason: 'duplicate',
+      duplicate_issue_id: 9900,
+      labels: [],
+      assignees: []
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('update_issue rejects incompatible state reasons before GitHub access', async () => {
+  const harness = await createGitHubAgentToolHarness();
+  const originalFetch = globalThis.fetch;
+  let fetchCalls = 0;
+  globalThis.fetch = async () => {
+    fetchCalls += 1;
+    throw new Error('GitHub must not be called');
+  };
+
+  try {
+    for (const input of [
+      { issueNumber: 12, state: 'open', stateReason: 'not_planned' },
+      { issueNumber: 12, state: 'closed', stateReason: 'reopened' },
+      { issueNumber: 12, state: 'closed', stateReason: 'duplicate' },
+      { issueNumber: 12, state: 'closed', stateReason: 'not_planned', duplicateIssueNumber: 99 }
+    ]) {
+      const result = await harness.executeTool('update_issue', input, {
+        companyId: 'company-1',
+        projectId: 'project-1'
+      });
+      assert.ok(result.error);
+    }
+    assert.equal(fetchCalls, 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('update_issue treats an identical closed reason as a no-op and rejects an ignored reason change', async () => {
+  const harness = await createGitHubAgentToolHarness();
+  const originalFetch = globalThis.fetch;
+  let patchCalls = 0;
+
+  globalThis.fetch = async (input, init) => {
+    const url = new URL(getRequestUrl(input));
+    if (url.pathname === '/repos/paperclipai/example-repo/issues/12' && init?.method === 'PATCH') {
+      patchCalls += 1;
+    }
+    if (url.pathname === '/repos/paperclipai/example-repo/issues/12') {
+      return jsonResponse({
+        id: 1200,
+        number: 12,
+        title: 'Closed importer bug',
+        body: '',
+        html_url: 'https://github.com/paperclipai/example-repo/issues/12',
+        state: 'closed',
+        state_reason: 'not_planned',
+        comments: 0,
+        user: { login: 'octocat' },
+        assignees: [],
+        labels: [],
+        milestone: null
+      });
+    }
+    throw new Error(`Unexpected GitHub request: ${url.toString()}`);
+  };
+
+  try {
+    const noOp = await harness.executeTool('update_issue', {
+      issueNumber: 12,
+      state: 'closed',
+      stateReason: 'not_planned'
+    }, {
+      companyId: 'company-1',
+      projectId: 'project-1'
+    });
+    assert.ok(!noOp.error, noOp.error);
+    assert.match(noOp.content ?? '', /no github issue changes were requested/i);
+
+    const mismatch = await harness.executeTool('update_issue', {
+      issueNumber: 12,
+      state: 'closed',
+      stateReason: 'completed'
+    }, {
+      companyId: 'company-1',
+      projectId: 'project-1'
+    });
+    assert.match(mismatch.error ?? '', /reopen issue #12 before closing it as completed/i);
+    assert.equal(patchCalls, 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test('update_issue omits a blank body update after stripping AI footers', async () => {
   const harness = await createGitHubAgentToolHarness();
   const originalFetch = globalThis.fetch;
