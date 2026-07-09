@@ -416,7 +416,9 @@ interface ImportedIssueRecord {
   lastSeenGitHubState?: 'open' | 'closed';
   linkedPullRequestCommentCounts?: GitHubPullRequestCommentCountRecord[];
   remoteActionFingerprint?: string;
+  selectedPullRequestGate?: GitHubPullRequestReference;
   pendingRemoteActionWake?: PendingRemoteActionWake;
+  activationPending?: boolean;
   repositoryUrl?: string;
   paperclipProjectId?: string;
   companyId?: string;
@@ -431,11 +433,53 @@ interface PendingRemoteActionWake {
   nextStatus?: PaperclipIssueStatus;
 }
 
+function isPendingWakeApplied(
+  pendingWake: PendingRemoteActionWake,
+  status: PaperclipIssueStatus,
+  assignee: PaperclipIssueAssigneePrincipal | null | undefined
+): boolean {
+  return (!pendingWake.nextStatus || pendingWake.nextStatus === status)
+    && assignee?.kind === 'agent'
+    && assignee.id === pendingWake.assigneeAgentId;
+}
+
+function reuseOrCreatePendingWake<T extends Omit<PendingRemoteActionWake, 'fingerprint'>>(
+  existing: PendingRemoteActionWake | undefined,
+  next: T,
+  createFingerprint: () => string
+): T & { fingerprint: string } {
+  if (
+    existing
+    && existing.assigneeAgentId === next.assigneeAgentId
+    && existing.mutation === next.mutation
+    && existing.nextStatus === next.nextStatus
+  ) {
+    return existing as T & { fingerprint: string };
+  }
+  return { fingerprint: createFingerprint(), ...next };
+}
+
+function canReservePendingWake(
+  registry: RemoteActionRecord[],
+  currentRecord: RemoteActionRecord
+): boolean {
+  return Boolean(currentRecord.pendingWake)
+    || registry.filter((record) => record.pendingWake).length < MAX_REMOTE_ACTION_REGISTRY_RECORDS;
+}
+
 interface RemoteActionRecord {
   key: string;
   fingerprint?: string;
   pendingWake?: PendingRemoteActionWake;
   linkedPullRequestCommentCounts?: GitHubPullRequestCommentCountRecord[];
+  selectedPullRequestGate?: GitHubPullRequestReference;
+}
+
+function createRemoteActionWakeFingerprint(remoteActionFingerprint: string): string {
+  return createHash('sha256').update(JSON.stringify({
+    remoteActionFingerprint,
+    wakeEpisodeId: randomUUID()
+  })).digest('hex');
 }
 
 interface GitHubIssueLinkEntityData {
@@ -827,6 +871,7 @@ type GitHubApiIssueLabelRecord =
     };
 
 type GitHubIssueStateReason = 'completed' | 'not_planned' | 'duplicate';
+type GitHubIssueMutationStateReason = GitHubIssueStateReason | 'reopened';
 type GitHubPullRequestCiState = 'green' | 'red' | 'unfinished';
 type GitHubPullRequestMergeability = 'mergeable' | 'conflicting' | 'unknown';
 type GitHubPullRequestReviewDecision = 'approved' | 'changes_requested' | 'review_required' | 'unknown';
@@ -1143,6 +1188,10 @@ interface GitHubPullRequestCommentCountRecord extends GitHubPullRequestReference
   reviewCommentCount: number;
 }
 
+interface GitHubTrustedPullRequestCommentSource extends GitHubPullRequestReference {
+  kind: 'top_level' | 'review';
+}
+
 function canonicalizeGitHubPullRequestCommentCounts(
   records: GitHubPullRequestCommentCountRecord[]
 ): GitHubPullRequestCommentCountRecord[] {
@@ -1240,6 +1289,8 @@ interface GitHubPullRequestLinkEntityData {
   githubPullRequestUrl: string;
   githubPullRequestState: 'open' | 'closed';
   title?: string;
+  followThroughAssigneeAgentId?: string;
+  followThroughAssigneeUpdatedAt?: string;
   syncedAt: string;
 }
 
@@ -6753,6 +6804,24 @@ function recordCompanyActivityMetricEvent(
   };
 }
 
+function normalizeSelectedPullRequestGate(value: unknown): GitHubPullRequestReference | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const record = value as Record<string, unknown>;
+  const repositoryUrl = normalizeOptionalString(record.repositoryUrl);
+  const number = typeof record.number === 'number' && Number.isInteger(record.number) && record.number > 0
+    ? record.number
+    : undefined;
+  if (!repositoryUrl || !number) return undefined;
+  try {
+    return {
+      repositoryUrl: getNormalizedMappingRepositoryUrl({ repositoryUrl }).toLowerCase(),
+      number
+    };
+  } catch {
+    return undefined;
+  }
+}
+
 function normalizeImportRegistry(value: unknown): ImportedIssueRecord[] {
   if (!Array.isArray(value)) {
     return [];
@@ -6797,7 +6866,9 @@ function normalizeImportRegistry(value: unknown): ImportedIssueRecord[] {
         typeof record.remoteActionFingerprint === 'string' && /^[a-f0-9]{64}$/.test(record.remoteActionFingerprint)
           ? record.remoteActionFingerprint
           : undefined;
+      const selectedPullRequestGate = normalizeSelectedPullRequestGate(record.selectedPullRequestGate);
       const pendingRemoteActionWake = normalizePendingRemoteActionWake(record.pendingRemoteActionWake);
+      const activationPending = record.activationPending === true;
 
       if (!mappingId || Number.isNaN(githubIssueId) || !paperclipIssueId || !importedAt) {
         return null;
@@ -6816,7 +6887,9 @@ function normalizeImportRegistry(value: unknown): ImportedIssueRecord[] {
         ...(lastSeenGitHubState ? { lastSeenGitHubState } : {}),
         ...(linkedPullRequestCommentCounts.length > 0 ? { linkedPullRequestCommentCounts } : {}),
         ...(remoteActionFingerprint ? { remoteActionFingerprint } : {}),
-        ...(pendingRemoteActionWake ? { pendingRemoteActionWake } : {})
+        ...(selectedPullRequestGate ? { selectedPullRequestGate } : {}),
+        ...(pendingRemoteActionWake ? { pendingRemoteActionWake } : {}),
+        ...(activationPending ? { activationPending: true } : {})
       };
     })
     .filter((entry): entry is ImportedIssueRecord => entry !== null);
@@ -6859,6 +6932,7 @@ function normalizeRemoteActionRegistry(value: unknown): RemoteActionRecord[] {
     const linkedPullRequestCommentCounts = normalizeGitHubPullRequestCommentCountRecords(
       record.linkedPullRequestCommentCounts
     );
+    const selectedPullRequestGate = normalizeSelectedPullRequestGate(record.selectedPullRequestGate);
     const previous = recordsByKey.get(key);
     recordsByKey.set(key, {
       key,
@@ -6868,6 +6942,11 @@ function normalizeRemoteActionRegistry(value: unknown): RemoteActionRecord[] {
         ? { linkedPullRequestCommentCounts }
         : previous?.linkedPullRequestCommentCounts
           ? { linkedPullRequestCommentCounts: previous.linkedPullRequestCommentCounts }
+          : {}),
+      ...(selectedPullRequestGate
+        ? { selectedPullRequestGate }
+        : previous?.selectedPullRequestGate
+          ? { selectedPullRequestGate: previous.selectedPullRequestGate }
           : {})
     });
   }
@@ -7039,7 +7118,8 @@ function buildImportedIssueRecord(
   mapping: RepositoryMapping,
   issue: GitHubIssueRecord,
   paperclipIssueId: string,
-  importedAt: string
+  importedAt: string,
+  activationPending = false
 ): ImportedIssueRecord {
   return {
     mappingId: mapping.id,
@@ -7052,7 +7132,8 @@ function buildImportedIssueRecord(
     linkedPullRequestCommentCounts: [],
     repositoryUrl: getNormalizedMappingRepositoryUrl(mapping),
     paperclipProjectId: mapping.paperclipProjectId,
-    companyId: mapping.companyId
+    companyId: mapping.companyId,
+    ...(activationPending ? { activationPending: true } : {})
   };
 }
 
@@ -7767,6 +7848,187 @@ function resolvePaperclipStatusFromLinkedPullRequests(
   return 'in_progress';
 }
 
+type EffectiveDirectPullRequestGateCondition =
+  | 'conflict'
+  | 'ci_failed'
+  | 'review_actionable'
+  | 'action_required'
+  | 'trusted_comment'
+  | 'waiting'
+  | 'ready';
+
+interface EffectiveDirectPullRequestGate {
+  repositoryUrl: string;
+  number: number;
+  headSha: string | null;
+  condition: EffectiveDirectPullRequestGateCondition;
+  remoteCondition: Exclude<EffectiveDirectPullRequestGateCondition, 'trusted_comment'>;
+  trustedCommentKinds: Array<GitHubTrustedPullRequestCommentSource['kind']>;
+  ownerCandidate?: string;
+  pullRequest: GitHubPullRequestStatusSnapshot;
+}
+
+function getEffectiveDirectPullRequestGatePriority(condition: EffectiveDirectPullRequestGateCondition): number {
+  switch (condition) {
+    case 'conflict': return 0;
+    case 'ci_failed': return 1;
+    case 'review_actionable': return 2;
+    case 'action_required': return 3;
+    case 'trusted_comment': return 4;
+    case 'waiting': return 5;
+    case 'ready': return 6;
+  }
+}
+
+function getEffectiveDirectPullRequestGateCondition(
+  pullRequest: GitHubPullRequestStatusSnapshot,
+  hasTrustedPullRequestComment: boolean
+): {
+  condition: EffectiveDirectPullRequestGateCondition;
+  remoteCondition: Exclude<EffectiveDirectPullRequestGateCondition, 'trusted_comment'>;
+} {
+  const baseCondition = getEffectivePullRequestActionCondition(pullRequest);
+  const remoteCondition: Exclude<EffectiveDirectPullRequestGateCondition, 'trusted_comment'> =
+    baseCondition === 'conflict' || baseCondition === 'ci_failed' || baseCondition === 'review_actionable'
+      ? baseCondition
+      : isGitHubPullRequestActionRequiredForSync(pullRequest)
+        ? 'action_required'
+        : baseCondition;
+  return {
+    condition: hasTrustedPullRequestComment && (remoteCondition === 'ready' || remoteCondition === 'waiting')
+      ? 'trusted_comment'
+      : remoteCondition,
+    remoteCondition
+  };
+}
+
+function selectHighestPriorityEffectivePullRequestGate(
+  gates: EffectiveDirectPullRequestGate[],
+  preferredGate?: GitHubPullRequestReference
+): EffectiveDirectPullRequestGate | undefined {
+  const preferredGateKey = preferredGate ? buildGitHubPullRequestReferenceKey(preferredGate) : undefined;
+  return [...gates].sort((left, right) =>
+    getEffectiveDirectPullRequestGatePriority(left.condition)
+      - getEffectiveDirectPullRequestGatePriority(right.condition)
+    || Number(buildGitHubPullRequestReferenceKey(right) === preferredGateKey)
+      - Number(buildGitHubPullRequestReferenceKey(left) === preferredGateKey)
+    || left.repositoryUrl.localeCompare(right.repositoryUrl)
+    || left.number - right.number
+  )[0];
+}
+
+function buildTrustedCommentKindsByPullRequest(
+  trustedCommentSources: GitHubTrustedPullRequestCommentSource[]
+): Map<string, Array<GitHubTrustedPullRequestCommentSource['kind']>> {
+  const kindsByPullRequest = new Map<string, Set<GitHubTrustedPullRequestCommentSource['kind']>>();
+  for (const source of trustedCommentSources) {
+    const key = buildGitHubPullRequestReferenceKey(source);
+    const kinds = kindsByPullRequest.get(key) ?? new Set<GitHubTrustedPullRequestCommentSource['kind']>();
+    kinds.add(source.kind);
+    kindsByPullRequest.set(key, kinds);
+  }
+  return new Map([...kindsByPullRequest].map(([key, kinds]) => [key, [...kinds].sort()]));
+}
+
+function selectEffectiveDirectPullRequestGate(
+  pullRequests: GitHubDirectPullRequestSyncSnapshot[],
+  trustedCommentSources: GitHubTrustedPullRequestCommentSource[],
+  preferredGate?: GitHubPullRequestReference
+): EffectiveDirectPullRequestGate | undefined {
+  const trustedCommentKindsByPullRequest = buildTrustedCommentKindsByPullRequest(trustedCommentSources);
+  return selectHighestPriorityEffectivePullRequestGate(pullRequests
+    .filter((entry): entry is GitHubDirectPullRequestSyncSnapshot & { pullRequest: GitHubPullRequestStatusSnapshot } =>
+      entry.lifecycleState === 'open' && Boolean(entry.pullRequest)
+    )
+    .map((entry): EffectiveDirectPullRequestGate => {
+      const repositoryUrl = getNormalizedMappingRepositoryUrl({ repositoryUrl: entry.repository.url }).toLowerCase();
+      const number = entry.pullRequestLink.data.githubPullRequestNumber;
+      const trustedCommentKinds = trustedCommentKindsByPullRequest.get(
+        buildGitHubPullRequestReferenceKey({ repositoryUrl, number })
+      ) ?? [];
+      const { condition, remoteCondition } = getEffectiveDirectPullRequestGateCondition(
+        entry.pullRequest,
+        trustedCommentKinds.length > 0
+      );
+      return {
+        repositoryUrl,
+        number,
+        headSha: entry.pullRequest.headSha ?? null,
+        condition,
+        remoteCondition,
+        trustedCommentKinds,
+        ownerCandidate: entry.pullRequestLink.data.followThroughAssigneeAgentId,
+        pullRequest: entry.pullRequest
+      };
+    }), preferredGate);
+}
+
+function selectEffectiveIssueLinkedPullRequestGate(
+  pullRequests: GitHubPullRequestStatusSnapshot[],
+  trustedCommentSources: GitHubTrustedPullRequestCommentSource[],
+  hasTrustedIssueComment: boolean,
+  pullRequestLinks: GitHubPullRequestLinkRecord[] = [],
+  preferredGate?: GitHubPullRequestReference
+): EffectiveDirectPullRequestGate | undefined {
+  const trustedCommentKindsByPullRequest = buildTrustedCommentKindsByPullRequest(trustedCommentSources);
+  const ownerByPullRequest = new Map(pullRequestLinks.map((link) => [
+    buildGitHubPullRequestReferenceKey({
+      repositoryUrl: link.data.repositoryUrl,
+      number: link.data.githubPullRequestNumber
+    }),
+    link.data.followThroughAssigneeAgentId
+  ]));
+
+  return selectHighestPriorityEffectivePullRequestGate(pullRequests.map((pullRequest) => {
+    const repositoryUrl = getNormalizedMappingRepositoryUrl({ repositoryUrl: pullRequest.repositoryUrl }).toLowerCase();
+    const number = pullRequest.number;
+    const key = buildGitHubPullRequestReferenceKey({ repositoryUrl, number });
+    const trustedCommentKinds = trustedCommentKindsByPullRequest.get(key) ?? [];
+    const { condition, remoteCondition } = getEffectiveDirectPullRequestGateCondition(
+      pullRequest,
+      hasTrustedIssueComment || trustedCommentKinds.length > 0
+    );
+    return {
+      repositoryUrl,
+      number,
+      headSha: pullRequest.headSha ?? null,
+      condition,
+      remoteCondition,
+      trustedCommentKinds,
+      ownerCandidate: ownerByPullRequest.get(key),
+      pullRequest
+    };
+  }), preferredGate);
+}
+
+function selectEffectiveIssueLinkedPullRequestAction(
+  pullRequests: GitHubPullRequestStatusSnapshot[],
+  trustedCommentSources: GitHubTrustedPullRequestCommentSource[],
+  hasTrustedIssueComment: boolean
+): GitHubPullRequestStatusSnapshot | undefined {
+  return selectEffectiveIssueLinkedPullRequestGate(
+    pullRequests,
+    trustedCommentSources,
+    hasTrustedIssueComment
+  )?.pullRequest;
+}
+
+function isActionableDirectPullRequestGate(
+  gate: EffectiveDirectPullRequestGate | undefined
+): boolean {
+  return Boolean(gate && gate.condition !== 'ready' && gate.condition !== 'waiting');
+}
+
+async function resolveValidFollowThroughAssigneeAgentId(
+  ctx: PluginSetupContext,
+  companyId: string,
+  candidate: string | undefined
+): Promise<string | undefined> {
+  if (!candidate) return undefined;
+  const agent = await ctx.agents.get(candidate, companyId);
+  return agent?.companyId === companyId ? candidate : undefined;
+}
+
 function formatPaperclipIssueStatus(status: PaperclipIssueStatus): string {
   switch (status) {
     case 'backlog':
@@ -8223,12 +8485,26 @@ function resolvePaperclipIssueReviewAssignee(
 
 function resolvePaperclipIssueExecutorAssignee(
   syncContext: PaperclipIssueSyncContext,
-  advancedSettings: GitHubSyncAdvancedSettings
+  advancedSettings: GitHubSyncAdvancedSettings,
+  followThroughAssigneeAgentId?: string
 ): SyncTransitionAssigneeResolution | null {
   const returnAssignee = syncContext.executionState?.returnAssignee;
-  if (returnAssignee) {
+  if (
+    returnAssignee
+    && (
+      syncContext.executionState?.status === 'pending'
+      || syncContext.executionState?.status === 'changes_requested'
+    )
+  ) {
     return {
       principal: returnAssignee,
+      role: 'executor'
+    };
+  }
+
+  if (followThroughAssigneeAgentId) {
+    return {
+      principal: { kind: 'agent', id: followThroughAssigneeAgentId },
       role: 'executor'
     };
   }
@@ -8257,8 +8533,9 @@ function resolveSyncTransitionAssignee(params: {
   nextStatus: PaperclipIssueStatus;
   syncContext: PaperclipIssueSyncContext;
   advancedSettings: GitHubSyncAdvancedSettings;
+  followThroughAssigneeAgentId?: string;
 }): SyncTransitionAssigneeResolution | null {
-  const { currentStatus, nextStatus, syncContext, advancedSettings } = params;
+  const { currentStatus, nextStatus, syncContext, advancedSettings, followThroughAssigneeAgentId } = params;
 
   if (isHealthyMaintainerWaitTransition({ currentStatus, nextStatus, syncContext })) {
     return null;
@@ -8269,7 +8546,11 @@ function resolveSyncTransitionAssignee(params: {
   }
 
   if (nextStatus === 'todo' || nextStatus === 'in_progress') {
-    return resolvePaperclipIssueExecutorAssignee(syncContext, advancedSettings);
+    return resolvePaperclipIssueExecutorAssignee(
+      syncContext,
+      advancedSettings,
+      followThroughAssigneeAgentId
+    );
   }
 
   return null;
@@ -8589,6 +8870,7 @@ function describeGitHubDirectPullRequestIssueStatusReason(
 function resolvePaperclipIssueStatus(params: {
   currentStatus: PaperclipIssueStatus;
   snapshot: GitHubIssueStatusSnapshot;
+  effectiveGate?: EffectiveDirectPullRequestGate;
   hasTrustedNewComment?: boolean;
   wasImportedThisRun: boolean;
   defaultImportedStatus: PaperclipIssueStatus;
@@ -8598,6 +8880,7 @@ function resolvePaperclipIssueStatus(params: {
   const {
     currentStatus,
     snapshot,
+    effectiveGate,
     hasTrustedNewComment,
     wasImportedThisRun,
     defaultImportedStatus,
@@ -8616,18 +8899,33 @@ function resolvePaperclipIssueStatus(params: {
     return 'backlog';
   }
 
-  if (hasTrustedNewComment) {
+  if (hasTrustedNewComment && snapshot.linkedPullRequests.length === 0) {
     return hasExecutorHandoffTarget ? 'in_progress' : 'todo';
   }
 
-  if (snapshot.linkedPullRequests.length > 0) {
-    if (shouldPreserveBlockedExternalPullRequestWait({
-      currentStatus,
-      linkedPullRequests: snapshot.linkedPullRequests
-    })) {
-      return 'blocked';
+  if (effectiveGate) {
+    if (effectiveGate.condition === 'trusted_comment') {
+      return hasExecutorHandoffTarget ? 'in_progress' : 'todo';
     }
+    if (isActionableDirectPullRequestGate(effectiveGate)) {
+      if (shouldPreserveBlockedExternalPullRequestWait({
+        currentStatus,
+        linkedPullRequests: [effectiveGate.pullRequest]
+      })) {
+        return 'blocked';
+      }
+      return hasExecutorHandoffTarget ? 'in_progress' : 'todo';
+    }
+    if (effectiveGate.condition === 'waiting') {
+      return (currentStatus === 'done' || currentStatus === 'in_review')
+        && isGitHubPullRequestTransientUnknownMergeabilityWait(effectiveGate.pullRequest)
+        ? 'in_review'
+        : 'in_progress';
+    }
+    return 'in_review';
+  }
 
+  if (snapshot.linkedPullRequests.length > 0) {
     return resolvePaperclipStatusFromLinkedPullRequests(snapshot.linkedPullRequests, {
       preferInProgress: hasExecutorHandoffTarget,
       preserveTransientUnknownMergeabilityWait: currentStatus === 'done' || currentStatus === 'in_review'
@@ -8668,31 +8966,33 @@ function resolvePaperclipPullRequestIssueStatus(params: {
 function resolvePaperclipDirectPullRequestIssueStatus(params: {
   currentStatus: PaperclipIssueStatus;
   pullRequests: GitHubDirectPullRequestSyncSnapshot[];
+  effectiveGate?: EffectiveDirectPullRequestGate;
   hasExecutorHandoffTarget?: boolean;
-  hasTrustedNewComment?: boolean;
 }): PaperclipIssueStatus {
-  const { currentStatus, pullRequests, hasExecutorHandoffTarget, hasTrustedNewComment } = params;
-  const openPullRequests = pullRequests
-    .map((entry) => entry.pullRequest)
-    .filter((pullRequest): pullRequest is GitHubPullRequestStatusSnapshot => Boolean(pullRequest));
+  const { currentStatus, pullRequests, effectiveGate, hasExecutorHandoffTarget } = params;
 
-  if (openPullRequests.length > 0) {
-    if (hasTrustedNewComment) {
+  if (effectiveGate) {
+    if (effectiveGate.condition === 'trusted_comment') {
       return currentStatus === 'backlog'
         ? 'backlog'
         : hasExecutorHandoffTarget ? 'in_progress' : 'todo';
     }
-    if (shouldPreserveBlockedExternalPullRequestWait({
-      currentStatus,
-      linkedPullRequests: openPullRequests
-    })) {
-      return 'blocked';
+    if (isActionableDirectPullRequestGate(effectiveGate)) {
+      if (shouldPreserveBlockedExternalPullRequestWait({
+        currentStatus,
+        linkedPullRequests: [effectiveGate.pullRequest]
+      })) {
+        return 'blocked';
+      }
+      return hasExecutorHandoffTarget ? 'in_progress' : 'todo';
     }
-
-    return resolvePaperclipStatusFromLinkedPullRequests(openPullRequests, {
-      preferInProgress: hasExecutorHandoffTarget,
-      preserveTransientUnknownMergeabilityWait: currentStatus === 'done' || currentStatus === 'in_review'
-    });
+    if (effectiveGate.condition === 'waiting') {
+      return (currentStatus === 'done' || currentStatus === 'in_review')
+        && isGitHubPullRequestTransientUnknownMergeabilityWait(effectiveGate.pullRequest)
+        ? 'in_review'
+        : 'in_progress';
+    }
+    return 'in_review';
   }
 
   return pullRequests.some((entry) => entry.lifecycleState === 'merged') ? 'done' : 'cancelled';
@@ -9735,17 +10035,18 @@ async function listGitHubPullRequestCommentCountRecords(
   return normalizeGitHubPullRequestCommentCountRecords(commentCounts);
 }
 
-async function hasTrustedNewLinkedPullRequestComments(params: {
+async function listTrustedNewLinkedPullRequestCommentSources(params: {
   octokit: Octokit;
   originalPosterLogin?: string;
   previousCommentCounts?: GitHubPullRequestCommentCountRecord[];
   currentCommentCounts: GitHubPullRequestCommentCountRecord[];
   maintainerCache: Map<string, boolean>;
-}): Promise<boolean> {
+}): Promise<GitHubTrustedPullRequestCommentSource[]> {
   if ((params.currentCommentCounts?.length ?? 0) === 0 || (params.previousCommentCounts?.length ?? 0) === 0) {
-    return false;
+    return [];
   }
 
+  const sources: GitHubTrustedPullRequestCommentSource[] = [];
   const previousCommentCountsByKey = new Map(
     (params.previousCommentCounts ?? []).map((record) => [buildGitHubPullRequestReferenceKey(record), record])
   );
@@ -9757,6 +10058,7 @@ async function hasTrustedNewLinkedPullRequestComments(params: {
     }
 
     const pullRequestRepository = requireRepositoryReference(currentCommentCount.repositoryUrl);
+    const repositoryUrl = getNormalizedMappingRepositoryUrl({ repositoryUrl: currentCommentCount.repositoryUrl });
 
     if (currentCommentCount.topLevelCommentCount > previousCommentCount.topLevelCommentCount) {
       const newTopLevelComments = await listNewGitHubIssueCommentsSinceCount(
@@ -9773,7 +10075,7 @@ async function hasTrustedNewLinkedPullRequestComments(params: {
         originalPosterLogin: params.originalPosterLogin,
         maintainerCache: params.maintainerCache
       })) {
-        return true;
+        sources.push({ repositoryUrl, number: currentCommentCount.number, kind: 'top_level' });
       }
     }
 
@@ -9792,12 +10094,15 @@ async function hasTrustedNewLinkedPullRequestComments(params: {
         originalPosterLogin: params.originalPosterLogin,
         maintainerCache: params.maintainerCache
       })) {
-        return true;
+        sources.push({ repositoryUrl, number: currentCommentCount.number, kind: 'review' });
       }
     }
   }
 
-  return false;
+  return sources.sort((left, right) =>
+    buildGitHubPullRequestReferenceKey(left).localeCompare(buildGitHubPullRequestReferenceKey(right))
+    || left.kind.localeCompare(right.kind)
+  );
 }
 
 async function isMaintainerAuthoredGitHubIssue(params: {
@@ -10307,7 +10612,10 @@ async function listImportedPaperclipIssuesForMapping(
         continue;
       }
 
-      const githubIssueUrl = extractImportedGitHubIssueUrlFromDescription(issue.description);
+      const originLink = resolvePaperclipIssueOriginGitHubIssueLink(issue, mapping.companyId);
+      const githubIssueUrl = originLink?.repositoryUrl === normalizedRepositoryUrl
+        ? originLink.githubIssueUrl
+        : extractImportedGitHubIssueUrlFromDescription(issue.description);
       if (!githubIssueUrl) {
         continue;
       }
@@ -10571,6 +10879,8 @@ function normalizeGitHubPullRequestLinkEntityData(value: unknown): GitHubPullReq
         ? 'open'
         : undefined;
   const title = typeof record.title === 'string' && record.title.trim() ? record.title.trim() : undefined;
+  const followThroughAssigneeAgentId = normalizeOptionalString(record.followThroughAssigneeAgentId);
+  const followThroughAssigneeUpdatedAt = normalizeOptionalString(record.followThroughAssigneeUpdatedAt);
   const syncedAt = typeof record.syncedAt === 'string' && record.syncedAt.trim() ? record.syncedAt.trim() : undefined;
 
   if (!repositoryUrl || githubPullRequestNumber === undefined || !githubPullRequestUrl || !githubPullRequestState || !syncedAt) {
@@ -10587,6 +10897,8 @@ function normalizeGitHubPullRequestLinkEntityData(value: unknown): GitHubPullReq
     githubPullRequestUrl,
     githubPullRequestState,
     ...(title ? { title } : {}),
+    ...(followThroughAssigneeAgentId ? { followThroughAssigneeAgentId } : {}),
+    ...(followThroughAssigneeUpdatedAt ? { followThroughAssigneeUpdatedAt } : {}),
     syncedAt
   };
 }
@@ -10803,7 +11115,8 @@ function doesGitHubPullRequestLinkRecordMatchTarget(
       return (!record.data.companyId || record.data.companyId === target.companyId)
         && (!record.data.paperclipProjectId || record.data.paperclipProjectId === target.projectId);
     case 'issue':
-      return Boolean(target.issueId && record.paperclipIssueId === target.issueId);
+      return Boolean(target.issueId && record.paperclipIssueId === target.issueId)
+        && (!record.data.companyId || record.data.companyId === target.companyId);
     default:
       return true;
   }
@@ -11150,6 +11463,27 @@ async function upsertGitHubIssueLinkRecord(
   });
 }
 
+const pullRequestLinkMutationTails = new Map<string, Promise<void>>();
+
+async function withPullRequestLinkMutationLock<T>(key: string, mutation: () => Promise<T>): Promise<T> {
+  const previousTail = pullRequestLinkMutationTails.get(key) ?? Promise.resolve();
+  let release!: () => void;
+  const currentMutation = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const currentTail = previousTail.catch(() => undefined).then(() => currentMutation);
+  pullRequestLinkMutationTails.set(key, currentTail);
+  await previousTail.catch(() => undefined);
+  try {
+    return await mutation();
+  } finally {
+    release();
+    if (pullRequestLinkMutationTails.get(key) === currentTail) {
+      pullRequestLinkMutationTails.delete(key);
+    }
+  }
+}
+
 async function upsertGitHubPullRequestLinkRecord(
   ctx: PluginSetupContext,
   params: {
@@ -11161,28 +11495,79 @@ async function upsertGitHubPullRequestLinkRecord(
     pullRequestUrl: string;
     pullRequestTitle: string;
     pullRequestState: 'open' | 'closed';
+    followThroughAssigneeAgentId?: string | null;
   }
-): Promise<void> {
-  await ctx.entities.upsert({
-    entityType: PULL_REQUEST_LINK_ENTITY_TYPE,
-    scopeKind: 'issue',
-    scopeId: params.issueId,
-    externalId: params.pullRequestUrl,
-    title: `GitHub pull request #${params.pullRequestNumber}`,
-    status: params.pullRequestState,
-    data: {
+): Promise<GitHubPullRequestLinkEntityData> {
+  const repositoryUrl = getNormalizedMappingRepositoryUrl({ repositoryUrl: params.repositoryUrl });
+  const referenceKey = buildGitHubPullRequestReferenceKey({
+    repositoryUrl,
+    number: params.pullRequestNumber
+  });
+  const mutationKey = `${params.companyId}:${params.issueId}:${referenceKey}`;
+  return withPullRequestLinkMutationLock(mutationKey, async () => {
+    const findMatchingRecord = (records: GitHubPullRequestLinkRecord[]) => records.find((record) =>
+      buildGitHubPullRequestReferenceKey({
+        repositoryUrl: record.data.repositoryUrl,
+        number: record.data.githubPullRequestNumber
+      }) === referenceKey
+    );
+    const exactExternalIdMatch = findMatchingRecord(await listGitHubPullRequestLinkRecords(ctx, {
+      paperclipIssueId: params.issueId,
+      externalId: params.pullRequestUrl
+    }));
+    const existing = exactExternalIdMatch ?? findMatchingRecord(await listGitHubPullRequestLinkRecords(ctx, {
+      paperclipIssueId: params.issueId
+    }));
+    const previousOwner = existing?.data.followThroughAssigneeAgentId;
+    const nextOwner = params.followThroughAssigneeAgentId === undefined
+      ? previousOwner
+      : params.followThroughAssigneeAgentId ?? undefined;
+    const ownerChanged = params.followThroughAssigneeAgentId !== undefined && previousOwner !== nextOwner;
+    const data: GitHubPullRequestLinkEntityData = {
       companyId: params.companyId,
       ...(params.projectId ? { paperclipProjectId: params.projectId } : {}),
-      repositoryUrl: getNormalizedMappingRepositoryUrl({
-        repositoryUrl: params.repositoryUrl
-      }),
+      repositoryUrl,
       githubPullRequestNumber: params.pullRequestNumber,
       githubPullRequestUrl: params.pullRequestUrl,
       githubPullRequestState: params.pullRequestState,
       title: params.pullRequestTitle,
+      ...(nextOwner ? { followThroughAssigneeAgentId: nextOwner } : {}),
+      ...(ownerChanged
+        ? { followThroughAssigneeUpdatedAt: new Date().toISOString() }
+        : existing?.data.followThroughAssigneeUpdatedAt
+          ? { followThroughAssigneeUpdatedAt: existing.data.followThroughAssigneeUpdatedAt }
+          : {}),
       syncedAt: new Date().toISOString()
-    }
+    };
+    await ctx.entities.upsert({
+      entityType: PULL_REQUEST_LINK_ENTITY_TYPE,
+      scopeKind: 'issue',
+      scopeId: params.issueId,
+      externalId: existing?.externalId ?? params.pullRequestUrl,
+      title: `GitHub pull request #${params.pullRequestNumber}`,
+      status: params.pullRequestState,
+      data: data as unknown as Record<string, unknown>
+    });
+    return data;
   });
+}
+
+async function validateFollowThroughAssigneeAgentId(
+  ctx: PluginSetupContext,
+  companyId: string,
+  value: unknown
+): Promise<string | null | undefined> {
+  if (value === undefined) return undefined;
+  if (value === null) return null;
+  const agentId = normalizeOptionalString(value);
+  if (!agentId) {
+    throw new Error('followThroughAssigneeAgentId must be a Paperclip agent id or null.');
+  }
+  const agent = await ctx.agents.get(agentId, companyId);
+  if (!agent || agent.companyId !== companyId) {
+    throw new Error('followThroughAssigneeAgentId must identify an agent in the same Paperclip company.');
+  }
+  return agentId;
 }
 
 function normalizeIssueGitHubLinkKind(value: unknown): 'issue' | 'pull_request' | null {
@@ -11564,6 +11949,7 @@ async function linkPaperclipIssueToGitHubPullRequest(
     pullRequestUrl?: unknown;
     requireUnlinked?: boolean;
     allowUnmapped?: boolean;
+    followThroughAssigneeAgentId?: unknown;
   }
 ): Promise<Record<string, unknown>> {
   const companyId = normalizeCompanyId(params.companyId);
@@ -11591,6 +11977,11 @@ async function linkPaperclipIssueToGitHubPullRequest(
     repositoryUrl: reference.repositoryUrl,
     allowUnmapped: params.allowUnmapped
   });
+  const followThroughAssigneeAgentId = await validateFollowThroughAssigneeAgentId(
+    ctx,
+    companyId,
+    params.followThroughAssigneeAgentId
+  );
   const octokit = await createGitHubToolOctokit(ctx, companyId);
   const response = await octokit.rest.pulls.get({
     owner: scope.repository.owner,
@@ -11609,7 +12000,7 @@ async function linkPaperclipIssueToGitHubPullRequest(
     merged: response.data.merged
   });
 
-  await upsertGitHubPullRequestLinkRecord(ctx, {
+  const storedLink = await upsertGitHubPullRequestLinkRecord(ctx, {
     companyId,
     projectId: scope.mapping?.paperclipProjectId ?? scope.projectId,
     issueId,
@@ -11617,7 +12008,8 @@ async function linkPaperclipIssueToGitHubPullRequest(
     pullRequestNumber: reference.pullRequestNumber,
     pullRequestUrl,
     pullRequestTitle: response.data.title || `Pull request #${reference.pullRequestNumber}`,
-    pullRequestState
+    pullRequestState,
+    followThroughAssigneeAgentId
   });
   await rememberExternalGitHubLinkCompany(ctx, companyId);
 
@@ -11636,7 +12028,13 @@ async function linkPaperclipIssueToGitHubPullRequest(
     repositoryUrl: scope.repository.url,
     githubPullRequestNumber: reference.pullRequestNumber,
     githubPullRequestUrl: pullRequestUrl,
-    githubPullRequestState: pullRequestState
+    githubPullRequestState: pullRequestState,
+    ...(storedLink.followThroughAssigneeAgentId
+      ? { followThroughAssigneeAgentId: storedLink.followThroughAssigneeAgentId }
+      : {}),
+    ...(storedLink.followThroughAssigneeUpdatedAt
+      ? { followThroughAssigneeUpdatedAt: storedLink.followThroughAssigneeUpdatedAt }
+      : {})
   };
 }
 
@@ -12000,14 +12398,14 @@ async function wakePaperclipIssueAssignee(
     previousStatus?: PaperclipIssueStatus;
     nextStatus?: PaperclipIssueStatus;
   }
-): Promise<void> {
+): Promise<boolean> {
   if (!params.assigneeAgentId) {
-    return;
+    return false;
   }
 
   if (ctx.issues && typeof ctx.issues.requestWakeup === 'function' && params.companyId) {
     try {
-      await ctx.issues.requestWakeup(params.paperclipIssueId, params.companyId, {
+      const result = await ctx.issues.requestWakeup(params.paperclipIssueId, params.companyId, {
         reason: params.reason,
         contextSource: `github-sync.${params.mutation}`,
         ...(params.actionFingerprint
@@ -12016,7 +12414,7 @@ async function wakePaperclipIssueAssignee(
             ? { idempotencyKey: ['github-sync', params.mutation, params.paperclipIssueId].join(':') }
             : {})
       });
-      return;
+      return result?.queued !== false;
     } catch (error) {
       if (!params.paperclipApiBaseUrl) {
         throw new Error(
@@ -12073,6 +12471,7 @@ async function wakePaperclipIssueAssignee(
     if (!response.ok) {
       throw new Error(`Wakeup request failed with status ${response.status}.`);
     }
+    return true;
   } catch (error) {
     throw new Error(
       `GitHub sync could not wake the assignee for Paperclip issue ${params.paperclipIssueId}: ${getErrorMessage(error)}`,
@@ -13095,78 +13494,56 @@ function getEffectivePullRequestActionCondition(
   return 'waiting';
 }
 
-function getEffectivePullRequestActionPriority(condition: ReturnType<typeof getEffectivePullRequestActionCondition>): number {
-  switch (condition) {
-    case 'conflict': return 0;
-    case 'ci_failed': return 1;
-    case 'review_actionable': return 2;
-    case 'waiting': return 3;
-    case 'ready': return 4;
-  }
-}
-
-function selectEffectivePullRequestFingerprintEntries(
-  pullRequests: Array<{
-    repositoryUrl: string;
-    number: number;
-    headSha: string | null;
-    condition: ReturnType<typeof getEffectivePullRequestActionCondition>;
-  }>
-) {
-  const highestPriority = Math.min(...pullRequests.map((pullRequest) =>
-    getEffectivePullRequestActionPriority(pullRequest.condition)
-  ));
-  return pullRequests
-    .filter((pullRequest) => getEffectivePullRequestActionPriority(pullRequest.condition) === highestPriority)
-    .sort((left, right) => left.repositoryUrl.localeCompare(right.repositoryUrl) || left.number - right.number);
-}
-
-function buildRemoteActionFingerprint(snapshot: GitHubIssueStatusSnapshot): string {
-  const allPullRequests = snapshot.linkedPullRequests.map((pullRequest) => ({
-    repositoryUrl: pullRequest.repositoryUrl.toLowerCase(),
-    number: pullRequest.number,
-    headSha: pullRequest.headSha ?? null,
-    condition: getEffectivePullRequestActionCondition(pullRequest)
-  }));
-  const pullRequests = snapshot.state === 'closed' || allPullRequests.length === 0
-    ? []
-    : selectEffectivePullRequestFingerprintEntries(allPullRequests);
+function buildRemoteActionFingerprint(
+  snapshot: GitHubIssueStatusSnapshot,
+  effectiveGate = snapshot.state === 'closed'
+    ? undefined
+    : selectEffectiveIssueLinkedPullRequestGate(snapshot.linkedPullRequests, [], false)
+): string {
+  const gate = snapshot.state === 'closed' || !effectiveGate
+    ? null
+    : {
+        repositoryUrl: effectiveGate.repositoryUrl,
+        number: effectiveGate.number,
+        headSha: effectiveGate.headSha,
+        condition: effectiveGate.remoteCondition
+      };
   const reasonCode = snapshot.state === 'closed'
     ? `issue_closed_${snapshot.stateReason ?? 'completed'}`
-    : pullRequests.length === 0
-      ? 'issue_open'
-      : `pr_${pullRequests[0]?.condition ?? 'waiting'}`;
+    : gate
+      ? `pr_${gate.condition}`
+      : 'issue_open';
 
   return createHash('sha256').update(JSON.stringify({
-    version: 3,
+    version: 4,
     issue: {
       state: snapshot.state,
       stateReason: snapshot.stateReason ?? null
     },
-    pullRequests,
+    gate,
     reasonCode
   })).digest('hex');
 }
 
-function buildDirectPullRequestActionFingerprint(snapshots: GitHubDirectPullRequestSyncSnapshot[]): string {
-  const openPullRequests = snapshots
-    .filter((entry) => entry.lifecycleState === 'open' && entry.pullRequest)
-    .map((entry) => ({
-      repositoryUrl: entry.repository.url.toLowerCase(),
-      number: entry.pullRequestLink.data.githubPullRequestNumber,
-      headSha: entry.pullRequest?.headSha ?? null,
-      condition: getEffectivePullRequestActionCondition(entry.pullRequest as GitHubPullRequestStatusSnapshot)
-    }));
-  const terminalOutcome = openPullRequests.length > 0
+function buildDirectPullRequestActionFingerprint(
+  snapshots: GitHubDirectPullRequestSyncSnapshot[],
+  effectiveGate: EffectiveDirectPullRequestGate | undefined
+): string {
+  const terminalOutcome = effectiveGate
     ? null
     : snapshots.some((entry) => entry.lifecycleState === 'merged') ? 'merged' : 'closed';
-  const pullRequests = openPullRequests.length > 0
-    ? selectEffectivePullRequestFingerprintEntries(openPullRequests)
-    : [];
+  const gate = effectiveGate
+    ? {
+        repositoryUrl: effectiveGate.repositoryUrl,
+        number: effectiveGate.number,
+        headSha: effectiveGate.headSha,
+        condition: effectiveGate.remoteCondition
+      }
+    : null;
   return createHash('sha256').update(JSON.stringify({
-    version: 3,
+    version: 4,
     terminalOutcome,
-    pullRequests
+    gate
   })).digest('hex');
 }
 
@@ -13298,7 +13675,7 @@ async function updatePaperclipIssueState(
     issuePatch
   });
   const reasonCode = classifyIssueInteractionReason(transitionCommentAnnotation?.reason ?? trimmedTransitionComment);
-  const interactionDedupeBase = actionFingerprint
+  const interactionFamilyBase = actionFingerprint
     ? `sync:${createHash('sha256').update(JSON.stringify({
         companyId,
         issueId,
@@ -13309,7 +13686,7 @@ async function updatePaperclipIssueState(
         currentIssueState: syncContext,
         issuePatch
       })).digest('hex')}`
-    : `sync:${issueId}:${interactionOccurredAt}:${currentStatus}:${nextStatus}`;
+    : undefined;
   const mutationFamilyBase = actionFingerprint
     ? `sync:${createHash('sha256').update(JSON.stringify({
         companyId,
@@ -13318,7 +13695,7 @@ async function updatePaperclipIssueState(
         actionFingerprint,
         nextStatus
       })).digest('hex')}`
-    : interactionDedupeBase;
+    : `sync:${issueId}:${interactionOccurredAt}:${currentStatus}:${nextStatus}`;
   const hasAssigneePatch = Object.prototype.hasOwnProperty.call(issuePatch, 'assigneeAgentId')
     || Object.prototype.hasOwnProperty.call(issuePatch, 'assigneeUserId');
   const mutationExpectedState = {
@@ -13350,12 +13727,10 @@ async function updatePaperclipIssueState(
     .update(JSON.stringify(liveMutationState))
     .digest('hex')
     .slice(0, 32);
-  const mutationPatchBase = `${mutationFamilyBase}:patch:${createHash('sha256')
-    .update(JSON.stringify(issuePatch))
-    .digest('hex')
-    .slice(0, 32)}:applied:${mutationExpectedStateFingerprint}`;
   let existingInteractionEvents: IssueInteractionEvent[] = [];
-  if (actionFingerprint) {
+  let interactionDedupeBase = mutationFamilyBase;
+  let reconciliationAttemptId: string | undefined;
+  if (actionFingerprint && interactionFamilyBase) {
     const ledger = await listIssueInteractionEvents(ctx, companyId, issueId, {
       from: '1970-01-01T00:00:00.000Z',
       to: '9999-12-31T23:59:59.999Z'
@@ -13368,20 +13743,38 @@ async function updatePaperclipIssueState(
       throw new Error('GitHub Sync refused a status transition because its issue interaction ledger is incomplete or conflicting.');
     }
     existingInteractionEvents = ledger.events;
-    const existingIntent = existingInteractionEvents.find((event) => event.dedupeKey === `${interactionDedupeBase}:intent`);
-    if (existingIntent) interactionOccurredAt = existingIntent.occurredAt;
+    const attemptPrefix = `${interactionFamilyBase}:attempt:`;
+    const latestOpenAttemptIntent = existingInteractionEvents
+      .filter((event) => {
+        if (!event.dedupeKey.startsWith(attemptPrefix)) return false;
+        const suffix = event.dedupeKey.slice(attemptPrefix.length);
+        return /^[^:]+:intent$/.test(suffix);
+      })
+      .sort((left, right) =>
+        right.occurredAt.localeCompare(left.occurredAt)
+        || right.dedupeKey.localeCompare(left.dedupeKey)
+      )
+      .find((intent) => {
+        const attemptBase = intent.dedupeKey.slice(0, -':intent'.length);
+        return !existingInteractionEvents.some((event) =>
+          event.dedupeKey.startsWith(`${attemptBase}:result:`)
+          && !event.dedupeKey.endsWith(':result:failed')
+        );
+      });
+    if (latestOpenAttemptIntent) {
+      interactionDedupeBase = latestOpenAttemptIntent.dedupeKey.slice(0, -':intent'.length);
+      reconciliationAttemptId = interactionDedupeBase.slice(attemptPrefix.length);
+      interactionOccurredAt = latestOpenAttemptIntent.occurredAt;
+    } else {
+      reconciliationAttemptId = randomUUID();
+      interactionDedupeBase = `${attemptPrefix}${reconciliationAttemptId}`;
+    }
   }
-  const completedMutationForPatch = existingInteractionEvents.some((event) =>
-    event.dedupeKey.startsWith(`${mutationPatchBase}:`)
-    && event.dedupeKey.endsWith(':mutation:result:changed')
-  );
-  const mutationDedupeBase = !issuePatchAlreadyApplied && completedMutationForPatch
-    ? `${mutationPatchBase}:drift:${createHash('sha256').update(JSON.stringify({
-        currentStatus: liveCurrentStatus,
-        currentIssueState: liveSyncContext,
-        issuePatch
-      })).digest('hex').slice(0, 32)}`
-    : mutationPatchBase;
+  const mutationPatchBase = `${mutationFamilyBase}${reconciliationAttemptId ? `:attempt:${reconciliationAttemptId}` : ''}:patch:${createHash('sha256')
+    .update(JSON.stringify(issuePatch))
+    .digest('hex')
+    .slice(0, 32)}:applied:${mutationExpectedStateFingerprint}`;
+  const mutationDedupeBase = mutationPatchBase;
   await persistIssueInteractionEvent(ctx, {
     schemaVersion: 1,
     companyId,
@@ -13471,11 +13864,15 @@ async function updatePaperclipIssueState(
   if (statusWillChange) {
     const commentIntentKey = `${interactionDedupeBase}:comment:intent`;
     const commentChangedKey = `${interactionDedupeBase}:comment:result:changed`;
+    const commentFailedBeforeReturnKey = `${interactionDedupeBase}:comment:result:failed-before-return`;
     const priorCommentIntent = existingInteractionEvents.find((event) => event.dedupeKey === commentIntentKey);
     const priorCommentChanged = existingInteractionEvents.find((event) => event.dedupeKey === commentChangedKey);
+    const priorCommentFailedBeforeReturn = existingInteractionEvents.find(
+      (event) => event.dedupeKey === commentFailedBeforeReturnKey
+    );
     if (priorCommentChanged) {
       transitionCommentComplete = true;
-    } else if (priorCommentIntent) {
+    } else if (priorCommentIntent && !priorCommentFailedBeforeReturn) {
       throw new Error('GitHub Sync refused to repeat an uncertain transition comment; reconcile the durable interaction intent before retrying.');
     } else {
       const commentEventBase = {
@@ -13500,8 +13897,10 @@ async function updatePaperclipIssueState(
         outcome: 'observed',
         dedupeKey: commentIntentKey
       });
+      let commentReturned = false;
       try {
         createdTransitionComment = await ctx.issues.createComment(issueId, trimmedTransitionComment, companyId);
+        commentReturned = true;
         if (transitionCommentAnnotation) {
           await upsertStatusTransitionCommentAnnotation(ctx, {
             issueId,
@@ -13523,7 +13922,9 @@ async function updatePaperclipIssueState(
         await persistIssueInteractionEvent(ctx, {
           ...commentEventBase,
           outcome: 'failed',
-          dedupeKey: `${interactionDedupeBase}:comment:result:failed`
+          dedupeKey: commentReturned
+            ? `${interactionDedupeBase}:comment:result:failed-after-return`
+            : commentFailedBeforeReturnKey
         });
         throw error;
       }
@@ -13870,7 +14271,6 @@ async function createPaperclipIssue(
 
   const title = issue.title;
   const description = buildPaperclipIssueDescription(issue);
-  const defaultAssignee = getConfiguredAdvancedAssigneePrincipal(advancedSettings, 'default');
   const createdIssue = await ensurePaperclipIssueStandardWorkMode(
     ctx,
     await ctx.issues.create({
@@ -13878,29 +14278,15 @@ async function createPaperclipIssue(
       projectId: mapping.paperclipProjectId,
       title,
       ...(description ? { description } : {}),
-      status: advancedSettings.defaultStatus,
+      status: 'backlog',
       originKind: GITHUB_ISSUE_ORIGIN_KIND,
-      originId: normalizeGitHubIssueHtmlUrl(issue.htmlUrl) ?? issue.htmlUrl,
-      ...(defaultAssignee?.kind === 'agent'
-        ? { assigneeAgentId: defaultAssignee.id }
-        : defaultAssignee?.kind === 'user'
-          ? { assigneeUserId: defaultAssignee.id }
-        : {})
+      originId: normalizeGitHubIssueHtmlUrl(issue.htmlUrl) ?? issue.htmlUrl
     }),
     mapping.companyId
   );
   const ensuredCreatedIssueId = createdIssue.id;
   const normalizedCreatedIssueDescription = createdIssue.description ?? undefined;
   const createPath: IssueDescriptionUpdatePath = 'sdk';
-
-  if (defaultAssignee?.kind === 'user') {
-    await assignImportedPaperclipIssueToUser(ctx, {
-      companyId: mapping.companyId,
-      issueId: ensuredCreatedIssueId,
-      assigneeUserId: defaultAssignee.id,
-      paperclipApiBaseUrl
-    });
-  }
 
   if (normalizeIssueDescriptionValue(normalizedCreatedIssueDescription) !== description) {
     logIssueDescriptionDiagnostic(
@@ -14016,7 +14402,8 @@ async function ensurePaperclipIssueImported(
         mapping,
         issue,
         existingImportedPaperclipIssue.id,
-        coerceDate(existingImportedPaperclipIssue.createdAt ?? new Date()).toISOString()
+        coerceDate(existingImportedPaperclipIssue.createdAt ?? new Date()).toISOString(),
+        true
       )
     );
 
@@ -14037,7 +14424,7 @@ async function ensurePaperclipIssueImported(
   );
   const registryRecord = upsertImportedIssueRecord(
     nextRegistry,
-    buildImportedIssueRecord(mapping, issue, createdIssue.id, new Date().toISOString())
+    buildImportedIssueRecord(mapping, issue, createdIssue.id, new Date().toISOString(), true)
   );
   importRegistryByIssueId.set(issue.id, registryRecord);
   ensuredPaperclipIssueIds.set(issue.id, createdIssue.id);
@@ -14652,18 +15039,42 @@ async function synchronizePaperclipIssueStatuses(
           }
         }
       }
-      const hasTrustedNewLinkedPullRequestComment =
+      const trustedNewLinkedPullRequestCommentSources =
         paperclipIssue.status === 'backlog' || currentLinkedPullRequestCommentCounts.length === 0
-          ? false
-          : await hasTrustedNewLinkedPullRequestComments({
+          ? []
+          : await listTrustedNewLinkedPullRequestCommentSources({
               octokit,
               originalPosterLogin: githubIssue.authorLogin,
               previousCommentCounts: importedIssue.linkedPullRequestCommentCounts,
               currentCommentCounts: currentLinkedPullRequestCommentCounts,
               maintainerCache: repositoryMaintainerCache
             });
+      const hasTrustedNewLinkedPullRequestComment = trustedNewLinkedPullRequestCommentSources.length > 0;
       const hasTrustedNewComment = hasTrustedNewIssueComment || hasTrustedNewLinkedPullRequestComment;
-      const remoteActionFingerprint = buildRemoteActionFingerprint(snapshot);
+      const issueLinkedPullRequestLinks = snapshot.linkedPullRequests.length === 0
+        ? []
+        : await listGitHubPullRequestLinkRecords(ctx, {
+            paperclipIssueId: importedIssue.paperclipIssueId
+          });
+      const effectiveGate = selectEffectiveIssueLinkedPullRequestGate(
+        snapshot.linkedPullRequests,
+        trustedNewLinkedPullRequestCommentSources,
+        hasTrustedNewIssueComment,
+        issueLinkedPullRequestLinks,
+        importedIssue.selectedPullRequestGate
+      );
+      const followThroughAssigneeAgentId = await resolveValidFollowThroughAssigneeAgentId(
+        ctx,
+        mapping.companyId,
+        effectiveGate?.ownerCandidate
+      );
+      const transitionFollowThroughAssigneeAgentId = isActionableDirectPullRequestGate(effectiveGate)
+        ? followThroughAssigneeAgentId
+        : undefined;
+      const remoteActionFingerprint = createHash('sha256').update(JSON.stringify({
+        issue: buildRemoteActionFingerprint(snapshot, effectiveGate),
+        followThroughAssigneeAgentId
+      })).digest('hex');
       const actionJournalFingerprint = createHash('sha256').update(JSON.stringify({
         remoteActionFingerprint,
         issueCommentCount: snapshot.commentCount,
@@ -14671,9 +15082,17 @@ async function synchronizePaperclipIssueStatuses(
           currentLinkedPullRequestCommentCounts
         )
       })).digest('hex');
-      if (importedIssue.pendingRemoteActionWake) {
+      const createWakeFingerprint = () => createRemoteActionWakeFingerprint(remoteActionFingerprint);
+      if (
+        importedIssue.pendingRemoteActionWake
+        && isPendingWakeApplied(
+          importedIssue.pendingRemoteActionWake,
+          paperclipIssue.status,
+          getPaperclipIssueSyncContext(paperclipIssue).assignee
+        )
+      ) {
         const pendingWake = importedIssue.pendingRemoteActionWake;
-        await wakePaperclipIssueAssignee(ctx, {
+        const admitted = await wakePaperclipIssueAssignee(ctx, {
           assigneeAgentId: pendingWake.assigneeAgentId,
           paperclipIssueId: importedIssue.paperclipIssueId,
           companyId: mapping.companyId,
@@ -14684,12 +15103,16 @@ async function synchronizePaperclipIssueStatuses(
           previousStatus: pendingWake.previousStatus,
           nextStatus: pendingWake.nextStatus
         });
-        delete importedIssue.pendingRemoteActionWake;
-        await persistImportRegistry();
+        if (admitted) {
+          delete importedIssue.pendingRemoteActionWake;
+          delete importedIssue.activationPending;
+          await persistImportRegistry();
+        }
       }
       const wasImportedThisRun = createdIssueIds.has(importedIssue.githubIssueId);
+      const isPendingInitialActivation = wasImportedThisRun || importedIssue.activationPending === true;
       const maintainerAuthoredImportedIssue =
-        wasImportedThisRun &&
+        isPendingInitialActivation &&
         advancedSettings.defaultStatus !== 'todo' &&
         snapshot.state === 'open' &&
         snapshot.linkedPullRequests.length === 0
@@ -14703,13 +15126,15 @@ async function synchronizePaperclipIssueStatuses(
       const paperclipIssueSyncContext = getPaperclipIssueSyncContext(paperclipIssue);
       const executorTransitionAssignee = resolvePaperclipIssueExecutorAssignee(
         paperclipIssueSyncContext,
-        advancedSettings
+        advancedSettings,
+        transitionFollowThroughAssigneeAgentId
       );
       let nextStatus = resolvePaperclipIssueStatus({
         currentStatus: paperclipIssue.status,
         snapshot,
+        effectiveGate,
         hasTrustedNewComment,
-        wasImportedThisRun,
+        wasImportedThisRun: isPendingInitialActivation,
         defaultImportedStatus: advancedSettings.defaultStatus,
         maintainerAuthoredImportedIssue,
         hasExecutorHandoffTarget: Boolean(executorTransitionAssignee)
@@ -14721,32 +15146,32 @@ async function synchronizePaperclipIssueStatuses(
       ) {
         nextStatus = 'blocked';
       }
-      if (
-        paperclipIssue.status !== nextStatus
-        && !hasTrustedNewComment
-        && importedIssue.remoteActionFingerprint === remoteActionFingerprint
-      ) {
-        nextStatus = paperclipIssue.status;
-      }
+
       const shouldPreserveMaintainerWaitRouting = isHealthyMaintainerWaitTransition({
         currentStatus: paperclipIssue.status,
         nextStatus,
         syncContext: paperclipIssueSyncContext
       });
       const shouldClearCompletedExecutionPolicy = nextStatus === 'done' || nextStatus === 'cancelled';
-      const shouldPreserveImportedTriageRouting = shouldPreserveImportedTriageAssignee({
-        currentStatus: paperclipIssue.status,
-        nextStatus,
-        wasImportedThisRun,
-        maintainerAuthoredImportedIssue
-      });
-      const nextTransitionAssignee = shouldPreserveImportedTriageRouting
-        ? null
-        : resolveSyncTransitionAssignee({
+      const shouldPreserveImportedTriageRouting = Boolean(paperclipIssueSyncContext.assignee)
+        && shouldPreserveImportedTriageAssignee({
+          currentStatus: paperclipIssue.status,
+          nextStatus,
+          wasImportedThisRun: isPendingInitialActivation,
+          maintainerAuthoredImportedIssue
+        });
+      const configuredDefaultAssignee = getConfiguredAdvancedAssigneePrincipal(advancedSettings, 'default');
+      const nextTransitionAssignee = isPendingInitialActivation
+        && configuredDefaultAssignee
+        ? { principal: configuredDefaultAssignee, role: 'executor' as const }
+        : shouldPreserveImportedTriageRouting
+          ? null
+          : resolveSyncTransitionAssignee({
             currentStatus: paperclipIssue.status,
             nextStatus,
             syncContext: paperclipIssueSyncContext,
-            advancedSettings
+            advancedSettings,
+            followThroughAssigneeAgentId: transitionFollowThroughAssigneeAgentId
           });
       const shouldClearTransitionAssignee =
         nextStatus === 'in_review'
@@ -14754,14 +15179,17 @@ async function synchronizePaperclipIssueStatuses(
       const nextAssigneeChanged = nextTransitionAssignee
         ? !doesPaperclipIssueAssigneeMatch(paperclipIssueSyncContext.assignee, nextTransitionAssignee.principal)
         : false;
+      const importedActivationAssignee = paperclipIssueSyncContext.assignee?.kind === 'agent'
+        ? paperclipIssueSyncContext.assignee
+        : nextTransitionAssignee?.principal.kind === 'agent'
+          ? nextTransitionAssignee.principal
+          : undefined;
       const shouldWakeImportedAssignee =
-        wasImportedThisRun
+        isPendingInitialActivation
         && nextStatus === 'todo'
-        && (paperclipIssue.status === nextStatus || shouldPreserveImportedTriageRouting)
-        && paperclipIssueSyncContext.assignee?.kind === 'agent';
+        && Boolean(importedActivationAssignee);
       const shouldWakeTransitionAssignee =
-        paperclipIssue.status !== nextStatus
-        && nextTransitionAssignee?.principal.kind === 'agent'
+        nextTransitionAssignee?.principal.kind === 'agent'
         && isActionablePaperclipIssueStatus(nextStatus)
         && (nextAssigneeChanged || paperclipIssue.status !== nextStatus);
 
@@ -14771,11 +15199,34 @@ async function synchronizePaperclipIssueStatuses(
         importedIssue.lastSeenGitHubState = snapshot.state;
         importedIssue.linkedPullRequestCommentCounts = currentLinkedPullRequestCommentCounts;
         importedIssue.remoteActionFingerprint = remoteActionFingerprint;
+        importedIssue.selectedPullRequestGate = effectiveGate
+          ? { repositoryUrl: effectiveGate.repositoryUrl, number: effectiveGate.number }
+          : undefined;
         if (pendingWake) importedIssue.pendingRemoteActionWake = pendingWake;
+        else delete importedIssue.activationPending;
         await persistImportRegistry();
       };
 
       if (paperclipIssue.status === nextStatus) {
+        const pendingWake: PendingRemoteActionWake | undefined =
+          shouldWakeImportedAssignee && importedActivationAssignee
+            ? reuseOrCreatePendingWake(importedIssue.pendingRemoteActionWake, {
+                assigneeAgentId: importedActivationAssignee.id,
+                reason: IMPORTED_ISSUE_WAKE_REASON,
+                mutation: 'import',
+                nextStatus
+              }, createWakeFingerprint)
+            : shouldWakeTransitionAssignee && nextTransitionAssignee?.principal.kind === 'agent'
+              ? reuseOrCreatePendingWake(importedIssue.pendingRemoteActionWake, {
+                  assigneeAgentId: nextTransitionAssignee.principal.id,
+                  reason: STATUS_TRANSITION_WAKE_REASON,
+                  mutation: 'status_transition',
+                  previousStatus: paperclipIssue.status,
+                  nextStatus
+                }, createWakeFingerprint)
+              : undefined;
+        if (pendingWake) importedIssue.pendingRemoteActionWake = pendingWake;
+        if (pendingWake || isPendingInitialActivation) await persistImportRegistry();
         updateSyncFailureContext(syncFailureContext, {
           phase: 'updating_paperclip_status',
           repositoryUrl: repository.url,
@@ -14787,6 +15238,7 @@ async function synchronizePaperclipIssueStatuses(
           currentStatus: paperclipIssue.status,
           syncContext: paperclipIssueSyncContext,
           nextStatus,
+          ...(nextAssigneeChanged && nextTransitionAssignee ? { nextAssignee: nextTransitionAssignee.principal } : {}),
           ...(shouldClearTransitionAssignee ? { clearAssignee: true } : {}),
           ...(shouldPreserveMaintainerWaitRouting || shouldClearCompletedExecutionPolicy ? { clearExecutionPolicy: true } : {}),
           transitionComment: '',
@@ -14794,25 +15246,20 @@ async function synchronizePaperclipIssueStatuses(
           paperclipApiBaseUrl
         });
 
-        if (shouldWakeImportedAssignee && paperclipIssueSyncContext.assignee?.kind === 'agent') {
-          const pendingWake: PendingRemoteActionWake = {
-            fingerprint: remoteActionFingerprint,
-            assigneeAgentId: paperclipIssueSyncContext.assignee.id,
-            reason: IMPORTED_ISSUE_WAKE_REASON,
-            mutation: 'import',
-            nextStatus
-          };
+        if (pendingWake) {
           await persistObservedRemoteState(pendingWake);
           queuedIssueWakeups.push({
             assigneeAgentId: pendingWake.assigneeAgentId,
             paperclipIssueId: importedIssue.paperclipIssueId,
             reason: pendingWake.reason,
-            mutation: 'import',
+            mutation: pendingWake.mutation,
             actionFingerprint: pendingWake.fingerprint,
+            previousStatus: pendingWake.previousStatus,
             nextStatus,
             onSuccess: async () => {
               if (importedIssue.pendingRemoteActionWake?.fingerprint === pendingWake.fingerprint) {
                 delete importedIssue.pendingRemoteActionWake;
+                delete importedIssue.activationPending;
                 await persistImportRegistry();
               }
             }
@@ -14837,6 +15284,26 @@ async function synchronizePaperclipIssueStatuses(
         repositoryUrl: repository.url,
         githubIssueNumber: githubIssue.number
       });
+      const pendingWake: PendingRemoteActionWake | undefined =
+        shouldWakeImportedAssignee && importedActivationAssignee
+          ? reuseOrCreatePendingWake(importedIssue.pendingRemoteActionWake, {
+              assigneeAgentId: importedActivationAssignee.id,
+              reason: IMPORTED_ISSUE_WAKE_REASON,
+              mutation: 'import',
+              previousStatus: paperclipIssue.status,
+              nextStatus
+            }, createWakeFingerprint)
+          : shouldWakeTransitionAssignee && nextTransitionAssignee?.principal.kind === 'agent'
+            ? reuseOrCreatePendingWake(importedIssue.pendingRemoteActionWake, {
+                assigneeAgentId: nextTransitionAssignee.principal.id,
+                reason: STATUS_TRANSITION_WAKE_REASON,
+                mutation: 'status_transition',
+                previousStatus: paperclipIssue.status,
+                nextStatus
+              }, createWakeFingerprint)
+            : undefined;
+      if (pendingWake) importedIssue.pendingRemoteActionWake = pendingWake;
+      if (pendingWake || isPendingInitialActivation) await persistImportRegistry();
       await updatePaperclipIssueState(ctx, {
         companyId: mapping.companyId,
         issueId: importedIssue.paperclipIssueId,
@@ -14851,26 +15318,6 @@ async function synchronizePaperclipIssueStatuses(
         actionFingerprint: actionJournalFingerprint,
         paperclipApiBaseUrl
       });
-      const pendingWake: PendingRemoteActionWake | undefined =
-        shouldWakeImportedAssignee && paperclipIssueSyncContext.assignee?.kind === 'agent'
-          ? {
-              fingerprint: remoteActionFingerprint,
-              assigneeAgentId: paperclipIssueSyncContext.assignee.id,
-              reason: IMPORTED_ISSUE_WAKE_REASON,
-              mutation: 'import',
-              previousStatus: paperclipIssue.status,
-              nextStatus
-            }
-          : shouldWakeTransitionAssignee && nextTransitionAssignee?.principal.kind === 'agent'
-            ? {
-                fingerprint: remoteActionFingerprint,
-                assigneeAgentId: nextTransitionAssignee.principal.id,
-                reason: STATUS_TRANSITION_WAKE_REASON,
-                mutation: 'status_transition',
-                previousStatus: paperclipIssue.status,
-                nextStatus
-              }
-            : undefined;
       await persistObservedRemoteState(pendingWake);
       updatedStatusesCount += 1;
 
@@ -14886,6 +15333,7 @@ async function synchronizePaperclipIssueStatuses(
           onSuccess: async () => {
             if (importedIssue.pendingRemoteActionWake?.fingerprint === pendingWake.fingerprint) {
               delete importedIssue.pendingRemoteActionWake;
+              delete importedIssue.activationPending;
               await persistImportRegistry();
             }
           }
@@ -14916,7 +15364,7 @@ async function synchronizePaperclipIssueStatuses(
     queuedIssueWakeups,
     IMPORTED_ISSUE_WAKEUP_CONCURRENCY,
     async (queuedWakeup) => {
-      await wakePaperclipIssueAssignee(ctx, {
+      const admitted = await wakePaperclipIssueAssignee(ctx, {
         assigneeAgentId: queuedWakeup.assigneeAgentId,
         paperclipIssueId: queuedWakeup.paperclipIssueId,
         companyId: mapping.companyId,
@@ -14927,7 +15375,7 @@ async function synchronizePaperclipIssueStatuses(
         previousStatus: queuedWakeup.previousStatus,
         nextStatus: queuedWakeup.nextStatus
       });
-      await queuedWakeup.onSuccess?.();
+      if (admitted) await queuedWakeup.onSuccess?.();
     }
   );
 
@@ -15131,9 +15579,16 @@ async function synchronizePaperclipPullRequestIssueStatuses(
         remoteAction = { key: remoteActionKey };
         remoteActionRegistry.push(remoteAction);
       }
-      if (remoteAction.pendingWake) {
+      if (
+        remoteAction.pendingWake
+        && isPendingWakeApplied(
+          remoteAction.pendingWake,
+          paperclipIssue.status,
+          getPaperclipIssueSyncContext(paperclipIssue).assignee
+        )
+      ) {
         const pendingWake = remoteAction.pendingWake;
-        await wakePaperclipIssueAssignee(ctx, {
+        const admitted = await wakePaperclipIssueAssignee(ctx, {
           assigneeAgentId: pendingWake.assigneeAgentId,
           paperclipIssueId,
           companyId: mapping.companyId,
@@ -15144,44 +15599,62 @@ async function synchronizePaperclipPullRequestIssueStatuses(
           previousStatus: pendingWake.previousStatus,
           nextStatus: pendingWake.nextStatus
         });
-        delete remoteAction.pendingWake;
-        await persistRemoteActionRegistry();
+        if (admitted) {
+          delete remoteAction.pendingWake;
+          await persistRemoteActionRegistry();
+        }
       }
       const currentCommentCounts = pullRequestSnapshots
         .map((snapshot) => snapshot.commentCounts)
         .filter((counts): counts is GitHubPullRequestCommentCountRecord => Boolean(counts));
-      let hasTrustedNewComment = false;
+      const trustedCommentSources: GitHubTrustedPullRequestCommentSource[] = [];
       if (paperclipIssue.status !== 'backlog' && remoteAction.linkedPullRequestCommentCounts) {
         const maintainerCache = new Map<string, boolean>();
         for (const snapshot of pullRequestSnapshots) {
           if (!snapshot.commentCounts) continue;
-          if (await hasTrustedNewLinkedPullRequestComments({
+          trustedCommentSources.push(...await listTrustedNewLinkedPullRequestCommentSources({
             octokit,
             originalPosterLogin: snapshot.authorLogin,
             previousCommentCounts: remoteAction.linkedPullRequestCommentCounts,
             currentCommentCounts: [snapshot.commentCounts],
             maintainerCache
-          })) {
-            hasTrustedNewComment = true;
-            break;
-          }
+          }));
         }
       }
-      const remoteActionFingerprint = buildDirectPullRequestActionFingerprint(pullRequestSnapshots);
+      const effectiveGate = selectEffectiveDirectPullRequestGate(
+        pullRequestSnapshots,
+        trustedCommentSources,
+        remoteAction.selectedPullRequestGate
+      );
+      const hasTrustedNewComment = Boolean(effectiveGate?.trustedCommentKinds.length);
+      const followThroughAssigneeAgentId = await resolveValidFollowThroughAssigneeAgentId(
+        ctx,
+        mapping.companyId,
+        effectiveGate?.ownerCandidate
+      );
+      const transitionFollowThroughAssigneeAgentId = isActionableDirectPullRequestGate(effectiveGate)
+        ? followThroughAssigneeAgentId
+        : undefined;
+      const remoteActionFingerprint = createHash('sha256').update(JSON.stringify({
+        pullRequest: buildDirectPullRequestActionFingerprint(pullRequestSnapshots, effectiveGate),
+        followThroughAssigneeAgentId
+      })).digest('hex');
       const actionJournalFingerprint = createHash('sha256').update(JSON.stringify({
         remoteActionFingerprint,
         commentCounts: canonicalizeGitHubPullRequestCommentCounts(currentCommentCounts)
       })).digest('hex');
+      const createWakeFingerprint = () => createRemoteActionWakeFingerprint(remoteActionFingerprint);
       const paperclipIssueSyncContext = getPaperclipIssueSyncContext(paperclipIssue);
       const executorTransitionAssignee = resolvePaperclipIssueExecutorAssignee(
         paperclipIssueSyncContext,
-        advancedSettings
+        advancedSettings,
+        transitionFollowThroughAssigneeAgentId
       );
       let nextStatus = resolvePaperclipDirectPullRequestIssueStatus({
         currentStatus: paperclipIssue.status,
         pullRequests: pullRequestSnapshots,
-        hasExecutorHandoffTarget: Boolean(executorTransitionAssignee),
-        hasTrustedNewComment
+        effectiveGate,
+        hasExecutorHandoffTarget: Boolean(executorTransitionAssignee)
       });
       if (
         paperclipIssue.status === 'blocked'
@@ -15191,13 +15664,7 @@ async function synchronizePaperclipPullRequestIssueStatuses(
       ) {
         nextStatus = 'blocked';
       }
-      if (
-        paperclipIssue.status !== nextStatus
-        && remoteAction.fingerprint === remoteActionFingerprint
-        && !hasTrustedNewComment
-      ) {
-        nextStatus = paperclipIssue.status;
-      }
+
       const shouldPreserveMaintainerWaitRouting = isHealthyMaintainerWaitTransition({
         currentStatus: paperclipIssue.status,
         nextStatus,
@@ -15208,7 +15675,8 @@ async function synchronizePaperclipPullRequestIssueStatuses(
         currentStatus: paperclipIssue.status,
         nextStatus,
         syncContext: paperclipIssueSyncContext,
-        advancedSettings
+        advancedSettings,
+        followThroughAssigneeAgentId: transitionFollowThroughAssigneeAgentId
       });
       const shouldClearTransitionAssignee =
         nextStatus === 'in_review'
@@ -15217,13 +15685,35 @@ async function synchronizePaperclipPullRequestIssueStatuses(
         ? !doesPaperclipIssueAssigneeMatch(paperclipIssueSyncContext.assignee, nextTransitionAssignee.principal)
         : false;
       const shouldWakeTransitionAssignee =
-        paperclipIssue.status !== nextStatus
-        && nextTransitionAssignee?.principal.kind === 'agent'
+        nextTransitionAssignee?.principal.kind === 'agent'
         && isActionablePaperclipIssueStatus(nextStatus)
         && (nextAssigneeChanged || paperclipIssue.status !== nextStatus);
 
       if (paperclipIssue.status === nextStatus) {
-        if (shouldClearTransitionAssignee || shouldClearCompletedExecutionPolicy) {
+        if (
+          shouldWakeTransitionAssignee
+          && nextTransitionAssignee?.principal.kind === 'agent'
+          && !canReservePendingWake(remoteActionRegistry, remoteAction)
+        ) {
+          throw new Error(
+            `Remote action registry pending-wake capacity ${MAX_REMOTE_ACTION_REGISTRY_RECORDS} reached; refusing an untracked assignment update`
+          );
+        }
+        const pendingWake = shouldWakeTransitionAssignee && nextTransitionAssignee?.principal.kind === 'agent'
+          ? reuseOrCreatePendingWake(remoteAction.pendingWake, {
+              assigneeAgentId: nextTransitionAssignee.principal.id,
+              reason: STATUS_TRANSITION_WAKE_REASON,
+              mutation: 'status_transition',
+              previousStatus: paperclipIssue.status,
+              nextStatus
+            }, createWakeFingerprint)
+          : undefined;
+        if (pendingWake) {
+          remoteAction.pendingWake = pendingWake;
+          await persistRemoteActionRegistry();
+          remoteAction = remoteActionRegistry.find((record) => record.key === remoteActionKey) ?? remoteAction;
+        }
+        if (shouldClearTransitionAssignee || shouldClearCompletedExecutionPolicy || nextAssigneeChanged) {
           updateSyncFailureContext(syncFailureContext, {
             phase: 'updating_paperclip_status',
             repositoryUrl: primaryRepository?.url,
@@ -15235,6 +15725,7 @@ async function synchronizePaperclipPullRequestIssueStatuses(
             currentStatus: paperclipIssue.status,
             syncContext: paperclipIssueSyncContext,
             nextStatus,
+            ...(nextAssigneeChanged && nextTransitionAssignee ? { nextAssignee: nextTransitionAssignee.principal } : {}),
             ...(shouldClearTransitionAssignee ? { clearAssignee: true } : {}),
             ...(shouldPreserveMaintainerWaitRouting || shouldClearCompletedExecutionPolicy ? { clearExecutionPolicy: true } : {}),
             transitionComment: '',
@@ -15245,7 +15736,29 @@ async function synchronizePaperclipPullRequestIssueStatuses(
 
         remoteAction.fingerprint = remoteActionFingerprint;
         remoteAction.linkedPullRequestCommentCounts = currentCommentCounts;
+        remoteAction.selectedPullRequestGate = effectiveGate
+          ? { repositoryUrl: effectiveGate.repositoryUrl, number: effectiveGate.number }
+          : undefined;
+        if (pendingWake) remoteAction.pendingWake = pendingWake;
         await persistRemoteActionRegistry();
+        if (pendingWake) {
+          queuedIssueWakeups.push({
+            assigneeAgentId: pendingWake.assigneeAgentId,
+            paperclipIssueId,
+            reason: pendingWake.reason,
+            mutation: 'status_transition',
+            actionFingerprint: pendingWake.fingerprint,
+            previousStatus: pendingWake.previousStatus,
+            nextStatus: pendingWake.nextStatus,
+            onSuccess: async () => {
+              const persistedRemoteAction = remoteActionRegistry.find((record) => record.key === remoteActionKey);
+              if (persistedRemoteAction?.pendingWake?.fingerprint === pendingWake.fingerprint) {
+                delete persistedRemoteAction.pendingWake;
+                await persistRemoteActionRegistry();
+              }
+            }
+          });
+        }
         continue;
       }
 
@@ -15262,11 +15775,25 @@ async function synchronizePaperclipPullRequestIssueStatuses(
       if (
         shouldWakeTransitionAssignee
         && nextTransitionAssignee?.principal.kind === 'agent'
-        && remoteActionRegistry.filter((record) => record.pendingWake).length >= MAX_REMOTE_ACTION_REGISTRY_RECORDS
+        && !canReservePendingWake(remoteActionRegistry, remoteAction)
       ) {
         throw new Error(
           `Remote action registry pending-wake capacity ${MAX_REMOTE_ACTION_REGISTRY_RECORDS} reached; refusing an untracked status transition`
         );
+      }
+      const pendingWake = shouldWakeTransitionAssignee && nextTransitionAssignee?.principal.kind === 'agent'
+        ? reuseOrCreatePendingWake(remoteAction.pendingWake, {
+            assigneeAgentId: nextTransitionAssignee.principal.id,
+            reason: STATUS_TRANSITION_WAKE_REASON,
+            mutation: 'status_transition',
+            previousStatus: paperclipIssue.status,
+            nextStatus
+          }, createWakeFingerprint)
+        : undefined;
+      if (pendingWake) {
+        remoteAction.pendingWake = pendingWake;
+        await persistRemoteActionRegistry();
+        remoteAction = remoteActionRegistry.find((record) => record.key === remoteActionKey) ?? remoteAction;
       }
       await updatePaperclipIssueState(ctx, {
         companyId: mapping.companyId,
@@ -15281,18 +15808,11 @@ async function synchronizePaperclipPullRequestIssueStatuses(
         actionFingerprint: actionJournalFingerprint,
         paperclipApiBaseUrl
       });
-      const pendingWake = shouldWakeTransitionAssignee && nextTransitionAssignee?.principal.kind === 'agent'
-        ? {
-            fingerprint: remoteActionFingerprint,
-            assigneeAgentId: nextTransitionAssignee.principal.id,
-            reason: STATUS_TRANSITION_WAKE_REASON,
-            mutation: 'status_transition',
-            previousStatus: paperclipIssue.status,
-            nextStatus
-          } satisfies PendingRemoteActionWake
-        : undefined;
       remoteAction.fingerprint = remoteActionFingerprint;
       remoteAction.linkedPullRequestCommentCounts = currentCommentCounts;
+      remoteAction.selectedPullRequestGate = effectiveGate
+        ? { repositoryUrl: effectiveGate.repositoryUrl, number: effectiveGate.number }
+        : undefined;
       if (pendingWake) remoteAction.pendingWake = pendingWake;
       await persistRemoteActionRegistry();
       updatedStatusesCount += 1;
@@ -15307,8 +15827,9 @@ async function synchronizePaperclipPullRequestIssueStatuses(
           previousStatus: pendingWake.previousStatus,
           nextStatus: pendingWake.nextStatus,
           onSuccess: async () => {
-            if (remoteAction.pendingWake?.fingerprint === pendingWake.fingerprint) {
-              delete remoteAction.pendingWake;
+            const persistedRemoteAction = remoteActionRegistry.find((record) => record.key === remoteActionKey);
+            if (persistedRemoteAction?.pendingWake?.fingerprint === pendingWake.fingerprint) {
+              delete persistedRemoteAction.pendingWake;
               await persistRemoteActionRegistry();
             }
           }
@@ -15327,7 +15848,7 @@ async function synchronizePaperclipPullRequestIssueStatuses(
     queuedIssueWakeups,
     IMPORTED_ISSUE_WAKEUP_CONCURRENCY,
     async (queuedWakeup) => {
-      await wakePaperclipIssueAssignee(ctx, {
+      const admitted = await wakePaperclipIssueAssignee(ctx, {
         assigneeAgentId: queuedWakeup.assigneeAgentId,
         paperclipIssueId: queuedWakeup.paperclipIssueId,
         companyId: mapping.companyId,
@@ -15338,7 +15859,7 @@ async function synchronizePaperclipPullRequestIssueStatuses(
         previousStatus: queuedWakeup.previousStatus,
         nextStatus: queuedWakeup.nextStatus
       });
-      await queuedWakeup.onSuccess?.();
+      if (admitted) await queuedWakeup.onSuccess?.();
     }
   );
 
@@ -16097,13 +16618,16 @@ async function handleCompanyMetricApiRoute(
   let linkedRepository: ParsedRepositoryReference | null = null;
   let linkedPullRequestNumber: number | undefined;
   let linkedPullRequestUrl: string | undefined;
+  let linkedFollowThroughAssigneeAgentId: string | undefined;
+  let linkedFollowThroughAssigneeUpdatedAt: string | undefined;
   if (paperclipIssueId) {
     const linkResult = await linkPaperclipIssueToGitHubPullRequest(ctx, {
       companyId,
       issueId: paperclipIssueId,
       repositoryUrl: repository?.url,
       pullRequestNumber,
-      pullRequestUrl
+      pullRequestUrl,
+      followThroughAssigneeAgentId: payload.followThroughAssigneeAgentId
     });
     linkedPaperclipIssueId =
       typeof linkResult.paperclipIssueId === 'string' ? linkResult.paperclipIssueId : paperclipIssueId;
@@ -16111,6 +16635,8 @@ async function handleCompanyMetricApiRoute(
     linkedRepository = resultRepositoryUrl ? parseRepositoryReference(resultRepositoryUrl) : null;
     linkedPullRequestNumber = normalizeToolPositiveInteger(linkResult.githubPullRequestNumber);
     linkedPullRequestUrl = normalizeGitHubPullRequestHtmlUrl(normalizeOptionalString(linkResult.githubPullRequestUrl));
+    linkedFollowThroughAssigneeAgentId = normalizeOptionalString(linkResult.followThroughAssigneeAgentId);
+    linkedFollowThroughAssigneeUpdatedAt = normalizeOptionalString(linkResult.followThroughAssigneeUpdatedAt);
   }
 
   const metricRepositoryUrl = repository?.url ?? linkedRepository?.url;
@@ -16170,7 +16696,13 @@ async function handleCompanyMetricApiRoute(
       recorded: recordedMetric.recorded,
       companyId,
       metric: 'pull_request_created',
-      ...(linkedPaperclipIssueId ? { paperclipIssueId: linkedPaperclipIssueId } : {})
+      ...(linkedPaperclipIssueId ? { paperclipIssueId: linkedPaperclipIssueId } : {}),
+      ...(linkedFollowThroughAssigneeAgentId
+        ? { followThroughAssigneeAgentId: linkedFollowThroughAssigneeAgentId }
+        : {}),
+      ...(linkedFollowThroughAssigneeUpdatedAt
+        ? { followThroughAssigneeUpdatedAt: linkedFollowThroughAssigneeUpdatedAt }
+        : {})
     }
   };
 }
@@ -19397,6 +19929,11 @@ async function createProjectPullRequestPaperclipIssue(
   }
 
   const scope = await requireProjectPullRequestScope(ctx, input);
+  const followThroughAssigneeAgentId = await validateFollowThroughAssigneeAgentId(
+    ctx,
+    scope.companyId,
+    input.followThroughAssigneeAgentId
+  );
   const octokit = await createGitHubToolOctokit(ctx, scope.companyId);
   const pullRequestResponse = await octokit.rest.pulls.get({
     owner: scope.repository.owner,
@@ -19408,29 +19945,89 @@ async function createProjectPullRequestPaperclipIssue(
   });
   const pullRequest = pullRequestResponse.data;
   const pullRequestUrl = pullRequest.html_url;
-  const existingLinks = await listGitHubPullRequestLinkRecords(ctx, {
-    externalId: pullRequestUrl
+  const pullRequestState = getPullRequestApiState({
+    state: pullRequest.state,
+    merged: pullRequest.merged
+  }) === 'open'
+    ? 'open'
+    : 'closed';
+  const pullRequestReferenceKey = buildGitHubPullRequestReferenceKey({
+    repositoryUrl: scope.repository.url,
+    number: pullRequestNumber
   });
-  const existingLink = existingLinks.find((record) =>
-    record.data.githubPullRequestNumber === pullRequestNumber &&
-    record.data.repositoryUrl === scope.repository.url &&
-    (!record.data.companyId || record.data.companyId === scope.companyId) &&
-    (!record.data.paperclipProjectId || record.data.paperclipProjectId === scope.projectId)
-  );
-  const existingIssue = existingLink
-    ? await ctx.issues.get(existingLink.paperclipIssueId, scope.companyId)
-    : null;
+  const creationLockKey = `hosted-create:${scope.companyId}:${scope.projectId}:${pullRequestReferenceKey}`;
 
-  if (existingLink && existingIssue) {
-    return {
-      paperclipIssueId: existingIssue.id,
-      ...(existingIssue.identifier ? { paperclipIssueKey: existingIssue.identifier } : {}),
-      alreadyLinked: true
+  return withPullRequestLinkMutationLock(creationLockKey, async () => {
+    const sortMatchingLinks = (records: GitHubPullRequestLinkRecord[]) => records
+      .filter((record) =>
+        record.data.githubPullRequestNumber === pullRequestNumber &&
+        buildGitHubPullRequestReferenceKey({
+          repositoryUrl: record.data.repositoryUrl,
+          number: record.data.githubPullRequestNumber
+        }) === pullRequestReferenceKey
+      )
+      .sort((left, right) =>
+        left.paperclipIssueId.localeCompare(right.paperclipIssueId) ||
+        (left.externalId ?? '').localeCompare(right.externalId ?? '')
+      );
+    const findReusableLinkedIssue = async (records: GitHubPullRequestLinkRecord[]) => {
+      for (const link of sortMatchingLinks(records)) {
+        const issue = await ctx.issues.get(link.paperclipIssueId, scope.companyId);
+        if (issue?.companyId === scope.companyId && issue.projectId === scope.projectId) {
+          return { link, issue };
+        }
+      }
+      return null;
     };
-  }
+    const exactLinks = await listGitHubPullRequestLinkRecords(ctx, {
+      externalId: pullRequestUrl
+    });
+    const linkedMatch = await findReusableLinkedIssue(exactLinks)
+      ?? await findReusableLinkedIssue(await listGitHubPullRequestLinkRecords(ctx));
+    const existingLink = linkedMatch?.link ?? null;
+    const existingIssue = linkedMatch?.issue ?? null;
+    const recoveredOriginIssue = existingIssue
+      ? null
+      : (await listPaperclipIssuesForProject(ctx, scope.companyId, scope.projectId)).find((issue) => {
+          const originLink = resolvePaperclipIssueOriginGitHubPullRequestLink(issue);
+          if (!originLink) {
+            return false;
+          }
+          return buildGitHubPullRequestReferenceKey({
+            repositoryUrl: originLink.repositoryUrl,
+            number: originLink.githubPullRequestNumber
+          }) === pullRequestReferenceKey;
+        }) ?? null;
+    const reusableIssue = existingIssue ?? recoveredOriginIssue;
 
-  const requestedTitle = typeof input.title === 'string' && input.title.trim() ? input.title.trim() : pullRequest.title.trim();
-  const createdIssue = await ensurePaperclipIssueStandardWorkMode(
+    if (reusableIssue) {
+      const persistedLink = await upsertGitHubPullRequestLinkRecord(ctx, {
+        companyId: scope.companyId,
+        projectId: scope.projectId,
+        issueId: reusableIssue.id,
+        repositoryUrl: scope.repository.url,
+        pullRequestNumber,
+        pullRequestUrl,
+        pullRequestTitle: pullRequest.title,
+        pullRequestState,
+        followThroughAssigneeAgentId
+      });
+      invalidateProjectPullRequestCaches(scope);
+      return {
+        paperclipIssueId: reusableIssue.id,
+        ...(reusableIssue.identifier ? { paperclipIssueKey: reusableIssue.identifier } : {}),
+        ...(persistedLink.followThroughAssigneeAgentId
+          ? { followThroughAssigneeAgentId: persistedLink.followThroughAssigneeAgentId }
+          : {}),
+        ...(persistedLink.followThroughAssigneeUpdatedAt
+          ? { followThroughAssigneeUpdatedAt: persistedLink.followThroughAssigneeUpdatedAt }
+          : {}),
+        alreadyLinked: Boolean(existingLink && existingIssue)
+      };
+    }
+
+    const requestedTitle = typeof input.title === 'string' && input.title.trim() ? input.title.trim() : pullRequest.title.trim();
+    const createdIssue = await ensurePaperclipIssueStandardWorkMode(
     ctx,
     await ctx.issues.create({
       companyId: scope.companyId,
@@ -19450,7 +20047,7 @@ async function createProjectPullRequestPaperclipIssue(
   );
   const resolvedIssue = await ctx.issues.get(createdIssue.id, scope.companyId) ?? createdIssue;
 
-  await upsertGitHubPullRequestLinkRecord(ctx, {
+  const persistedLink = await upsertGitHubPullRequestLinkRecord(ctx, {
     companyId: scope.companyId,
     projectId: scope.projectId,
     issueId: resolvedIssue.id,
@@ -19458,20 +20055,23 @@ async function createProjectPullRequestPaperclipIssue(
     pullRequestNumber,
     pullRequestUrl,
     pullRequestTitle: pullRequest.title,
-    pullRequestState: getPullRequestApiState({
-      state: pullRequest.state,
-      merged: pullRequest.merged
-    }) === 'open'
-      ? 'open'
-      : 'closed'
+    pullRequestState,
+    followThroughAssigneeAgentId
   });
   invalidateProjectPullRequestCaches(scope);
 
   return {
     paperclipIssueId: resolvedIssue.id,
     ...(resolvedIssue.identifier ? { paperclipIssueKey: resolvedIssue.identifier } : {}),
-    alreadyLinked: false
-  };
+    ...(persistedLink.followThroughAssigneeAgentId
+      ? { followThroughAssigneeAgentId: persistedLink.followThroughAssigneeAgentId }
+      : {}),
+      ...(persistedLink.followThroughAssigneeUpdatedAt
+        ? { followThroughAssigneeUpdatedAt: persistedLink.followThroughAssigneeUpdatedAt }
+        : {}),
+      alreadyLinked: false
+    };
+  });
 }
 
 async function refreshProjectPullRequests(
@@ -22014,7 +22614,40 @@ function registerGitHubAgentTools(ctx: PluginSetupContext): void {
     getGitHubAgentToolDeclaration('update_issue'),
     async (params, runCtx) => executeTrackedGitHubMutation(ctx, 'update_issue', params, runCtx, async () => {
       const input = getToolInputRecord(params);
+      const state = input.state === 'open' || input.state === 'closed' ? input.state : undefined;
+      const stateReason = input.stateReason === 'completed'
+        || input.stateReason === 'not_planned'
+        || input.stateReason === 'duplicate'
+        || input.stateReason === 'reopened'
+        ? input.stateReason as GitHubIssueMutationStateReason
+        : undefined;
+      const stateReasonRequested = Object.prototype.hasOwnProperty.call(input, 'stateReason');
+      const duplicateIssueNumberRequested = Object.prototype.hasOwnProperty.call(input, 'duplicateIssueNumber');
+      const duplicateIssueNumber = duplicateIssueNumberRequested
+        ? normalizeToolPositiveInteger(input.duplicateIssueNumber)
+        : undefined;
+      if (stateReasonRequested && !stateReason) {
+        throw new Error('stateReason must be completed, not_planned, duplicate, or reopened.');
+      }
+      if (stateReason && !state) {
+        throw new Error('stateReason requires state.');
+      }
+      if (stateReason === 'reopened' && state !== 'open') {
+        throw new Error('stateReason reopened requires state=open.');
+      }
+      if (stateReason && stateReason !== 'reopened' && state !== 'closed') {
+        throw new Error(`stateReason ${stateReason} requires state=closed.`);
+      }
+      if (stateReason === 'duplicate' && duplicateIssueNumber === undefined) {
+        throw new Error('stateReason duplicate requires duplicateIssueNumber.');
+      }
+      if (duplicateIssueNumberRequested && stateReason !== 'duplicate') {
+        throw new Error('duplicateIssueNumber requires stateReason=duplicate.');
+      }
       const target = await resolveGitHubIssueToolTarget(ctx, runCtx, input);
+      if (duplicateIssueNumber === target.issueNumber) {
+        throw new Error('An issue cannot be marked as a duplicate of itself.');
+      }
       const octokit = await createAgentToolOctokit(runCtx, 'update_issue', target.repository);
       const currentResponse = await octokit.rest.issues.get({
         owner: target.repository.owner,
@@ -22046,7 +22679,6 @@ function registerGitHubAgentTools(ctx: PluginSetupContext): void {
       const body = Object.prototype.hasOwnProperty.call(input, 'body') && typeof input.body === 'string'
         ? appendOptionalAiAuthorshipFooter(input.body, 'issue description', llmModel)
         : undefined;
-      const state = input.state === 'open' || input.state === 'closed' ? input.state : undefined;
       const milestoneNumber = Object.prototype.hasOwnProperty.call(input, 'milestoneNumber')
         ? input.milestoneNumber === null
           ? null
@@ -22055,6 +22687,27 @@ function registerGitHubAgentTools(ctx: PluginSetupContext): void {
 
       const milestoneRequested = Object.prototype.hasOwnProperty.call(input, 'milestoneNumber');
       const currentMilestoneNumber = currentIssue.milestone?.number ?? null;
+      const currentStateReason = normalizeGitHubIssueStateReason((currentIssue as GitHubApiIssueRecord).state_reason);
+      if (
+        stateReason
+        && state === currentIssue.state
+        && state === 'closed'
+        && stateReason !== currentStateReason
+      ) {
+        throw new Error(
+          `GitHub only applies stateReason when state changes; reopen issue #${target.issueNumber} before closing it as ${stateReason}.`
+        );
+      }
+      if (
+        stateReason === 'duplicate'
+        && state === currentIssue.state
+        && currentStateReason === 'duplicate'
+      ) {
+        throw new Error(
+          `GitHub does not expose the current canonical duplicate target; reopen issue #${target.issueNumber} before marking it as a duplicate again.`
+        );
+      }
+      const effectiveStateReason = state === currentIssue.state ? currentStateReason : stateReason;
       const hasChanges =
         (title !== undefined && title !== currentIssue.title) ||
         (body !== undefined && body !== (currentIssue.body ?? '')) ||
@@ -22063,6 +22716,16 @@ function registerGitHubAgentTools(ctx: PluginSetupContext): void {
         !sameNamedValues(nextLabels, currentLabels) ||
         !sameNamedValues(nextAssignees, currentAssignees);
 
+      const duplicateIssueId = hasChanges && stateReason === 'duplicate' && duplicateIssueNumber !== undefined
+        ? (await octokit.rest.issues.get({
+            owner: target.repository.owner,
+            repo: target.repository.repo,
+            issue_number: duplicateIssueNumber,
+            headers: {
+              'X-GitHub-Api-Version': GITHUB_API_VERSION
+            }
+          })).data.id
+        : undefined;
       const updatedResponse = hasChanges
         ? await octokit.rest.issues.update({
             owner: target.repository.owner,
@@ -22071,6 +22734,8 @@ function registerGitHubAgentTools(ctx: PluginSetupContext): void {
             ...(title !== undefined ? { title } : {}),
             ...(body !== undefined ? { body } : {}),
             ...(state ? { state } : {}),
+            ...(stateReason ? { state_reason: stateReason } : {}),
+            ...(duplicateIssueId !== undefined ? { duplicate_issue_id: duplicateIssueId } : {}),
             ...(milestoneRequested ? { milestone: milestoneNumber } : {}),
             labels: nextLabels,
             assignees: nextAssignees,
@@ -22093,7 +22758,7 @@ function registerGitHubAgentTools(ctx: PluginSetupContext): void {
             body: updatedIssue.body,
             url: updatedIssue.htmlUrl,
             state: updatedIssue.state,
-            stateReason: updatedIssue.stateReason,
+            stateReason: updatedIssue.stateReason ?? effectiveStateReason,
             labels: normalizeGitHubIssueLabels((updatedResponse.data as GitHubApiIssueRecord).labels),
             assignees: (updatedResponse.data.assignees ?? []).map((assignee) => assignee?.login ?? '').filter(Boolean),
             milestone: updatedResponse.data.milestone
@@ -22235,6 +22900,11 @@ function registerGitHubAgentTools(ctx: PluginSetupContext): void {
       if (!issue) {
         throw new Error('Paperclip issue was not found.');
       }
+      const followThroughAssigneeAgentId = await validateFollowThroughAssigneeAgentId(
+        ctx,
+        runCtx.companyId,
+        input.followThroughAssigneeAgentId
+      );
       const issueProjectId = normalizeOptionalToolString(issue.projectId);
       if (!issueProjectId || issueProjectId !== runCtx.projectId) {
         throw new Error('The selected Paperclip issue does not belong to the current tool run project.');
@@ -22355,12 +23025,14 @@ function registerGitHubAgentTools(ctx: PluginSetupContext): void {
         pullRequestData = existingPullRequest;
       }
 
+      let persistedFollowThroughAssigneeAgentId = followThroughAssigneeAgentId ?? undefined;
+      let persistedFollowThroughAssigneeUpdatedAt: string | undefined;
       if (paperclipIssueId) {
         const pullRequestUrl =
           normalizeGitHubPullRequestHtmlUrl(pullRequestData.html_url)
           ?? `${repository.url}/pull/${pullRequestData.number}`;
 
-        await upsertGitHubPullRequestLinkRecord(ctx, {
+        const persistedLink = await upsertGitHubPullRequestLinkRecord(ctx, {
           companyId: runCtx.companyId,
           projectId: issueProjectId,
           issueId: paperclipIssueId,
@@ -22371,8 +23043,11 @@ function registerGitHubAgentTools(ctx: PluginSetupContext): void {
           pullRequestState: getGitHubPullRequestStateForLink({
             state: pullRequestData.state,
             merged: false
-          })
+          }),
+          followThroughAssigneeAgentId
         });
+        persistedFollowThroughAssigneeAgentId = persistedLink.followThroughAssigneeAgentId;
+        persistedFollowThroughAssigneeUpdatedAt = persistedLink.followThroughAssigneeUpdatedAt;
         invalidateProjectPullRequestCaches({
           companyId: runCtx.companyId,
           projectId: issueProjectId,
@@ -22403,6 +23078,14 @@ function registerGitHubAgentTools(ctx: PluginSetupContext): void {
             commitSha: publishedBranch.commitSha,
             remoteRef: publishedBranch.remoteRef
           },
+          ...(persistedFollowThroughAssigneeAgentId
+            ? {
+                followThroughAssigneeAgentId: persistedFollowThroughAssigneeAgentId,
+                ...(persistedFollowThroughAssigneeUpdatedAt
+                  ? { followThroughAssigneeUpdatedAt: persistedFollowThroughAssigneeUpdatedAt }
+                  : {})
+              }
+            : {}),
           pullRequest: {
             number: pullRequestData.number,
             title: pullRequestData.title,
@@ -22991,7 +23674,8 @@ function registerGitHubAgentTools(ctx: PluginSetupContext): void {
             repositoryUrl: normalizeOptionalToolString(input.repository),
             pullRequestNumber: input.pullRequestNumber,
             pullRequestUrl: input.pullRequestUrl,
-            allowUnmapped: true
+            allowUnmapped: true,
+            followThroughAssigneeAgentId: input.followThroughAssigneeAgentId
           });
 
       const itemLabel = kind === 'issue'
@@ -23035,6 +23719,7 @@ export function shouldStartWorkerHost(moduleUrl: string, entry = process.argv[1]
 export const __testing = {
   buildDirectPullRequestActionFingerprint,
   buildRemoteActionFingerprint,
+  canReservePendingWake,
   canonicalizeGitHubPullRequestCommentCounts,
   buildSyncFallbackExecutionStatePatch,
   createGitHubToolOctokit,
@@ -23042,17 +23727,24 @@ export const __testing = {
   hasUnresolvedPaperclipIssueBlocker,
   isHealthyMaintainerWaitTransition,
   isPaperclipIssuePatchApplied,
+  listTrustedNewLinkedPullRequestCommentSources,
   normalizePaperclipIssueAssigneePrincipal,
   normalizeImportRegistry,
   normalizeRemoteActionRegistry,
   persistIssueInteractionEvent,
   trackedMutationOutcome,
+  selectHighestPriorityEffectivePullRequestGate,
+  selectEffectiveDirectPullRequestGate,
+  selectEffectiveIssueLinkedPullRequestAction,
+  selectEffectiveIssueLinkedPullRequestGate,
   resolvePaperclipApiAuthTokens,
   resolveGithubToken,
+  resolvePaperclipIssueStatus,
   resolvePaperclipPullRequestIssueStatus,
   resolveSyncTransitionAssignee,
   resolveTrustedWorkspacePath,
   updatePaperclipIssueState,
+  upsertGitHubPullRequestLinkRecord,
   wakePaperclipIssueAssignee,
   setCreatePullRequestBranchPublisher(
     publisher?: CreatePullRequestBranchPublisher
@@ -23204,7 +23896,8 @@ const plugin = definePlugin({
             repositoryUrl: normalizeOptionalString(record.repository),
             pullRequestNumber: record.pullRequestNumber,
             pullRequestUrl: record.pullRequestUrl,
-            requireUnlinked: true
+            requireUnlinked: true,
+            followThroughAssigneeAgentId: record.followThroughAssigneeAgentId
           });
     });
 

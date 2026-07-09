@@ -15,6 +15,11 @@ const paperclipIssueIdProperty = {
   description: 'Paperclip issue id used to infer the linked GitHub issue and repository when available.'
 } as const;
 
+const followThroughAssigneeAgentIdProperty = {
+  type: ['string', 'null'],
+  description: 'Optional durable Paperclip agent owner for actionable follow-through on this linked pull request. The agent must belong to the authenticated company. Pass null to clear an existing owner.'
+} as const;
+
 const issueNumberProperty = {
   type: 'integer',
   minimum: 1,
@@ -158,7 +163,7 @@ export const GITHUB_AGENT_TOOLS: PluginToolDeclaration[] = [
   {
     name: 'update_issue',
     displayName: 'Update Issue',
-    description: 'Update GitHub issue fields such as title, body, state, labels, assignees, or milestone. When a non-empty body is provided, the plugin appends an AI-authorship footer and includes llmModel when supplied.',
+    description: 'Update GitHub issue fields such as title, body, state, closure reason, labels, assignees, or milestone. When a non-empty body is provided, the plugin appends an AI-authorship footer and includes llmModel when supplied.',
     parametersSchema: {
       type: 'object',
       additionalProperties: false,
@@ -178,6 +183,16 @@ export const GITHUB_AGENT_TOOLS: PluginToolDeclaration[] = [
         state: {
           type: 'string',
           enum: ['open', 'closed']
+        },
+        stateReason: {
+          type: 'string',
+          enum: ['completed', 'not_planned', 'duplicate', 'reopened'],
+          description: 'Native GitHub state reason. Use completed, not_planned, or duplicate with state=closed; use reopened with state=open.'
+        },
+        duplicateIssueNumber: {
+          type: 'integer',
+          minimum: 1,
+          description: 'Canonical issue number in the same repository. Required only when stateReason=duplicate.'
         },
         setLabels: {
           type: 'array',
@@ -281,6 +296,7 @@ export const GITHUB_AGENT_TOOLS: PluginToolDeclaration[] = [
           type: 'string',
           description: 'Paperclip issue id used to resolve the trusted execution workspace and durable pull-request link.'
         },
+        followThroughAssigneeAgentId: followThroughAssigneeAgentIdProperty,
         head: {
           type: 'string',
           description: 'Plain local branch name to publish. Owner-qualified branches and arbitrary refspecs are rejected.'
@@ -644,7 +660,8 @@ export const GITHUB_AGENT_TOOLS: PluginToolDeclaration[] = [
         pullRequestUrl: {
           type: 'string',
           description: 'Full GitHub pull request URL.'
-        }
+        },
+        followThroughAssigneeAgentId: followThroughAssigneeAgentIdProperty
       }
     }
   },
