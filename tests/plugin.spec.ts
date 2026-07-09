@@ -4262,6 +4262,57 @@ test('update_issue resolves duplicateIssueNumber to GitHub duplicate_issue_id', 
   }
 });
 
+test('update_issue refuses to guess an already-closed duplicate target', async () => {
+  const harness = await createGitHubAgentToolHarness();
+  const originalFetch = globalThis.fetch;
+  let fetchCalls = 0;
+  let patchCalls = 0;
+
+  globalThis.fetch = async (input, init) => {
+    fetchCalls += 1;
+    const url = new URL(getRequestUrl(input));
+    if (init?.method === 'PATCH') {
+      patchCalls += 1;
+    }
+    if (url.pathname === '/repos/paperclipai/example-repo/issues/12' && init?.method !== 'PATCH') {
+      return jsonResponse({
+        id: 1200,
+        number: 12,
+        title: 'Duplicate importer bug',
+        body: '',
+        html_url: 'https://github.com/paperclipai/example-repo/issues/12',
+        state: 'closed',
+        state_reason: 'duplicate',
+        comments: 0,
+        user: { login: 'octocat' },
+        assignees: [],
+        labels: [],
+        milestone: null
+      });
+    }
+    throw new Error(`Unexpected GitHub request: ${url.toString()}`);
+  };
+
+  try {
+    const result = await harness.executeTool('update_issue', {
+      issueNumber: 12,
+      title: 'Retitled duplicate',
+      state: 'closed',
+      stateReason: 'duplicate',
+      duplicateIssueNumber: 99
+    }, {
+      companyId: 'company-1',
+      projectId: 'project-1'
+    });
+
+    assert.match(result.error ?? '', /does not expose the current canonical duplicate target/i);
+    assert.equal(fetchCalls, 1);
+    assert.equal(patchCalls, 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test('update_issue rejects incompatible state reasons before GitHub access', async () => {
   const harness = await createGitHubAgentToolHarness();
   const originalFetch = globalThis.fetch;

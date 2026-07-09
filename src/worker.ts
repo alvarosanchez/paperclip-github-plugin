@@ -22690,6 +22690,15 @@ function registerGitHubAgentTools(ctx: PluginSetupContext): void {
           `GitHub only applies stateReason when state changes; reopen issue #${target.issueNumber} before closing it as ${stateReason}.`
         );
       }
+      if (
+        stateReason === 'duplicate'
+        && state === currentIssue.state
+        && currentStateReason === 'duplicate'
+      ) {
+        throw new Error(
+          `GitHub does not expose the current canonical duplicate target; reopen issue #${target.issueNumber} before marking it as a duplicate again.`
+        );
+      }
       const effectiveStateReason = state === currentIssue.state ? currentStateReason : stateReason;
       const hasChanges =
         (title !== undefined && title !== currentIssue.title) ||
