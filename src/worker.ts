@@ -13864,11 +13864,15 @@ async function updatePaperclipIssueState(
   if (statusWillChange) {
     const commentIntentKey = `${interactionDedupeBase}:comment:intent`;
     const commentChangedKey = `${interactionDedupeBase}:comment:result:changed`;
+    const commentFailedBeforeReturnKey = `${interactionDedupeBase}:comment:result:failed-before-return`;
     const priorCommentIntent = existingInteractionEvents.find((event) => event.dedupeKey === commentIntentKey);
     const priorCommentChanged = existingInteractionEvents.find((event) => event.dedupeKey === commentChangedKey);
+    const priorCommentFailedBeforeReturn = existingInteractionEvents.find(
+      (event) => event.dedupeKey === commentFailedBeforeReturnKey
+    );
     if (priorCommentChanged) {
       transitionCommentComplete = true;
-    } else if (priorCommentIntent) {
+    } else if (priorCommentIntent && !priorCommentFailedBeforeReturn) {
       throw new Error('GitHub Sync refused to repeat an uncertain transition comment; reconcile the durable interaction intent before retrying.');
     } else {
       const commentEventBase = {
@@ -13893,8 +13897,10 @@ async function updatePaperclipIssueState(
         outcome: 'observed',
         dedupeKey: commentIntentKey
       });
+      let commentReturned = false;
       try {
         createdTransitionComment = await ctx.issues.createComment(issueId, trimmedTransitionComment, companyId);
+        commentReturned = true;
         if (transitionCommentAnnotation) {
           await upsertStatusTransitionCommentAnnotation(ctx, {
             issueId,
@@ -13916,7 +13922,9 @@ async function updatePaperclipIssueState(
         await persistIssueInteractionEvent(ctx, {
           ...commentEventBase,
           outcome: 'failed',
-          dedupeKey: `${interactionDedupeBase}:comment:result:failed`
+          dedupeKey: commentReturned
+            ? `${interactionDedupeBase}:comment:result:failed-after-return`
+            : commentFailedBeforeReturnKey
         });
         throw error;
       }

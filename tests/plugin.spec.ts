@@ -25001,8 +25001,18 @@ test('worker does not perform sync-driven status transitions when the explanator
     ]
   );
 
-  harness.ctx.issues.createComment = async () => {
-    throw new Error('Comment bridge unavailable');
+  let failNextComment = true;
+  let commentAttempts = 0;
+  let successfulComments = 0;
+  harness.ctx.issues.createComment = async (...args) => {
+    commentAttempts += 1;
+    if (failNextComment) {
+      failNextComment = false;
+      throw new Error('Comment bridge unavailable');
+    }
+    const comment = await originalCreateComment(...args);
+    successfulComments += 1;
+    return comment;
   };
 
   const originalFetch = globalThis.fetch;
@@ -25073,6 +25083,19 @@ test('worker does not perform sync-driven status transitions when the explanator
     assert.equal(sync.syncState.status, 'error');
     assert.equal(sync.syncState.updatedStatusesCount ?? 0, 0);
     assert.equal((await harness.ctx.issues.get(importedIssue.id, 'company-1'))?.status, 'in_progress');
+    assert.equal(commentAttempts, 1);
+    assert.equal(successfulComments, 0);
+
+    const retry = await harness.performAction('sync.runNow', {
+      waitForCompletion: true
+    }) as {
+      syncState: { status: string; updatedStatusesCount?: number };
+    };
+
+    assert.equal(retry.syncState.status, 'success');
+    assert.equal((await harness.ctx.issues.get(importedIssue.id, 'company-1'))?.status, 'done');
+    assert.equal(commentAttempts, 2);
+    assert.equal(successfulComments, 1);
   } finally {
     harness.ctx.issues.createComment = originalCreateComment;
     globalThis.fetch = originalFetch;
