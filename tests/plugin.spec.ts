@@ -4647,7 +4647,7 @@ test('update_pull_request refreshes the AI footer when updating the pull request
         number: 7,
         title: 'Fix the importer',
         body: updatedBody,
-        html_url: 'https://github.com/paperclipai/example-repo/pull/7',
+        html_url: `https://github.com/paperclipai/example-repo/pull/${pullRequestNumber}`,
         state: 'open',
         draft: false,
         merged: false,
