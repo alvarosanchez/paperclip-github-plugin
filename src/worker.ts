@@ -976,18 +976,7 @@ interface GitHubPullRequestCiContextsQueryResult {
       statusCheckRollup?: {
         contexts?: {
           pageInfo?: GitHubPageInfo | null;
-          nodes?: Array<
-            | {
-                __typename?: 'CheckRun';
-                status?: string | null;
-                conclusion?: string | null;
-              }
-            | {
-                __typename?: 'StatusContext';
-                state?: string | null;
-              }
-            | null
-          > | null;
+          nodes?: Array<GitHubCiContextNode | null> | null;
         } | null;
       } | null;
     } | null;
@@ -1037,18 +1026,7 @@ interface GitHubRepositoryOpenPullRequestStatusesQueryResult {
         statusCheckRollup?: {
           contexts?: {
             pageInfo?: GitHubPageInfo | null;
-            nodes?: Array<
-              | {
-                  __typename?: 'CheckRun';
-                  status?: string | null;
-                  conclusion?: string | null;
-                }
-              | {
-                  __typename?: 'StatusContext';
-                  state?: string | null;
-                }
-              | null
-            > | null;
+            nodes?: Array<GitHubCiContextNode | null> | null;
           } | null;
         } | null;
       } | null> | null;
@@ -1166,10 +1144,32 @@ interface GitHubRequestPullRequestCopilotReviewMutationResult {
 
 interface GitHubCiContextRecord {
   type: 'checkRun' | 'statusContext';
+  identity?: string;
   status?: string;
   conclusion?: string;
   state?: string;
+  startedAt?: string;
+  completedAt?: string;
+  createdAt?: string;
+  updatedAt?: string;
 }
+
+type GitHubCiContextNode =
+  | {
+      __typename?: 'CheckRun';
+      name?: string | null;
+      status?: string | null;
+      conclusion?: string | null;
+      startedAt?: string | null;
+      completedAt?: string | null;
+    }
+  | {
+      __typename?: 'StatusContext';
+      context?: string | null;
+      state?: string | null;
+      createdAt?: string | null;
+      updatedAt?: string | null;
+    };
 
 interface GitHubIssueCommentRecord {
   id: number;
@@ -1424,18 +1424,7 @@ interface GitHubProjectPullRequestsQueryResult {
         statusCheckRollup?: {
           contexts?: {
             pageInfo?: GitHubPageInfo | null;
-            nodes?: Array<
-              | {
-                  __typename?: 'CheckRun';
-                  status?: string | null;
-                  conclusion?: string | null;
-                }
-              | {
-                  __typename?: 'StatusContext';
-                  state?: string | null;
-                }
-              | null
-            > | null;
+            nodes?: Array<GitHubCiContextNode | null> | null;
           } | null;
         } | null;
       } | null> | null;
@@ -1488,18 +1477,7 @@ interface GitHubProjectPullRequestMetricsQueryResult {
         statusCheckRollup?: {
           contexts?: {
             pageInfo?: GitHubPageInfo | null;
-            nodes?: Array<
-              | {
-                  __typename?: 'CheckRun';
-                  status?: string | null;
-                  conclusion?: string | null;
-                }
-              | {
-                  __typename?: 'StatusContext';
-                  state?: string | null;
-                }
-              | null
-            > | null;
+            nodes?: Array<GitHubCiContextNode | null> | null;
           } | null;
         } | null;
       } | null> | null;
@@ -1630,11 +1608,17 @@ const GITHUB_PULL_REQUEST_CI_CONTEXTS_QUERY = `
             nodes {
               __typename
               ... on CheckRun {
+                name
                 status
                 conclusion
+                startedAt
+                completedAt
               }
               ... on StatusContext {
+                context
                 state
+                createdAt
+                updatedAt
               }
             }
           }
@@ -1708,11 +1692,17 @@ const GITHUB_REPOSITORY_OPEN_PULL_REQUEST_STATUSES_QUERY = `
               nodes {
                 __typename
                 ... on CheckRun {
+                  name
                   status
                   conclusion
+                  startedAt
+                  completedAt
                 }
                 ... on StatusContext {
+                  context
                   state
+                  createdAt
+                  updatedAt
                 }
               }
             }
@@ -1804,11 +1794,17 @@ const GITHUB_PROJECT_PULL_REQUEST_INSIGHT_FIELDS = `
               nodes {
                 __typename
                 ... on CheckRun {
+                  name
                   status
                   conclusion
+                  startedAt
+                  completedAt
                 }
                 ... on StatusContext {
+                  context
                   state
+                  createdAt
+                  updatedAt
                 }
               }
             }
@@ -1861,11 +1857,17 @@ const GITHUB_PROJECT_PULL_REQUEST_METRICS_FIELDS = `
               nodes {
                 __typename
                 ... on CheckRun {
+                  name
                   status
                   conclusion
+                  startedAt
+                  completedAt
                 }
                 ... on StatusContext {
+                  context
                   state
+                  createdAt
+                  updatedAt
                 }
               }
             }
@@ -7760,14 +7762,62 @@ function sliceProjectPullRequestNumbers(
   };
 }
 
+function getGitHubCiContextAttemptTimestamp(context: GitHubCiContextRecord): number | undefined {
+  const value = context.completedAt
+    ?? context.updatedAt
+    ?? context.startedAt
+    ?? context.createdAt;
+  if (!value) {
+    return undefined;
+  }
+
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) ? timestamp : undefined;
+}
+
+function getEffectiveGitHubCiContexts(contexts: GitHubCiContextRecord[]): GitHubCiContextRecord[] {
+  const ungroupedContexts: GitHubCiContextRecord[] = [];
+  const latestContexts = new Map<string, { context: GitHubCiContextRecord; timestamp: number }>();
+
+  for (const context of contexts) {
+    const timestamp = getGitHubCiContextAttemptTimestamp(context);
+    if (!context.identity || timestamp === undefined) {
+      // Without both a stable check identity and an ordering timestamp, retaining the
+      // context is safer than accidentally hiding a distinct required check.
+      ungroupedContexts.push(context);
+      continue;
+    }
+
+    const existing = latestContexts.get(context.identity);
+    if (!existing) {
+      latestContexts.set(context.identity, { context, timestamp });
+      continue;
+    }
+
+    if (timestamp > existing.timestamp) {
+      latestContexts.set(context.identity, { context, timestamp });
+      continue;
+    }
+
+    if (timestamp === existing.timestamp) {
+      // GitHub can report separate checks with an equal timestamp. Keep both unless
+      // the API gives us enough ordering evidence to prove one supersedes the other.
+      ungroupedContexts.push(context);
+    }
+  }
+
+  return [...ungroupedContexts, ...[...latestContexts.values()].map(({ context }) => context)];
+}
+
 function classifyGitHubPullRequestCiState(contexts: GitHubCiContextRecord[]): GitHubPullRequestCiState {
-  if (contexts.length === 0) {
+  const effectiveContexts = getEffectiveGitHubCiContexts(contexts);
+  if (effectiveContexts.length === 0) {
     return 'unfinished';
   }
 
   let hasPendingContext = false;
 
-  for (const context of contexts) {
+  for (const context of effectiveContexts) {
     if (context.type === 'statusContext') {
       const state = context.state?.toUpperCase();
       if (!state) {
@@ -9120,18 +9170,7 @@ async function loadLinkedPullRequestsForOpenIssues(
 }
 
 function extractGitHubCiContextRecords(
-  nodes: Array<
-    | {
-        __typename?: 'CheckRun';
-        status?: string | null;
-        conclusion?: string | null;
-      }
-    | {
-        __typename?: 'StatusContext';
-        state?: string | null;
-      }
-    | null
-  >
+  nodes: Array<GitHubCiContextNode | null>
 ): GitHubCiContextRecord[] {
   const contexts: GitHubCiContextRecord[] = [];
 
@@ -9143,8 +9182,13 @@ function extractGitHubCiContextRecords(
     if (node.__typename === 'CheckRun') {
       contexts.push({
         type: 'checkRun',
+        ...(typeof node.name === 'string' && node.name.trim()
+          ? { identity: `checkRun:${node.name.trim()}` }
+          : {}),
         status: node.status ?? undefined,
-        conclusion: node.conclusion ?? undefined
+        conclusion: node.conclusion ?? undefined,
+        startedAt: node.startedAt ?? undefined,
+        completedAt: node.completedAt ?? undefined
       });
       continue;
     }
@@ -9152,7 +9196,12 @@ function extractGitHubCiContextRecords(
     if (node.__typename === 'StatusContext') {
       contexts.push({
         type: 'statusContext',
-        state: node.state ?? undefined
+        ...(typeof node.context === 'string' && node.context.trim()
+          ? { identity: `statusContext:${node.context.trim()}` }
+          : {}),
+        state: node.state ?? undefined,
+        createdAt: node.createdAt ?? undefined,
+        updatedAt: node.updatedAt ?? undefined
       });
     }
   }
@@ -9318,18 +9367,7 @@ function tryBuildGitHubPullRequestStatusSnapshotFromBatchNode(node: {
   statusCheckRollup?: {
     contexts?: {
       pageInfo?: GitHubPageInfo | null;
-      nodes?: Array<
-        | {
-            __typename?: 'CheckRun';
-            status?: string | null;
-            conclusion?: string | null;
-          }
-        | {
-            __typename?: 'StatusContext';
-            state?: string | null;
-          }
-        | null
-      > | null;
+      nodes?: Array<GitHubCiContextNode | null> | null;
     } | null;
   } | null;
 }, repository: ParsedRepositoryReference): GitHubPullRequestStatusSnapshot | null {
@@ -9363,18 +9401,7 @@ function tryBuildGitHubPullRequestCiStateFromBatchNode(node: {
   statusCheckRollup?: {
     contexts?: {
       pageInfo?: GitHubPageInfo | null;
-      nodes?: Array<
-        | {
-            __typename?: 'CheckRun';
-            status?: string | null;
-            conclusion?: string | null;
-          }
-        | {
-            __typename?: 'StatusContext';
-            state?: string | null;
-          }
-        | null
-      > | null;
+      nodes?: Array<GitHubCiContextNode | null> | null;
     } | null;
   } | null;
 }): GitHubPullRequestCiState | null {
@@ -9482,28 +9509,7 @@ async function getGitHubPullRequestCiSnapshot(
     }
 
     const connection = response.repository?.pullRequest?.statusCheckRollup?.contexts;
-    const nodes = connection?.nodes ?? [];
-    for (const node of nodes) {
-      if (!node?.__typename) {
-        continue;
-      }
-
-      if (node.__typename === 'CheckRun') {
-        contexts.push({
-          type: 'checkRun',
-          status: node.status ?? undefined,
-          conclusion: node.conclusion ?? undefined
-        });
-        continue;
-      }
-
-      if (node.__typename === 'StatusContext') {
-        contexts.push({
-          type: 'statusContext',
-          state: node.state ?? undefined
-        });
-      }
-    }
+    contexts.push(...extractGitHubCiContextRecords(connection?.nodes ?? []));
 
     after = getPageCursor(connection?.pageInfo);
   } while (after);

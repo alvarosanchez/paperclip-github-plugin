@@ -4858,13 +4858,67 @@ test('tracked issue mutations attribute linked targets omitted from tool input',
 test('get_pull_request_checks returns CI jobs, status contexts, and workflow runs', async () => {
   const harness = await createGitHubAgentToolHarness();
   const originalFetch = globalThis.fetch;
+  const ciContextsByPullRequest = new Map<number, Array<Record<string, string | null>>>([[7, [
+    {
+      __typename: 'CheckRun',
+      name: 'Application generation UI',
+      status: 'COMPLETED',
+      conclusion: 'FAILURE',
+      startedAt: '2026-04-12T09:00:00Z',
+      completedAt: '2026-04-12T09:10:00Z'
+    },
+    {
+      __typename: 'CheckRun',
+      name: 'Application generation UI',
+      status: 'COMPLETED',
+      conclusion: 'FAILURE',
+      startedAt: '2026-04-12T10:00:00Z',
+      completedAt: '2026-04-12T10:10:00Z'
+    },
+    {
+      __typename: 'CheckRun',
+      name: 'Application generation UI',
+      status: 'COMPLETED',
+      conclusion: 'SUCCESS',
+      startedAt: '2026-04-12T11:00:00Z',
+      completedAt: '2026-04-12T11:10:00Z'
+    }
+  ]], [8, [
+    {
+      __typename: 'CheckRun', name: 'Application generation UI', status: 'COMPLETED', conclusion: 'SUCCESS',
+      startedAt: '2026-04-12T11:00:00Z', completedAt: '2026-04-12T11:10:00Z'
+    },
+    {
+      __typename: 'CheckRun', name: 'Application generation UI', status: 'COMPLETED', conclusion: 'FAILURE',
+      startedAt: '2026-04-12T12:00:00Z', completedAt: '2026-04-12T12:10:00Z'
+    }
+  ]], [9, [
+    {
+      __typename: 'CheckRun', name: 'Application generation UI', status: 'COMPLETED', conclusion: 'FAILURE',
+      startedAt: '2026-04-12T12:00:00Z', completedAt: '2026-04-12T12:10:00Z'
+    },
+    {
+      __typename: 'CheckRun', name: 'Application generation UI', status: 'IN_PROGRESS', conclusion: null,
+      startedAt: '2026-04-12T13:00:00Z', completedAt: null
+    }
+  ]], [10, [
+    {
+      __typename: 'CheckRun', name: 'test (ubuntu)', status: 'COMPLETED', conclusion: 'SUCCESS',
+      startedAt: '2026-04-12T14:00:00Z', completedAt: '2026-04-12T14:10:00Z'
+    },
+    {
+      __typename: 'CheckRun', name: 'test (windows)', status: 'COMPLETED', conclusion: 'FAILURE',
+      startedAt: '2026-04-12T14:00:00Z', completedAt: '2026-04-12T14:10:00Z'
+    }
+  ]]]);
 
   globalThis.fetch = async (input, init) => {
     const url = new URL(getRequestUrl(input));
 
-    if (url.pathname === '/repos/paperclipai/example-repo/pulls/7') {
+    const pullRequestNumber = Number(url.pathname.match(/\/pulls\/(\d+)$/)?.[1]);
+    if ([7, 8, 9, 10].includes(pullRequestNumber)) {
       return jsonResponse({
-        number: 7,
+        number: pullRequestNumber,
         title: 'Fix the importer',
         html_url: 'https://github.com/paperclipai/example-repo/pull/7',
         state: 'open',
@@ -4874,7 +4928,7 @@ test('get_pull_request_checks returns CI jobs, status contexts, and workflow run
         mergeable_state: 'clean',
         head: {
           ref: 'feature/fix-importer',
-          sha: 'abc123'
+          sha: `abc${pullRequestNumber}`
         },
         base: {
           ref: 'main'
@@ -4887,7 +4941,7 @@ test('get_pull_request_checks returns CI jobs, status contexts, and workflow run
       });
     }
 
-    if (url.pathname === '/repos/paperclipai/example-repo/commits/abc123/check-runs') {
+    if (/\/repos\/paperclipai\/example-repo\/commits\/abc(?:7|8|9|10)\/check-runs$/.test(url.pathname)) {
       return jsonResponse({
         total_count: 1,
         check_runs: [
@@ -4907,7 +4961,7 @@ test('get_pull_request_checks returns CI jobs, status contexts, and workflow run
       });
     }
 
-    if (url.pathname === '/repos/paperclipai/example-repo/commits/abc123/status') {
+    if (/\/repos\/paperclipai\/example-repo\/commits\/abc(?:7|8|9|10)\/status$/.test(url.pathname)) {
       return jsonResponse({
         state: 'failure',
         statuses: [
@@ -4924,7 +4978,7 @@ test('get_pull_request_checks returns CI jobs, status contexts, and workflow run
     }
 
     if (url.pathname === '/repos/paperclipai/example-repo/actions/runs') {
-      assert.equal(url.searchParams.get('head_sha'), 'abc123');
+      assert.match(url.searchParams.get('head_sha') ?? '', /^abc(?:7|8|9|10)$/);
       return jsonResponse({
         total_count: 1,
         workflow_runs: [
@@ -4944,7 +4998,7 @@ test('get_pull_request_checks returns CI jobs, status contexts, and workflow run
     }
 
     if (url.pathname === '/graphql') {
-      const { query } = getGraphqlRequest(init);
+      const { query, variables } = getGraphqlRequest(init);
       if (query.includes('query GitHubPullRequestReviewThreads')) {
         return graphqlResponse({
           repository: {
@@ -4987,13 +5041,7 @@ test('get_pull_request_checks returns CI jobs, status contexts, and workflow run
                     hasNextPage: false,
                     endCursor: null
                   },
-                  nodes: [
-                    {
-                      __typename: 'CheckRun',
-                      status: 'COMPLETED',
-                      conclusion: 'FAILURE'
-                    }
-                  ]
+                  nodes: ciContextsByPullRequest.get(variables.pullRequestNumber as number) ?? []
                 }
               }
             }
@@ -5021,11 +5069,26 @@ test('get_pull_request_checks returns CI jobs, status contexts, and workflow run
       statusContexts: Array<{ context: string }>;
       workflowRuns: Array<{ id: number }>;
     };
-    assert.equal(data.ciState, 'red');
+    assert.equal(data.ciState, 'green');
     assert.equal(data.hasUnresolvedReviewThreads, true);
     assert.equal(data.checkRuns[0]?.id, 301);
     assert.equal(data.statusContexts[0]?.context, 'lint');
     assert.equal(data.workflowRuns[0]?.id, 401);
+
+    const newerFailure = await harness.executeTool('get_pull_request_checks', { pullRequestNumber: 8 }, {
+      companyId: 'company-1', projectId: 'project-1'
+    });
+    assert.equal((newerFailure.data as { ciState: string }).ciState, 'red');
+
+    const newerPendingAttempt = await harness.executeTool('get_pull_request_checks', { pullRequestNumber: 9 }, {
+      companyId: 'company-1', projectId: 'project-1'
+    });
+    assert.equal((newerPendingAttempt.data as { ciState: string }).ciState, 'unfinished');
+
+    const distinctMatrixFailure = await harness.executeTool('get_pull_request_checks', { pullRequestNumber: 10 }, {
+      companyId: 'company-1', projectId: 'project-1'
+    });
+    assert.equal((distinctMatrixFailure.data as { ciState: string }).ciState, 'red');
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -9465,7 +9528,24 @@ test('sync.runNow leaves completed direct pull request reviews in an unassigned 
                       nodes: [
                         {
                           __typename: 'StatusContext',
-                          state: 'SUCCESS'
+                          context: 'deployment',
+                          state: 'FAILURE',
+                          createdAt: '2026-04-12T09:00:00Z',
+                          updatedAt: '2026-04-12T09:10:00Z'
+                        },
+                        {
+                          __typename: 'StatusContext',
+                          context: 'deployment',
+                          state: 'FAILURE',
+                          createdAt: '2026-04-12T10:00:00Z',
+                          updatedAt: '2026-04-12T10:10:00Z'
+                        },
+                        {
+                          __typename: 'StatusContext',
+                          context: 'deployment',
+                          state: 'SUCCESS',
+                          createdAt: '2026-04-12T11:00:00Z',
+                          updatedAt: '2026-04-12T11:10:00Z'
                         }
                       ]
                     }
@@ -9509,7 +9589,24 @@ test('sync.runNow leaves completed direct pull request reviews in an unassigned 
                   nodes: [
                     {
                       __typename: 'StatusContext',
-                      state: 'SUCCESS'
+                      context: 'deployment',
+                      state: 'FAILURE',
+                      createdAt: '2026-04-12T09:00:00Z',
+                      updatedAt: '2026-04-12T09:10:00Z'
+                    },
+                    {
+                      __typename: 'StatusContext',
+                      context: 'deployment',
+                      state: 'FAILURE',
+                      createdAt: '2026-04-12T10:00:00Z',
+                      updatedAt: '2026-04-12T10:10:00Z'
+                    },
+                    {
+                      __typename: 'StatusContext',
+                      context: 'deployment',
+                      state: 'SUCCESS',
+                      createdAt: '2026-04-12T11:00:00Z',
+                      updatedAt: '2026-04-12T11:10:00Z'
                     }
                   ]
                 }
