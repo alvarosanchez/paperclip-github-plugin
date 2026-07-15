@@ -4647,7 +4647,7 @@ test('update_pull_request refreshes the AI footer when updating the pull request
         number: 7,
         title: 'Fix the importer',
         body: updatedBody,
-        html_url: `https://github.com/paperclipai/example-repo/pull/${pullRequestNumber}`,
+        html_url: 'https://github.com/paperclipai/example-repo/pull/7',
         state: 'open',
         draft: false,
         merged: false,
@@ -4920,7 +4920,7 @@ test('get_pull_request_checks returns CI jobs, status contexts, and workflow run
       return jsonResponse({
         number: pullRequestNumber,
         title: 'Fix the importer',
-        html_url: 'https://github.com/paperclipai/example-repo/pull/7',
+        html_url: `https://github.com/paperclipai/example-repo/pull/${pullRequestNumber}`,
         state: 'open',
         draft: false,
         merged: false,
