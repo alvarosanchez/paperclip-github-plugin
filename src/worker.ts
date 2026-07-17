@@ -976,18 +976,7 @@ interface GitHubPullRequestCiContextsQueryResult {
       statusCheckRollup?: {
         contexts?: {
           pageInfo?: GitHubPageInfo | null;
-          nodes?: Array<
-            | {
-                __typename?: 'CheckRun';
-                status?: string | null;
-                conclusion?: string | null;
-              }
-            | {
-                __typename?: 'StatusContext';
-                state?: string | null;
-              }
-            | null
-          > | null;
+          nodes?: Array<GitHubCiContextNode | null> | null;
         } | null;
       } | null;
     } | null;
@@ -1037,18 +1026,7 @@ interface GitHubRepositoryOpenPullRequestStatusesQueryResult {
         statusCheckRollup?: {
           contexts?: {
             pageInfo?: GitHubPageInfo | null;
-            nodes?: Array<
-              | {
-                  __typename?: 'CheckRun';
-                  status?: string | null;
-                  conclusion?: string | null;
-                }
-              | {
-                  __typename?: 'StatusContext';
-                  state?: string | null;
-                }
-              | null
-            > | null;
+            nodes?: Array<GitHubCiContextNode | null> | null;
           } | null;
         } | null;
       } | null> | null;
@@ -1166,10 +1144,44 @@ interface GitHubRequestPullRequestCopilotReviewMutationResult {
 
 interface GitHubCiContextRecord {
   type: 'checkRun' | 'statusContext';
+  identity?: string;
   status?: string;
   conclusion?: string;
   state?: string;
+  startedAt?: string;
+  completedAt?: string;
+  createdAt?: string;
+  updatedAt?: string;
 }
+
+type GitHubCiContextNode =
+  | {
+      __typename?: 'CheckRun';
+      name?: string | null;
+      status?: string | null;
+      conclusion?: string | null;
+      startedAt?: string | null;
+      completedAt?: string | null;
+      checkSuite?: {
+        createdAt?: string | null;
+        app?: {
+          id?: string | null;
+          slug?: string | null;
+        } | null;
+        workflowRun?: {
+          workflow?: {
+            id?: string | null;
+          } | null;
+        } | null;
+      } | null;
+    }
+  | {
+      __typename?: 'StatusContext';
+      context?: string | null;
+      state?: string | null;
+      createdAt?: string | null;
+      updatedAt?: string | null;
+    };
 
 interface GitHubIssueCommentRecord {
   id: number;
@@ -1424,18 +1436,7 @@ interface GitHubProjectPullRequestsQueryResult {
         statusCheckRollup?: {
           contexts?: {
             pageInfo?: GitHubPageInfo | null;
-            nodes?: Array<
-              | {
-                  __typename?: 'CheckRun';
-                  status?: string | null;
-                  conclusion?: string | null;
-                }
-              | {
-                  __typename?: 'StatusContext';
-                  state?: string | null;
-                }
-              | null
-            > | null;
+            nodes?: Array<GitHubCiContextNode | null> | null;
           } | null;
         } | null;
       } | null> | null;
@@ -1488,18 +1489,7 @@ interface GitHubProjectPullRequestMetricsQueryResult {
         statusCheckRollup?: {
           contexts?: {
             pageInfo?: GitHubPageInfo | null;
-            nodes?: Array<
-              | {
-                  __typename?: 'CheckRun';
-                  status?: string | null;
-                  conclusion?: string | null;
-                }
-              | {
-                  __typename?: 'StatusContext';
-                  state?: string | null;
-                }
-              | null
-            > | null;
+            nodes?: Array<GitHubCiContextNode | null> | null;
           } | null;
         } | null;
       } | null> | null;
@@ -1630,11 +1620,29 @@ const GITHUB_PULL_REQUEST_CI_CONTEXTS_QUERY = `
             nodes {
               __typename
               ... on CheckRun {
+                name
                 status
                 conclusion
+                startedAt
+                completedAt
+                checkSuite {
+                  createdAt
+                  app {
+                    id
+                    slug
+                  }
+                  workflowRun {
+                    workflow {
+                      id
+                    }
+                  }
+                }
               }
               ... on StatusContext {
+                context
                 state
+                createdAt
+                updatedAt
               }
             }
           }
@@ -1708,11 +1716,29 @@ const GITHUB_REPOSITORY_OPEN_PULL_REQUEST_STATUSES_QUERY = `
               nodes {
                 __typename
                 ... on CheckRun {
+                  name
                   status
                   conclusion
+                  startedAt
+                  completedAt
+                  checkSuite {
+                    createdAt
+                  app {
+                    id
+                    slug
+                  }
+                  workflowRun {
+                    workflow {
+                      id
+                    }
+                  }
+                  }
                 }
                 ... on StatusContext {
+                  context
                   state
+                  createdAt
+                  updatedAt
                 }
               }
             }
@@ -1804,11 +1830,29 @@ const GITHUB_PROJECT_PULL_REQUEST_INSIGHT_FIELDS = `
               nodes {
                 __typename
                 ... on CheckRun {
+                  name
                   status
                   conclusion
+                  startedAt
+                  completedAt
+                  checkSuite {
+                    createdAt
+                  app {
+                    id
+                    slug
+                  }
+                  workflowRun {
+                    workflow {
+                      id
+                    }
+                  }
+                  }
                 }
                 ... on StatusContext {
+                  context
                   state
+                  createdAt
+                  updatedAt
                 }
               }
             }
@@ -1861,11 +1905,29 @@ const GITHUB_PROJECT_PULL_REQUEST_METRICS_FIELDS = `
               nodes {
                 __typename
                 ... on CheckRun {
+                  name
                   status
                   conclusion
+                  startedAt
+                  completedAt
+                  checkSuite {
+                    createdAt
+                  app {
+                    id
+                    slug
+                  }
+                  workflowRun {
+                    workflow {
+                      id
+                    }
+                  }
+                  }
                 }
                 ... on StatusContext {
+                  context
                   state
+                  createdAt
+                  updatedAt
                 }
               }
             }
@@ -7760,14 +7822,65 @@ function sliceProjectPullRequestNumbers(
   };
 }
 
+function getGitHubCiContextAttemptTimestamp(context: GitHubCiContextRecord): number | undefined {
+  const value = context.type === 'checkRun'
+    // Completion time is not attempt order: an older long-running check can finish
+    // after a newer check. A queued check without start/suite creation time remains
+    // ungrouped below rather than being allowed to hide another attempt.
+    ? context.startedAt ?? context.createdAt
+    : context.updatedAt ?? context.createdAt;
+  if (!value) {
+    return undefined;
+  }
+
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) ? timestamp : undefined;
+}
+
+function getEffectiveGitHubCiContexts(contexts: GitHubCiContextRecord[]): GitHubCiContextRecord[] {
+  const ungroupedContexts: GitHubCiContextRecord[] = [];
+  const latestContexts = new Map<string, { contexts: GitHubCiContextRecord[]; timestamp: number }>();
+
+  for (const context of contexts) {
+    const timestamp = getGitHubCiContextAttemptTimestamp(context);
+    if (!context.identity || timestamp === undefined) {
+      // Without both a stable check identity and an ordering timestamp, retaining the
+      // context is safer than accidentally hiding a distinct required check.
+      ungroupedContexts.push(context);
+      continue;
+    }
+
+    const existing = latestContexts.get(context.identity);
+    if (!existing) {
+      latestContexts.set(context.identity, { contexts: [context], timestamp });
+      continue;
+    }
+
+    if (timestamp > existing.timestamp) {
+      latestContexts.set(context.identity, { contexts: [context], timestamp });
+      continue;
+    }
+
+    if (timestamp === existing.timestamp) {
+      // GitHub can report separate checks with an equal timestamp. They are all
+      // current attempts only when the tie is at the latest timestamp for this
+      // identity; older tied attempts were superseded and must not affect CI state.
+      existing.contexts.push(context);
+    }
+  }
+
+  return [...ungroupedContexts, ...[...latestContexts.values()].flatMap(({ contexts: latest }) => latest)];
+}
+
 function classifyGitHubPullRequestCiState(contexts: GitHubCiContextRecord[]): GitHubPullRequestCiState {
-  if (contexts.length === 0) {
+  const effectiveContexts = getEffectiveGitHubCiContexts(contexts);
+  if (effectiveContexts.length === 0) {
     return 'unfinished';
   }
 
   let hasPendingContext = false;
 
-  for (const context of contexts) {
+  for (const context of effectiveContexts) {
     if (context.type === 'statusContext') {
       const state = context.state?.toUpperCase();
       if (!state) {
@@ -9120,18 +9233,7 @@ async function loadLinkedPullRequestsForOpenIssues(
 }
 
 function extractGitHubCiContextRecords(
-  nodes: Array<
-    | {
-        __typename?: 'CheckRun';
-        status?: string | null;
-        conclusion?: string | null;
-      }
-    | {
-        __typename?: 'StatusContext';
-        state?: string | null;
-      }
-    | null
-  >
+  nodes: Array<GitHubCiContextNode | null>
 ): GitHubCiContextRecord[] {
   const contexts: GitHubCiContextRecord[] = [];
 
@@ -9141,10 +9243,29 @@ function extractGitHubCiContextRecords(
     }
 
     if (node.__typename === 'CheckRun') {
+      const app = node.checkSuite?.app;
+      const appId = typeof app?.id === 'string' && app.id.trim() ? app.id.trim() : undefined;
+      const appSlug = typeof app?.slug === 'string' && app.slug.trim() ? app.slug.trim() : undefined;
+      const producerIdentity = appId
+        ? `app:${appId}`
+        : appSlug
+          ? `appSlug:${appSlug}`
+          : undefined;
+
+      const workflowId = node.checkSuite?.workflowRun?.workflow?.id?.trim();
       contexts.push({
         type: 'checkRun',
+        // A rendered check name is stable only within its producer and workflow.
+        // If GitHub omits workflow provenance, retain the context instead of
+        // accidentally hiding a distinct required check with the same name.
+        ...(typeof node.name === 'string' && node.name.trim() && producerIdentity && workflowId
+          ? { identity: `checkRun:${producerIdentity}:${workflowId}:${node.name.trim()}` }
+          : {}),
         status: node.status ?? undefined,
-        conclusion: node.conclusion ?? undefined
+        conclusion: node.conclusion ?? undefined,
+        startedAt: node.startedAt ?? undefined,
+        completedAt: node.completedAt ?? undefined,
+        createdAt: node.checkSuite?.createdAt ?? undefined
       });
       continue;
     }
@@ -9152,7 +9273,12 @@ function extractGitHubCiContextRecords(
     if (node.__typename === 'StatusContext') {
       contexts.push({
         type: 'statusContext',
-        state: node.state ?? undefined
+        ...(typeof node.context === 'string' && node.context.trim()
+          ? { identity: `statusContext:${node.context.trim()}` }
+          : {}),
+        state: node.state ?? undefined,
+        createdAt: node.createdAt ?? undefined,
+        updatedAt: node.updatedAt ?? undefined
       });
     }
   }
@@ -9318,18 +9444,7 @@ function tryBuildGitHubPullRequestStatusSnapshotFromBatchNode(node: {
   statusCheckRollup?: {
     contexts?: {
       pageInfo?: GitHubPageInfo | null;
-      nodes?: Array<
-        | {
-            __typename?: 'CheckRun';
-            status?: string | null;
-            conclusion?: string | null;
-          }
-        | {
-            __typename?: 'StatusContext';
-            state?: string | null;
-          }
-        | null
-      > | null;
+      nodes?: Array<GitHubCiContextNode | null> | null;
     } | null;
   } | null;
 }, repository: ParsedRepositoryReference): GitHubPullRequestStatusSnapshot | null {
@@ -9363,18 +9478,7 @@ function tryBuildGitHubPullRequestCiStateFromBatchNode(node: {
   statusCheckRollup?: {
     contexts?: {
       pageInfo?: GitHubPageInfo | null;
-      nodes?: Array<
-        | {
-            __typename?: 'CheckRun';
-            status?: string | null;
-            conclusion?: string | null;
-          }
-        | {
-            __typename?: 'StatusContext';
-            state?: string | null;
-          }
-        | null
-      > | null;
+      nodes?: Array<GitHubCiContextNode | null> | null;
     } | null;
   } | null;
 }): GitHubPullRequestCiState | null {
@@ -9482,28 +9586,7 @@ async function getGitHubPullRequestCiSnapshot(
     }
 
     const connection = response.repository?.pullRequest?.statusCheckRollup?.contexts;
-    const nodes = connection?.nodes ?? [];
-    for (const node of nodes) {
-      if (!node?.__typename) {
-        continue;
-      }
-
-      if (node.__typename === 'CheckRun') {
-        contexts.push({
-          type: 'checkRun',
-          status: node.status ?? undefined,
-          conclusion: node.conclusion ?? undefined
-        });
-        continue;
-      }
-
-      if (node.__typename === 'StatusContext') {
-        contexts.push({
-          type: 'statusContext',
-          state: node.state ?? undefined
-        });
-      }
-    }
+    contexts.push(...extractGitHubCiContextRecords(connection?.nodes ?? []));
 
     after = getPageCursor(connection?.pageInfo);
   } while (after);
