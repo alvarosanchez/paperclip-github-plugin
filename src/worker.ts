@@ -1168,6 +1168,11 @@ type GitHubCiContextNode =
           id?: string | null;
           slug?: string | null;
         } | null;
+        workflowRun?: {
+          workflow?: {
+            id?: string | null;
+          } | null;
+        } | null;
       } | null;
     }
   | {
@@ -1626,6 +1631,11 @@ const GITHUB_PULL_REQUEST_CI_CONTEXTS_QUERY = `
                     id
                     slug
                   }
+                  workflowRun {
+                    workflow {
+                      id
+                    }
+                  }
                 }
               }
               ... on StatusContext {
@@ -1713,10 +1723,15 @@ const GITHUB_REPOSITORY_OPEN_PULL_REQUEST_STATUSES_QUERY = `
                   completedAt
                   checkSuite {
                     createdAt
-                    app {
+                  app {
+                    id
+                    slug
+                  }
+                  workflowRun {
+                    workflow {
                       id
-                      slug
                     }
+                  }
                   }
                 }
                 ... on StatusContext {
@@ -1822,10 +1837,15 @@ const GITHUB_PROJECT_PULL_REQUEST_INSIGHT_FIELDS = `
                   completedAt
                   checkSuite {
                     createdAt
-                    app {
+                  app {
+                    id
+                    slug
+                  }
+                  workflowRun {
+                    workflow {
                       id
-                      slug
                     }
+                  }
                   }
                 }
                 ... on StatusContext {
@@ -1892,10 +1912,15 @@ const GITHUB_PROJECT_PULL_REQUEST_METRICS_FIELDS = `
                   completedAt
                   checkSuite {
                     createdAt
-                    app {
+                  app {
+                    id
+                    slug
+                  }
+                  workflowRun {
+                    workflow {
                       id
-                      slug
                     }
+                  }
                   }
                 }
                 ... on StatusContext {
@@ -7814,7 +7839,7 @@ function getGitHubCiContextAttemptTimestamp(context: GitHubCiContextRecord): num
 
 function getEffectiveGitHubCiContexts(contexts: GitHubCiContextRecord[]): GitHubCiContextRecord[] {
   const ungroupedContexts: GitHubCiContextRecord[] = [];
-  const latestContexts = new Map<string, { context: GitHubCiContextRecord; timestamp: number }>();
+  const latestContexts = new Map<string, { contexts: GitHubCiContextRecord[]; timestamp: number }>();
 
   for (const context of contexts) {
     const timestamp = getGitHubCiContextAttemptTimestamp(context);
@@ -7827,23 +7852,24 @@ function getEffectiveGitHubCiContexts(contexts: GitHubCiContextRecord[]): GitHub
 
     const existing = latestContexts.get(context.identity);
     if (!existing) {
-      latestContexts.set(context.identity, { context, timestamp });
+      latestContexts.set(context.identity, { contexts: [context], timestamp });
       continue;
     }
 
     if (timestamp > existing.timestamp) {
-      latestContexts.set(context.identity, { context, timestamp });
+      latestContexts.set(context.identity, { contexts: [context], timestamp });
       continue;
     }
 
     if (timestamp === existing.timestamp) {
-      // GitHub can report separate checks with an equal timestamp. Keep both unless
-      // the API gives us enough ordering evidence to prove one supersedes the other.
-      ungroupedContexts.push(context);
+      // GitHub can report separate checks with an equal timestamp. They are all
+      // current attempts only when the tie is at the latest timestamp for this
+      // identity; older tied attempts were superseded and must not affect CI state.
+      existing.contexts.push(context);
     }
   }
 
-  return [...ungroupedContexts, ...[...latestContexts.values()].map(({ context }) => context)];
+  return [...ungroupedContexts, ...[...latestContexts.values()].flatMap(({ contexts: latest }) => latest)];
 }
 
 function classifyGitHubPullRequestCiState(contexts: GitHubCiContextRecord[]): GitHubPullRequestCiState {
@@ -9226,10 +9252,14 @@ function extractGitHubCiContextRecords(
           ? `appSlug:${appSlug}`
           : undefined;
 
+      const workflowId = node.checkSuite?.workflowRun?.workflow?.id?.trim();
       contexts.push({
         type: 'checkRun',
-        ...(typeof node.name === 'string' && node.name.trim() && producerIdentity
-          ? { identity: `checkRun:${producerIdentity}:${node.name.trim()}` }
+        // A rendered check name is stable only within its producer and workflow.
+        // If GitHub omits workflow provenance, retain the context instead of
+        // accidentally hiding a distinct required check with the same name.
+        ...(typeof node.name === 'string' && node.name.trim() && producerIdentity && workflowId
+          ? { identity: `checkRun:${producerIdentity}:${workflowId}:${node.name.trim()}` }
           : {}),
         status: node.status ?? undefined,
         conclusion: node.conclusion ?? undefined,
