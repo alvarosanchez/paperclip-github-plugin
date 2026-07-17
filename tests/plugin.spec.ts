@@ -4858,7 +4858,7 @@ test('tracked issue mutations attribute linked targets omitted from tool input',
 test('get_pull_request_checks returns CI jobs, status contexts, and workflow runs', async () => {
   const harness = await createGitHubAgentToolHarness();
   const originalFetch = globalThis.fetch;
-  const ciContextsByPullRequest = new Map<number, Array<Record<string, string | null>>>([[7, [
+  const ciContextsByPullRequest = new Map<number, Array<Record<string, unknown>>>([[7, [
     {
       __typename: 'CheckRun',
       name: 'Application generation UI',
@@ -4911,12 +4911,46 @@ test('get_pull_request_checks returns CI jobs, status contexts, and workflow run
       startedAt: '2026-04-12T14:00:00Z', completedAt: '2026-04-12T14:10:00Z'
     }
   ]]]);
+  for (const contexts of ciContextsByPullRequest.values()) {
+    for (const context of contexts) {
+      if (context.__typename === 'CheckRun') {
+        context.checkSuite = {
+          createdAt: context.startedAt,
+          app: { id: 'APP_actions', slug: 'github-actions' }
+        };
+      }
+    }
+  }
+  ciContextsByPullRequest.set(11, [
+    {
+      __typename: 'CheckRun', name: 'Application generation UI', status: 'COMPLETED', conclusion: 'FAILURE',
+      startedAt: '2026-04-12T10:00:00Z', completedAt: '2026-04-12T14:00:00Z',
+      checkSuite: { createdAt: '2026-04-12T09:59:00Z', app: { id: 'APP_actions', slug: 'github-actions' } }
+    },
+    {
+      __typename: 'CheckRun', name: 'Application generation UI', status: 'COMPLETED', conclusion: 'SUCCESS',
+      startedAt: '2026-04-12T12:00:00Z', completedAt: '2026-04-12T13:00:00Z',
+      checkSuite: { createdAt: '2026-04-12T11:59:00Z', app: { id: 'APP_actions', slug: 'github-actions' } }
+    }
+  ]);
+  ciContextsByPullRequest.set(12, [
+    {
+      __typename: 'CheckRun', name: 'build', status: 'COMPLETED', conclusion: 'SUCCESS',
+      startedAt: '2026-04-12T12:00:00Z', completedAt: '2026-04-12T12:10:00Z',
+      checkSuite: { createdAt: '2026-04-12T11:59:00Z', app: { id: 'APP_actions', slug: 'github-actions' } }
+    },
+    {
+      __typename: 'CheckRun', name: 'build', status: 'COMPLETED', conclusion: 'FAILURE',
+      startedAt: '2026-04-12T13:00:00Z', completedAt: '2026-04-12T13:10:00Z',
+      checkSuite: { createdAt: '2026-04-12T12:59:00Z', app: { id: 'APP_external_ci', slug: 'external-ci' } }
+    }
+  ]);
 
   globalThis.fetch = async (input, init) => {
     const url = new URL(getRequestUrl(input));
 
     const pullRequestNumber = Number(url.pathname.match(/\/pulls\/(\d+)$/)?.[1]);
-    if ([7, 8, 9, 10].includes(pullRequestNumber)) {
+    if ([7, 8, 9, 10, 11, 12].includes(pullRequestNumber)) {
       return jsonResponse({
         number: pullRequestNumber,
         title: 'Fix the importer',
@@ -4941,7 +4975,7 @@ test('get_pull_request_checks returns CI jobs, status contexts, and workflow run
       });
     }
 
-    if (/\/repos\/paperclipai\/example-repo\/commits\/abc(?:7|8|9|10)\/check-runs$/.test(url.pathname)) {
+    if (/\/repos\/paperclipai\/example-repo\/commits\/abc(?:7|8|9|10|11|12)\/check-runs$/.test(url.pathname)) {
       return jsonResponse({
         total_count: 1,
         check_runs: [
@@ -4961,7 +4995,7 @@ test('get_pull_request_checks returns CI jobs, status contexts, and workflow run
       });
     }
 
-    if (/\/repos\/paperclipai\/example-repo\/commits\/abc(?:7|8|9|10)\/status$/.test(url.pathname)) {
+    if (/\/repos\/paperclipai\/example-repo\/commits\/abc(?:7|8|9|10|11|12)\/status$/.test(url.pathname)) {
       return jsonResponse({
         state: 'failure',
         statuses: [
@@ -4978,7 +5012,7 @@ test('get_pull_request_checks returns CI jobs, status contexts, and workflow run
     }
 
     if (url.pathname === '/repos/paperclipai/example-repo/actions/runs') {
-      assert.match(url.searchParams.get('head_sha') ?? '', /^abc(?:7|8|9|10)$/);
+      assert.match(url.searchParams.get('head_sha') ?? '', /^abc(?:7|8|9|10|11|12)$/);
       return jsonResponse({
         total_count: 1,
         workflow_runs: [
@@ -5089,6 +5123,16 @@ test('get_pull_request_checks returns CI jobs, status contexts, and workflow run
       companyId: 'company-1', projectId: 'project-1'
     });
     assert.equal((distinctMatrixFailure.data as { ciState: string }).ciState, 'red');
+
+    const overlappingAttempts = await harness.executeTool('get_pull_request_checks', { pullRequestNumber: 11 }, {
+      companyId: 'company-1', projectId: 'project-1'
+    });
+    assert.equal((overlappingAttempts.data as { ciState: string }).ciState, 'green');
+
+    const sameNameDifferentProducer = await harness.executeTool('get_pull_request_checks', { pullRequestNumber: 12 }, {
+      companyId: 'company-1', projectId: 'project-1'
+    });
+    assert.equal((sameNameDifferentProducer.data as { ciState: string }).ciState, 'red');
   } finally {
     globalThis.fetch = originalFetch;
   }

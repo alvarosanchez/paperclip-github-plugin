@@ -1162,6 +1162,13 @@ type GitHubCiContextNode =
       conclusion?: string | null;
       startedAt?: string | null;
       completedAt?: string | null;
+      checkSuite?: {
+        createdAt?: string | null;
+        app?: {
+          id?: string | null;
+          slug?: string | null;
+        } | null;
+      } | null;
     }
   | {
       __typename?: 'StatusContext';
@@ -1613,6 +1620,13 @@ const GITHUB_PULL_REQUEST_CI_CONTEXTS_QUERY = `
                 conclusion
                 startedAt
                 completedAt
+                checkSuite {
+                  createdAt
+                  app {
+                    id
+                    slug
+                  }
+                }
               }
               ... on StatusContext {
                 context
@@ -1697,6 +1711,13 @@ const GITHUB_REPOSITORY_OPEN_PULL_REQUEST_STATUSES_QUERY = `
                   conclusion
                   startedAt
                   completedAt
+                  checkSuite {
+                    createdAt
+                    app {
+                      id
+                      slug
+                    }
+                  }
                 }
                 ... on StatusContext {
                   context
@@ -1799,6 +1820,13 @@ const GITHUB_PROJECT_PULL_REQUEST_INSIGHT_FIELDS = `
                   conclusion
                   startedAt
                   completedAt
+                  checkSuite {
+                    createdAt
+                    app {
+                      id
+                      slug
+                    }
+                  }
                 }
                 ... on StatusContext {
                   context
@@ -1862,6 +1890,13 @@ const GITHUB_PROJECT_PULL_REQUEST_METRICS_FIELDS = `
                   conclusion
                   startedAt
                   completedAt
+                  checkSuite {
+                    createdAt
+                    app {
+                      id
+                      slug
+                    }
+                  }
                 }
                 ... on StatusContext {
                   context
@@ -7763,10 +7798,12 @@ function sliceProjectPullRequestNumbers(
 }
 
 function getGitHubCiContextAttemptTimestamp(context: GitHubCiContextRecord): number | undefined {
-  const value = context.completedAt
-    ?? context.updatedAt
-    ?? context.startedAt
-    ?? context.createdAt;
+  const value = context.type === 'checkRun'
+    // Completion time is not attempt order: an older long-running check can finish
+    // after a newer check. A queued check without start/suite creation time remains
+    // ungrouped below rather than being allowed to hide another attempt.
+    ? context.startedAt ?? context.createdAt
+    : context.updatedAt ?? context.createdAt;
   if (!value) {
     return undefined;
   }
@@ -9180,15 +9217,25 @@ function extractGitHubCiContextRecords(
     }
 
     if (node.__typename === 'CheckRun') {
+      const app = node.checkSuite?.app;
+      const appId = typeof app?.id === 'string' && app.id.trim() ? app.id.trim() : undefined;
+      const appSlug = typeof app?.slug === 'string' && app.slug.trim() ? app.slug.trim() : undefined;
+      const producerIdentity = appId
+        ? `app:${appId}`
+        : appSlug
+          ? `appSlug:${appSlug}`
+          : undefined;
+
       contexts.push({
         type: 'checkRun',
-        ...(typeof node.name === 'string' && node.name.trim()
-          ? { identity: `checkRun:${node.name.trim()}` }
+        ...(typeof node.name === 'string' && node.name.trim() && producerIdentity
+          ? { identity: `checkRun:${producerIdentity}:${node.name.trim()}` }
           : {}),
         status: node.status ?? undefined,
         conclusion: node.conclusion ?? undefined,
         startedAt: node.startedAt ?? undefined,
-        completedAt: node.completedAt ?? undefined
+        completedAt: node.completedAt ?? undefined,
+        createdAt: node.checkSuite?.createdAt ?? undefined
       });
       continue;
     }
