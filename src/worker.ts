@@ -417,6 +417,7 @@ interface ImportedIssueRecord {
   linkedPullRequestCommentCounts?: GitHubPullRequestCommentCountRecord[];
   remoteActionFingerprint?: string;
   selectedPullRequestGate?: GitHubPullRequestReference;
+  terminalPullRequestSnapshot?: TerminalPullRequestSnapshot;
   pendingRemoteActionWake?: PendingRemoteActionWake;
   activationPending?: boolean;
   repositoryUrl?: string;
@@ -473,6 +474,17 @@ interface RemoteActionRecord {
   pendingWake?: PendingRemoteActionWake;
   linkedPullRequestCommentCounts?: GitHubPullRequestCommentCountRecord[];
   selectedPullRequestGate?: GitHubPullRequestReference;
+  terminalPullRequestSnapshot?: TerminalPullRequestSnapshot;
+}
+
+/**
+ * The last review-ready PR snapshot observed before a human or policy marks an
+ * issue done.  This is deliberately explicit rather than derived from the
+ * remote-action fingerprint: the latter is an opaque deduplication key and
+ * cannot prove that a particular commit was acknowledged as complete.
+ */
+interface TerminalPullRequestSnapshot extends GitHubPullRequestReference {
+  headSha: string;
 }
 
 function createRemoteActionWakeFingerprint(remoteActionFingerprint: string): string {
@@ -6884,6 +6896,16 @@ function normalizeSelectedPullRequestGate(value: unknown): GitHubPullRequestRefe
   }
 }
 
+function normalizeTerminalPullRequestSnapshot(value: unknown): TerminalPullRequestSnapshot | undefined {
+  const reference = normalizeSelectedPullRequestGate(value);
+  const record = value && typeof value === 'object' ? value as Record<string, unknown> : undefined;
+  const headSha = typeof record?.headSha === 'string' ? record.headSha.trim().toLowerCase() : undefined;
+  if (!reference || !headSha || !/^[a-f0-9]{40,64}$/.test(headSha)) {
+    return undefined;
+  }
+  return { ...reference, headSha };
+}
+
 function normalizeImportRegistry(value: unknown): ImportedIssueRecord[] {
   if (!Array.isArray(value)) {
     return [];
@@ -6929,6 +6951,7 @@ function normalizeImportRegistry(value: unknown): ImportedIssueRecord[] {
           ? record.remoteActionFingerprint
           : undefined;
       const selectedPullRequestGate = normalizeSelectedPullRequestGate(record.selectedPullRequestGate);
+      const terminalPullRequestSnapshot = normalizeTerminalPullRequestSnapshot(record.terminalPullRequestSnapshot);
       const pendingRemoteActionWake = normalizePendingRemoteActionWake(record.pendingRemoteActionWake);
       const activationPending = record.activationPending === true;
 
@@ -6950,6 +6973,7 @@ function normalizeImportRegistry(value: unknown): ImportedIssueRecord[] {
         ...(linkedPullRequestCommentCounts.length > 0 ? { linkedPullRequestCommentCounts } : {}),
         ...(remoteActionFingerprint ? { remoteActionFingerprint } : {}),
         ...(selectedPullRequestGate ? { selectedPullRequestGate } : {}),
+        ...(terminalPullRequestSnapshot ? { terminalPullRequestSnapshot } : {}),
         ...(pendingRemoteActionWake ? { pendingRemoteActionWake } : {}),
         ...(activationPending ? { activationPending: true } : {})
       };
@@ -6995,6 +7019,7 @@ function normalizeRemoteActionRegistry(value: unknown): RemoteActionRecord[] {
       record.linkedPullRequestCommentCounts
     );
     const selectedPullRequestGate = normalizeSelectedPullRequestGate(record.selectedPullRequestGate);
+    const terminalPullRequestSnapshot = normalizeTerminalPullRequestSnapshot(record.terminalPullRequestSnapshot);
     const previous = recordsByKey.get(key);
     recordsByKey.set(key, {
       key,
@@ -7009,6 +7034,11 @@ function normalizeRemoteActionRegistry(value: unknown): RemoteActionRecord[] {
         ? { selectedPullRequestGate }
         : previous?.selectedPullRequestGate
           ? { selectedPullRequestGate: previous.selectedPullRequestGate }
+          : {}),
+      ...(terminalPullRequestSnapshot
+        ? { terminalPullRequestSnapshot }
+        : previous?.terminalPullRequestSnapshot
+          ? { terminalPullRequestSnapshot: previous.terminalPullRequestSnapshot }
           : {})
     });
   }
@@ -8015,6 +8045,72 @@ function getEffectiveDirectPullRequestGateCondition(
   };
 }
 
+function buildTerminalPullRequestSnapshot(
+  effectiveGate: EffectiveDirectPullRequestGate | undefined
+): TerminalPullRequestSnapshot | undefined {
+  if (effectiveGate?.condition !== 'ready' || !effectiveGate.headSha) {
+    return undefined;
+  }
+  const headSha = effectiveGate.headSha.trim().toLowerCase();
+  return /^[a-f0-9]{40,64}$/.test(headSha)
+    ? {
+        repositoryUrl: effectiveGate.repositoryUrl,
+        number: effectiveGate.number,
+        headSha
+      }
+    : undefined;
+}
+
+function isTerminalCompletionPreserved(params: {
+  currentStatus: PaperclipIssueStatus;
+  terminalPullRequestSnapshot?: TerminalPullRequestSnapshot;
+  effectiveGate?: EffectiveDirectPullRequestGate;
+}): boolean {
+  if (params.currentStatus !== 'done') {
+    return false;
+  }
+  const currentSnapshot = buildTerminalPullRequestSnapshot(params.effectiveGate);
+  const terminalSnapshot = params.terminalPullRequestSnapshot;
+  return Boolean(
+    currentSnapshot
+    && terminalSnapshot
+    && currentSnapshot.repositoryUrl === terminalSnapshot.repositoryUrl
+    && currentSnapshot.number === terminalSnapshot.number
+    && currentSnapshot.headSha === terminalSnapshot.headSha
+  );
+}
+
+function shouldReopenTerminalCompletion(params: {
+  currentStatus: PaperclipIssueStatus;
+  terminalPullRequestSnapshot?: TerminalPullRequestSnapshot;
+  effectiveGate?: EffectiveDirectPullRequestGate;
+}): boolean {
+  return params.currentStatus === 'done'
+    && Boolean(params.effectiveGate)
+    && !isTerminalCompletionPreserved(params);
+}
+
+function shouldPreserveTerminalReopenContinuation(params: {
+  currentStatus: PaperclipIssueStatus;
+  terminalPullRequestSnapshot?: TerminalPullRequestSnapshot;
+  effectiveGate?: EffectiveDirectPullRequestGate;
+}): boolean {
+  if (params.currentStatus !== 'todo' && params.currentStatus !== 'in_progress') {
+    return false;
+  }
+  const currentSnapshot = buildTerminalPullRequestSnapshot(params.effectiveGate);
+  const terminalSnapshot = params.terminalPullRequestSnapshot;
+  return Boolean(
+    currentSnapshot
+    && terminalSnapshot
+    && (
+      currentSnapshot.repositoryUrl !== terminalSnapshot.repositoryUrl
+      || currentSnapshot.number !== terminalSnapshot.number
+      || currentSnapshot.headSha !== terminalSnapshot.headSha
+    )
+  );
+}
+
 function selectHighestPriorityEffectivePullRequestGate(
   gates: EffectiveDirectPullRequestGate[],
   preferredGate?: GitHubPullRequestReference
@@ -8984,6 +9080,7 @@ function resolvePaperclipIssueStatus(params: {
   currentStatus: PaperclipIssueStatus;
   snapshot: GitHubIssueStatusSnapshot;
   effectiveGate?: EffectiveDirectPullRequestGate;
+  terminalPullRequestSnapshot?: TerminalPullRequestSnapshot;
   hasTrustedNewComment?: boolean;
   wasImportedThisRun: boolean;
   defaultImportedStatus: PaperclipIssueStatus;
@@ -8994,6 +9091,7 @@ function resolvePaperclipIssueStatus(params: {
     currentStatus,
     snapshot,
     effectiveGate,
+    terminalPullRequestSnapshot,
     hasTrustedNewComment,
     wasImportedThisRun,
     defaultImportedStatus,
@@ -9016,6 +9114,20 @@ function resolvePaperclipIssueStatus(params: {
     return hasExecutorHandoffTarget ? 'in_progress' : 'todo';
   }
 
+  if (isTerminalCompletionPreserved({ currentStatus, terminalPullRequestSnapshot, effectiveGate })) {
+    return 'done';
+  }
+
+  if (shouldPreserveTerminalReopenContinuation({ currentStatus, terminalPullRequestSnapshot, effectiveGate })) {
+    return currentStatus;
+  }
+
+  const terminalCompletionReopened = shouldReopenTerminalCompletion({
+    currentStatus,
+    terminalPullRequestSnapshot,
+    effectiveGate
+  });
+
   if (effectiveGate) {
     if (effectiveGate.condition === 'trusted_comment') {
       return hasExecutorHandoffTarget ? 'in_progress' : 'todo';
@@ -9030,10 +9142,16 @@ function resolvePaperclipIssueStatus(params: {
       return hasExecutorHandoffTarget ? 'in_progress' : 'todo';
     }
     if (effectiveGate.condition === 'waiting') {
+      if (terminalCompletionReopened) {
+        return hasExecutorHandoffTarget ? 'in_progress' : 'todo';
+      }
       return (currentStatus === 'done' || currentStatus === 'in_review')
         && isGitHubPullRequestTransientUnknownMergeabilityWait(effectiveGate.pullRequest)
         ? 'in_review'
         : 'in_progress';
+    }
+    if (terminalCompletionReopened) {
+      return hasExecutorHandoffTarget ? 'in_progress' : 'todo';
     }
     return 'in_review';
   }
@@ -9080,9 +9198,24 @@ function resolvePaperclipDirectPullRequestIssueStatus(params: {
   currentStatus: PaperclipIssueStatus;
   pullRequests: GitHubDirectPullRequestSyncSnapshot[];
   effectiveGate?: EffectiveDirectPullRequestGate;
+  terminalPullRequestSnapshot?: TerminalPullRequestSnapshot;
   hasExecutorHandoffTarget?: boolean;
 }): PaperclipIssueStatus {
-  const { currentStatus, pullRequests, effectiveGate, hasExecutorHandoffTarget } = params;
+  const { currentStatus, pullRequests, effectiveGate, terminalPullRequestSnapshot, hasExecutorHandoffTarget } = params;
+
+  if (isTerminalCompletionPreserved({ currentStatus, terminalPullRequestSnapshot, effectiveGate })) {
+    return 'done';
+  }
+
+  if (shouldPreserveTerminalReopenContinuation({ currentStatus, terminalPullRequestSnapshot, effectiveGate })) {
+    return currentStatus;
+  }
+
+  const terminalCompletionReopened = shouldReopenTerminalCompletion({
+    currentStatus,
+    terminalPullRequestSnapshot,
+    effectiveGate
+  });
 
   if (effectiveGate) {
     if (effectiveGate.condition === 'trusted_comment') {
@@ -9100,10 +9233,16 @@ function resolvePaperclipDirectPullRequestIssueStatus(params: {
       return hasExecutorHandoffTarget ? 'in_progress' : 'todo';
     }
     if (effectiveGate.condition === 'waiting') {
+      if (terminalCompletionReopened) {
+        return hasExecutorHandoffTarget ? 'in_progress' : 'todo';
+      }
       return (currentStatus === 'done' || currentStatus === 'in_review')
         && isGitHubPullRequestTransientUnknownMergeabilityWait(effectiveGate.pullRequest)
         ? 'in_review'
         : 'in_progress';
+    }
+    if (terminalCompletionReopened) {
+      return hasExecutorHandoffTarget ? 'in_progress' : 'todo';
     }
     return 'in_review';
   }
@@ -15151,7 +15290,23 @@ async function synchronizePaperclipIssueStatuses(
         mapping.companyId,
         effectiveGate?.ownerCandidate
       );
-      const transitionFollowThroughAssigneeAgentId = isActionableDirectPullRequestGate(effectiveGate)
+      const terminalCompletionReopened = shouldReopenTerminalCompletion({
+        currentStatus: paperclipIssue.status,
+        terminalPullRequestSnapshot: importedIssue.terminalPullRequestSnapshot,
+        effectiveGate
+      });
+      const terminalCompletionPreserved = isTerminalCompletionPreserved({
+        currentStatus: paperclipIssue.status,
+        terminalPullRequestSnapshot: importedIssue.terminalPullRequestSnapshot,
+        effectiveGate
+      });
+      const terminalReopenContinuation = shouldPreserveTerminalReopenContinuation({
+        currentStatus: paperclipIssue.status,
+        terminalPullRequestSnapshot: importedIssue.terminalPullRequestSnapshot,
+        effectiveGate
+      });
+      const transitionFollowThroughAssigneeAgentId =
+        isActionableDirectPullRequestGate(effectiveGate) || terminalCompletionReopened
         ? followThroughAssigneeAgentId
         : undefined;
       const remoteActionFingerprint = createHash('sha256').update(JSON.stringify({
@@ -15216,6 +15371,7 @@ async function synchronizePaperclipIssueStatuses(
         currentStatus: paperclipIssue.status,
         snapshot,
         effectiveGate,
+        terminalPullRequestSnapshot: importedIssue.terminalPullRequestSnapshot,
         hasTrustedNewComment,
         wasImportedThisRun: isPendingInitialActivation,
         defaultImportedStatus: advancedSettings.defaultStatus,
@@ -15235,7 +15391,8 @@ async function synchronizePaperclipIssueStatuses(
         nextStatus,
         syncContext: paperclipIssueSyncContext
       });
-      const shouldClearCompletedExecutionPolicy = nextStatus === 'done' || nextStatus === 'cancelled';
+      const shouldClearCompletedExecutionPolicy =
+        (nextStatus === 'done' || nextStatus === 'cancelled') && !terminalCompletionPreserved;
       const shouldPreserveImportedTriageRouting = Boolean(paperclipIssueSyncContext.assignee)
         && shouldPreserveImportedTriageAssignee({
           currentStatus: paperclipIssue.status,
@@ -15285,6 +15442,13 @@ async function synchronizePaperclipIssueStatuses(
         importedIssue.selectedPullRequestGate = effectiveGate
           ? { repositoryUrl: effectiveGate.repositoryUrl, number: effectiveGate.number }
           : undefined;
+        if (nextStatus === 'in_review') {
+          const terminalSnapshot = buildTerminalPullRequestSnapshot(effectiveGate);
+          if (terminalSnapshot) importedIssue.terminalPullRequestSnapshot = terminalSnapshot;
+          else delete importedIssue.terminalPullRequestSnapshot;
+        } else if (nextStatus !== 'done' && !terminalCompletionReopened && !terminalReopenContinuation) {
+          delete importedIssue.terminalPullRequestSnapshot;
+        }
         if (pendingWake) importedIssue.pendingRemoteActionWake = pendingWake;
         else delete importedIssue.activationPending;
         await persistImportRegistry();
@@ -15715,7 +15879,23 @@ async function synchronizePaperclipPullRequestIssueStatuses(
         mapping.companyId,
         effectiveGate?.ownerCandidate
       );
-      const transitionFollowThroughAssigneeAgentId = isActionableDirectPullRequestGate(effectiveGate)
+      const terminalCompletionReopened = shouldReopenTerminalCompletion({
+        currentStatus: paperclipIssue.status,
+        terminalPullRequestSnapshot: remoteAction.terminalPullRequestSnapshot,
+        effectiveGate
+      });
+      const terminalCompletionPreserved = isTerminalCompletionPreserved({
+        currentStatus: paperclipIssue.status,
+        terminalPullRequestSnapshot: remoteAction.terminalPullRequestSnapshot,
+        effectiveGate
+      });
+      const terminalReopenContinuation = shouldPreserveTerminalReopenContinuation({
+        currentStatus: paperclipIssue.status,
+        terminalPullRequestSnapshot: remoteAction.terminalPullRequestSnapshot,
+        effectiveGate
+      });
+      const transitionFollowThroughAssigneeAgentId =
+        isActionableDirectPullRequestGate(effectiveGate) || terminalCompletionReopened
         ? followThroughAssigneeAgentId
         : undefined;
       const remoteActionFingerprint = createHash('sha256').update(JSON.stringify({
@@ -15737,6 +15917,7 @@ async function synchronizePaperclipPullRequestIssueStatuses(
         currentStatus: paperclipIssue.status,
         pullRequests: pullRequestSnapshots,
         effectiveGate,
+        terminalPullRequestSnapshot: remoteAction.terminalPullRequestSnapshot,
         hasExecutorHandoffTarget: Boolean(executorTransitionAssignee)
       });
       if (
@@ -15753,7 +15934,8 @@ async function synchronizePaperclipPullRequestIssueStatuses(
         nextStatus,
         syncContext: paperclipIssueSyncContext
       });
-      const shouldClearCompletedExecutionPolicy = nextStatus === 'done' || nextStatus === 'cancelled';
+      const shouldClearCompletedExecutionPolicy =
+        (nextStatus === 'done' || nextStatus === 'cancelled') && !terminalCompletionPreserved;
       const nextTransitionAssignee = resolveSyncTransitionAssignee({
         currentStatus: paperclipIssue.status,
         nextStatus,
@@ -15822,6 +16004,13 @@ async function synchronizePaperclipPullRequestIssueStatuses(
         remoteAction.selectedPullRequestGate = effectiveGate
           ? { repositoryUrl: effectiveGate.repositoryUrl, number: effectiveGate.number }
           : undefined;
+        if (nextStatus === 'in_review') {
+          const terminalSnapshot = buildTerminalPullRequestSnapshot(effectiveGate);
+          if (terminalSnapshot) remoteAction.terminalPullRequestSnapshot = terminalSnapshot;
+          else delete remoteAction.terminalPullRequestSnapshot;
+        } else if (nextStatus !== 'done' && !terminalCompletionReopened && !terminalReopenContinuation) {
+          delete remoteAction.terminalPullRequestSnapshot;
+        }
         if (pendingWake) remoteAction.pendingWake = pendingWake;
         await persistRemoteActionRegistry();
         if (pendingWake) {
@@ -15896,6 +16085,13 @@ async function synchronizePaperclipPullRequestIssueStatuses(
       remoteAction.selectedPullRequestGate = effectiveGate
         ? { repositoryUrl: effectiveGate.repositoryUrl, number: effectiveGate.number }
         : undefined;
+      if (nextStatus === 'in_review') {
+        const terminalSnapshot = buildTerminalPullRequestSnapshot(effectiveGate);
+        if (terminalSnapshot) remoteAction.terminalPullRequestSnapshot = terminalSnapshot;
+        else delete remoteAction.terminalPullRequestSnapshot;
+      } else if (nextStatus !== 'done' && !terminalCompletionReopened && !terminalReopenContinuation) {
+        delete remoteAction.terminalPullRequestSnapshot;
+      }
       if (pendingWake) remoteAction.pendingWake = pendingWake;
       await persistRemoteActionRegistry();
       updatedStatusesCount += 1;
@@ -23810,6 +24006,7 @@ export const __testing = {
   hasUnresolvedPaperclipIssueBlocker,
   isHealthyMaintainerWaitTransition,
   isPaperclipIssuePatchApplied,
+  isTerminalCompletionPreserved,
   listTrustedNewLinkedPullRequestCommentSources,
   normalizePaperclipIssueAssigneePrincipal,
   normalizeImportRegistry,
@@ -23823,8 +24020,11 @@ export const __testing = {
   resolvePaperclipApiAuthTokens,
   resolveGithubToken,
   resolvePaperclipIssueStatus,
+  resolvePaperclipDirectPullRequestIssueStatus,
   resolvePaperclipPullRequestIssueStatus,
   resolveSyncTransitionAssignee,
+  shouldPreserveTerminalReopenContinuation,
+  shouldReopenTerminalCompletion,
   resolveTrustedWorkspacePath,
   updatePaperclipIssueState,
   upsertGitHubPullRequestLinkRecord,
