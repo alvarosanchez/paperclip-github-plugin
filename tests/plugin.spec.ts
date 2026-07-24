@@ -9234,6 +9234,104 @@ test('sync.runNow monitors Paperclip issues created from pull requests without c
   }
 });
 
+test('sync preserves an acknowledged terminal direct-PR head and reopens a changed head with its durable owner', async () => {
+  const harness = await createProjectPullRequestsHarness();
+  const originalFetch = globalThis.fetch;
+  const originalCreateComment = harness.ctx.issues.createComment;
+  const originalRequestWakeup = harness.ctx.issues.requestWakeup.bind(harness.ctx.issues);
+  const transitionComments: string[] = [];
+  const wakeups: string[] = [];
+  const acknowledgedHead = '65cca42353b54bea1370a7a78442eb7499aa6565';
+  let headSha = acknowledgedHead;
+
+  harness.ctx.agents.get = async (agentId, companyId) =>
+    agentId === 'terminal-owner' && companyId === 'company-1'
+      ? { id: agentId, companyId, name: 'Terminal owner' } as never
+      : null;
+  harness.ctx.issues.createComment = async (issueId, body, companyId) => {
+    transitionComments.push(body);
+    return originalCreateComment(issueId, body, companyId);
+  };
+  harness.ctx.issues.requestWakeup = async (issueId, companyId, options) => {
+    wakeups.push(options?.idempotencyKey ?? 'missing-key');
+    return originalRequestWakeup(issueId, companyId, options);
+  };
+
+  const issue = await harness.ctx.issues.create({
+    companyId: 'company-1', projectId: 'project-1', title: 'AIG-761 terminal completion', status: 'done'
+  });
+  await upsertDirectPullRequestLink(harness, issue.id, 77, {
+    followThroughAssigneeAgentId: 'terminal-owner'
+  });
+  await harness.ctx.state.set(
+    { scopeKind: 'instance', stateKey: 'paperclip-github-plugin-remote-action-registry' },
+    [{
+      key: `direct-pr:company-1:${issue.id}`,
+      terminalPullRequestSnapshot: {
+        repositoryUrl: 'https://github.com/paperclipai/example-repo', number: 77, headSha: acknowledgedHead
+      }
+    }]
+  );
+
+  globalThis.fetch = async (input, init) => {
+    const requestUrl = getDecodedRequestPathname(input);
+    if (requestUrl === '/repos/paperclipai/example-repo/issues') return jsonResponse([]);
+    if (requestUrl === '/repos/paperclipai/example-repo/pulls/77') {
+      return jsonResponse({
+        number: 77, title: 'AIG-761', html_url: 'https://github.com/paperclipai/example-repo/pull/77',
+        state: 'open', merged: false, comments: 0, review_comments: 0, user: { login: 'author' }
+      });
+    }
+    if (requestUrl === '/graphql') {
+      const { query, variables } = getGraphqlRequest(init);
+      if (query.includes('query GitHubRepositoryOpenIssueLinkedPullRequests')) {
+        return graphqlResponse({ repository: { issues: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [] } } });
+      }
+      if (query.includes('query GitHubPullRequestReviewThreads') && variables.pullRequestNumber === 77) {
+        return graphqlResponse({ repository: { pullRequest: {
+          reviewThreads: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [{ isResolved: true }] }
+        } } });
+      }
+      if (query.includes('query GitHubPullRequestCiContexts') && variables.pullRequestNumber === 77) {
+        return graphqlResponse({ repository: { pullRequest: {
+          headRefOid: headSha, mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN', reviewDecision: 'APPROVED',
+          statusCheckRollup: { contexts: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [{
+            __typename: 'CheckRun', status: 'COMPLETED', conclusion: 'SUCCESS'
+          }] } }
+        } } });
+      }
+    }
+    throw new Error(`Unexpected GitHub request: ${getRequestUrl(input)}`);
+  };
+
+  const sync = () => harness.performAction('sync.runNow', {
+    companyId: 'company-1', issueId: issue.id, waitForCompletion: true
+  }) as Promise<{ syncState: { status: string } }>;
+
+  try {
+    assert.equal((await sync()).syncState.status, 'success');
+    assert.equal((await harness.ctx.issues.get(issue.id, 'company-1'))?.status, 'done');
+    assert.deepEqual(transitionComments, []);
+    assert.deepEqual(wakeups, []);
+
+    headSha = 'a'.repeat(40);
+    assert.equal((await sync()).syncState.status, 'success');
+    const reopened = await harness.ctx.issues.get(issue.id, 'company-1');
+    assert.equal(reopened?.status, 'in_progress');
+    assert.equal(reopened?.assigneeAgentId, 'terminal-owner');
+    assert.equal(transitionComments.length, 1);
+    assert.equal(wakeups.length, 1);
+
+    assert.equal((await sync()).syncState.status, 'success');
+    assert.equal(transitionComments.length, 1, 'identical reopen evidence must not churn comments');
+    assert.equal(wakeups.length, 1, 'identical reopen evidence must not schedule another wake');
+  } finally {
+    harness.ctx.issues.createComment = originalCreateComment;
+    harness.ctx.issues.requestWakeup = originalRequestWakeup;
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test('sync.runNow keeps the non-first direct PR gate selected after trusted comment evidence is consumed', async () => {
   const harness = await createProjectPullRequestsHarness();
   const originalFetch = globalThis.fetch;
@@ -9486,7 +9584,7 @@ test('sync.runNow keeps the non-first direct PR gate selected after trusted comm
   }
 });
 
-test('sync.runNow leaves completed direct pull request reviews in an unassigned maintainer wait', async () => {
+test('sync preserves a completed direct pull request when its acknowledged terminal head remains healthy', async () => {
   const harness = await createProjectPullRequestsHarness();
   const originalFetch = globalThis.fetch;
   const originalUpdate = harness.ctx.issues.update;
@@ -9558,6 +9656,15 @@ test('sync.runNow leaves completed direct pull request reviews in an unassigned 
       lastDecisionOutcome: 'approved'
     }
   } as never, 'company-1');
+  await harness.ctx.state.set(
+    { scopeKind: 'instance', stateKey: 'paperclip-github-plugin-remote-action-registry' },
+    [{
+      key: `direct-pr:company-1:${issue.id}`,
+      terminalPullRequestSnapshot: {
+        repositoryUrl: 'https://github.com/paperclipai/example-repo', number: 44, headSha: '4'.repeat(40)
+      }
+    }]
+  );
 
   const directStatusUpdateCalls: Array<{ issueId: string; patch: Record<string, unknown> }> = [];
   harness.ctx.issues.update = async (issueId, patch, companyId) => {
@@ -9620,6 +9727,7 @@ test('sync.runNow leaves completed direct pull request reviews in an unassigned 
               nodes: [
                 {
                   number: 44,
+                  headRefOid: '4'.repeat(40),
                   mergeable: 'MERGEABLE',
                   mergeStateStatus: 'CLEAN',
                   reviewDecision: null,
@@ -9688,6 +9796,7 @@ test('sync.runNow leaves completed direct pull request reviews in an unassigned 
         return graphqlResponse({
           repository: {
             pullRequest: {
+              headRefOid: '4'.repeat(40),
               mergeable: 'MERGEABLE',
               mergeStateStatus: 'CLEAN',
               reviewDecision: null,
@@ -9699,25 +9808,9 @@ test('sync.runNow leaves completed direct pull request reviews in an unassigned 
                   },
                   nodes: [
                     {
-                      __typename: 'StatusContext',
-                      context: 'deployment',
-                      state: 'FAILURE',
-                      createdAt: '2026-04-12T09:00:00Z',
-                      updatedAt: '2026-04-12T09:10:00Z'
-                    },
-                    {
-                      __typename: 'StatusContext',
-                      context: 'deployment',
-                      state: 'FAILURE',
-                      createdAt: '2026-04-12T10:00:00Z',
-                      updatedAt: '2026-04-12T10:10:00Z'
-                    },
-                    {
-                      __typename: 'StatusContext',
-                      context: 'deployment',
-                      state: 'SUCCESS',
-                      createdAt: '2026-04-12T11:00:00Z',
-                      updatedAt: '2026-04-12T11:10:00Z'
+                      __typename: 'CheckRun',
+                      status: 'COMPLETED',
+                      conclusion: 'SUCCESS'
                     }
                   ]
                 }
@@ -9742,23 +9835,15 @@ test('sync.runNow leaves completed direct pull request reviews in an unassigned 
 
     assert.equal(sync.syncState.status, 'success');
     assert.equal(sync.syncState.syncedIssuesCount, 1);
-    assert.equal(directStatusUpdateCalls.length, 1);
-    assert.equal(directStatusUpdateCalls[0]?.patch.status, 'in_review');
-    assert.equal(directStatusUpdateCalls[0]?.patch.assigneeAgentId, null);
-    assert.equal(directStatusUpdateCalls[0]?.patch.assigneeUserId, null);
-    assert.equal(directStatusUpdateCalls[0]?.patch.executionPolicy, null);
-    assert.equal(directStatusUpdateCalls[0]?.patch.executionState, null);
+    assert.deepEqual(directStatusUpdateCalls, []);
 
     const updatedIssue = await harness.ctx.issues.get(issue.id, 'company-1') as Record<string, any> | null;
-    assert.equal(updatedIssue?.status, 'in_review');
-    assert.equal(updatedIssue?.assigneeAgentId ?? null, null);
-    assert.equal(updatedIssue?.assigneeUserId ?? null, null);
-    assert.equal(updatedIssue?.executionPolicy ?? null, null);
-    assert.equal(updatedIssue?.executionState ?? null, null);
+    assert.equal(updatedIssue?.status, 'done');
+    assert.equal(updatedIssue?.assigneeAgentId, 'agent-3');
+    assert.equal(updatedIssue?.executionPolicy?.mode, 'normal');
+    assert.equal(updatedIssue?.executionState?.status, 'completed');
     assert.equal(wakeRequests.length, 0);
-    assert.equal(statusTransitionComments.length, 1);
-    assert.match(statusTransitionComments[0]?.body ?? '', /from `done` to `in review`/);
-    assert.match(statusTransitionComments[0]?.body ?? '', /green CI with all review threads resolved/);
+    assert.equal(statusTransitionComments.length, 0);
   } finally {
     harness.ctx.issues.createComment = originalCreateComment;
     harness.ctx.issues.update = originalUpdate;
@@ -10343,9 +10428,9 @@ test('sync.runNow does not let stale direct PR links close open GitHub issue-lin
 
     assert.equal(sync.syncState.status, 'success');
     const updatedIssue = await harness.ctx.issues.get(issue.id, 'company-1');
-    assert.equal(updatedIssue?.status, 'in_review');
+    assert.equal(updatedIssue?.status, 'todo');
     assert.equal(statusTransitionComments.length, 1);
-    assert.match(statusTransitionComments[0]?.body ?? '', /from `done` to `in review`/);
+    assert.match(statusTransitionComments[0]?.body ?? '', /from `done` to `todo`/);
     assert.doesNotMatch(statusTransitionComments[0]?.body ?? '', /pull request was merged/);
   } finally {
     harness.ctx.issues.createComment = originalCreateComment;
@@ -22132,7 +22217,7 @@ test('worker routes non-review-ready GitHub merge state statuses back to active 
       initialStatus: 'done' as const,
       mergeable: 'MERGEABLE' as const,
       mergeStateStatus: 'UNKNOWN',
-      expectedStatus: 'in_review' as const,
+      expectedStatus: 'in_progress' as const,
       expectedReason: /unknown mergeability/
     }
   ];
@@ -22307,7 +22392,7 @@ test('worker routes non-review-ready GitHub merge state statuses back to active 
         assert.equal(wakeRequests.includes(issue?.id ?? ''), true);
         assert.match(
           statusTransitionComments.find((comment) => comment.issueId === issue?.id)?.body ?? '',
-          /from `in review` to `in progress`/
+          new RegExp(`from \`${scenario.initialStatus === 'done' ? 'done' : 'in review'}\` to \`in progress\``)
         );
         assert.match(
           statusTransitionComments.find((comment) => comment.issueId === issue?.id)?.body ?? '',
@@ -22315,12 +22400,7 @@ test('worker routes non-review-ready GitHub merge state statuses back to active 
         );
       } else {
         assert.equal(issue?.assigneeAgentId ?? null, null);
-        if (scenario.initialStatus === 'done') {
-          assert.match(transitionComment?.body ?? '', /from `done` to `in review`/);
-          assert.match(transitionComment?.body ?? '', scenario.expectedReason ?? /unknown mergeability/);
-        } else {
-          assert.equal(transitionComment, undefined);
-        }
+        assert.equal(transitionComment, undefined);
       }
     }
   } finally {
