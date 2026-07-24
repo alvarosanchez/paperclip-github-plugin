@@ -2392,12 +2392,15 @@ function getErrorMessage(error: unknown): string {
   return String(error);
 }
 
-function isPluginSecretReferenceDisabledError(error: unknown): boolean {
+function isPluginSecretReferenceUnavailableError(error: unknown): boolean {
   const message = getErrorMessage(error).toLowerCase();
   return (
     message.includes('plugin secret reference')
     && message.includes('disabled')
-  ) || message.includes('company-scoped plugin config lands');
+  ) || message.includes('company-scoped plugin config lands') || (
+    message.includes('invalid secret reference')
+    && message.includes('secret_ref')
+  );
 }
 
 function getErrorCause(error: unknown): unknown {
@@ -2908,6 +2911,27 @@ function buildGitHubRepositoryTokenCapabilityAudit(params: {
 
 function normalizeSecretRef(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim() ? value.trim() : undefined;
+}
+
+const SECRET_REF_UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+type HostSecretRef = {
+  type: 'secret_ref';
+  secretId: string;
+};
+
+function toHostSecretRef(secretRef: string): string | HostSecretRef {
+  return SECRET_REF_UUID_PATTERN.test(secretRef)
+    ? { type: 'secret_ref', secretId: secretRef }
+    : secretRef;
+}
+
+async function resolvePluginSecret(ctx: PluginSetupContext, secretRef: string): Promise<string> {
+  // The published SDK still types this as a string, while newer Paperclip hosts
+  // require UUID-backed plugin refs in the structured secret_ref form. Keep
+  // non-UUID legacy references unchanged so older hosts retain their contract.
+  const resolveSecret = ctx.secrets.resolve as unknown as (ref: string | HostSecretRef) => Promise<string>;
+  return await resolveSecret(toHostSecretRef(secretRef));
 }
 
 function normalizeGitHubLowercaseString(value: unknown): string | undefined {
@@ -5712,7 +5736,7 @@ async function shouldSeedExternalPaperclipBoardTokenFallback(
   secretRef: string
 ): Promise<boolean> {
   try {
-    return !(await ctx.secrets.resolve(secretRef)).trim();
+    return !(await resolvePluginSecret(ctx, secretRef)).trim();
   } catch (error) {
     ctx.logger.warn('Unable to resolve the saved Paperclip board API token while checking worker fallback necessity.', {
       companyId,
@@ -16170,12 +16194,12 @@ async function resolvePaperclipApiAuthTokens(
     }
 
     try {
-      const token = (await ctx.secrets.resolve(secretRef)).trim();
+      const token = (await resolvePluginSecret(ctx, secretRef)).trim();
       if (token) {
         tokensByCompanyId.set(companyId, token);
       }
     } catch (error) {
-      if (fallbackToken && isPluginSecretReferenceDisabledError(error)) {
+      if (fallbackToken && isPluginSecretReferenceUnavailableError(error)) {
         ctx.logger.warn('GitHub Sync is using a worker-local Paperclip board token fallback because plugin secret refs are unavailable in this host.', {
           companyId,
           secretRef,
@@ -16209,14 +16233,14 @@ async function resolveGithubToken(
   const configuredTokenSource = getConfiguredGithubTokenSource(settings, config, options.companyId);
   if (configuredTokenSource.secretRef) {
     try {
-      const token = (await ctx.secrets.resolve(configuredTokenSource.secretRef)).trim();
+      const token = (await resolvePluginSecret(ctx, configuredTokenSource.secretRef)).trim();
       if (token) {
         return token;
       }
 
       return configuredTokenSource.fallbackToken ?? '';
     } catch (error) {
-      if (configuredTokenSource.fallbackToken && isPluginSecretReferenceDisabledError(error)) {
+      if (configuredTokenSource.fallbackToken && isPluginSecretReferenceUnavailableError(error)) {
         ctx.logger.warn('GitHub Sync is using a worker-local company token fallback because plugin secret refs are unavailable in this host.', {
           companyId: normalizeCompanyId(options.companyId),
           secretRef: configuredTokenSource.secretRef,
@@ -24276,7 +24300,7 @@ const plugin = definePlugin({
       }
 
       try {
-        const resolvedToken = (await ctx.secrets.resolve(githubTokenRef)).trim();
+        const resolvedToken = (await resolvePluginSecret(ctx, githubTokenRef)).trim();
         if (resolvedToken) {
           return {
             secretResolvable: true,
@@ -24284,7 +24308,7 @@ const plugin = definePlugin({
           };
         }
       } catch (error) {
-        if (!isPluginSecretReferenceDisabledError(error)) {
+        if (!isPluginSecretReferenceUnavailableError(error)) {
           throw error;
         }
 

@@ -15409,6 +15409,77 @@ test('resolveGithubToken trims secret-backed GitHub tokens before returning them
   );
 });
 
+test('resolveGithubToken passes UUID-backed refs to structured-secret-ref hosts', async () => {
+  const workerModule = await importFreshWorkerModule();
+  const testing = workerModule.__testing as typeof workerModule.__testing & {
+    resolveGithubToken?: (ctx: unknown, options?: { companyId?: string }) => Promise<string>;
+  };
+  const harness = createTestHarness({
+    manifest,
+    config: {
+      githubTokenRefs: {
+        'company-1': TEST_GITHUB_SECRET_ID
+      }
+    }
+  });
+  await plugin.definition.setup(harness.ctx);
+
+  let resolvedSecretRef: unknown;
+  harness.ctx.secrets.resolve = async (secretRef) => {
+    resolvedSecretRef = secretRef;
+    return 'ghp_structured_secret_ref_token';
+  };
+
+  assert.equal(
+    await testing.resolveGithubToken?.(harness.ctx, { companyId: 'company-1' }),
+    'ghp_structured_secret_ref_token'
+  );
+  assert.deepEqual(resolvedSecretRef, {
+    type: 'secret_ref',
+    secretId: TEST_GITHUB_SECRET_ID
+  });
+});
+
+test('resolveGithubToken uses only the configured company fallback for the documented invalid-secret-ref host error', async () => {
+  const workerModule = await importFreshWorkerModule();
+  const testing = workerModule.__testing as typeof workerModule.__testing & {
+    resolveGithubToken?: (ctx: unknown, options?: { companyId?: string }) => Promise<string>;
+  };
+  const harness = createTestHarness({
+    manifest,
+    config: {
+      githubTokenRefs: {
+        'company-1': TEST_GITHUB_SECRET_ID
+      },
+      githubTokensByCompanyId: {
+        'company-1': 'ghp_company_fallback_token'
+      }
+    }
+  });
+  await plugin.definition.setup(harness.ctx);
+
+  harness.ctx.secrets.resolve = async (secretRef) => {
+    assert.deepEqual(secretRef, {
+      type: 'secret_ref',
+      secretId: TEST_GITHUB_SECRET_ID
+    });
+    throw new Error('Invalid secret reference for plugin: secret UUID. Use { type: "secret_ref", secretId, version? }.');
+  };
+
+  assert.equal(
+    await testing.resolveGithubToken?.(harness.ctx, { companyId: 'company-1' }),
+    'ghp_company_fallback_token'
+  );
+
+  harness.ctx.secrets.resolve = async () => {
+    throw new Error('Secret provider access denied');
+  };
+  await assert.rejects(
+    testing.resolveGithubToken?.(harness.ctx, { companyId: 'company-1' }),
+    /Secret provider access denied/
+  );
+});
+
 test('settings.registration reports company-specific board access without resolving the saved secret', async () => {
   const harness = createTestHarness({ manifest });
   await plugin.definition.setup(harness.ctx);
