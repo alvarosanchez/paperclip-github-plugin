@@ -15440,6 +15440,70 @@ test('resolveGithubToken passes UUID-backed refs to structured-secret-ref hosts'
   });
 });
 
+test('resolveGithubToken passes UUIDv6, UUIDv7, and UUIDv8 refs to structured-secret-ref hosts', async () => {
+  const workerModule = await importFreshWorkerModule();
+  const testing = workerModule.__testing as typeof workerModule.__testing & {
+    resolveGithubToken?: (ctx: unknown, options?: { companyId?: string }) => Promise<string>;
+  };
+
+  for (const secretId of [
+    '00000000-0000-6000-8000-000000000001',
+    '00000000-0000-7000-8000-000000000001',
+    '00000000-0000-8000-8000-000000000001'
+  ]) {
+    const harness = createTestHarness({
+      manifest,
+      config: {
+        githubTokenRefs: {
+          'company-1': secretId
+        }
+      }
+    });
+    await plugin.definition.setup(harness.ctx);
+
+    let resolvedSecretRef: unknown;
+    harness.ctx.secrets.resolve = async (secretRef) => {
+      resolvedSecretRef = secretRef;
+      return 'ghp_structured_secret_ref_token';
+    };
+
+    await testing.resolveGithubToken?.(harness.ctx, { companyId: 'company-1' });
+    assert.deepEqual(resolvedSecretRef, { type: 'secret_ref', secretId });
+  }
+});
+
+test('resolveGithubToken preserves the host secret resolver receiver', async () => {
+  const workerModule = await importFreshWorkerModule();
+  const testing = workerModule.__testing as typeof workerModule.__testing & {
+    resolveGithubToken?: (ctx: unknown, options?: { companyId?: string }) => Promise<string>;
+  };
+  const harness = createTestHarness({
+    manifest,
+    config: {
+      githubTokenRefs: {
+        'company-1': TEST_GITHUB_SECRET_ID
+      }
+    }
+  });
+  await plugin.definition.setup(harness.ctx);
+
+  const secrets = harness.ctx.secrets as typeof harness.ctx.secrets & { receiver?: unknown };
+  secrets.receiver = secrets;
+  secrets.resolve = async function (secretRef) {
+    assert.equal(this.receiver, this);
+    assert.deepEqual(secretRef, {
+      type: 'secret_ref',
+      secretId: TEST_GITHUB_SECRET_ID
+    });
+    return 'ghp_bound_secret_resolver_token';
+  };
+
+  assert.equal(
+    await testing.resolveGithubToken?.(harness.ctx, { companyId: 'company-1' }),
+    'ghp_bound_secret_resolver_token'
+  );
+});
+
 test('resolveGithubToken uses only the configured company fallback for the documented invalid-secret-ref host error', async () => {
   const workerModule = await importFreshWorkerModule();
   const testing = workerModule.__testing as typeof workerModule.__testing & {

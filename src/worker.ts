@@ -2913,7 +2913,7 @@ function normalizeSecretRef(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim() ? value.trim() : undefined;
 }
 
-const SECRET_REF_UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const SECRET_REF_UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 type HostSecretRef = {
   type: 'secret_ref';
@@ -2930,8 +2930,10 @@ async function resolvePluginSecret(ctx: PluginSetupContext, secretRef: string): 
   // The published SDK still types this as a string, while newer Paperclip hosts
   // require UUID-backed plugin refs in the structured secret_ref form. Keep
   // non-UUID legacy references unchanged so older hosts retain their contract.
-  const resolveSecret = ctx.secrets.resolve as unknown as (ref: string | HostSecretRef) => Promise<string>;
-  return await resolveSecret(toHostSecretRef(secretRef));
+  const secrets = ctx.secrets as unknown as {
+    resolve(ref: string | HostSecretRef): Promise<string>;
+  };
+  return await secrets.resolve(toHostSecretRef(secretRef));
 }
 
 function normalizeGitHubLowercaseString(value: unknown): string | undefined {
