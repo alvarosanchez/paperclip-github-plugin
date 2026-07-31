@@ -1,5 +1,12 @@
-export type PluginConfigBoardTokenRefs = Record<string, string>;
-export type PluginConfigGitHubTokenRefs = Record<string, string>;
+export interface PluginConfigSecretRef {
+  type: 'secret_ref';
+  secretId: string;
+  version?: number | 'latest';
+}
+
+export type PluginConfigSecretReference = string | PluginConfigSecretRef;
+export type PluginConfigBoardTokenRefs = Record<string, PluginConfigSecretReference>;
+export type PluginConfigGitHubTokenRefs = Record<string, PluginConfigSecretReference>;
 
 export interface GitHubSyncPluginConfig extends Record<string, unknown> {
   githubTokenRefs?: PluginConfigGitHubTokenRefs;
@@ -9,6 +16,38 @@ export interface GitHubSyncPluginConfig extends Record<string, unknown> {
 
 function normalizeOptionalString(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim() ? value.trim() : undefined;
+}
+
+export function createPluginConfigSecretRef(secretId: string): PluginConfigSecretRef {
+  return { type: 'secret_ref', secretId };
+}
+
+export function normalizePluginConfigSecretRef(value: unknown): PluginConfigSecretReference | undefined {
+  const stringRef = normalizeOptionalString(value);
+  if (stringRef) {
+    return stringRef;
+  }
+
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return undefined;
+  }
+
+  const record = value as Record<string, unknown>;
+  const secretId = normalizeOptionalString(record.secretId);
+  if (record.type !== 'secret_ref' || !secretId) {
+    return undefined;
+  }
+
+  const version = record.version === 'latest'
+    ? 'latest' as const
+    : typeof record.version === 'number' && Number.isSafeInteger(record.version) && record.version > 0
+      ? record.version
+      : undefined;
+  return {
+    type: 'secret_ref',
+    secretId,
+    ...(version ? { version } : {})
+  };
 }
 
 export function normalizePaperclipApiBaseUrl(value: unknown): string | undefined {
@@ -32,12 +71,12 @@ export function normalizePluginConfigBoardTokenRefs(value: unknown): PluginConfi
   const entries = Object.entries(value as Record<string, unknown>)
     .map(([companyId, secretRef]) => {
       const normalizedCompanyId = normalizeOptionalString(companyId);
-      const normalizedSecretRef = normalizeOptionalString(secretRef);
+      const normalizedSecretRef = normalizePluginConfigSecretRef(secretRef);
       return normalizedCompanyId && normalizedSecretRef
         ? [normalizedCompanyId, normalizedSecretRef] as const
         : null;
     })
-    .filter((entry): entry is readonly [string, string] => Boolean(entry));
+    .filter((entry): entry is readonly [string, PluginConfigSecretReference] => Boolean(entry));
 
   if (entries.length === 0) {
     return undefined;
@@ -54,12 +93,12 @@ export function normalizePluginConfigGitHubTokenRefs(value: unknown): PluginConf
   const entries = Object.entries(value as Record<string, unknown>)
     .map(([companyId, secretRef]) => {
       const normalizedCompanyId = normalizeOptionalString(companyId);
-      const normalizedSecretRef = normalizeOptionalString(secretRef);
+      const normalizedSecretRef = normalizePluginConfigSecretRef(secretRef);
       return normalizedCompanyId && normalizedSecretRef
         ? [normalizedCompanyId, normalizedSecretRef] as const
         : null;
     })
-    .filter((entry): entry is readonly [string, string] => Boolean(entry));
+    .filter((entry): entry is readonly [string, PluginConfigSecretReference] => Boolean(entry));
 
   if (entries.length === 0) {
     return undefined;
