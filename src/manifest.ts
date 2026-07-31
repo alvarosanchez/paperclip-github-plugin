@@ -58,14 +58,38 @@ export const manifest: PaperclipPluginManifestV1 = {
         type: 'object',
         title: 'GitHub Token Secrets',
         additionalProperties: {
-          type: 'string'
+          oneOf: [
+            { type: 'string' },
+            {
+              type: 'object',
+              properties: {
+                type: { const: 'secret_ref' },
+                secretId: { type: 'string' },
+                version: { oneOf: [{ const: 'latest' }, { type: 'integer', minimum: 1 }] }
+              },
+              required: ['type', 'secretId'],
+              additionalProperties: false
+            }
+          ]
         }
       },
       paperclipBoardApiTokenRefs: {
         type: 'object',
         title: 'Paperclip Board Token Secrets',
         additionalProperties: {
-          type: 'string'
+          oneOf: [
+            { type: 'string' },
+            {
+              type: 'object',
+              properties: {
+                type: { const: 'secret_ref' },
+                secretId: { type: 'string' },
+                version: { oneOf: [{ const: 'latest' }, { type: 'integer', minimum: 1 }] }
+              },
+              required: ['type', 'secretId'],
+              additionalProperties: false
+            }
+          ]
         }
       },
       paperclipApiBaseUrl: {

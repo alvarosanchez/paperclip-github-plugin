@@ -10,6 +10,7 @@ import {
   definePlugin,
   startWorkerRpcHost,
   type Agent,
+  type EnvSecretRefBinding,
   type Issue,
   type IssueComment,
   type PluginApiRequestInput,
@@ -186,9 +187,10 @@ type PaperclipIssueUpdatePatchWithLabels = Parameters<PluginSetupContext['issues
   labels?: PaperclipIssueLabel[];
 };
 type PaperclipLabelDirectory = Map<string, PaperclipIssueLabel[]>;
-type GitHubTokenRefs = Record<string, string>;
+type PluginSecretRef = string | HostSecretRef;
+type GitHubTokenRefs = Record<string, PluginSecretRef>;
 type GitHubTokensByCompanyId = Record<string, string>;
-type PaperclipBoardApiTokenRefs = Record<string, string>;
+type PaperclipBoardApiTokenRefs = Record<string, PluginSecretRef>;
 type PaperclipBoardApiTokensByCompanyId = Record<string, string>;
 type GitHubTokenLoginByCompanyId = Record<string, string>;
 type PaperclipBoardAccessIdentityByCompanyId = Record<string, string>;
@@ -587,7 +589,7 @@ interface GitHubSyncSettings {
   paperclipApiBaseUrlByCompanyId?: PaperclipApiBaseUrlByCompanyId;
   githubTokenRefs?: GitHubTokenRefs;
   githubTokenLoginByCompanyId?: GitHubTokenLoginByCompanyId;
-  githubTokenRef?: string;
+  githubTokenRef?: PluginSecretRef;
   githubTokenLogin?: string;
   paperclipBoardApiTokenRefs?: PaperclipBoardApiTokenRefs;
   paperclipBoardAccessIdentityByCompanyId?: PaperclipBoardAccessIdentityByCompanyId;
@@ -599,7 +601,7 @@ interface GitHubSyncSettings {
 
 interface GitHubSyncConfig {
   githubTokenRefs?: GitHubTokenRefs;
-  githubTokenRef?: string;
+  githubTokenRef?: PluginSecretRef;
   githubToken?: string;
   githubTokensByCompanyId?: GitHubTokensByCompanyId;
   paperclipBoardApiTokenRefs?: PaperclipBoardApiTokenRefs;
@@ -646,7 +648,7 @@ type ScheduleFrequencyMinutesByCompanyId = Record<string, number>;
 type PaperclipApiBaseUrlByCompanyId = Record<string, string>;
 
 interface ResolvedGitHubTokenSource {
-  secretRef?: string;
+  secretRef?: PluginSecretRef;
   token?: string;
   fallbackToken?: string;
 }
@@ -2392,12 +2394,15 @@ function getErrorMessage(error: unknown): string {
   return String(error);
 }
 
-function isPluginSecretReferenceDisabledError(error: unknown): boolean {
+function isPluginSecretReferenceUnavailableError(error: unknown): boolean {
   const message = getErrorMessage(error).toLowerCase();
   return (
     message.includes('plugin secret reference')
     && message.includes('disabled')
-  ) || message.includes('company-scoped plugin config lands');
+  ) || message.includes('company-scoped plugin config lands') || (
+    message.includes('invalid secret reference')
+    && message.includes('secret_ref')
+  );
 }
 
 function getErrorCause(error: unknown): unknown {
@@ -2910,6 +2915,85 @@ function normalizeSecretRef(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim() ? value.trim() : undefined;
 }
 
+type HostSecretRef = EnvSecretRefBinding;
+
+function normalizePluginSecretRef(value: unknown): PluginSecretRef | undefined {
+  const stringRef = normalizeSecretRef(value);
+  if (stringRef) {
+    return stringRef;
+  }
+
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return undefined;
+  }
+
+  const record = value as Record<string, unknown>;
+  const secretId = normalizeSecretRef(record.secretId);
+  if (record.type !== 'secret_ref' || !secretId) {
+    return undefined;
+  }
+
+  const version = record.version === 'latest'
+    ? 'latest' as const
+    : typeof record.version === 'number' && Number.isSafeInteger(record.version) && record.version > 0
+      ? record.version
+      : undefined;
+  return {
+    type: 'secret_ref',
+    secretId,
+    ...(version ? { version } : {})
+  };
+}
+
+function isLegacySecretResolverObjectRejection(error: unknown): boolean {
+  const message = getErrorMessage(error).toLowerCase();
+  return message.includes('invalid secret reference') && message.includes('[object object]');
+}
+
+function getPluginSecretRefKey(secretRef: PluginSecretRef): string {
+  return typeof secretRef === 'string'
+    ? `string:${secretRef}`
+    : `secret_ref:${secretRef.secretId}:${secretRef.version ?? ''}`;
+}
+
+function isSamePluginSecretRef(left: PluginSecretRef | undefined, right: PluginSecretRef | undefined): boolean {
+  return Boolean(left && right && getPluginSecretRefKey(left) === getPluginSecretRefKey(right));
+}
+
+function getCompanyPluginSecretScope(companyId: string, configKey: 'githubTokenRefs' | 'paperclipBoardApiTokenRefs') {
+  return {
+    companyId,
+    configPath: `${configKey}.${companyId}`
+  };
+}
+
+async function resolvePluginSecret(
+  ctx: PluginSetupContext,
+  secretRef: PluginSecretRef,
+  scope?: { companyId?: string; configPath?: string }
+): Promise<string> {
+  const secrets = ctx.secrets;
+
+  // Raw refs intentionally retain the 2026.626.0 bridge contract. Structured
+  // refs are trusted plugin-config bindings and must carry their host scope.
+  if (typeof secretRef === 'string') {
+    return await secrets.resolve.call(secrets, secretRef);
+  }
+
+  try {
+    return await secrets.resolve.call(secrets, secretRef, scope);
+  } catch (error) {
+    // Paperclip 2026.626.0 rejects structured refs before resolution. Retry
+    // only that exact bridge-shape rejection with its UUID string contract;
+    // permissions, provider, and all unrelated failures remain fail-closed.
+    if (!isLegacySecretResolverObjectRejection(error)) {
+      throw error;
+    }
+
+    return await secrets.resolve.call(secrets, secretRef.secretId);
+  }
+}
+
 function normalizeGitHubLowercaseString(value: unknown): string | undefined {
   if (typeof value !== 'string') {
     return undefined;
@@ -2923,8 +3007,8 @@ function normalizeGitHubUserLogin(value: unknown): string | undefined {
   return normalizeGitHubLowercaseString(value);
 }
 
-function normalizeGitHubTokenRef(value: unknown): string | undefined {
-  return normalizeSecretRef(value);
+function normalizeGitHubTokenRef(value: unknown): PluginSecretRef | undefined {
+  return normalizePluginSecretRef(value);
 }
 
 function normalizeGitHubTokenRefs(value: unknown): GitHubTokenRefs | undefined {
@@ -2940,7 +3024,7 @@ function normalizeGitHubTokenRefs(value: unknown): GitHubTokenRefs | undefined {
         ? [normalizedCompanyId, normalizedSecretRef] as const
         : null;
     })
-    .filter((entry): entry is readonly [string, string] => entry !== null);
+    .filter((entry): entry is readonly [string, PluginSecretRef] => entry !== null);
 
   if (entries.length === 0) {
     return undefined;
@@ -5709,10 +5793,14 @@ async function clearExternalCompanyPaperclipBoardApiTokenFallback(
 async function shouldSeedExternalPaperclipBoardTokenFallback(
   ctx: PluginSetupContext,
   companyId: string,
-  secretRef: string
+  secretRef: PluginSecretRef
 ): Promise<boolean> {
   try {
-    return !(await ctx.secrets.resolve(secretRef)).trim();
+    return !(await resolvePluginSecret(
+      ctx,
+      secretRef,
+      getCompanyPluginSecretScope(companyId, 'paperclipBoardApiTokenRefs')
+    )).trim();
   } catch (error) {
     ctx.logger.warn('Unable to resolve the saved Paperclip board API token while checking worker fallback necessity.', {
       companyId,
@@ -5731,12 +5819,12 @@ function normalizePaperclipBoardApiTokenRefs(value: unknown): PaperclipBoardApiT
   const entries = Object.entries(value as Record<string, unknown>)
     .map(([companyId, secretRef]) => {
       const normalizedCompanyId = normalizeCompanyId(companyId);
-      const normalizedSecretRef = normalizeSecretRef(secretRef);
+      const normalizedSecretRef = normalizePluginSecretRef(secretRef);
       return normalizedCompanyId && normalizedSecretRef
         ? [normalizedCompanyId, normalizedSecretRef] as const
         : null;
     })
-    .filter((entry): entry is readonly [string, string] => entry !== null);
+    .filter((entry): entry is readonly [string, PluginSecretRef] => entry !== null);
 
   if (entries.length === 0) {
     return undefined;
@@ -15976,8 +16064,8 @@ function getConfiguredGithubTokenSource(
     hasAnyScopedValue(settings?.githubTokenRefs)
     || hasAnyScopedValue(config.githubTokenRefs);
   const secretRef = normalizedCompanyId
-    ? normalizeSecretRef(config.githubTokenRefs?.[normalizedCompanyId])
-      ?? normalizeSecretRef(settings?.githubTokenRefs?.[normalizedCompanyId])
+    ? normalizePluginSecretRef(config.githubTokenRefs?.[normalizedCompanyId])
+      ?? normalizePluginSecretRef(settings?.githubTokenRefs?.[normalizedCompanyId])
       ?? (!hasScopedGitHubTokenRefs
         ? normalizeGitHubTokenRef(config.githubTokenRef)
           ?? normalizeGitHubTokenRef(settings?.githubTokenRef)
@@ -15990,8 +16078,8 @@ function getConfiguredGithubTokenSource(
           ...Object.values(settings?.githubTokenRefs ?? {})
         ]
           .map((value) => normalizeGitHubTokenRef(value))
-          .filter((value): value is string => Boolean(value));
-        const uniqueRefs = [...new Set(configuredRefs)];
+          .filter((value): value is PluginSecretRef => Boolean(value));
+        const uniqueRefs = [...new Map(configuredRefs.map((value) => [getPluginSecretRefKey(value), value])).values()];
         return uniqueRefs.length === 1 ? uniqueRefs[0] : undefined;
       })();
   if (secretRef) {
@@ -16012,7 +16100,7 @@ function getConfiguredGithubTokenRef(
   settings: Pick<GitHubSyncSettings, 'githubTokenRefs' | 'githubTokenRef'> | null | undefined,
   config: GitHubSyncConfig,
   companyId?: string
-): string | undefined {
+): PluginSecretRef | undefined {
   return getConfiguredGithubTokenSource(settings, config, companyId).secretRef;
 }
 
@@ -16039,45 +16127,45 @@ function hasConfiguredGithubToken(
 function getSavedGitHubTokenRef(
   settings: Pick<GitHubSyncSettings, 'githubTokenRefs'> | null | undefined,
   companyId?: string
-): string | undefined {
+): PluginSecretRef | undefined {
   if (!companyId) {
     return undefined;
   }
 
-  return normalizeSecretRef(settings?.githubTokenRefs?.[companyId]);
+  return normalizePluginSecretRef(settings?.githubTokenRefs?.[companyId]);
 }
 
 function getConfiguredGitHubTokenRef(
   config: Pick<GitHubSyncConfig, 'githubTokenRefs'> | null | undefined,
   companyId?: string
-): string | undefined {
+): PluginSecretRef | undefined {
   if (!companyId) {
     return undefined;
   }
 
-  return normalizeSecretRef(config?.githubTokenRefs?.[companyId]);
+  return normalizePluginSecretRef(config?.githubTokenRefs?.[companyId]);
 }
 
 function getSavedPaperclipBoardApiTokenRef(
   settings: Pick<GitHubSyncSettings, 'paperclipBoardApiTokenRefs'> | null | undefined,
   companyId?: string
-): string | undefined {
+): PluginSecretRef | undefined {
   if (!companyId) {
     return undefined;
   }
 
-  return normalizeSecretRef(settings?.paperclipBoardApiTokenRefs?.[companyId]);
+  return normalizePluginSecretRef(settings?.paperclipBoardApiTokenRefs?.[companyId]);
 }
 
 function getConfiguredPaperclipBoardApiTokenRef(
   config: Pick<GitHubSyncConfig, 'paperclipBoardApiTokenRefs'> | null | undefined,
   companyId?: string
-): string | undefined {
+): PluginSecretRef | undefined {
   if (!companyId) {
     return undefined;
   }
 
-  return normalizeSecretRef(config?.paperclipBoardApiTokenRefs?.[companyId]);
+  return normalizePluginSecretRef(config?.paperclipBoardApiTokenRefs?.[companyId]);
 }
 
 function hasConfiguredPaperclipBoardAccess(
@@ -16170,12 +16258,16 @@ async function resolvePaperclipApiAuthTokens(
     }
 
     try {
-      const token = (await ctx.secrets.resolve(secretRef)).trim();
+      const token = (await resolvePluginSecret(
+        ctx,
+        secretRef,
+        getCompanyPluginSecretScope(companyId, 'paperclipBoardApiTokenRefs')
+      )).trim();
       if (token) {
         tokensByCompanyId.set(companyId, token);
       }
     } catch (error) {
-      if (fallbackToken && isPluginSecretReferenceDisabledError(error)) {
+      if (fallbackToken && isPluginSecretReferenceUnavailableError(error)) {
         ctx.logger.warn('GitHub Sync is using a worker-local Paperclip board token fallback because plugin secret refs are unavailable in this host.', {
           companyId,
           secretRef,
@@ -16209,14 +16301,19 @@ async function resolveGithubToken(
   const configuredTokenSource = getConfiguredGithubTokenSource(settings, config, options.companyId);
   if (configuredTokenSource.secretRef) {
     try {
-      const token = (await ctx.secrets.resolve(configuredTokenSource.secretRef)).trim();
+      const companyId = normalizeCompanyId(options.companyId);
+      const token = (await resolvePluginSecret(
+        ctx,
+        configuredTokenSource.secretRef,
+        companyId ? getCompanyPluginSecretScope(companyId, 'githubTokenRefs') : undefined
+      )).trim();
       if (token) {
         return token;
       }
 
       return configuredTokenSource.fallbackToken ?? '';
     } catch (error) {
-      if (configuredTokenSource.fallbackToken && isPluginSecretReferenceDisabledError(error)) {
+      if (configuredTokenSource.fallbackToken && isPluginSecretReferenceUnavailableError(error)) {
         ctx.logger.warn('GitHub Sync is using a worker-local company token fallback because plugin secret refs are unavailable in this host.', {
           companyId: normalizeCompanyId(options.companyId),
           secretRef: configuredTokenSource.secretRef,
@@ -24155,7 +24252,7 @@ const plugin = definePlugin({
         throw new Error('A company id is required to update Paperclip board access.');
       }
 
-      const nextSecretRef = normalizeSecretRef(record.paperclipBoardApiTokenRef);
+      const nextSecretRef = normalizePluginSecretRef(record.paperclipBoardApiTokenRef);
       const boardAccessRecord = record.paperclipBoardAccess && typeof record.paperclipBoardAccess === 'object'
         ? record.paperclipBoardAccess as Record<string, unknown>
         : {};
@@ -24179,7 +24276,7 @@ const plugin = definePlugin({
         if (nextBoardApiToken) {
           const configuredSecretRef = getConfiguredPaperclipBoardApiTokenRef(trustedConfig, companyId);
           if (
-            configuredSecretRef !== nextSecretRef
+            !isSamePluginSecretRef(configuredSecretRef, nextSecretRef)
             || await shouldSeedExternalPaperclipBoardTokenFallback(ctx, companyId, nextSecretRef)
           ) {
             await writeExternalCompanyPaperclipBoardApiTokenFallback(ctx, companyId, nextBoardApiToken);
@@ -24260,7 +24357,7 @@ const plugin = definePlugin({
     ctx.actions.register('settings.ensureGitHubTokenAvailable', async (input, actionContext) => {
       const record = normalizeActionRecord(input, actionContext);
       const companyId = normalizeCompanyId(record.companyId);
-      const githubTokenRef = normalizeSecretRef(record.githubTokenRef);
+      const githubTokenRef = normalizePluginSecretRef(record.githubTokenRef);
       const token = normalizeGitHubToken(record.token);
 
       if (!companyId) {
@@ -24276,7 +24373,11 @@ const plugin = definePlugin({
       }
 
       try {
-        const resolvedToken = (await ctx.secrets.resolve(githubTokenRef)).trim();
+        const resolvedToken = (await resolvePluginSecret(
+          ctx,
+          githubTokenRef,
+          getCompanyPluginSecretScope(companyId, 'githubTokenRefs')
+        )).trim();
         if (resolvedToken) {
           return {
             secretResolvable: true,
@@ -24284,7 +24385,7 @@ const plugin = definePlugin({
           };
         }
       } catch (error) {
-        if (!isPluginSecretReferenceDisabledError(error)) {
+        if (!isPluginSecretReferenceUnavailableError(error)) {
           throw error;
         }
 

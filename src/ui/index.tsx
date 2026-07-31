@@ -18,6 +18,7 @@ import { normalizeCompanyAssigneeOptionsResponse, type GitHubSyncAssigneeOption 
 import { buildPaperclipUrl, fetchJson, fetchPaperclipHealth, resolveCliAuthPollUrl } from './http.ts';
 import { resolveInstalledGitHubSyncPluginId, resolvePluginSettingsHref } from './plugin-installation.ts';
 import {
+  createPluginConfigSecretRef,
   mergePluginConfig,
   type GitHubSyncPluginConfig,
   normalizePaperclipApiBaseUrl,
@@ -12021,16 +12022,17 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
 
       const secretName = `github_sync_${companyId.replace(/[^a-z0-9]+/gi, '_').toLowerCase()}`;
       const secret = await resolveOrCreateCompanySecret(companyId, secretName, trimmedToken);
+      const secretRef = createPluginConfigSecretRef(secret.id);
 
       await patchPluginConfig(pluginId, {
         githubTokenRefs: {
-          [companyId]: secret.id
+          [companyId]: secretRef
         }
       });
       await saveRegistration({
         companyId,
         githubTokenRefs: {
-          [companyId]: secret.id
+          [companyId]: secretRef
         },
         githubTokenLogin: validation.login
       });
@@ -12039,7 +12041,7 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
       try {
         await ensureGitHubTokenAvailable({
           companyId,
-          githubTokenRef: secret.id,
+          githubTokenRef: secretRef,
           token: trimmedToken
         });
       } catch (error) {
@@ -12128,15 +12130,16 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
       const boardIdentity = await fetchBoardAccessIdentity(boardApiToken);
       const secretName = `paperclip_board_api_${companyId.replace(/[^a-z0-9]+/gi, '_').toLowerCase()}`;
       const secret = await resolveOrCreateCompanySecret(companyId, secretName, boardApiToken);
+      const secretRef = createPluginConfigSecretRef(secret.id);
 
       await patchPluginConfig(pluginId, {
         paperclipBoardApiTokenRefs: {
-          [companyId]: secret.id
+          [companyId]: secretRef
         }
       });
       await updateBoardAccess({
         companyId,
-        paperclipBoardApiTokenRef: secret.id,
+        paperclipBoardApiTokenRef: secretRef,
         paperclipBoardAccess: {
           authorization: {
             bearer: boardApiToken
