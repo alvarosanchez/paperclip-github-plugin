@@ -12,14 +12,14 @@ importers:
         specifier: ^22.0.1
         version: 22.0.1
       '@paperclipai/plugin-sdk':
-        specifier: ^2026.626.0
-        version: 2026.707.0(react@19.2.7)
+        specifier: ^2026.831.1
+        version: 2026.831.1(react@19.2.8)
       react:
-        specifier: ^19.2.7
-        version: 19.2.7
+        specifier: ^19.2.8
+        version: 19.2.8
       react-markdown:
         specifier: ^10.1.0
-        version: 10.1.0(@types/react@19.2.17)(react@19.2.7)
+        version: 10.1.0(@types/react@19.2.17)(react@19.2.8)
       rehype-raw:
         specifier: ^7.0.0
         version: 7.0.0
@@ -259,8 +259,9 @@ packages:
   '@octokit/types@16.0.0':
     resolution: {integrity: sha512-sKq+9r1Mm4efXW1FCk7hFSeJo4QKreL/tTbR0rz/qx/r1Oa2VV83LTA/H/MuCOX7uCIJmQVRKBcbmWoySjAnSg==}
 
-  '@paperclipai/plugin-sdk@2026.707.0':
-    resolution: {integrity: sha512-5pS4nG+l8k7GBvIHiuvPjWsiVX9KYG1WBD/c/DJGPBRRAuUj3Sd/PiaukAV6g/Ax94CnPS799hQLq40i09FKVg==}
+  '@paperclipai/plugin-sdk@2026.831.1':
+    resolution: {integrity: sha512-de69dihx3PJOHBgJfy/Z1Oe5RmyxfsIdYFDJufFFtvr+oQlj3B83OntmNb/gaPCH3sKQ+rEIHY82Qx2fbIfD9w==}
+    engines: {node: '>=24.11.0'}
     hasBin: true
     peerDependencies:
       react: '>=18'
@@ -268,8 +269,9 @@ packages:
       react:
         optional: true
 
-  '@paperclipai/shared@2026.707.0':
-    resolution: {integrity: sha512-CI1D+jBVKdBlCqhFi+GfaK+ADZ1E1PLxAhStzmDkHORTmDnloZZMQ2JbnbPcJGdlIJTTMxAEFVrhgGzwh7jsbw==}
+  '@paperclipai/shared@2026.831.1':
+    resolution: {integrity: sha512-rkpful4jL71GIl8+SRBD4oUm1Kcrz4V4RXz75kQYq8DX2xmLA0gKzcDWeenouYrAmFvzeOshDCQpc1u8FrN4xQ==}
+    engines: {node: '>=24.11.0'}
 
   '@types/debug@4.1.13':
     resolution: {integrity: sha512-KSVgmQmzMwPlmtljOomayoR89W4FynCAi3E8PPs7vmDVPe84hT+vGPKkJfThkmXs0x0jAaa9U8uW8bbfyS2fWw==}
@@ -598,8 +600,8 @@ packages:
       '@types/react': '>=18'
       react: '>=18'
 
-  react@19.2.7:
-    resolution: {integrity: sha512-HNe9WslTbXmFK8o8cmwgAeJFSBvt1bPdHCVKtaaV+WlAN36mpT4hcRpwbf3fY56ar2oIXzsBpOAiIRHAdY0OlQ==}
+  react@19.2.8:
+    resolution: {integrity: sha512-PWaYA1L/q9u2u7xYQi+Y3L3Yfnie7XyLeaJICV1MGD6LprsBxcAqGjYyr0eY3p+QdsA+x/Irkt4Qif8D63+Sbw==}
     engines: {node: '>=0.10.0'}
 
   rehype-raw@7.0.0:
@@ -684,8 +686,8 @@ packages:
   web-namespaces@2.0.1:
     resolution: {integrity: sha512-bKr1DkiNa2krS7qxNtdrtHAmzuYGFQLiQ13TsorsdT6ULTkPLKuu5+GsFpDlg6JFjUTwX2DyhMPG2be8uPrqsQ==}
 
-  zod@3.25.76:
-    resolution: {integrity: sha512-gzUt/qt81nXsFGKIFcC3YnfEAx5NkunCfnDlvuBSSFS02bcXu4Lmea0AFIUwbLWxWPx3d9p8S5QoaujKcNQxcQ==}
+  zod@4.5.4:
+    resolution: {integrity: sha512-sC95tT5iHHH9gtpj6A81kh+NEaRAUFN+qlUPDUbRfOMvNf5QCBqsb3WgvnpVtK5Y+4UfA6KqufotuTvMGiTlsA==}
 
   zwitch@2.0.4:
     resolution: {integrity: sha512-bXE4cR/kVZhKZX/RjPEflHaKVhUVl85noU3v6b8apfQEc1x4A+zBxjZ4lN8LqGd6WZ3dl98pY4o717VFmoPp+A==}
@@ -833,16 +835,16 @@ snapshots:
     dependencies:
       '@octokit/openapi-types': 27.0.0
 
-  '@paperclipai/plugin-sdk@2026.707.0(react@19.2.7)':
+  '@paperclipai/plugin-sdk@2026.831.1(react@19.2.8)':
     dependencies:
-      '@paperclipai/shared': 2026.707.0
-      zod: 3.25.76
+      '@paperclipai/shared': 2026.831.1
+      zod: 4.5.4
     optionalDependencies:
-      react: 19.2.7
+      react: 19.2.8
 
-  '@paperclipai/shared@2026.707.0':
+  '@paperclipai/shared@2026.831.1':
     dependencies:
-      zod: 3.25.76
+      zod: 4.5.4
 
   '@types/debug@4.1.13':
     dependencies:
@@ -1429,7 +1431,7 @@ snapshots:
 
   property-information@7.2.0: {}
 
-  react-markdown@10.1.0(@types/react@19.2.17)(react@19.2.7):
+  react-markdown@10.1.0(@types/react@19.2.17)(react@19.2.8):
     dependencies:
       '@types/hast': 3.0.5
       '@types/mdast': 4.0.4
@@ -1438,7 +1440,7 @@ snapshots:
       hast-util-to-jsx-runtime: 2.3.6
       html-url-attributes: 3.0.1
       mdast-util-to-hast: 13.2.1
-      react: 19.2.7
+      react: 19.2.8
       remark-parse: 11.0.0
       remark-rehype: 11.1.2
       unified: 11.0.5
@@ -1447,7 +1449,7 @@ snapshots:
     transitivePeerDependencies:
       - supports-color
 
-  react@19.2.7: {}
+  react@19.2.8: {}
 
   rehype-raw@7.0.0:
     dependencies:
@@ -1575,6 +1577,6 @@ snapshots:
 
   web-namespaces@2.0.1: {}
 
-  zod@3.25.76: {}
+  zod@4.5.4: {}
 
   zwitch@2.0.4: {}
