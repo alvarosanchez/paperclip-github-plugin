@@ -225,6 +225,16 @@ The plugin is designed to avoid persisting raw credentials in plugin state.
 - On authenticated Paperclip deployments, sync is blocked until the relevant company has connected Paperclip board access. On local trusted deployments, board access setup remains visible so operators can configure it for host API paths that still require board credentials, but missing board access does not by itself block sync preflight.
 - KPI API route requests must include `Authorization: Bearer <PAPERCLIP_API_KEY>` from an agent run; the Paperclip host authenticates the token and supplies the agent company before the worker records any metric event.
 
+#### Sharing the token with Paperclip's own GitHub features
+
+GitHub Sync stores its token as a company secret named `github_sync_<company id>` and references it from plugin config. Paperclip's host-side GitHub features do not read that reference: `server/src/services/git-credentials.ts` resolves a company secret **by name**, probing `GITHUB_TOKEN`, `GH_TOKEN` and `PAPERCLIP_GITHUB_TOKEN` in that order. Those credentials back managed-checkout git authentication, the merged-PR confirmation sweep, the execution-workspace reaper's `merged_via_pr` detection, and the built-in GitHub external-object provider's liveness snapshots. Without one of those secrets those host features run unauthenticated and degrade on private repositories and GitHub rate limits.
+
+The **GitHub access** section of GitHub Sync settings has an opt-in checkbox, **Also expose this token to Paperclip as `GITHUB_TOKEN`**. It is unchecked by default. When checked, saving the token also creates a company secret named `GITHUB_TOKEN` with the same value, or rotates the existing one in place when the company already has it, so there is never a second divergent copy. The plugin's own `github_sync_<company id>` secret and its plugin-config reference are unchanged either way; unchecking the box on a later save does **not** delete or rotate an existing `GITHUB_TOKEN`.
+
+The host matches the name **exactly**, so the plugin looks for a secret named `GITHUB_TOKEN` case-sensitively. Paperclip also derives a unique `key` from a secret's name, so a company that already has a secret named `github_token` (or any other casing) makes the create fail with a conflict; the settings page surfaces that conflict instead of silently rotating the wrong row. Keep the secret's status `active`: the git-credential probe silently skips a disabled or archived secret, and the external-object/merged-PR path fails with an auth error on one.
+
+Leave it unchecked if you want the GitHub credential scoped to the plugin worker only. A secret named `GITHUB_TOKEN` is readable by any host feature and by agent-facing secret surfaces that resolve company secrets by name, which is a wider blast radius than a plugin secret reference bound to GitHub Sync. If you prefer separate credentials, create a `GITHUB_TOKEN` company secret manually with a narrower token instead of ticking the box.
+
 ### Optional worker-local token file
 
 Paperclip-managed, company-scoped secret refs are the normal path on Paperclip `2026.831` and newer. If they are not available, the worker can read a local fallback file at `${PAPERCLIP_HOME:-~/.paperclip}/plugins/github-sync/config.json`:

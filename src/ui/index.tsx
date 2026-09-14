@@ -17,6 +17,12 @@ import { parseRepositoryReference, type ParsedRepositoryReference } from '../git
 import { resolvePaperclipAuthControlsPolicy } from '../paperclip-health.ts';
 import { normalizeCompanyAssigneeOptionsResponse, type GitHubSyncAssigneeOption } from './assignees.ts';
 import { buildPaperclipUrl, fetchJson, fetchPaperclipHealth, resolveCliAuthPollUrl } from './http.ts';
+import {
+  exposeGitHubTokenToPaperclipHost,
+  HOST_GITHUB_TOKEN_SECRET_NAME,
+  resolveOrCreateCompanySecret as resolveOrCreateCompanySecretRequest,
+  type CompanySecretSummary
+} from './host-secrets.ts';
 import { resolveInstalledGitHubSyncPluginId, resolvePluginSettingsHref } from './plugin-installation.ts';
 import {
   hasLegacyPluginSecretRefs,
@@ -1931,6 +1937,33 @@ const PAGE_STYLES = `
 }
 
 .ghsync__input::placeholder {
+  color: var(--ghsync-muted);
+}
+
+.ghsync__checkbox-field {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+}
+
+.ghsync__checkbox-field input[type="checkbox"] {
+  margin-top: 2px;
+  accent-color: var(--ghsync-accent, currentColor);
+}
+
+.ghsync__checkbox-field-copy {
+  display: grid;
+  gap: 4px;
+}
+
+.ghsync__checkbox-field-copy label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ghsync-title);
+}
+
+.ghsync__checkbox-field-copy span {
+  font-size: 12px;
   color: var(--ghsync-muted);
 }
 
@@ -6827,26 +6860,12 @@ async function ensureProjectRepoBinding(projectId: string, repositoryUrl: string
   });
 }
 
-async function resolveOrCreateCompanySecret(companyId: string, name: string, value: string): Promise<{ id: string; name: string }> {
-  const existingSecrets = await fetchJson<Array<{ id: string; name: string }>>(`/api/companies/${companyId}/secrets`);
-  const existing = existingSecrets.find((secret) => secret.name.trim().toLowerCase() === name.trim().toLowerCase());
-
-  if (existing) {
-    return fetchJson<{ id: string; name: string }>(`/api/secrets/${existing.id}/rotate`, {
-      method: 'POST',
-      body: JSON.stringify({
-        value
-      })
-    });
-  }
-
-  return fetchJson<{ id: string; name: string }>(`/api/companies/${companyId}/secrets`, {
-    method: 'POST',
-    body: JSON.stringify({
-      name,
-      value
-    })
-  });
+function resolveOrCreateCompanySecret(
+  companyId: string,
+  name: string,
+  value: string
+): Promise<CompanySecretSummary> {
+  return resolveOrCreateCompanySecretRequest(fetchJson, companyId, name, value);
 }
 
 function isPluginSecretReferencesDisabledError(error: unknown): boolean {
@@ -11229,6 +11248,7 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
   const [tokenDraft, setTokenDraft] = useState('');
   const [showSavedTokenHint, setShowSavedTokenHint] = useState(false);
   const [showTokenEditor, setShowTokenEditor] = useState(false);
+  const [exposeTokenAsHostSecret, setExposeTokenAsHostSecret] = useState(false);
   const [showAdvancedSettings, setShowAdvancedSettings] = useState(false);
   const [cachedSettings, setCachedSettings] = useState<GitHubSyncSettings | null>(null);
   const [existingProjectCandidates, setExistingProjectCandidates] = useState<ExistingProjectSyncCandidate[]>([]);
@@ -12082,6 +12102,19 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
         availabilityWarning = error;
       }
 
+      // Opt-in only: Paperclip's own GitHub features read a company secret by name, so mirroring the
+      // token there widens its blast radius beyond the plugin worker.
+      let hostSecretExposureWarning: unknown = null;
+      let hostSecretExposed = false;
+      if (exposeTokenAsHostSecret) {
+        try {
+          await exposeGitHubTokenToPaperclipHost(fetchJson, companyId, trimmedToken);
+          hostSecretExposed = true;
+        } catch (error) {
+          hostSecretExposureWarning = error;
+        }
+      }
+
 
       setForm((current) => ({
         ...current,
@@ -12092,6 +12125,7 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
       setTokenStatusOverride('valid');
       setValidatedLogin(validation.login);
       setTokenDraft('');
+      setExposeTokenAsHostSecret(false);
       toast({
         title: `Authenticated as ${validation.login}`,
         body: 'Token saved.',
@@ -12103,6 +12137,23 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
           body: getActionErrorMessage(
             availabilityWarning,
             'GitHub Sync could not verify worker access to the saved token.'
+          ),
+          tone: 'error'
+        });
+      }
+      if (hostSecretExposed) {
+        toast({
+          title: `Paperclip secret ${HOST_GITHUB_TOKEN_SECRET_NAME} updated`,
+          body: 'Paperclip host GitHub features can now authenticate with this token.',
+          tone: 'success'
+        });
+      }
+      if (hostSecretExposureWarning) {
+        toast({
+          title: `GitHub token saved, but ${HOST_GITHUB_TOKEN_SECRET_NAME} could not be updated`,
+          body: getActionErrorMessage(
+            hostSecretExposureWarning,
+            `Paperclip could not create or rotate the ${HOST_GITHUB_TOKEN_SECRET_NAME} company secret.`
           ),
           tone: 'error'
         });
@@ -12513,6 +12564,28 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
                   />
                 </div>
 
+                <div className="ghsync__checkbox-field">
+                  <input
+                    id="github-token-expose-host-secret"
+                    type="checkbox"
+                    checked={exposeTokenAsHostSecret}
+                    disabled={settingsMutationsLocked}
+                    onChange={(event) => {
+                      setExposeTokenAsHostSecret(event.currentTarget.checked);
+                    }}
+                  />
+                  <div className="ghsync__checkbox-field-copy">
+                    <label htmlFor="github-token-expose-host-secret">
+                      {`Also expose this token to Paperclip as ${HOST_GITHUB_TOKEN_SECRET_NAME}`}
+                    </label>
+                    <span>
+                      {`Creates or rotates a company secret named ${HOST_GITHUB_TOKEN_SECRET_NAME} so Paperclip's own GitHub features `}
+                      {'(managed-checkout git credentials, merged-PR confirmation sweep, workspace reaper, external-object liveness) '}
+                      {'can authenticate with the same token. GitHub Sync itself does not need it.'}
+                    </span>
+                  </div>
+                </div>
+
                 <div className="ghsync__actions">
                   <div className="ghsync__button-row">
                     {hasSavedToken ? (
@@ -12524,6 +12597,7 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
                           setShowTokenEditor(false);
                           setTokenDraft('');
                           setTokenStatusOverride('valid');
+                          setExposeTokenAsHostSecret(false);
                         }}
                       >
                         Cancel
