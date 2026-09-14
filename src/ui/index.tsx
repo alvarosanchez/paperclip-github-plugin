@@ -18,6 +18,7 @@ import { normalizeCompanyAssigneeOptionsResponse, type GitHubSyncAssigneeOption 
 import { buildPaperclipUrl, fetchJson, fetchPaperclipHealth, resolveCliAuthPollUrl } from './http.ts';
 import { resolveInstalledGitHubSyncPluginId, resolvePluginSettingsHref } from './plugin-installation.ts';
 import {
+  hasLegacyPluginSecretRefs,
   mergePluginConfig,
   type GitHubSyncPluginConfig,
   type GitHubSyncPluginConfigPatch,
@@ -5847,9 +5848,13 @@ function buildPluginConfigUrl(pluginId: string, companyId: string): string {
   return `/api/plugins/${pluginId}/config?companyId=${encodeURIComponent(companyId)}`;
 }
 
-async function readPluginConfig(pluginId: string, companyId: string): Promise<GitHubSyncPluginConfig> {
+async function readRawPluginConfig(pluginId: string, companyId: string): Promise<unknown> {
   const currentConfigResponse = await fetchJson<PluginConfigResponse | null>(buildPluginConfigUrl(pluginId, companyId));
-  return normalizePluginConfig(currentConfigResponse?.configJson);
+  return currentConfigResponse?.configJson;
+}
+
+async function readPluginConfig(pluginId: string, companyId: string): Promise<GitHubSyncPluginConfig> {
+  return normalizePluginConfig(await readRawPluginConfig(pluginId, companyId));
 }
 
 async function syncTrustedPaperclipApiBaseUrl(
@@ -6923,10 +6928,14 @@ export async function patchPluginConfig(
     throw new Error('Company context is required to save GitHub Sync plugin config.');
   }
 
-  const currentConfig = await readPluginConfig(pluginId, companyId);
+  const rawCurrentConfig = await readRawPluginConfig(pluginId, companyId);
+  const currentConfig = normalizePluginConfig(rawCurrentConfig);
   const nextConfig = mergePluginConfig(currentConfig, patch);
 
-  if (JSON.stringify(nextConfig) === JSON.stringify(currentConfig)) {
+  // A legacy row (bare secret-id strings) normalizes to the same bindings the patch produces, so
+  // compare on the normalized shape only when the stored row is already in binding form;
+  // otherwise the write is what upgrades the host row and clears `binding_missing`.
+  if (!hasLegacyPluginSecretRefs(rawCurrentConfig) && JSON.stringify(nextConfig) === JSON.stringify(currentConfig)) {
     return;
   }
 
