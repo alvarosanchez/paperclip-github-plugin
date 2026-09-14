@@ -1,55 +1,17 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-  "extends": [
-    "config:best-practices",
-    ":dependencyDashboard"
-  ],
+  "extends": ["config:best-practices", ":dependencyDashboard"],
   "timezone": "Europe/Madrid",
-  "labels": [
-    "dependencies"
-  ],
+  "labels": ["dependencies"],
   "rangeStrategy": "bump",
-  "lockFileMaintenance": {
-    "enabled": true,
-    "schedule": [
-      "before 4am on monday"
-    ]
-  },
+  "platformAutomerge": false,
+  "lockFileMaintenance": { "enabled": true, "schedule": ["before 4am on monday"], "automerge": true },
   "packageRules": [
-    {
-      "matchManagers": [
-        "github-actions"
-      ],
-      "matchPackageNames": [
-        "node"
-      ],
-      "allowedVersions": "<24"
-    },
-    {
-      "matchManagers": [
-        "github-actions"
-      ],
-      "groupName": "github-actions"
-    },
-    {
-      "matchDepTypes": [
-        "dependencies"
-      ],
-      "matchUpdateTypes": [
-        "minor",
-        "patch"
-      ],
-      "groupName": "npm production dependencies"
-    },
-    {
-      "matchDepTypes": [
-        "devDependencies"
-      ],
-      "matchUpdateTypes": [
-        "minor",
-        "patch"
-      ],
-      "groupName": "npm development dependencies"
-    }
+    { "matchManagers": ["github-actions"], "matchPackageNames": ["node"], "allowedVersions": "<25" },
+    { "matchManagers": ["github-actions"], "matchUpdateTypes": ["patch", "pin", "digest"], "groupName": "github-actions patch updates", "automerge": true },
+    { "matchManagers": ["github-actions"], "matchUpdateTypes": ["minor", "major"], "groupName": "github-actions" },
+    { "matchDepTypes": ["dependencies", "devDependencies", "packageManager", "engines"], "matchUpdateTypes": ["patch", "pin", "digest"], "groupName": "npm patch updates", "automerge": true },
+    { "matchDepTypes": ["dependencies"], "matchUpdateTypes": ["minor"], "groupName": "npm production dependencies" },
+    { "matchDepTypes": ["devDependencies"], "matchUpdateTypes": ["minor"], "groupName": "npm development dependencies" }
   ]
 }
