@@ -24279,6 +24279,8 @@ const plugin = definePlugin({
   },
   async setup(ctx) {
     pluginRuntimeContext = ctx;
+    // A fresh worker must not inherit a previous process's tool-access probe results.
+    clearAgentToolAccessSummaryCache();
 
     ctx.data.register('settings.registration', async (input) => {
       const record = input && typeof input === 'object' ? input as Record<string, unknown> : {};
