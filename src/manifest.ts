@@ -17,6 +17,25 @@ const MANIFEST_VERSION =
   || process.env.npm_package_version?.trim()
   || '0.0.0-dev';
 
+// Paperclip 2026.831 binds and resolves plugin secret refs only when they are stored as the shared
+// `{ type: "secret_ref", secretId, version? }` binding. Bare secret-id strings are still accepted by
+// the schema so config rows written by older releases keep validating until the settings UI
+// re-mirrors them as bindings.
+const COMPANY_SECRET_REF_VALUE_SCHEMA = {
+  anyOf: [
+    { type: 'string' },
+    {
+      type: 'object',
+      properties: {
+        type: { const: 'secret_ref' },
+        secretId: { type: 'string' },
+        version: { anyOf: [{ type: 'string' }, { type: 'integer' }] }
+      },
+      required: ['type', 'secretId']
+    }
+  ]
+};
+
 export const manifest: PaperclipPluginManifestV1 = {
   id: GITHUB_SYNC_PLUGIN_ID,
   apiVersion: 1,
@@ -57,16 +76,14 @@ export const manifest: PaperclipPluginManifestV1 = {
       githubTokenRefs: {
         type: 'object',
         title: 'GitHub Token Secrets',
-        additionalProperties: {
-          type: 'string'
-        }
+        description: 'Company id to Paperclip secret reference for the GitHub token.',
+        additionalProperties: COMPANY_SECRET_REF_VALUE_SCHEMA
       },
       paperclipBoardApiTokenRefs: {
         type: 'object',
         title: 'Paperclip Board Token Secrets',
-        additionalProperties: {
-          type: 'string'
-        }
+        description: 'Company id to Paperclip secret reference for the board access token.',
+        additionalProperties: COMPANY_SECRET_REF_VALUE_SCHEMA
       },
       paperclipApiBaseUrl: {
         type: 'string',

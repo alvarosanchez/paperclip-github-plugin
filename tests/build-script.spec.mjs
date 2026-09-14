@@ -7,7 +7,7 @@ import test from 'node:test';
 import { promisify } from 'node:util';
 
 const execFileAsync = promisify(execFile);
-const RELEASE_UNDER_TEST = '2026.626.0';
+const RELEASE_UNDER_TEST = '2026.831.1';
 const PNPM_ACTION_SETUP_SHA_PATTERN = '[0-9a-f]{40}';
 
 test('build script reports missing local dependencies clearly when node_modules is absent', async () => {
@@ -69,15 +69,37 @@ test('GitHub workflows let packageManager select the pnpm version', async () => 
   assert.doesNotMatch(ciWorkflow, /pnpm\/action-setup@[\s\S]*?with:[\s\S]*?\n\s*version:\s/);
   assert.doesNotMatch(releaseWorkflow, /pnpm\/action-setup@[\s\S]*?with:[\s\S]*?\n\s*version:\s/);
   assert.match(pnpmWorkspace, /^allowBuilds:\n  esbuild: true\n/);
-  assert.match(pnpmWorkspace, /minimumReleaseAgeExclude:\n  - '@paperclipai\/plugin-sdk@2026\.626\.0'\n  - '@paperclipai\/shared@2026\.626\.0'\n?$/);
+  assert.match(pnpmWorkspace, /minimumReleaseAgeExclude:\n  - '@paperclipai\/plugin-sdk@2026\.831\.1'\n  - '@paperclipai\/shared@2026\.831\.1'\n?$/);
 });
 
-test('documents and enforces the Paperclip 2026.626 GitHub Sync adoption boundary', async () => {
+test('documents and enforces the Paperclip 2026.831 GitHub Sync adoption boundary', async () => {
   const readme = await readFile(new URL('../README.md', import.meta.url), 'utf8');
   const spec = await readFile(new URL('../SPEC.md', import.meta.url), 'utf8');
   const manifestSource = await readFile(new URL('../src/manifest.ts', import.meta.url), 'utf8');
   const workerSource = await readFile(new URL('../src/worker.ts', import.meta.url), 'utf8');
 
+  // 2026.831: company-scoped plugin config, secret refs re-enabled, tool gateway, unused capabilities.
+  assert.match(readme, /Paperclip 2026\.831 compatibility boundary/);
+  assert.match(readme, /company-scoped/i);
+  assert.match(readme, /"type": "secret_ref"/);
+  assert.match(readme, /tool gateway/i);
+  assert.match(spec, /## Paperclip 2026\.831 compatibility boundary/);
+  assert.match(spec, /MUST declare `multiCompanyConfig: true`/);
+  assert.match(spec, /MUST pass the company id to `ctx\.config\.get\(companyId\)`/);
+  assert.match(spec, /MUST NOT read plugin config from `onHealth\(\)`/);
+  assert.match(spec, /tool gateway/i);
+  assert.match(spec, /MUST NOT declare `issue\.interactions\.read`, `issue\.attachments\.read`, `approvals\.read`, `issue\.comments\.create_human_attributed`, `issue\.interactions\.respond`, or `approvals\.respond`/);
+  assert.match(spec, /MUST NOT declare a strict `minimumHostVersion` or `minimumPaperclipVersion` gate/);
+  assert.match(workerSource, /multiCompanyConfig:\s*true/);
+  assert.match(workerSource, /async onConfigChanged\(/);
+  assert.doesNotMatch(workerSource, /async onHealth\(/);
+  assert.doesNotMatch(manifestSource, /minimumHostVersion|minimumPaperclipVersion/);
+  assert.doesNotMatch(
+    manifestSource,
+    /issue\.interactions\.read|issue\.attachments\.read|approvals\.read|issue\.comments\.create_human_attributed|issue\.interactions\.respond|approvals\.respond/
+  );
+
+  // Still true since 2026.626: no duplicate external-object provider, no watchdog coupling.
   assert.match(readme, /external object references and task watchdogs/i);
   assert.match(readme, /built-in GitHub external-object provider/i);
   assert.match(readme, /retires its plugin comment-annotation slot/i);

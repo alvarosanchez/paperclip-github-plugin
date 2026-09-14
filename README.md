@@ -2,7 +2,7 @@
 
 [![npm version](https://img.shields.io/npm/v/paperclip-github-plugin)](https://www.npmjs.com/package/paperclip-github-plugin)
 [![CI](https://img.shields.io/github/actions/workflow/status/alvarosanchez/paperclip-github-plugin/ci.yml?branch=main&label=CI)](https://github.com/alvarosanchez/paperclip-github-plugin/actions/workflows/ci.yml)
-[![Node >=20](https://img.shields.io/badge/node-%3E%3D20-339933?logo=node.js&logoColor=white)](https://www.npmjs.com/package/paperclip-github-plugin)
+[![Node >=24.11](https://img.shields.io/badge/node-%3E%3D24.11-339933?logo=node.js&logoColor=white)](https://www.npmjs.com/package/paperclip-github-plugin)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](https://github.com/alvarosanchez/paperclip-github-plugin/blob/main/LICENSE)
 
 GitHub Sync is a Paperclip plugin for teams that plan in Paperclip but still receive work through GitHub issues.
@@ -32,7 +32,7 @@ The plugin adds a full in-host workflow instead of a one-off import script:
 - a dashboard widget that shows sync readiness, current sync status, and run/cancel controls
 - a separate KPI dashboard widget that tracks GitHub backlog size, GitHub issues closed, and Paperclip pull requests created with recent history and historical comparisons
 - saved sync diagnostics that let operators inspect the latest per-issue failures, raw errors, and suggested next steps
-- a project sidebar item that opens a live project-scoped Pull Requests page for the mapped repository and can show the open PR count through a lightweight badge read
+- a project sidebar item that opens a live project-scoped Pull Requests page for the mapped repository and can show the open PR count through a lightweight badge read (Paperclip `2026.831` hosts do not render it; see the compatibility boundary below)
 - manual sync actions from global, project, and issue surfaces
 - a GitHub detail tab on synced Paperclip issues that includes GitHub-marked action buttons plus the GitHub issue creator with avatar, lets operators manually link or unlink a Paperclip issue from a GitHub issue or pull request, and shows compact troubleshooting details if the host cannot provide a resolvable issue context
 - GitHub link annotations on sync-generated status transition comments when the host supports comment annotations
@@ -89,7 +89,7 @@ The owner is stored on the PR-link entity, so unrelated title/state refreshes, p
 
 ### Project pull request command center
 
-Each mapped project can expose a **Pull Requests** entry in the sidebar that opens a live GitHub queue page for that repository. The sidebar badge uses a lightweight total-count read, while the queue keeps the default view fast by loading only the current 10-row page, uses a repo-wide metrics read for the summary cards, reuses that cached metrics scan to keep filtered views fast by fetching only the visible filtered rows, keeps repo-scoped count, metrics, and per-PR review/check insight caches warm for repeat visits, lets operators explicitly bust those caches with Refresh when they want a live reread, shows total, mergeable, reviewable, and failing cards that filter the table, only treats a pull request as mergeable when it targets the current default branch with green checks, at least one approval, no outstanding change requests, and no unresolved review threads, includes an **Up to date** column that distinguishes current branches, clean update candidates, conflict cases, and unknown freshness when GitHub cannot confirm the comparison, shows the PR target branch with a highlighted default-branch badge, keeps the list sorted by most recently updated first, paginates larger repositories, keeps a compact bottom detail pane with markdown-and-HTML-rendered conversation plus an inline comment composer, supports deterministic **Update branch** actions for clean behind-base pull requests, adds Copilot quick actions that post `@copilot` requests for **Fix CI**, **Rebase**, and **Address review feedback**, requests Copilot through GitHub’s native reviewer flow for **Review**, keeps comment, review, quick approve/request-changes, re-run CI, merge, and close actions available, lets the review modal submit comment-only, approve, or request-changes reviews, hides any pull request action whose required GitHub permission is not verified for the saved token, and opens linked Paperclip issues in a plugin-provided right drawer so operators can stay on the queue page.
+Each mapped project can expose a **Pull Requests** entry in the sidebar that opens a live GitHub queue page for that repository (on Paperclip `2026.831` the streamlined sidebar does not mount project sidebar items, so open the page directly at `/<company-prefix>/github-pull-requests?projectId=<project id>`). The sidebar badge uses a lightweight total-count read, while the queue keeps the default view fast by loading only the current 10-row page, uses a repo-wide metrics read for the summary cards, reuses that cached metrics scan to keep filtered views fast by fetching only the visible filtered rows, keeps repo-scoped count, metrics, and per-PR review/check insight caches warm for repeat visits, lets operators explicitly bust those caches with Refresh when they want a live reread, shows total, mergeable, reviewable, and failing cards that filter the table, only treats a pull request as mergeable when it targets the current default branch with green checks, at least one approval, no outstanding change requests, and no unresolved review threads, includes an **Up to date** column that distinguishes current branches, clean update candidates, conflict cases, and unknown freshness when GitHub cannot confirm the comparison, shows the PR target branch with a highlighted default-branch badge, keeps the list sorted by most recently updated first, paginates larger repositories, keeps a compact bottom detail pane with markdown-and-HTML-rendered conversation plus an inline comment composer, supports deterministic **Update branch** actions for clean behind-base pull requests, adds Copilot quick actions that post `@copilot` requests for **Fix CI**, **Rebase**, and **Address review feedback**, requests Copilot through GitHub’s native reviewer flow for **Review**, keeps comment, review, quick approve/request-changes, re-run CI, merge, and close actions available, lets the review modal submit comment-only, approve, or request-changes reviews, hides any pull request action whose required GitHub permission is not verified for the saved token, and opens linked Paperclip issues in a plugin-provided right drawer so operators can stay on the queue page.
 
 Paperclip issue linkage on the queue prefers the GitHub issue that the pull request closes, so imported GitHub issues and delivery work stay connected in the same project view. If a pull request has no closing-issue-backed link yet, the queue falls back to the Paperclip issue created directly from that pull request and updates the table immediately when that create action returns.
 
@@ -128,8 +128,8 @@ Coverage is dimensioned rather than reported as one misleading complete flag: th
 
 ## Requirements
 
-- Node.js 20+
-- a Paperclip host with plugin installation enabled. GitHub Sync is built and tested against Paperclip `2026.626.0`; the manifest relies on explicit capabilities instead of a strict host-version gate because current latest/development hosts can report `0.0.0` during plugin upgrade.
+- Node.js 24.11+ (the `@paperclipai/plugin-sdk` 2026.831 line requires it)
+- a Paperclip host with plugin installation enabled. GitHub Sync is built and tested against Paperclip `2026.831.1`; the manifest relies on explicit capabilities instead of a strict host-version gate because current latest/development hosts can report `0.0.0` during plugin upgrade.
 - a GitHub token with API access to the repositories you want to sync
 
 ## Install from npm
@@ -216,18 +216,18 @@ Additional behavior:
 
 The plugin is designed to avoid persisting raw credentials in plugin state.
 
-- GitHub tokens saved through the UI are stored as per-company Paperclip secret references.
-- Paperclip board access tokens are also stored as per-company secret references.
+- GitHub tokens saved through the UI are stored as per-company Paperclip secret references. Paperclip `2026.831` re-enabled plugin secret refs and made plugin config company-scoped: the settings UI mirrors each saved secret into that company's GitHub Sync plugin config as a `{ "type": "secret_ref", "secretId": "<uuid>" }` binding, the host binds that secret to the plugin, and the worker resolves it with the company id and config path. This is the normal path; no worker-local copy is needed.
+- Paperclip board access tokens are also stored as per-company secret references and mirrored the same way.
 - The settings UI also keeps lightweight non-secret identity labels for those saved connections, so later visits can still show who each company GitHub token and board access are connected as.
 - Agents use Paperclip's plugin tool dispatcher for GitHub Sync tools; the settings UI no longer propagates the saved GitHub token into agent environment variables.
 - The worker resolves those secret references at runtime instead of storing raw tokens in plugin state.
-- When the current Paperclip host rejects plugin secret refs, GitHub Sync keeps company-scoped worker-local compatibility copies for GitHub tokens and Paperclip board-access tokens in `${PAPERCLIP_HOME:-~/.paperclip}/plugins/github-sync/config.json`. Reconnect board access once after upgrading if sync still cannot authenticate Paperclip label or issue REST calls.
+- When the host cannot resolve a saved secret ref (a pre-`2026.831` host that rejected plugin secret refs, or a plugin config row that still holds a pre-`2026.831` bare secret id the host will not bind), GitHub Sync keeps company-scoped worker-local compatibility copies for GitHub tokens and Paperclip board-access tokens in `${PAPERCLIP_HOME:-~/.paperclip}/plugins/github-sync/config.json`. On `2026.831` the settings page detects bare-id refs and re-mirrors them as bindings on the next visit; reconnect board access once after upgrading if sync still cannot authenticate Paperclip label or issue REST calls.
 - On authenticated Paperclip deployments, sync is blocked until the relevant company has connected Paperclip board access. On local trusted deployments, board access setup remains visible so operators can configure it for host API paths that still require board credentials, but missing board access does not by itself block sync preflight.
 - KPI API route requests must include `Authorization: Bearer <PAPERCLIP_API_KEY>` from an agent run; the Paperclip host authenticates the token and supplies the agent company before the worker records any metric event.
 
 ### Optional worker-local token file
 
-If Paperclip-managed secrets are not available, the worker can read a local fallback file at `${PAPERCLIP_HOME:-~/.paperclip}/plugins/github-sync/config.json`:
+Paperclip-managed, company-scoped secret refs are the normal path on Paperclip `2026.831` and newer. If they are not available, the worker can read a local fallback file at `${PAPERCLIP_HOME:-~/.paperclip}/plugins/github-sync/config.json`:
 
 ```json
 {
@@ -245,7 +245,7 @@ Notes:
 
 - This file is read by the worker only.
 - The raw token is never persisted back into plugin state or plugin config.
-- A GitHub token secret saved through the settings UI is the primary source. If the current Paperclip host rejects plugin secret-ref resolution while company-scoped plugin config is unavailable, GitHub Sync stores the validated token in `githubTokensByCompanyId` as a worker-local compatibility fallback.
+- A GitHub token secret saved through the settings UI is the primary source. Only if the Paperclip host cannot resolve that secret ref for the plugin worker (older hosts that rejected plugin secret refs, or a ref that is not bound to the plugin for that company) does GitHub Sync store the validated token in `githubTokensByCompanyId` as a worker-local compatibility fallback.
 - A Paperclip board access secret saved through the settings UI is also the primary source. If the host cannot resolve it for plugin workers, reconnecting board access stores the approved board token in `paperclipBoardApiTokensByCompanyId` as a worker-local compatibility fallback for direct Paperclip REST calls.
 
 ### Worker-facing Paperclip API URL
@@ -311,8 +311,18 @@ curl -X POST "${PAPERCLIP_API_URL%/}/api/plugins/paperclip-github-plugin/api/com
 
 The worker deduplicates repeated PR events by preferring the pull request URL, then `repository + pullRequestNumber`, before falling back to the explicit `eventKey`. When `paperclipIssueId` is present, the worker verifies the live pull request and persists the same PR-link metadata used by scheduled/manual status syncs.
 
+### Paperclip 2026.831 compatibility boundary
 
-Paperclip `2026.626.0` adds external object references and task watchdogs, both relevant to GitHub URLs and long-running PR follow-up. GitHub issue and pull request URLs in synced descriptions, comments, and status-transition annotations can be recognized by Paperclip's built-in GitHub external-object provider, so GitHub Sync retires its plugin comment-annotation slot instead of continuing to render a duplicate GitHub-link annotation on comments. GitHub Sync also does **not** register a separate `external.objects.*` provider in this release: the host now owns generic GitHub URL detection and liveness snapshots, while GitHub Sync continues to own repository mappings, issue/PR sync, project PR dashboards, KPI attribution, and mutating GitHub agent tools. A future product PR can connect core external-object mentions back to GitHub Sync entities if operators need richer cross-filtering, but status routing must keep GitHub Sync as the source of truth for mapped/linked work.
+GitHub Sync targets Paperclip `2026.831.1` and adopts the host changes that matter for a multi-company connector:
+
+- **Company-scoped plugin config.** The host now stores one GitHub Sync config row per company and replays each of them to the worker after startup instead of passing a bootstrap config. The worker declares `multiCompanyConfig: true`, keys the delivered config by company, and passes the company id to every config read. Scheduled sync and other proactive paths only get host access for companies that have a saved GitHub Sync config; a company that has mappings but no saved config shows a sync error asking you to open GitHub Sync settings in that company and save once.
+- **Secret refs re-enabled.** Company-scoped secret refs are the normal path again. The settings UI mirrors GitHub tokens and board access tokens into plugin config as `{ "type": "secret_ref", "secretId": "<uuid>" }` bindings, and the worker resolves them with the company id and config path. The worker-local token file remains a compatibility fallback only.
+- **Tool gateway.** Agent tool discovery and execution now run through the host tool gateway, which applies each company's tool-access policy before a GitHub Sync tool runs. Tool names are unchanged (`<pluginId>:<tool>`); if a tool is missing for an agent, check the company's tool-access policy before suspecting the plugin.
+- **Optional capabilities not adopted.** `2026.831` adds `issue.interactions.read`, `issue.attachments.read`, `approvals.read`, `issue.comments.create_human_attributed`, `issue.interactions.respond`, and `approvals.respond`. GitHub Sync does not use those host surfaces, so it does not declare them; it keeps its existing capability set.
+- **No strict host-version gate.** The manifest still relies on declared capabilities and runtime fallbacks instead of `minimumHostVersion`, because latest/development hosts can report `0.0.0` during plugin upgrade.
+- **Project sidebar item has no mount point.** `2026.831` made the streamlined main sidebar mandatory (PAP-12472) and no longer renders the per-project list that hosted `projectSidebarItem` contributions. GitHub Sync keeps declaring the slot for hosts that render it, but on `2026.831` the **Pull Requests** entry does not appear; the queue page itself is unaffected and opens at `/<company-prefix>/github-pull-requests?projectId=<project id>`. The e2e harness verifies the sidebar link only when the host renders it and always opens the page by route.
+
+The boundaries adopted with Paperclip `2026.626.0` still apply. Paperclip `2026.626.0` adds external object references and task watchdogs, both relevant to GitHub URLs and long-running PR follow-up. GitHub issue and pull request URLs in synced descriptions, comments, and status-transition annotations can be recognized by Paperclip's built-in GitHub external-object provider, so GitHub Sync retires its plugin comment-annotation slot instead of continuing to render a duplicate GitHub-link annotation on comments. GitHub Sync also does **not** register a separate `external.objects.*` provider in this release: the host now owns generic GitHub URL detection and liveness snapshots, while GitHub Sync continues to own repository mappings, issue/PR sync, project PR dashboards, KPI attribution, and mutating GitHub agent tools. A future product PR can connect core external-object mentions back to GitHub Sync entities if operators need richer cross-filtering, but status routing must keep GitHub Sync as the source of truth for mapped/linked work.
 
 Task watchdogs are also deliberately not used as a replacement for GitHub Sync's scheduled/manual refresh loop. A watched issue tree that is merely waiting on GitHub CI, mergeability, review threads, or maintainer approval can look "stopped" to Paperclip's generic task-watchdog classifier because there may be no live Paperclip run or wake request while GitHub is the active external system. GitHub Sync should keep encoding those states through issue/PR links, sync comments, status transitions, assignee/execution-policy handoffs, and scheduled sync. Use task watchdogs only for Paperclip-owned delegated task trees; do not use them to poll GitHub PR state or to infer that GitHub Sync should wake an executor.
 
@@ -365,14 +375,16 @@ Example tool payload:
 - If an older GitHub Sync build fails upgrade with `requires host version 2026.427.0 or newer, but this server is running 0.0.0`, upgrade to a build that removes the strict manifest host-version gate. The host is reporting a development-version sentinel, so the plugin now relies on declared capabilities and runtime fallbacks instead.
 - If setup is reported as incomplete, confirm that a GitHub token has been saved or that `${PAPERCLIP_HOME:-~/.paperclip}/plugins/github-sync/config.json` contains `githubToken`, and make sure at least one mapping has a created Paperclip project or at least one Paperclip issue has been linked to GitHub.
 - If Paperclip says board access is required, open plugin settings inside the affected company and complete the Paperclip board access flow before retrying sync.
-- If GitHub Sync agent tools fail on `/api/plugins/tools` or `/api/plugins/tools/execute`, confirm the Paperclip host is `2026.626.0` or newer and that the tool request includes the agent run context required by Paperclip.
+- If GitHub Sync agent tools fail on `/api/plugins/tools` or `/api/plugins/tools/execute`, confirm the Paperclip host is `2026.831.1` or newer, that the tool request includes the agent run context required by Paperclip, and that the company's tool-access policy allows the `paperclip-github-plugin:*` tools for that agent.
+- If the worker logs `Secret is not bound to plugin` or `Invalid secret reference for plugin`, that company's plugin config still holds a pre-`2026.831` bare secret id. Open GitHub Sync settings inside that company so the UI re-mirrors the ref as a `secret_ref` binding, or reconnect the token; until then the worker uses the worker-local fallback copy if one exists.
+- If a scheduled sync reports that Paperclip denied worker access for a company, that company has GitHub Sync mappings but no saved plugin config row. Open GitHub Sync settings inside that company and save settings once so the host registers it.
 - If a KPI API route call is rejected, make sure the request includes `Authorization: Bearer ${PAPERCLIP_API_KEY}`, that the token is still valid for the current run, and that any `companyId` in the payload matches the calling agent's company.
 - If the worker reaches an authenticated HTML page instead of the Paperclip API JSON responses it expects, connect Paperclip board access for that company or set **Worker Paperclip API URL** in GitHub Sync settings to a worker-accessible Paperclip API origin.
 - If a Paperclip API fetch fails before any HTTP response is returned, the saved diagnostics include the method, URL, primary error, nested cause, and cause code when Node exposes them.
 - If a sync run finishes with partial failures, open the saved troubleshooting panel in GitHub Sync to inspect the repository, issue number, raw error, and suggested fix for each recorded failure.
 - If sync says the Paperclip API URL is not trusted, set **Worker Paperclip API URL** in GitHub Sync settings to the worker-accessible Paperclip API origin and retry.
 - If a pull request comment or review action is rejected, read the full toast message. Fine-grained GitHub tokens need write access to that repository, and GitHub requires a review summary when requesting changes.
-- If a GitHub-linked project does not show the **Pull requests** sidebar entry, reopen the plugin settings and re-save the mapping. The project pull request surfaces also recover older mappings when saved ids are missing, and they can fall back to the active project's bound GitHub repository when the project already has a GitHub workspace configured.
+- If a GitHub-linked project does not show the **Pull requests** sidebar entry on Paperclip `2026.831`, that is expected: the streamlined sidebar has no `projectSidebarItem` mount point, so open `/<company-prefix>/github-pull-requests?projectId=<project id>` directly. On hosts that still render project sidebar items, reopen the plugin settings and re-save the mapping. The project pull request surfaces also recover older mappings when saved ids are missing, and they can fall back to the active project's bound GitHub repository when the project already has a GitHub workspace configured.
 - If GitHub rate limiting is hit, the plugin pauses sync until the reported reset time instead of retrying pointlessly.
 - If a manual sync takes longer than the host action window, it continues in the background and updates the UI when it finishes or when a cancellation request stops it.
 - If a sync shows `running` after the worker has restarted, the next settings read, toolbar read, cancel action, or scheduler tick will reconcile that stale run into an interrupted error or a cancelled result so you can retry cleanly.
@@ -391,10 +403,10 @@ Useful scripts:
 
 - `pnpm dev` watches the manifest, worker, and UI bundles and rebuilds them into `dist/`
 - `pnpm dev:ui` starts a local Paperclip plugin UI dev server from `dist/ui` on port `4177`
-- `pnpm test:e2e` builds the plugin, boots an isolated Paperclip `2026.626.0` instance, installs the plugin, and verifies the hosted settings page renders
-- `pnpm verify:manual` builds the plugin, boots a local-trusted Paperclip `2026.626.0` instance for manual inspection, seeds a `Dummy Company` with a mapped review project and a `CEO` agent on the Codex local adapter using model `gpt-5.4`, installs the plugin, and opens the company dashboard without seeding KPI history.
+- `pnpm test:e2e` builds the plugin, boots an isolated Paperclip `2026.831.1` instance, installs the plugin, and verifies the hosted settings page renders
+- `pnpm verify:manual` builds the plugin, boots a local-trusted Paperclip `2026.831.1` instance for manual inspection, seeds a `Dummy Company` with a mapped review project and a `CEO` agent on the Codex local adapter using model `gpt-5.4`, installs the plugin, and opens the company dashboard without seeding KPI history.
 
-The disposable Paperclip harnesses run `paperclipai@2026.626.0` under `node@24`, matching the release's Docker baseline and avoiding Node 20's missing `node:sqlite` runtime module.
+The disposable Paperclip harnesses run `paperclipai@2026.831.1` under `node@24`, matching the release's Docker baseline and avoiding Node 20's missing `node:sqlite` runtime module.
 
 For fast hosted UI iteration, run `pnpm dev` in one terminal and `pnpm dev:ui` in another.
 
