@@ -12,10 +12,17 @@ import rehypeSanitize, { defaultSchema } from 'rehype-sanitize';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 
+import { GITHUB_SYNC_PLUGIN_ID } from '../kpi-contract.ts';
 import { parseRepositoryReference, type ParsedRepositoryReference } from '../github-repo.ts';
 import { resolvePaperclipAuthControlsPolicy } from '../paperclip-health.ts';
 import { normalizeCompanyAssigneeOptionsResponse, type GitHubSyncAssigneeOption } from './assignees.ts';
 import { buildPaperclipUrl, fetchJson, fetchPaperclipHealth, resolveCliAuthPollUrl } from './http.ts';
+import {
+  exposeGitHubTokenToPaperclipHost,
+  HOST_GITHUB_TOKEN_SECRET_NAME,
+  resolveOrCreateCompanySecret as resolveOrCreateCompanySecretRequest,
+  type CompanySecretSummary
+} from './host-secrets.ts';
 import { resolveInstalledGitHubSyncPluginId, resolvePluginSettingsHref } from './plugin-installation.ts';
 import {
   hasLegacyPluginSecretRefs,
@@ -32,6 +39,9 @@ import {
   type ExistingProjectSyncCandidate,
   type ProjectWorkspaceSummary
 } from './project-bindings.ts';
+
+const GITHUB_SYNC_TOOL_ACCESS_DOCS_URL =
+  'https://github.com/alvarosanchez/paperclip-github-plugin#granting-the-tools-to-agents';
 
 const HOST_BUTTON_BASE_CLASSNAME = [
   'inline-flex items-center justify-center whitespace-nowrap text-sm font-medium',
@@ -264,6 +274,20 @@ interface GitHubSyncAdvancedSettings {
   ignoredIssueAuthorUsernames: string[];
 }
 
+/**
+ * Read-only sample of one agent's effective tool access. The host evaluates tool profiles per
+ * agent and agent-scoped bindings beat company-scoped ones, so this describes `checkedAgentName`
+ * and must be presented as a sample rather than a company-wide verdict.
+ */
+interface AgentToolAccessSummary {
+  status: 'ready' | 'unavailable' | 'no_agents' | 'not_checked';
+  toolsVisibleToAgents: number | null;
+  totalToolCount?: number;
+  checkedAgentId?: string;
+  checkedAgentName?: string;
+  checkableAgentCount?: number;
+}
+
 interface GitHubSyncSettings {
   mappings: RepositoryMapping[];
   syncState: SyncRunState;
@@ -281,6 +305,7 @@ interface GitHubSyncSettings {
   paperclipBoardAccessNeedsConfigSync?: boolean;
   paperclipBoardAccessConfigSyncRef?: string;
   totalSyncedIssuesCount?: number;
+  agentToolAccess?: AgentToolAccessSummary;
   updatedAt?: string;
 }
 
@@ -367,18 +392,6 @@ type ManualGitHubLinkKind = 'issue' | 'pull_request';
 interface IssueIdentifierResolutionData {
   issueId: string;
   issueIdentifier: string;
-}
-
-interface CommentAnnotationData {
-  source: 'entity' | 'comment_body';
-  links: Array<{
-    type: 'issue' | 'pull_request';
-    label: string;
-    href: string;
-  }>;
-  previousStatus?: string;
-  nextStatus?: string;
-  reason?: string;
 }
 
 interface TokenValidationResult {
@@ -1933,6 +1946,33 @@ const PAGE_STYLES = `
   color: var(--ghsync-muted);
 }
 
+.ghsync__checkbox-field {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+}
+
+.ghsync__checkbox-field input[type="checkbox"] {
+  margin-top: 2px;
+  accent-color: var(--ghsync-accent, currentColor);
+}
+
+.ghsync__checkbox-field-copy {
+  display: grid;
+  gap: 4px;
+}
+
+.ghsync__checkbox-field-copy label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ghsync-title);
+}
+
+.ghsync__checkbox-field-copy span {
+  font-size: 12px;
+  color: var(--ghsync-muted);
+}
+
 .ghsync__input:focus {
   border-color: var(--ghsync-border);
 }
@@ -2287,6 +2327,12 @@ const PAGE_STYLES = `
   color: var(--ghsync-muted);
   font-size: 12px;
   line-height: 1.5;
+}
+
+.ghsync__permission-audit-item a {
+  color: var(--ghsync-title);
+  font-size: 12px;
+  text-decoration: underline;
 }
 
 .ghsync__sync-summary--success {
@@ -4552,15 +4598,6 @@ const EXTENSION_SURFACE_STYLES = `
     font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   }
 
-  .ghsync-extension-card--compact {
-    gap: 10px;
-    padding: 0;
-    border: 0;
-    border-radius: 0;
-    background: transparent;
-    box-shadow: none;
-  }
-
   .ghsync-extension-heading {
     display: flex;
     justify-content: space-between;
@@ -4644,7 +4681,6 @@ const EXTENSION_SURFACE_STYLES = `
 
   .ghsync-extension-links,
   .ghsync-extension-labels,
-  .ghsync-comment-annotation,
   .ghsync-toolbar-button {
     display: flex;
     flex-wrap: wrap;
@@ -4683,14 +4719,6 @@ const EXTENSION_SURFACE_STYLES = `
 
   .ghsync-extension-pill {
     font-weight: 500;
-  }
-
-  .ghsync-comment-annotation__label {
-    color: var(--ghsync-muted);
-    font-size: 11px;
-    font-weight: 700;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
   }
 
   .ghsync-extension-note {
@@ -6838,26 +6866,12 @@ async function ensureProjectRepoBinding(projectId: string, repositoryUrl: string
   });
 }
 
-async function resolveOrCreateCompanySecret(companyId: string, name: string, value: string): Promise<{ id: string; name: string }> {
-  const existingSecrets = await fetchJson<Array<{ id: string; name: string }>>(`/api/companies/${companyId}/secrets`);
-  const existing = existingSecrets.find((secret) => secret.name.trim().toLowerCase() === name.trim().toLowerCase());
-
-  if (existing) {
-    return fetchJson<{ id: string; name: string }>(`/api/secrets/${existing.id}/rotate`, {
-      method: 'POST',
-      body: JSON.stringify({
-        value
-      })
-    });
-  }
-
-  return fetchJson<{ id: string; name: string }>(`/api/companies/${companyId}/secrets`, {
-    method: 'POST',
-    body: JSON.stringify({
-      name,
-      value
-    })
-  });
+function resolveOrCreateCompanySecret(
+  companyId: string,
+  name: string,
+  value: string
+): Promise<CompanySecretSummary> {
+  return resolveOrCreateCompanySecretRequest(fetchJson, companyId, name, value);
 }
 
 function isPluginSecretReferencesDisabledError(error: unknown): boolean {
@@ -11240,6 +11254,7 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
   const [tokenDraft, setTokenDraft] = useState('');
   const [showSavedTokenHint, setShowSavedTokenHint] = useState(false);
   const [showTokenEditor, setShowTokenEditor] = useState(false);
+  const [exposeTokenAsHostSecret, setExposeTokenAsHostSecret] = useState(false);
   const [showAdvancedSettings, setShowAdvancedSettings] = useState(false);
   const [cachedSettings, setCachedSettings] = useState<GitHubSyncSettings | null>(null);
   const [existingProjectCandidates, setExistingProjectCandidates] = useState<ExistingProjectSyncCandidate[]>([]);
@@ -11261,6 +11276,12 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
       setCachedSettings(settings.data);
     }
   }, [settings.data]);
+
+  // The opt-in host-secret exposure is a per-company decision, so switching companies must not
+  // carry a ticked box (or a half-typed token) into the next company's save.
+  useEffect(() => {
+    setExposeTokenAsHostSecret(false);
+  }, [hostContext.companyId]);
 
   useEffect(() => {
     if (!settings.data) {
@@ -11658,6 +11679,20 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
     && !tokenPermissionWarningVisible
     && tokenPermissionAuditData?.status === 'ready'
     && tokenPermissionRepositories.length === 0;
+  const agentToolAccess = settings.data?.agentToolAccess;
+  // Only a definite zero is actionable: `null` means the host could not be asked (older host,
+  // no board access, no agents), and warning there would be noise.
+  const agentToolAccessWarningVisible =
+    hasCompanyContext
+    && agentToolAccess?.status === 'ready'
+    && agentToolAccess.toolsVisibleToAgents === 0;
+  const agentToolAccessSampleLabel = agentToolAccess?.checkedAgentName
+    ? `Agent ${agentToolAccess.checkedAgentName}`
+    : 'The checked agent';
+  const agentToolAccessOtherAgentsHint =
+    typeof agentToolAccess?.checkableAgentCount === 'number' && agentToolAccess.checkableAgentCount > 1
+      ? ` of ${agentToolAccess.checkableAgentCount}`
+      : '';
   const boardAccessTone: Tone =
     connectingBoardAccess
       ? 'info'
@@ -12086,6 +12121,19 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
         availabilityWarning = error;
       }
 
+      // Opt-in only: Paperclip's own GitHub features read a company secret by name, so mirroring the
+      // token there widens its blast radius beyond the plugin worker.
+      let hostSecretExposureWarning: unknown = null;
+      let hostSecretExposed = false;
+      if (exposeTokenAsHostSecret) {
+        try {
+          await exposeGitHubTokenToPaperclipHost(fetchJson, companyId, trimmedToken);
+          hostSecretExposed = true;
+        } catch (error) {
+          hostSecretExposureWarning = error;
+        }
+      }
+
 
       setForm((current) => ({
         ...current,
@@ -12096,6 +12144,7 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
       setTokenStatusOverride('valid');
       setValidatedLogin(validation.login);
       setTokenDraft('');
+      setExposeTokenAsHostSecret(false);
       toast({
         title: `Authenticated as ${validation.login}`,
         body: 'Token saved.',
@@ -12107,6 +12156,23 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
           body: getActionErrorMessage(
             availabilityWarning,
             'GitHub Sync could not verify worker access to the saved token.'
+          ),
+          tone: 'error'
+        });
+      }
+      if (hostSecretExposed) {
+        toast({
+          title: `Paperclip secret ${HOST_GITHUB_TOKEN_SECRET_NAME} updated`,
+          body: 'Paperclip host GitHub features can now authenticate with this token.',
+          tone: 'success'
+        });
+      }
+      if (hostSecretExposureWarning) {
+        toast({
+          title: `GitHub token saved, but ${HOST_GITHUB_TOKEN_SECRET_NAME} could not be updated`,
+          body: getActionErrorMessage(
+            hostSecretExposureWarning,
+            `Paperclip could not create or rotate the ${HOST_GITHUB_TOKEN_SECRET_NAME} company secret.`
           ),
           tone: 'error'
         });
@@ -12517,6 +12583,28 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
                   />
                 </div>
 
+                <div className="ghsync__checkbox-field">
+                  <input
+                    id="github-token-expose-host-secret"
+                    type="checkbox"
+                    checked={exposeTokenAsHostSecret}
+                    disabled={settingsMutationsLocked}
+                    onChange={(event) => {
+                      setExposeTokenAsHostSecret(event.currentTarget.checked);
+                    }}
+                  />
+                  <div className="ghsync__checkbox-field-copy">
+                    <label htmlFor="github-token-expose-host-secret">
+                      {`Also expose this token to Paperclip as ${HOST_GITHUB_TOKEN_SECRET_NAME}`}
+                    </label>
+                    <span>
+                      {`Creates or rotates a company secret named ${HOST_GITHUB_TOKEN_SECRET_NAME} so Paperclip's own GitHub features `}
+                      {'(managed-checkout git credentials, merged-PR confirmation sweep, workspace reaper, external-object liveness) '}
+                      {'can authenticate with the same token. GitHub Sync itself does not need it.'}
+                    </span>
+                  </div>
+                </div>
+
                 <div className="ghsync__actions">
                   <div className="ghsync__button-row">
                     {hasSavedToken ? (
@@ -12528,6 +12616,7 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
                           setShowTokenEditor(false);
                           setTokenDraft('');
                           setTokenStatusOverride('valid');
+                          setExposeTokenAsHostSecret(false);
                         }}
                       >
                         Cancel
@@ -12621,6 +12710,33 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
                       {tokenPermissionAuditData?.warnings[0]
                         ?? 'Add a mapped repository in this company so GitHub Sync can verify the token permissions it needs.'}
                     </span>
+                  </div>
+                </div>
+              </div>
+            ) : null}
+
+            {agentToolAccessWarningVisible ? (
+              <div className="ghsync__permission-audit ghsync__permission-audit--warning">
+                <div className="ghsync__permission-audit-header">
+                  <strong>{`${agentToolAccessSampleLabel} cannot see the GitHub Sync tools`}</strong>
+                  <span className="ghsync__badge ghsync__badge--warning">Tool access</span>
+                </div>
+                <div className="ghsync__permission-audit-list">
+                  <div className="ghsync__permission-audit-item">
+                    <span>
+                      {`Paperclip's tool gateway is fail-closed, and no tool profile that applies to ${agentToolAccessSampleLabel} includes any of the `}
+                      {agentToolAccess?.totalToolCount ? `${agentToolAccess.totalToolCount} ` : ''}
+                      {`${GITHUB_SYNC_PLUGIN_ID}:* tools, so those tools will not be offered. `}
+                      {'Bind a tool profile with tool_name include entries at company scope. '}
+                      {`This is a sample of one agent${agentToolAccessOtherAgentsHint}: Paperclip evaluates tool profiles per agent, and an agent-scoped binding overrides the company one.`}
+                    </span>
+                    <a
+                      href={GITHUB_SYNC_TOOL_ACCESS_DOCS_URL}
+                      target="_blank"
+                      rel="noreferrer"
+                    >
+                      How to grant the tools to agents
+                    </a>
                   </div>
                 </div>
               </div>
@@ -15205,49 +15321,5 @@ export function GitHubSyncIssueTaskDetailView(props?: PluginDetailTabProps): Rea
 }
 
 export const GitHubSyncIssueDetailTab = GitHubSyncIssueTaskDetailView;
-
-export function GitHubSyncCommentAnnotation(): React.JSX.Element | null {
-  const context = useHostContext();
-  const themeMode = useResolvedThemeMode();
-  const theme = themeMode === 'light' ? LIGHT_PALETTE : DARK_PALETTE;
-  const themeVars = buildThemeVars(theme, themeMode);
-  const annotation = usePluginData<CommentAnnotationData | null>('comment.annotation', {
-    ...(context.companyId ? { companyId: context.companyId } : {}),
-    ...(context.entityId ? { commentId: context.entityId } : {}),
-    ...(context.parentEntityId ? { parentIssueId: context.parentEntityId } : {})
-  });
-
-  if (annotation.loading && !annotation.data) {
-    return null;
-  }
-
-  if (annotation.error || !annotation.data || annotation.data.links.length === 0) {
-    return null;
-  }
-
-  return (
-    <div className="ghsync-extension-card ghsync-extension-card--compact" style={themeVars}>
-      <style>{EXTENSION_SURFACE_STYLES}</style>
-      <div className="ghsync-comment-annotation">
-        <span className="ghsync-comment-annotation__label">GitHub refs</span>
-        {annotation.data.links.map((link: CommentAnnotationData['links'][number]) => (
-          <a
-            key={`${link.type}:${link.href}`}
-            href={link.href}
-            target="_blank"
-            rel="noreferrer"
-            className={getPluginActionClassName({
-              variant: 'secondary',
-              size: 'sm',
-              extraClassName: 'ghsync-extension-link'
-            })}
-          >
-            <GitHubButtonLabel label={link.label} />
-          </a>
-        ))}
-      </div>
-    </div>
-  );
-}
 
 export default GitHubSyncSettingsPage;

@@ -18,6 +18,15 @@ import {
 import { requiresPaperclipBoardAccess, resolvePaperclipAuthControlsPolicy } from '../src/paperclip-health.ts';
 import { normalizeCompanyAssigneeOptionsResponse } from '../src/ui/assignees.ts';
 import { fetchJson, fetchPaperclipHealth, resolveCliAuthPollUrl } from '../src/ui/http.ts';
+import {
+  buildCompanySecretCreateRequest,
+  buildCompanySecretListRequest,
+  buildCompanySecretRotateRequest,
+  exposeGitHubTokenToPaperclipHost,
+  findCompanySecretByName,
+  HOST_GITHUB_TOKEN_SECRET_NAME,
+  HOST_GITHUB_TOKEN_SECRET_NAMES
+} from '../src/ui/host-secrets.ts';
 import { resolveInstalledGitHubSyncPluginId, resolvePluginSettingsHref } from '../src/ui/plugin-installation.ts';
 import {
   hasLegacyPluginSecretRefs,
@@ -30984,4 +30993,413 @@ test('settings.registration asks the UI to re-mirror legacy bare-UUID plugin con
   const repairedResult = await harness.getData<RegistrationData>('settings.registration', { companyId: 'company-1' });
   assert.equal(repairedResult.githubTokenNeedsConfigSync, false);
   assert.equal(repairedResult.paperclipBoardAccessNeedsConfigSync, false);
+});
+
+interface AgentToolAccessRegistrationData {
+  agentToolAccess?: {
+    status: string;
+    toolsVisibleToAgents: number | null;
+    totalToolCount?: number;
+    checkedAgentId?: string;
+    checkedAgentName?: string;
+    checkableAgentCount?: number;
+  };
+}
+
+function createToolAccessHarness(companyId: string) {
+  const harness = createTestHarness({
+    manifest,
+    config: {
+      paperclipApiBaseUrl: 'http://127.0.0.1:3100',
+      paperclipBoardApiTokenRefs: {
+        [companyId]: { type: 'secret_ref', secretId: 'board-secret-ref' }
+      }
+    }
+  });
+
+  harness.ctx.secrets.resolve = async () => 'board-api-token';
+  harness.seed({
+    agents: [
+      createAgentFixture({
+        id: 'agent-terminated',
+        companyId,
+        name: 'Terminated',
+        status: 'terminated'
+      }),
+      createAgentFixture({
+        id: 'agent-active',
+        companyId,
+        name: 'Active',
+        status: 'active'
+      })
+    ]
+  });
+
+  return harness;
+}
+
+function getEffectiveToolProfilesUrl(companyId: string, agentId: string): string {
+  return `http://127.0.0.1:3100/api/companies/${companyId}/tools/profiles/effective/agents/${agentId}`;
+}
+
+test('settings.registration skips the agent tool-access check without board access', async () => {
+  const companyId = 'tool-access-company-unconfigured';
+  const harness = createTestHarness({ manifest });
+  await plugin.definition.setup(harness.ctx);
+
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input: RequestInfo | URL): Promise<Response> => {
+    throw new Error(`Unexpected fetch request: ${getRequestUrl(input)}`);
+  };
+
+  try {
+    const result = await harness.getData<AgentToolAccessRegistrationData>('settings.registration', {
+      companyId
+    });
+
+    assert.equal(result.agentToolAccess?.status, 'not_checked');
+    assert.equal(result.agentToolAccess?.toolsVisibleToAgents, null);
+    assert.equal(result.agentToolAccess?.totalToolCount, manifest.tools?.length);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('settings.registration counts the GitHub Sync tools an agent can see', async () => {
+  const companyId = 'tool-access-company-allowed';
+  const harness = createToolAccessHarness(companyId);
+  await plugin.definition.setup(harness.ctx);
+
+  const originalFetch = globalThis.fetch;
+  const requestedUrls: string[] = [];
+  const authorizationHeaders: Array<string | null> = [];
+
+  globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+    const url = getRequestUrl(input);
+    requestedUrls.push(url);
+    authorizationHeaders.push(getRequestHeader(input, init, 'authorization'));
+
+    if (url === getEffectiveToolProfilesUrl(companyId, 'agent-active')) {
+      return jsonResponse({
+        agentId: 'agent-active',
+        profiles: [{ id: 'profile-1', defaultAction: 'deny', status: 'active' }],
+        entries: [
+          {
+            selectorType: 'tool_name',
+            effect: 'include',
+            toolName: 'paperclip-github-plugin:get_issue'
+          }
+        ],
+        bindings: [],
+        allowedTools: [],
+        allowedToolNames: [
+          'linear:create_issue',
+          'paperclip-github-plugin:get_issue',
+          'paperclip-github-plugin:create_pull_request'
+        ]
+      });
+    }
+
+    throw new Error(`Unexpected fetch request: ${url}`);
+  };
+
+  try {
+    const result = await harness.getData<AgentToolAccessRegistrationData>('settings.registration', {
+      companyId
+    });
+
+    assert.equal(result.agentToolAccess?.status, 'ready');
+    assert.equal(result.agentToolAccess?.toolsVisibleToAgents, 2);
+    // The result is a single-agent sample, so the sampled agent must be identifiable.
+    assert.equal(result.agentToolAccess?.checkedAgentId, 'agent-active');
+    assert.equal(result.agentToolAccess?.checkedAgentName, 'Active');
+    assert.equal(result.agentToolAccess?.checkableAgentCount, 1);
+    assert.deepEqual(requestedUrls, [getEffectiveToolProfilesUrl(companyId, 'agent-active')]);
+    assert.deepEqual(authorizationHeaders, ['Bearer board-api-token']);
+
+    // The probe is cached per company so repeated settings reads do not hammer the board API.
+    const cachedResult = await harness.getData<AgentToolAccessRegistrationData>('settings.registration', {
+      companyId
+    });
+    assert.equal(cachedResult.agentToolAccess?.toolsVisibleToAgents, 2);
+    assert.equal(requestedUrls.length, 1);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('settings.registration reports zero visible tools when no profile includes them', async () => {
+  const companyId = 'tool-access-company-denied';
+  const harness = createToolAccessHarness(companyId);
+  await plugin.definition.setup(harness.ctx);
+
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input: RequestInfo | URL): Promise<Response> => {
+    const url = getRequestUrl(input);
+    if (url === getEffectiveToolProfilesUrl(companyId, 'agent-active')) {
+      return jsonResponse({
+        agentId: 'agent-active',
+        profiles: [{ id: 'profile-1', defaultAction: 'deny', status: 'active' }],
+        entries: [],
+        bindings: [],
+        allowedTools: [],
+        allowedToolNames: ['linear:create_issue']
+      });
+    }
+
+    throw new Error(`Unexpected fetch request: ${url}`);
+  };
+
+  try {
+    const result = await harness.getData<AgentToolAccessRegistrationData>('settings.registration', {
+      companyId
+    });
+
+    assert.equal(result.agentToolAccess?.status, 'ready');
+    assert.equal(result.agentToolAccess?.toolsVisibleToAgents, 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('settings.registration reports an unknown tool count for an allow-by-default profile', async () => {
+  const companyId = 'tool-access-company-allow-all';
+  const harness = createToolAccessHarness(companyId);
+  await plugin.definition.setup(harness.ctx);
+
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input: RequestInfo | URL): Promise<Response> => {
+    const url = getRequestUrl(input);
+    if (url === getEffectiveToolProfilesUrl(companyId, 'agent-active')) {
+      return jsonResponse({
+        agentId: 'agent-active',
+        profiles: [{ id: 'profile-1', defaultAction: 'allow', status: 'active' }],
+        entries: [],
+        bindings: [],
+        allowedTools: [],
+        allowedToolNames: []
+      });
+    }
+
+    throw new Error(`Unexpected fetch request: ${url}`);
+  };
+
+  try {
+    const result = await harness.getData<AgentToolAccessRegistrationData>('settings.registration', {
+      companyId
+    });
+
+    // `allowedToolNames` only lists catalog-backed MCP tools, so an allow-all profile must not be
+    // reported as zero: that would warn about a company whose agents do have access.
+    assert.equal(result.agentToolAccess?.status, 'ready');
+    assert.equal(result.agentToolAccess?.toolsVisibleToAgents, null);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('settings.registration tolerates hosts without the effective tool-profile route', async () => {
+  for (const status of [403, 404]) {
+    const companyId = `tool-access-company-${status}`;
+    const harness = createToolAccessHarness(companyId);
+    await plugin.definition.setup(harness.ctx);
+
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async (): Promise<Response> => jsonResponse({ error: 'Nope' }, status);
+
+    try {
+      const result = await harness.getData<AgentToolAccessRegistrationData>('settings.registration', {
+        companyId
+      });
+
+      assert.equal(result.agentToolAccess?.status, 'unavailable');
+      assert.equal(result.agentToolAccess?.toolsVisibleToAgents, null);
+      assert.equal(
+        harness.logs.some((entry) => entry.level === 'error' || entry.level === 'warn'),
+        false
+      );
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  }
+});
+
+test('settings.registration reports no checkable agents when the company has none', async () => {
+  const companyId = 'tool-access-company-no-agents';
+  const harness = createTestHarness({
+    manifest,
+    config: {
+      paperclipApiBaseUrl: 'http://127.0.0.1:3100',
+      paperclipBoardApiTokenRefs: {
+        [companyId]: { type: 'secret_ref', secretId: 'board-secret-ref' }
+      }
+    }
+  });
+  harness.ctx.secrets.resolve = async () => 'board-api-token';
+  await plugin.definition.setup(harness.ctx);
+
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input: RequestInfo | URL): Promise<Response> => {
+    throw new Error(`Unexpected fetch request: ${getRequestUrl(input)}`);
+  };
+
+  try {
+    const result = await harness.getData<AgentToolAccessRegistrationData>('settings.registration', {
+      companyId
+    });
+
+    assert.equal(result.agentToolAccess?.status, 'no_agents');
+    assert.equal(result.agentToolAccess?.toolsVisibleToAgents, null);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('company secret helpers build the documented Paperclip secret requests', () => {
+  assert.deepEqual(buildCompanySecretListRequest('company-1'), {
+    url: '/api/companies/company-1/secrets'
+  });
+
+  const createRequest = buildCompanySecretCreateRequest('company-1', HOST_GITHUB_TOKEN_SECRET_NAME, 'ghp_token');
+  assert.equal(createRequest.url, '/api/companies/company-1/secrets');
+  assert.equal(createRequest.init?.method, 'POST');
+  assert.deepEqual(JSON.parse(String(createRequest.init?.body)), {
+    name: 'GITHUB_TOKEN',
+    value: 'ghp_token'
+  });
+
+  const rotateRequest = buildCompanySecretRotateRequest('secret-1', 'ghp_token');
+  assert.equal(rotateRequest.url, '/api/secrets/secret-1/rotate');
+  assert.equal(rotateRequest.init?.method, 'POST');
+  assert.deepEqual(JSON.parse(String(rotateRequest.init?.body)), {
+    value: 'ghp_token'
+  });
+
+  assert.deepEqual(HOST_GITHUB_TOKEN_SECRET_NAMES, ['GITHUB_TOKEN', 'GH_TOKEN', 'PAPERCLIP_GITHUB_TOKEN']);
+});
+
+test('company secret lookup matches plugin names loosely and host names exactly', () => {
+  const secrets = [
+    { id: 'secret-lower', name: 'github_token' },
+    { id: 'secret-padded', name: 'GITHUB_TOKEN ' },
+    { id: 'secret-plugin', name: 'github_sync_company_1' }
+  ];
+
+  assert.equal(findCompanySecretByName(secrets, 'GitHub_Sync_Company_1')?.id, 'secret-plugin');
+  // The host compares secret names with plain SQL equality, so neither a lowercase row nor a
+  // trailing-space row may be mistaken for the `GITHUB_TOKEN` the host probes for.
+  assert.equal(findCompanySecretByName(secrets, 'GITHUB_TOKEN', { caseSensitive: true }), null);
+  assert.equal(findCompanySecretByName(secrets, 'GITHUB_TOKEN ', { caseSensitive: true })?.id, 'secret-padded');
+  assert.equal(findCompanySecretByName(secrets, 'github_token', { caseSensitive: true })?.id, 'secret-lower');
+});
+
+test('exposing the GitHub token refuses to rotate a non-active GITHUB_TOKEN secret', async () => {
+  const requests: string[] = [];
+  const fetchJsonStub = async <T,>(url: string, init?: RequestInit): Promise<T> => {
+    requests.push(`${init?.method ?? 'GET'} ${url}`);
+
+    if (url === '/api/companies/company-1/secrets' && !init?.method) {
+      return [{ id: 'secret-host', name: 'GITHUB_TOKEN', status: 'disabled' }] as T;
+    }
+
+    throw new Error('A disabled secret must not be rotated.');
+  };
+
+  await assert.rejects(
+    exposeGitHubTokenToPaperclipHost(fetchJsonStub, 'company-1', 'ghp_token'),
+    (error: unknown) => {
+      assert(error instanceof Error);
+      assert.match(error.message, /is disabled, not active/);
+      return true;
+    }
+  );
+  assert.deepEqual(requests, ['GET /api/companies/company-1/secrets']);
+});
+
+test('exposing the GitHub token creates the GITHUB_TOKEN company secret when it is missing', async () => {
+  const requests: Array<{ url: string; method: string; body: unknown }> = [];
+  const fetchJsonStub = async <T,>(url: string, init?: RequestInit): Promise<T> => {
+    requests.push({
+      url,
+      method: init?.method ?? 'GET',
+      body: typeof init?.body === 'string' ? JSON.parse(init.body) : undefined
+    });
+
+    if (url === '/api/companies/company-1/secrets' && !init?.method) {
+      return [{ id: 'secret-plugin', name: 'github_sync_company_1' }] as T;
+    }
+
+    return { id: 'secret-host', name: 'GITHUB_TOKEN' } as T;
+  };
+
+  const secret = await exposeGitHubTokenToPaperclipHost(fetchJsonStub, 'company-1', ' ghp_token ');
+
+  assert.deepEqual(secret, { id: 'secret-host', name: 'GITHUB_TOKEN' });
+  assert.deepEqual(requests, [
+    { url: '/api/companies/company-1/secrets', method: 'GET', body: undefined },
+    {
+      url: '/api/companies/company-1/secrets',
+      method: 'POST',
+      body: { name: 'GITHUB_TOKEN', value: 'ghp_token' }
+    }
+  ]);
+});
+
+test('exposing the GitHub token rotates an existing GITHUB_TOKEN company secret', async () => {
+  const requests: Array<{ url: string; method: string }> = [];
+  const fetchJsonStub = async <T,>(url: string, init?: RequestInit): Promise<T> => {
+    requests.push({ url, method: init?.method ?? 'GET' });
+
+    if (url === '/api/companies/company-1/secrets' && !init?.method) {
+      return [
+        { id: 'secret-other', name: 'GH_TOKEN' },
+        { id: 'secret-host', name: 'GITHUB_TOKEN', status: 'active' }
+      ] as T;
+    }
+
+    return { id: 'secret-host', name: 'GITHUB_TOKEN' } as T;
+  };
+
+  const secret = await exposeGitHubTokenToPaperclipHost(fetchJsonStub, 'company-1', 'ghp_rotated');
+
+  assert.equal(secret.id, 'secret-host');
+  assert.deepEqual(requests, [
+    { url: '/api/companies/company-1/secrets', method: 'GET' },
+    { url: '/api/secrets/secret-host/rotate', method: 'POST' }
+  ]);
+});
+
+test('exposing the GitHub token explains a conflicting company secret name', async () => {
+  const fetchJsonStub = async <T,>(url: string, init?: RequestInit): Promise<T> => {
+    if (url === '/api/companies/company-1/secrets' && !init?.method) {
+      return [{ id: 'secret-lower', name: 'github_token' }] as T;
+    }
+
+    throw new Error('Paperclip API 409: Secret key already exists: github_token');
+  };
+
+  await assert.rejects(
+    exposeGitHubTokenToPaperclipHost(fetchJsonStub, 'company-1', 'ghp_token'),
+    (error: unknown) => {
+      assert(error instanceof Error);
+      assert.match(error.message, /conflicts with GITHUB_TOKEN/);
+      assert.match(error.message, /matches this name exactly/);
+      return true;
+    }
+  );
+});
+
+test('exposing the GitHub token requires a company and a token', async () => {
+  const fetchJsonStub = async <T,>(): Promise<T> => {
+    throw new Error('No request should be made without a company and token.');
+  };
+
+  await assert.rejects(
+    exposeGitHubTokenToPaperclipHost(fetchJsonStub, '  ', 'ghp_token'),
+    /Company context is required/
+  );
+  await assert.rejects(
+    exposeGitHubTokenToPaperclipHost(fetchJsonStub, 'company-1', '  '),
+    /A GitHub token is required/
+  );
 });
