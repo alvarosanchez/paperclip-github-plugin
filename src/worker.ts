@@ -19905,20 +19905,29 @@ async function buildProjectPullRequestCountData(
  * (`server/src/services/tool-gateway.ts:842`), so only a `tool_name` (or `risk_level`) profile
  * entry — or a profile with `defaultAction: "allow"` — can make them visible to an agent.
  *
- * This read-only probe reports how many `paperclip-github-plugin:*` tool names one of the
- * company's agents can currently see, so the settings page can warn about a company that never
- * got a tool profile. It is best-effort: hosts without the route, without board access, or that
- * refuse the call are reported as unavailable rather than as an error.
+ * This read-only probe reports how many `paperclip-github-plugin:*` tool names **one sampled
+ * agent** of the company can currently see, so the settings page can warn about a company that
+ * never got a tool profile. It is deliberately a single-agent sample: the effective-profile route
+ * is per agent, and agent-scoped bindings win over company-scoped ones, so the result describes
+ * `checkedAgentId` and not every agent in the company. Consumers must present it that way.
+ * It is best-effort: hosts without the route, without board access, or that refuse the call are
+ * reported as unavailable rather than as an error.
  */
 type AgentToolAccessStatus = 'ready' | 'unavailable' | 'no_agents' | 'not_checked';
 
 interface AgentToolAccessSummary {
   status: AgentToolAccessStatus;
-  /** Count of GitHub Sync tool names an agent can see, or null when it could not be determined. */
+  /**
+   * Count of GitHub Sync tool names the sampled agent can see, or null when it could not be
+   * determined. Because agent-scoped bindings override company-scoped ones, this is a sample of
+   * `checkedAgentId`, not a company-wide guarantee.
+   */
   toolsVisibleToAgents: number | null;
   totalToolCount: number;
   checkedAgentId?: string;
-  message?: string;
+  checkedAgentName?: string;
+  /** How many agents of the company were eligible to be sampled. */
+  checkableAgentCount?: number;
 }
 
 const AGENT_TOOL_ACCESS_CACHE_TTL_MS = 120_000;
@@ -19936,15 +19945,11 @@ function clearAgentToolAccessSummaryCache(companyId?: string | null) {
   agentToolAccessSummaryCache.clear();
 }
 
-function buildUnavailableAgentToolAccessSummary(
-  status: AgentToolAccessStatus,
-  message?: string
-): AgentToolAccessSummary {
+function buildUnavailableAgentToolAccessSummary(status: AgentToolAccessStatus): AgentToolAccessSummary {
   return {
     status,
     toolsVisibleToAgents: null,
-    totalToolCount: GITHUB_AGENT_TOOLS.length,
-    ...(message ? { message } : {})
+    totalToolCount: GITHUB_AGENT_TOOLS.length
   };
 }
 
@@ -19979,15 +19984,19 @@ function effectiveToolProfilesGrantUnnamedTools(payload: Record<string, unknown>
 async function selectAgentForToolAccessCheck(
   ctx: PluginSetupContext,
   companyId: string
-): Promise<string | null> {
+): Promise<{ agent: { id: string; name: string } | null; checkableAgentCount: number }> {
   const agents = await ctx.agents.list({
     companyId,
-    limit: 100
+    limit: 500
   });
   const checkableAgents = agents.filter((agent) =>
     !agent.status || AGENT_TOOL_ACCESS_CHECKABLE_AGENT_STATUSES.has(agent.status));
   const preferredAgent = checkableAgents.find((agent) => agent.status === 'active') ?? checkableAgents[0];
-  return preferredAgent?.id ?? null;
+
+  return {
+    agent: preferredAgent ? { id: preferredAgent.id, name: preferredAgent.name } : null,
+    checkableAgentCount: checkableAgents.length
+  };
 }
 
 async function buildAgentToolAccessSummary(
@@ -20025,9 +20034,9 @@ async function loadAgentToolAccessSummary(
     return buildUnavailableAgentToolAccessSummary('not_checked');
   }
 
-  let agentId: string | null = null;
+  let sample: { agent: { id: string; name: string } | null; checkableAgentCount: number };
   try {
-    agentId = await selectAgentForToolAccessCheck(ctx, companyId);
+    sample = await selectAgentForToolAccessCheck(ctx, companyId);
   } catch (error) {
     ctx.logger.debug('GitHub Sync could not list company agents for the tool-access check.', {
       companyId,
@@ -20036,9 +20045,11 @@ async function loadAgentToolAccessSummary(
     return buildUnavailableAgentToolAccessSummary('unavailable');
   }
 
-  if (!agentId) {
+  if (!sample.agent) {
     return buildUnavailableAgentToolAccessSummary('no_agents');
   }
+
+  const agentId = sample.agent.id;
 
   try {
     const response = await fetchPaperclipApi(
@@ -20069,10 +20080,16 @@ async function loadAgentToolAccessSummary(
       return buildUnavailableAgentToolAccessSummary('unavailable');
     }
 
+    const sampleFields = {
+      checkedAgentId: agentId,
+      checkedAgentName: sample.agent.name,
+      checkableAgentCount: sample.checkableAgentCount
+    };
+
     if (effectiveToolProfilesGrantUnnamedTools(payloadResult.data)) {
       return {
         ...buildUnavailableAgentToolAccessSummary('ready'),
-        checkedAgentId: agentId
+        ...sampleFields
       };
     }
 
@@ -20080,7 +20097,7 @@ async function loadAgentToolAccessSummary(
       status: 'ready',
       toolsVisibleToAgents: countGitHubSyncToolNames(payloadResult.data.allowedToolNames),
       totalToolCount: GITHUB_AGENT_TOOLS.length,
-      checkedAgentId: agentId
+      ...sampleFields
     };
   } catch (error) {
     ctx.logger.debug('GitHub Sync could not reach the effective agent tool profile route.', {

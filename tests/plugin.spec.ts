@@ -31001,6 +31001,8 @@ interface AgentToolAccessRegistrationData {
     toolsVisibleToAgents: number | null;
     totalToolCount?: number;
     checkedAgentId?: string;
+    checkedAgentName?: string;
+    checkableAgentCount?: number;
   };
 }
 
@@ -31108,7 +31110,10 @@ test('settings.registration counts the GitHub Sync tools an agent can see', asyn
 
     assert.equal(result.agentToolAccess?.status, 'ready');
     assert.equal(result.agentToolAccess?.toolsVisibleToAgents, 2);
+    // The result is a single-agent sample, so the sampled agent must be identifiable.
     assert.equal(result.agentToolAccess?.checkedAgentId, 'agent-active');
+    assert.equal(result.agentToolAccess?.checkedAgentName, 'Active');
+    assert.equal(result.agentToolAccess?.checkableAgentCount, 1);
     assert.deepEqual(requestedUrls, [getEffectiveToolProfilesUrl(companyId, 'agent-active')]);
     assert.deepEqual(authorizationHeaders, ['Bearer board-api-token']);
 
@@ -31276,14 +31281,39 @@ test('company secret helpers build the documented Paperclip secret requests', ()
 test('company secret lookup matches plugin names loosely and host names exactly', () => {
   const secrets = [
     { id: 'secret-lower', name: 'github_token' },
+    { id: 'secret-padded', name: 'GITHUB_TOKEN ' },
     { id: 'secret-plugin', name: 'github_sync_company_1' }
   ];
 
   assert.equal(findCompanySecretByName(secrets, 'GitHub_Sync_Company_1')?.id, 'secret-plugin');
-  // The host compares secret names with plain SQL equality, so a lowercase row must not be
-  // mistaken for the `GITHUB_TOKEN` the host probes for.
+  // The host compares secret names with plain SQL equality, so neither a lowercase row nor a
+  // trailing-space row may be mistaken for the `GITHUB_TOKEN` the host probes for.
   assert.equal(findCompanySecretByName(secrets, 'GITHUB_TOKEN', { caseSensitive: true }), null);
+  assert.equal(findCompanySecretByName(secrets, 'GITHUB_TOKEN ', { caseSensitive: true })?.id, 'secret-padded');
   assert.equal(findCompanySecretByName(secrets, 'github_token', { caseSensitive: true })?.id, 'secret-lower');
+});
+
+test('exposing the GitHub token refuses to rotate a non-active GITHUB_TOKEN secret', async () => {
+  const requests: string[] = [];
+  const fetchJsonStub = async <T,>(url: string, init?: RequestInit): Promise<T> => {
+    requests.push(`${init?.method ?? 'GET'} ${url}`);
+
+    if (url === '/api/companies/company-1/secrets' && !init?.method) {
+      return [{ id: 'secret-host', name: 'GITHUB_TOKEN', status: 'disabled' }] as T;
+    }
+
+    throw new Error('A disabled secret must not be rotated.');
+  };
+
+  await assert.rejects(
+    exposeGitHubTokenToPaperclipHost(fetchJsonStub, 'company-1', 'ghp_token'),
+    (error: unknown) => {
+      assert(error instanceof Error);
+      assert.match(error.message, /is disabled, not active/);
+      return true;
+    }
+  );
+  assert.deepEqual(requests, ['GET /api/companies/company-1/secrets']);
 });
 
 test('exposing the GitHub token creates the GITHUB_TOKEN company secret when it is missing', async () => {
@@ -31323,7 +31353,7 @@ test('exposing the GitHub token rotates an existing GITHUB_TOKEN company secret'
     if (url === '/api/companies/company-1/secrets' && !init?.method) {
       return [
         { id: 'secret-other', name: 'GH_TOKEN' },
-        { id: 'secret-host', name: 'GITHUB_TOKEN' }
+        { id: 'secret-host', name: 'GITHUB_TOKEN', status: 'active' }
       ] as T;
     }
 

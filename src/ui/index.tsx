@@ -274,12 +274,18 @@ interface GitHubSyncAdvancedSettings {
   ignoredIssueAuthorUsernames: string[];
 }
 
+/**
+ * Read-only sample of one agent's effective tool access. The host evaluates tool profiles per
+ * agent and agent-scoped bindings beat company-scoped ones, so this describes `checkedAgentName`
+ * and must be presented as a sample rather than a company-wide verdict.
+ */
 interface AgentToolAccessSummary {
   status: 'ready' | 'unavailable' | 'no_agents' | 'not_checked';
   toolsVisibleToAgents: number | null;
   totalToolCount?: number;
   checkedAgentId?: string;
-  message?: string;
+  checkedAgentName?: string;
+  checkableAgentCount?: number;
 }
 
 interface GitHubSyncSettings {
@@ -11271,6 +11277,12 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
     }
   }, [settings.data]);
 
+  // The opt-in host-secret exposure is a per-company decision, so switching companies must not
+  // carry a ticked box (or a half-typed token) into the next company's save.
+  useEffect(() => {
+    setExposeTokenAsHostSecret(false);
+  }, [hostContext.companyId]);
+
   useEffect(() => {
     if (!settings.data) {
       return;
@@ -11674,6 +11686,13 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
     hasCompanyContext
     && agentToolAccess?.status === 'ready'
     && agentToolAccess.toolsVisibleToAgents === 0;
+  const agentToolAccessSampleLabel = agentToolAccess?.checkedAgentName
+    ? `Agent ${agentToolAccess.checkedAgentName}`
+    : 'The checked agent';
+  const agentToolAccessOtherAgentsHint =
+    typeof agentToolAccess?.checkableAgentCount === 'number' && agentToolAccess.checkableAgentCount > 1
+      ? ` of ${agentToolAccess.checkableAgentCount}`
+      : '';
   const boardAccessTone: Tone =
     connectingBoardAccess
       ? 'info'
@@ -12699,16 +12718,17 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
             {agentToolAccessWarningVisible ? (
               <div className="ghsync__permission-audit ghsync__permission-audit--warning">
                 <div className="ghsync__permission-audit-header">
-                  <strong>Agents cannot see the GitHub Sync tools</strong>
+                  <strong>{`${agentToolAccessSampleLabel} cannot see the GitHub Sync tools`}</strong>
                   <span className="ghsync__badge ghsync__badge--warning">Tool access</span>
                 </div>
                 <div className="ghsync__permission-audit-list">
                   <div className="ghsync__permission-audit-item">
                     <span>
-                      {`Paperclip's tool gateway is fail-closed, and no tool profile in this company includes any of the `}
+                      {`Paperclip's tool gateway is fail-closed, and no tool profile that applies to ${agentToolAccessSampleLabel} includes any of the `}
                       {agentToolAccess?.totalToolCount ? `${agentToolAccess.totalToolCount} ` : ''}
-                      {`${GITHUB_SYNC_PLUGIN_ID}:* tools, so agents will not be offered them. `}
-                      {'Bind a tool profile with tool_name include entries for this company.'}
+                      {`${GITHUB_SYNC_PLUGIN_ID}:* tools, so those tools will not be offered. `}
+                      {'Bind a tool profile with tool_name include entries at company scope. '}
+                      {`This is a sample of one agent${agentToolAccessOtherAgentsHint}: Paperclip evaluates tool profiles per agent, and an agent-scoped binding overrides the company one.`}
                     </span>
                     <a
                       href={GITHUB_SYNC_TOOL_ACCESS_DOCS_URL}

@@ -336,13 +336,24 @@ PAPERCLIP_BOARD_API_KEY="${PAPERCLIP_BOARD_API_KEY:?set a board API key}"
 COMPANY_ID="${COMPANY_ID:?set the Paperclip company id}"
 PLUGIN_ID="paperclip-github-plugin"
 
+# `--fail-with-body` makes curl exit non-zero on 4xx/5xx while still printing the error body,
+# so a 409 conflict or a 403 cannot be parsed into a null id and used in the next request.
 api() {
   local method="$1" path="$2"
   shift 2
-  curl -sS -X "${method}" "${PAPERCLIP_API_URL%/}${path}" \
+  curl -sS --fail-with-body -X "${method}" "${PAPERCLIP_API_URL%/}${path}" \
     -H "authorization: Bearer ${PAPERCLIP_BOARD_API_KEY}" \
     -H "content-type: application/json" \
     -H "accept: application/json" "$@"
+}
+
+require_id() {
+  local value="$1" label="$2"
+  if [ -z "${value}" ] || [ "${value}" = "null" ]; then
+    echo "${label} was not returned by Paperclip." >&2
+    exit 1
+  fi
+  printf '%s' "${value}"
 }
 
 # 1. Derive the tool names. As a board actor this route is unfiltered by policy and
@@ -358,14 +369,14 @@ entries="$(jq -Rn --arg names "${tool_names}" '
 ')"
 
 # 3. Create the profile. `defaultAction` stays "deny": only the listed tools are included.
-profile_id="$(api POST "/api/companies/${COMPANY_ID}/tools/profiles" -d "$(jq -n \
+profile_id="$(require_id "$(api POST "/api/companies/${COMPANY_ID}/tools/profiles" -d "$(jq -n \
   --argjson entries "${entries}" '{
     profileKey: "github-sync-tools",
     name: "GitHub Sync tools",
     defaultAction: "deny",
     status: "active",
     entries: $entries
-  }')" | jq -r '.id')"
+  }')" | jq -r '.id')" "Profile id")"
 
 # 4. Bind it to the whole company. `targetId` must equal the company id for company scope.
 api POST "/api/companies/${COMPANY_ID}/tools/profiles/${profile_id}/bind" -d "$(jq -n \
@@ -377,7 +388,8 @@ api POST "/api/companies/${COMPANY_ID}/tools/profiles/${profile_id}/bind" -d "$(
 
 # 5. Verify for one agent. `allowedToolNames` includes tool_name entries that have no MCP
 #    catalog row, which is exactly how plugin tools show up here.
-agent_id="$(api GET "/api/companies/${COMPANY_ID}/agents" | jq -r '[.[] | select(.status == "active")][0].id')"
+agent_id="$(require_id "$(api GET "/api/companies/${COMPANY_ID}/agents" \
+  | jq -r '[.[] | select(.status == "active")][0].id')" "Active agent id")"
 api GET "/api/companies/${COMPANY_ID}/tools/profiles/effective/agents/${agent_id}" \
   | jq --arg prefix "${PLUGIN_ID}:" '[.allowedToolNames[] | select(startswith($prefix))] | length'
 ```
@@ -389,7 +401,7 @@ Notes and gotchas:
 - Both `POST`s require a board actor with an **active, non-viewer** company membership. Agent API keys are rejected.
 - Binding `targetType: "agent"` narrows the grant to a single agent and wins over a company-scope binding for that agent. `project`, `routine`, `issue` and `gateway` bindings are ignored by the effective-tools view.
 - To revoke, `POST /api/companies/{companyId}/tools/profiles/{profileId}/unbind` with `{"targetType":"company","targetId":"<companyId>"}`.
-- GitHub Sync settings runs this same effective-tools check read-only and shows an **Agents cannot see the GitHub Sync tools** warning when a company's agents can see none of them. The check needs Paperclip board access connected and a reachable **Worker Paperclip API URL**; on hosts that do not expose the route it stays silent.
+- The effective-tools route is evaluated **per agent**, and an `agent`-scoped binding overrides the company one, so verifying one agent does not prove the grant for every agent. GitHub Sync settings runs this same check read-only against a single sampled agent and warns when that agent can see none of the tools; the banner names the agent it checked. The check needs Paperclip board access connected and a reachable **Worker Paperclip API URL**; on hosts that do not expose the route it stays silent.
 
 ### KPI attribution API route
 

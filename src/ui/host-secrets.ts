@@ -19,6 +19,8 @@ export const HOST_GITHUB_TOKEN_SECRET_NAME = HOST_GITHUB_TOKEN_SECRET_NAMES[0];
 export interface CompanySecretSummary {
   id: string;
   name: string;
+  /** Paperclip secret lifecycle status: `active`, `disabled`, `archived` or `deleted`. */
+  status?: string;
 }
 
 export interface PaperclipJsonRequest {
@@ -77,13 +79,16 @@ export function findCompanySecretByName(
   options: { caseSensitive?: boolean } = {}
 ): CompanySecretSummary | null {
   const caseSensitive = options.caseSensitive === true;
-  const expectedName = caseSensitive ? name.trim() : name.trim().toLowerCase();
+  // The host compares the stored name byte for byte, so the exact branch must not trim either
+  // side: a row stored as `GITHUB_TOKEN ` is a different secret as far as the host probe is
+  // concerned, and rotating it would leave the probe unsatisfied.
+  const expectedName = caseSensitive ? name : name.trim().toLowerCase();
   return secrets.find((secret) => {
     if (typeof secret?.name !== 'string') {
       return false;
     }
 
-    const candidate = caseSensitive ? secret.name.trim() : secret.name.trim().toLowerCase();
+    const candidate = caseSensitive ? secret.name : secret.name.trim().toLowerCase();
     return candidate === expectedName;
   }) ?? null;
 }
@@ -128,16 +133,39 @@ export async function exposeGitHubTokenToPaperclipHost(
     throw new Error('A GitHub token is required to expose it to Paperclip.');
   }
 
+  const listRequest = buildCompanySecretListRequest(trimmedCompanyId);
+  const existingSecrets = await fetchJson<Array<CompanySecretSummary>>(listRequest.url, listRequest.init);
+  const existing = findCompanySecretByName(
+    Array.isArray(existingSecrets) ? existingSecrets : [],
+    HOST_GITHUB_TOKEN_SECRET_NAME,
+    {
+      caseSensitive: true
+    }
+  );
+
+  if (existing) {
+    // Paperclip refuses to rotate a non-active secret, and the host's git-credential probe
+    // silently skips one, so rotating it would look like success while changing nothing.
+    if (typeof existing.status === 'string' && existing.status !== 'active') {
+      throw new Error(
+        `The ${HOST_GITHUB_TOKEN_SECRET_NAME} company secret is ${existing.status}, not active.`
+        + ' Re-activate it in Settings -> Secrets and save the token again, because Paperclip'
+        + ' ignores a secret in this state.'
+      );
+    }
+
+    const rotateRequest = buildCompanySecretRotateRequest(existing.id, trimmedToken);
+    return fetchJson<CompanySecretSummary>(rotateRequest.url, rotateRequest.init);
+  }
+
+  const createRequest = buildCompanySecretCreateRequest(
+    trimmedCompanyId,
+    HOST_GITHUB_TOKEN_SECRET_NAME,
+    trimmedToken
+  );
+
   try {
-    return await resolveOrCreateCompanySecret(
-      fetchJson,
-      trimmedCompanyId,
-      HOST_GITHUB_TOKEN_SECRET_NAME,
-      trimmedToken,
-      {
-        caseSensitive: true
-      }
-    );
+    return await fetchJson<CompanySecretSummary>(createRequest.url, createRequest.init);
   } catch (error) {
     // Paperclip derives a unique secret `key` from the name, so an existing secret whose name
     // only differs in case (`github_token`) blocks creating `GITHUB_TOKEN` with a 409 that is
