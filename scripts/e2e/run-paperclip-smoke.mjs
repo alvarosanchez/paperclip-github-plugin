@@ -945,18 +945,29 @@ async function main() {
       throw new Error(`Could not resolve the active company prefix from ${activeDashboardUrl.toString()}.`);
     }
 
-    const pullRequestsSidebarLink = page.getByRole('link', { name: 'Pull requests' }).first();
-    await pullRequestsSidebarLink.waitFor({ timeout: 120000 });
-
-    const pullRequestsHref = await pullRequestsSidebarLink.getAttribute('href');
     const expectedProjectPullRequestsPath = `/${activeCompanyPrefix}/github-pull-requests?projectId=${seededProject.id}`;
-    if (pullRequestsHref !== expectedProjectPullRequestsPath) {
-      throw new Error(
-        `Expected project Pull requests link to target ${expectedProjectPullRequestsPath}, received ${pullRequestsHref ?? 'null'}.`
-      );
+    // Paperclip 2026.831 made the streamlined main sidebar mandatory (PAP-12472) and no longer
+    // renders the per-project list that mounted `projectSidebarItem` contributions, so the
+    // sidebar link is only verified when the host actually renders it. The page route itself is
+    // host-independent, so the queue page is always opened directly afterwards.
+    const pullRequestsSidebarLink = page.getByRole('link', { name: 'Pull requests' }).first();
+    const sidebarLinkRendered = await pullRequestsSidebarLink
+      .waitFor({ timeout: 15000 })
+      .then(() => true)
+      .catch(() => false);
+    if (sidebarLinkRendered) {
+      const pullRequestsHref = await pullRequestsSidebarLink.getAttribute('href');
+      if (pullRequestsHref !== expectedProjectPullRequestsPath) {
+        throw new Error(
+          `Expected project Pull requests link to target ${expectedProjectPullRequestsPath}, received ${pullRequestsHref ?? 'null'}.`
+        );
+      }
+      log('Verified the project Pull requests sidebar link rendered by this host.');
+    } else {
+      log('Host sidebar does not mount projectSidebarItem contributions (Paperclip 2026.831 streamlined sidebar); opening the project Pull Requests page by route.');
     }
 
-    await pullRequestsSidebarLink.click();
+    await gotoWithTimeout(page, new URL(expectedProjectPullRequestsPath, baseUrl).toString());
     await page.getByRole('heading', { name: 'Open pull requests' }).waitFor({ timeout: 120000 });
     await page.getByText(formatRepositoryLabel(seededRepositoryUrl), { exact: true }).waitFor({ timeout: 120000 });
     const pullRequestsUrl = page.url();
