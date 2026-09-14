@@ -369,18 +369,6 @@ interface IssueIdentifierResolutionData {
   issueIdentifier: string;
 }
 
-interface CommentAnnotationData {
-  source: 'entity' | 'comment_body';
-  links: Array<{
-    type: 'issue' | 'pull_request';
-    label: string;
-    href: string;
-  }>;
-  previousStatus?: string;
-  nextStatus?: string;
-  reason?: string;
-}
-
 interface TokenValidationResult {
   login: string;
 }
@@ -4552,15 +4540,6 @@ const EXTENSION_SURFACE_STYLES = `
     font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   }
 
-  .ghsync-extension-card--compact {
-    gap: 10px;
-    padding: 0;
-    border: 0;
-    border-radius: 0;
-    background: transparent;
-    box-shadow: none;
-  }
-
   .ghsync-extension-heading {
     display: flex;
     justify-content: space-between;
@@ -4644,7 +4623,6 @@ const EXTENSION_SURFACE_STYLES = `
 
   .ghsync-extension-links,
   .ghsync-extension-labels,
-  .ghsync-comment-annotation,
   .ghsync-toolbar-button {
     display: flex;
     flex-wrap: wrap;
@@ -4683,14 +4661,6 @@ const EXTENSION_SURFACE_STYLES = `
 
   .ghsync-extension-pill {
     font-weight: 500;
-  }
-
-  .ghsync-comment-annotation__label {
-    color: var(--ghsync-muted);
-    font-size: 11px;
-    font-weight: 700;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
   }
 
   .ghsync-extension-note {
@@ -15205,49 +15175,5 @@ export function GitHubSyncIssueTaskDetailView(props?: PluginDetailTabProps): Rea
 }
 
 export const GitHubSyncIssueDetailTab = GitHubSyncIssueTaskDetailView;
-
-export function GitHubSyncCommentAnnotation(): React.JSX.Element | null {
-  const context = useHostContext();
-  const themeMode = useResolvedThemeMode();
-  const theme = themeMode === 'light' ? LIGHT_PALETTE : DARK_PALETTE;
-  const themeVars = buildThemeVars(theme, themeMode);
-  const annotation = usePluginData<CommentAnnotationData | null>('comment.annotation', {
-    ...(context.companyId ? { companyId: context.companyId } : {}),
-    ...(context.entityId ? { commentId: context.entityId } : {}),
-    ...(context.parentEntityId ? { parentIssueId: context.parentEntityId } : {})
-  });
-
-  if (annotation.loading && !annotation.data) {
-    return null;
-  }
-
-  if (annotation.error || !annotation.data || annotation.data.links.length === 0) {
-    return null;
-  }
-
-  return (
-    <div className="ghsync-extension-card ghsync-extension-card--compact" style={themeVars}>
-      <style>{EXTENSION_SURFACE_STYLES}</style>
-      <div className="ghsync-comment-annotation">
-        <span className="ghsync-comment-annotation__label">GitHub refs</span>
-        {annotation.data.links.map((link: CommentAnnotationData['links'][number]) => (
-          <a
-            key={`${link.type}:${link.href}`}
-            href={link.href}
-            target="_blank"
-            rel="noreferrer"
-            className={getPluginActionClassName({
-              variant: 'secondary',
-              size: 'sm',
-              extraClassName: 'ghsync-extension-link'
-            })}
-          >
-            <GitHubButtonLabel label={link.label} />
-          </a>
-        ))}
-      </div>
-    </div>
-  );
-}
 
 export default GitHubSyncSettingsPage;
