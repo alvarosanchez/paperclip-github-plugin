@@ -6931,11 +6931,14 @@ export async function patchPluginConfig(
   const rawCurrentConfig = await readRawPluginConfig(pluginId, companyId);
   const currentConfig = normalizePluginConfig(rawCurrentConfig);
   const nextConfig = mergePluginConfig(currentConfig, patch);
-
   // A legacy row (bare secret-id strings) normalizes to the same bindings the patch produces, so
-  // compare on the normalized shape only when the stored row is already in binding form;
-  // otherwise the write is what upgrades the host row and clears `binding_missing`.
-  if (!hasLegacyPluginSecretRefs(rawCurrentConfig) && JSON.stringify(nextConfig) === JSON.stringify(currentConfig)) {
+  // the normalized shapes match even though the stored row still needs upgrading.
+  const isLegacySecretRefMigration = hasLegacyPluginSecretRefs(rawCurrentConfig);
+  const isNormalizedConfigUnchanged = JSON.stringify(nextConfig) === JSON.stringify(currentConfig);
+
+  // Compare on the normalized shape only when the stored row is already in binding form; otherwise
+  // the write is what upgrades the host row and clears `binding_missing`.
+  if (!isLegacySecretRefMigration && isNormalizedConfigUnchanged) {
     return;
   }
 
@@ -6944,6 +6947,13 @@ export async function patchPluginConfig(
   } catch (error) {
     if (!isPluginSecretReferencesDisabledError(error)) {
       throw error;
+    }
+
+    // Pre-2026.831 hosts reject binding refs, and the bare secret-id strings they already store are
+    // the shape they understand. `stripPluginSecretRefConfig` would drop those refs entirely, so
+    // when the legacy migration is the only reason for this write, leave the stored row untouched.
+    if (isLegacySecretRefMigration && isNormalizedConfigUnchanged) {
+      return;
     }
 
     const safeConfig = stripPluginSecretRefConfig(nextConfig);

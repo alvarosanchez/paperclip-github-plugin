@@ -6245,6 +6245,77 @@ test('patchPluginConfig rewrites a legacy bare-UUID secret ref as a binding even
   }
 });
 
+test('patchPluginConfig keeps a legacy secret ref row intact when the host rejects binding refs', async () => {
+  const uiModule = await importFreshUiModule() as {
+    patchPluginConfig?: unknown;
+  };
+  const patchPluginConfig = uiModule.patchPluginConfig as (
+    pluginId: string,
+    companyId: string,
+    patch: { githubTokenRefs?: Record<string, string> }
+  ) => Promise<void>;
+  const legacySecretId = '11111111-2222-4333-8444-555555555555';
+  const originalFetch = globalThis.fetch;
+  const postBodies: unknown[] = [];
+  const storedConfigJson: Record<string, unknown> = {
+    githubTokenRefs: {
+      'company-1': legacySecretId
+    },
+    customFlag: true
+  };
+
+  globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+    const url = getRequestUrl(input);
+    const method = (init?.method ?? 'GET').toUpperCase();
+
+    if (url === '/api/plugins/plugin-1/config?companyId=company-1' && method === 'GET') {
+      return jsonResponse({ configJson: storedConfigJson });
+    }
+
+    if (url === '/api/plugins/plugin-1/config' && method === 'POST') {
+      postBodies.push(getJsonRequestBody(init));
+      return jsonResponse(
+        {
+          error: 'Plugin secret references are disabled until company-scoped plugin config lands'
+        },
+        422
+      );
+    }
+
+    throw new Error(`Unexpected fetch request: ${method} ${url}`);
+  };
+
+  try {
+    // A pre-2026.831 host stores the bare secret id and rejects binding refs. Stripping the refs
+    // would delete the only copy of the row the old host understands, so the migration write is
+    // abandoned instead and the legacy row survives.
+    await patchPluginConfig('plugin-1', 'company-1', {
+      githubTokenRefs: {
+        'company-1': legacySecretId
+      }
+    });
+
+    assert.equal(postBodies.length, 1, 'only the binding upgrade attempt is sent');
+    assert.deepEqual(postBodies[0], {
+      companyId: 'company-1',
+      configJson: {
+        githubTokenRefs: {
+          'company-1': { type: 'secret_ref', secretId: legacySecretId }
+        },
+        customFlag: true
+      }
+    });
+    assert.deepEqual(storedConfigJson, {
+      githubTokenRefs: {
+        'company-1': legacySecretId
+      },
+      customFlag: true
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test('normalizePluginConfig canonicalizes the trusted Paperclip API origin and drops invalid values', () => {
   assert.deepEqual(
     normalizePluginConfig({
