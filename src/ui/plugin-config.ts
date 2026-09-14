@@ -94,6 +94,23 @@ function normalizeCompanySecretRefMap(value: unknown): Record<string, PluginSecr
   return Object.fromEntries(entries);
 }
 
+/**
+ * Reports whether a raw plugin config row still stores any secret ref in the legacy bare
+ * secret-id string shape. Such rows normalize to the same `{ type: "secret_ref" }` bindings a
+ * patch produces, so callers must not skip a write based on normalized equality alone: the host
+ * only binds (and the worker only resolves) refs stored as binding objects.
+ */
+export function hasLegacyPluginSecretRefs(value: unknown): boolean {
+  if (!isPlainRecord(value)) {
+    return false;
+  }
+
+  return [value.githubTokenRefs, value.paperclipBoardApiTokenRefs].some((refs) =>
+    isPlainRecord(refs)
+    && Object.values(refs).some((secretRef) => !isPluginSecretRefBinding(secretRef) && Boolean(normalizeOptionalString(secretRef)))
+  );
+}
+
 export function normalizePluginConfigBoardTokenRefs(value: unknown): PluginConfigBoardTokenRefs | undefined {
   return normalizeCompanySecretRefMap(value);
 }

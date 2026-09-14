@@ -20,6 +20,7 @@ import { normalizeCompanyAssigneeOptionsResponse } from '../src/ui/assignees.ts'
 import { fetchJson, fetchPaperclipHealth, resolveCliAuthPollUrl } from '../src/ui/http.ts';
 import { resolveInstalledGitHubSyncPluginId, resolvePluginSettingsHref } from '../src/ui/plugin-installation.ts';
 import {
+  hasLegacyPluginSecretRefs,
   mergePluginConfig,
   normalizePluginConfig,
   type GitHubSyncPluginConfig,
@@ -6154,6 +6155,162 @@ test('patchPluginConfig retries without plugin secret refs when the host rejects
         }
       }
     ]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('hasLegacyPluginSecretRefs only flags secret refs stored as bare secret-id strings', () => {
+  assert.equal(hasLegacyPluginSecretRefs(undefined), false);
+  assert.equal(hasLegacyPluginSecretRefs({}), false);
+  assert.equal(
+    hasLegacyPluginSecretRefs({
+      githubTokenRefs: { 'company-1': { type: 'secret_ref', secretId: '11111111-2222-4333-8444-555555555555' } },
+      paperclipBoardApiTokenRefs: { 'company-1': { type: 'secret_ref', secretId: 'board-secret-ref', version: 'latest' } }
+    }),
+    false
+  );
+  assert.equal(hasLegacyPluginSecretRefs({ githubTokenRefs: { 'company-1': '11111111-2222-4333-8444-555555555555' } }), true);
+  assert.equal(hasLegacyPluginSecretRefs({ paperclipBoardApiTokenRefs: { 'company-1': 'board-secret-ref' } }), true);
+  assert.equal(hasLegacyPluginSecretRefs({ githubTokenRefs: { 'company-1': '   ' } }), false);
+});
+
+test('patchPluginConfig rewrites a legacy bare-UUID secret ref as a binding even when the normalized config is unchanged', async () => {
+  const uiModule = await importFreshUiModule() as {
+    patchPluginConfig?: unknown;
+  };
+  const patchPluginConfig = uiModule.patchPluginConfig as (
+    pluginId: string,
+    companyId: string,
+    patch: { githubTokenRefs?: Record<string, string> }
+  ) => Promise<void>;
+  const legacySecretId = '11111111-2222-4333-8444-555555555555';
+  const originalFetch = globalThis.fetch;
+  const postBodies: unknown[] = [];
+  let storedConfigJson: Record<string, unknown> = {
+    githubTokenRefs: {
+      'company-1': legacySecretId
+    },
+    customFlag: true
+  };
+
+  globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+    const url = getRequestUrl(input);
+    const method = (init?.method ?? 'GET').toUpperCase();
+
+    if (url === '/api/plugins/plugin-1/config?companyId=company-1' && method === 'GET') {
+      return jsonResponse({ configJson: storedConfigJson });
+    }
+
+    if (url === '/api/plugins/plugin-1/config' && method === 'POST') {
+      const body = getJsonRequestBody(init);
+      postBodies.push(body);
+      storedConfigJson = (body?.configJson ?? {}) as Record<string, unknown>;
+      return jsonResponse({ ok: true });
+    }
+
+    throw new Error(`Unexpected fetch request: ${method} ${url}`);
+  };
+
+  try {
+    // The migration effect re-mirrors the same secret id the host row already holds; the host only
+    // binds `{ type: "secret_ref" }` objects, so the write must happen despite normalized equality.
+    await patchPluginConfig('plugin-1', 'company-1', {
+      githubTokenRefs: {
+        'company-1': legacySecretId
+      }
+    });
+
+    assert.deepEqual(postBodies, [
+      {
+        companyId: 'company-1',
+        configJson: {
+          githubTokenRefs: {
+            'company-1': { type: 'secret_ref', secretId: legacySecretId }
+          },
+          customFlag: true
+        }
+      }
+    ]);
+
+    // Once the row stores a binding, an identical patch is a no-op again.
+    await patchPluginConfig('plugin-1', 'company-1', {
+      githubTokenRefs: {
+        'company-1': legacySecretId
+      }
+    });
+    assert.equal(postBodies.length, 1);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('patchPluginConfig keeps a legacy secret ref row intact when the host rejects binding refs', async () => {
+  const uiModule = await importFreshUiModule() as {
+    patchPluginConfig?: unknown;
+  };
+  const patchPluginConfig = uiModule.patchPluginConfig as (
+    pluginId: string,
+    companyId: string,
+    patch: { githubTokenRefs?: Record<string, string> }
+  ) => Promise<void>;
+  const legacySecretId = '11111111-2222-4333-8444-555555555555';
+  const originalFetch = globalThis.fetch;
+  const postBodies: unknown[] = [];
+  const storedConfigJson: Record<string, unknown> = {
+    githubTokenRefs: {
+      'company-1': legacySecretId
+    },
+    customFlag: true
+  };
+
+  globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+    const url = getRequestUrl(input);
+    const method = (init?.method ?? 'GET').toUpperCase();
+
+    if (url === '/api/plugins/plugin-1/config?companyId=company-1' && method === 'GET') {
+      return jsonResponse({ configJson: storedConfigJson });
+    }
+
+    if (url === '/api/plugins/plugin-1/config' && method === 'POST') {
+      postBodies.push(getJsonRequestBody(init));
+      return jsonResponse(
+        {
+          error: 'Plugin secret references are disabled until company-scoped plugin config lands'
+        },
+        422
+      );
+    }
+
+    throw new Error(`Unexpected fetch request: ${method} ${url}`);
+  };
+
+  try {
+    // A pre-2026.831 host stores the bare secret id and rejects binding refs. Stripping the refs
+    // would delete the only copy of the row the old host understands, so the migration write is
+    // abandoned instead and the legacy row survives.
+    await patchPluginConfig('plugin-1', 'company-1', {
+      githubTokenRefs: {
+        'company-1': legacySecretId
+      }
+    });
+
+    assert.equal(postBodies.length, 1, 'only the binding upgrade attempt is sent');
+    assert.deepEqual(postBodies[0], {
+      companyId: 'company-1',
+      configJson: {
+        githubTokenRefs: {
+          'company-1': { type: 'secret_ref', secretId: legacySecretId }
+        },
+        customFlag: true
+      }
+    });
+    assert.deepEqual(storedConfigJson, {
+      githubTokenRefs: {
+        'company-1': legacySecretId
+      },
+      customFlag: true
+    });
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -30640,6 +30797,108 @@ test('plugin declares multi-company config and remembers company-scoped config d
   assert.equal(companyOne.githubTokenConfigured, true);
   assert.equal(companyTwo.githubTokenConfigured, true);
   assert.equal(companyThree.githubTokenConfigured, false);
+});
+
+test('scheduled sync records the scope-denied operator message for a company the host refuses to scope and never configured', async () => {
+  const COMPANY_SCOPE_DENIED_SYNC_MESSAGE =
+    'Paperclip denied GitHub Sync worker access for this company because it has no saved GitHub Sync plugin config. Open GitHub Sync settings inside the company and save settings once so the host registers it.';
+  const companyId = 'company-scope-denied';
+  const worker = await importFreshWorker();
+  const harness = createTestHarness({
+    manifest,
+    config: {
+      githubTokensByCompanyId: {
+        [companyId]: 'ghp_worker_local_fallback_token'
+      }
+    }
+  });
+  await worker.definition.setup(harness.ctx);
+  harness.ctx.config.get = async () => {
+    throw Object.assign(new Error('company context is required'), { name: 'InvocationScopeDeniedError' });
+  };
+
+  await harness.performAction('settings.saveRegistration', {
+    mappings: [
+      {
+        id: 'mapping-scope-denied',
+        repositoryUrl: 'paperclipai/example-repo',
+        paperclipProjectName: 'Engineering',
+        paperclipProjectId: 'project-1',
+        companyId
+      }
+    ],
+    syncState: {
+      status: 'idle'
+    }
+  });
+
+  const originalFetch = globalThis.fetch;
+  const githubRequests: string[] = [];
+  globalThis.fetch = async (input) => {
+    githubRequests.push(getRequestUrl(input));
+    throw new Error(`Unexpected GitHub request: ${getRequestUrl(input)}`);
+  };
+
+  const readScopedSyncState = () => {
+    const settings = harness.getState({
+      scopeKind: 'instance',
+      stateKey: 'paperclip-github-plugin-settings'
+    }) as { syncStateByCompanyId?: Record<string, { status?: string; message?: string; lastRunTrigger?: string }> };
+    return settings.syncStateByCompanyId?.[companyId];
+  };
+
+  try {
+    await harness.runJob('sync.github-issues', {
+      trigger: 'schedule',
+      scheduledAt: '2026-04-09T09:45:00.000Z'
+    });
+
+    assert.equal(readScopedSyncState()?.status, 'error');
+    assert.equal(readScopedSyncState()?.message, COMPANY_SCOPE_DENIED_SYNC_MESSAGE);
+    assert.equal(readScopedSyncState()?.lastRunTrigger, 'schedule');
+    assert.deepEqual(githubRequests, [], 'sync must not continue with worker-local fallback config');
+
+    // The settings data path stays lenient and still renders an (empty) config for the company.
+    const registration = await harness.getData<{ githubTokenConfigured?: boolean }>('settings.registration', {
+      companyId
+    });
+    assert.equal(registration.githubTokenConfigured, false);
+
+    // Once the host delivers the company's config through configChanged, the remembered copy is
+    // trusted again and the scheduled sync proceeds.
+    await worker.definition.onConfigChanged?.(
+      {
+        githubTokenRefs: {
+          [companyId]: { type: 'secret_ref', secretId: 'github-secret-ref-scope-denied' }
+        }
+      },
+      { companyId }
+    );
+    harness.ctx.secrets.resolve = async () => 'github-token';
+    globalThis.fetch = async (input, init) => {
+      const url = new URL(getRequestUrl(input));
+      if (url.pathname === '/repos/paperclipai/example-repo/issues') {
+        return jsonResponse([]);
+      }
+      if (url.pathname === '/graphql') {
+        const { query } = getGraphqlRequest(init);
+        if (query.includes('query GitHubIssueParentRelationships')) {
+          return graphqlIssueParentRelationshipsResponse([]);
+        }
+      }
+      throw new Error(`Unexpected GitHub request: ${url.toString()}`);
+    };
+
+    // The failed run stamped `checkedAt` with the wall clock, so schedule the retry after it.
+    await harness.runJob('sync.github-issues', {
+      trigger: 'schedule',
+      scheduledAt: new Date(Date.now() + 60 * 60_000).toISOString()
+    });
+
+    assert.equal(readScopedSyncState()?.status, 'success', readScopedSyncState()?.message);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test('sync.runNow resolves the company-scoped GitHub token ref as a shared binding with company and config path', async () => {

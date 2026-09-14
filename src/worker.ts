@@ -16083,13 +16083,29 @@ function mergeRememberedTrustedConfig(): Record<string, unknown> {
   return merged;
 }
 
+interface ReadTrustedConfigOptions {
+  /**
+   * Sync execution must not silently continue for a company the host refuses to scope: when the
+   * host denies the company scope and it never delivered a config for that company (no saved
+   * plugin-config row), rethrow so the caller records `COMPANY_SCOPE_DENIED_SYNC_MESSAGE` instead
+   * of running with an empty or worker-local fallback config.
+   */
+  requireCompanyScope?: boolean;
+}
+
 /**
  * Reads the company-scoped plugin config from the host. Paperclip 2026.831 requires a company
  * scope for `ctx.config.get()`; when the host cannot derive one (scheduled jobs, actions without a
  * company, companies without a saved config row) the worker falls back to the config the host
- * delivered through `configChanged` so company-keyed settings still resolve.
+ * delivered through `configChanged` so company-keyed settings still resolve. Data/settings paths
+ * keep that lenient behavior so the UI can render an empty config; sync execution opts into
+ * `requireCompanyScope` so the scope-denied condition surfaces as a recorded sync error.
  */
-async function readTrustedConfig(ctx: PluginSetupContext, companyId?: string): Promise<Record<string, unknown>> {
+async function readTrustedConfig(
+  ctx: PluginSetupContext,
+  companyId?: string,
+  options: ReadTrustedConfigOptions = {}
+): Promise<Record<string, unknown>> {
   const normalizedCompanyId = normalizeCompanyId(companyId);
 
   try {
@@ -16103,6 +16119,9 @@ async function readTrustedConfig(ctx: PluginSetupContext, companyId?: string): P
     const remembered = normalizedCompanyId
       ? rememberedTrustedConfigByCompanyId.get(normalizedCompanyId)
       : mergeRememberedTrustedConfig();
+    if (options.requireCompanyScope && normalizedCompanyId && !remembered && isCompanyScopeDeniedError(error)) {
+      throw error;
+    }
     const warningKey = `${normalizedCompanyId ?? '<instance>'}:${getErrorMessage(error)}`;
     if (!reportedTrustedConfigReadFailures.has(warningKey)) {
       reportedTrustedConfigReadFailures.add(warningKey);
@@ -16119,9 +16138,13 @@ async function readTrustedConfig(ctx: PluginSetupContext, companyId?: string): P
   }
 }
 
-async function getResolvedConfig(ctx: PluginSetupContext, companyId?: string): Promise<GitHubSyncConfig> {
+async function getResolvedConfig(
+  ctx: PluginSetupContext,
+  companyId?: string,
+  options: ReadTrustedConfigOptions = {}
+): Promise<GitHubSyncConfig> {
   const [savedConfig, externalConfig] = await Promise.all([
-    readTrustedConfig(ctx, companyId),
+    readTrustedConfig(ctx, companyId, options),
     readExternalConfig(ctx)
   ]);
 
@@ -22258,10 +22281,22 @@ async function startSync(
   await reconcileOrphanedRunningSyncState(ctx, options.target?.companyId);
 
   const targetCompanyId = normalizeCompanyId(options.target?.companyId);
-  const [config, persistedSettings] = await Promise.all([
-    getResolvedConfig(ctx, targetCompanyId),
-    ctx.state.get(SETTINGS_SCOPE).then((value) => normalizeSettings(value))
-  ]);
+  let config: GitHubSyncConfig;
+  let persistedSettings: GitHubSyncSettings;
+  try {
+    [config, persistedSettings] = await Promise.all([
+      getResolvedConfig(ctx, targetCompanyId, { requireCompanyScope: true }),
+      ctx.state.get(SETTINGS_SCOPE).then((value) => normalizeSettings(value))
+    ]);
+  } catch (error) {
+    if (!isCompanyScopeDeniedError(error)) {
+      throw error;
+    }
+    // The host refused to scope plugin config for this company and never delivered one, so the
+    // company has no saved GitHub Sync plugin config. Record the operator-facing sync error
+    // instead of continuing with an empty or worker-local fallback config.
+    return createUnexpectedSyncErrorResult(ctx, trigger, error, targetCompanyId);
+  }
   const token = await resolveGithubToken(ctx, {
     companyId: targetCompanyId,
     config,
