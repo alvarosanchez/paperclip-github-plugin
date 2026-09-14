@@ -1,5 +1,18 @@
-export type PluginConfigBoardTokenRefs = Record<string, string>;
-export type PluginConfigGitHubTokenRefs = Record<string, string>;
+/**
+ * Paperclip 2026.831 binds plugin secret refs only when plugin config stores them as the shared
+ * `{ type: "secret_ref", secretId, version? }` binding, and the worker can only resolve bound refs.
+ * Older releases mirrored bare secret-id strings; the helpers below accept both shapes and always
+ * write bindings so a re-save upgrades legacy rows.
+ */
+export interface PluginSecretRefBinding {
+  type: 'secret_ref';
+  secretId: string;
+  version?: number | 'latest';
+}
+
+export type PluginConfigSecretRefInput = string | PluginSecretRefBinding;
+export type PluginConfigBoardTokenRefs = Record<string, PluginSecretRefBinding>;
+export type PluginConfigGitHubTokenRefs = Record<string, PluginSecretRefBinding>;
 
 export interface GitHubSyncPluginConfig extends Record<string, unknown> {
   githubTokenRefs?: PluginConfigGitHubTokenRefs;
@@ -7,8 +20,43 @@ export interface GitHubSyncPluginConfig extends Record<string, unknown> {
   paperclipApiBaseUrl?: string;
 }
 
+export interface GitHubSyncPluginConfigPatch extends Record<string, unknown> {
+  githubTokenRefs?: Record<string, PluginConfigSecretRefInput>;
+  paperclipBoardApiTokenRefs?: Record<string, PluginConfigSecretRefInput>;
+  paperclipApiBaseUrl?: string;
+}
+
 function normalizeOptionalString(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim() ? value.trim() : undefined;
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+export function isPluginSecretRefBinding(value: unknown): value is PluginSecretRefBinding {
+  return (
+    isPlainRecord(value)
+    && value.type === 'secret_ref'
+    && typeof value.secretId === 'string'
+    && Boolean(value.secretId.trim())
+  );
+}
+
+export function normalizePluginSecretRefBinding(value: unknown): PluginSecretRefBinding | undefined {
+  if (isPluginSecretRefBinding(value)) {
+    const version = value.version;
+    return {
+      type: 'secret_ref',
+      secretId: value.secretId.trim(),
+      ...(version === 'latest' || (typeof version === 'number' && Number.isInteger(version) && version > 0)
+        ? { version }
+        : {})
+    };
+  }
+
+  const secretId = normalizeOptionalString(value);
+  return secretId ? { type: 'secret_ref', secretId } : undefined;
 }
 
 export function normalizePaperclipApiBaseUrl(value: unknown): string | undefined {
@@ -24,56 +72,42 @@ export function normalizePaperclipApiBaseUrl(value: unknown): string | undefined
   }
 }
 
-export function normalizePluginConfigBoardTokenRefs(value: unknown): PluginConfigBoardTokenRefs | undefined {
-  if (!value || typeof value !== 'object') {
+function normalizeCompanySecretRefMap(value: unknown): Record<string, PluginSecretRefBinding> | undefined {
+  if (!isPlainRecord(value)) {
     return undefined;
   }
 
-  const entries = Object.entries(value as Record<string, unknown>)
+  const entries = Object.entries(value)
     .map(([companyId, secretRef]) => {
       const normalizedCompanyId = normalizeOptionalString(companyId);
-      const normalizedSecretRef = normalizeOptionalString(secretRef);
+      const normalizedSecretRef = normalizePluginSecretRefBinding(secretRef);
       return normalizedCompanyId && normalizedSecretRef
         ? [normalizedCompanyId, normalizedSecretRef] as const
         : null;
     })
-    .filter((entry): entry is readonly [string, string] => Boolean(entry));
+    .filter((entry): entry is readonly [string, PluginSecretRefBinding] => Boolean(entry));
 
   if (entries.length === 0) {
     return undefined;
   }
 
   return Object.fromEntries(entries);
+}
+
+export function normalizePluginConfigBoardTokenRefs(value: unknown): PluginConfigBoardTokenRefs | undefined {
+  return normalizeCompanySecretRefMap(value);
 }
 
 export function normalizePluginConfigGitHubTokenRefs(value: unknown): PluginConfigGitHubTokenRefs | undefined {
-  if (!value || typeof value !== 'object') {
-    return undefined;
-  }
-
-  const entries = Object.entries(value as Record<string, unknown>)
-    .map(([companyId, secretRef]) => {
-      const normalizedCompanyId = normalizeOptionalString(companyId);
-      const normalizedSecretRef = normalizeOptionalString(secretRef);
-      return normalizedCompanyId && normalizedSecretRef
-        ? [normalizedCompanyId, normalizedSecretRef] as const
-        : null;
-    })
-    .filter((entry): entry is readonly [string, string] => Boolean(entry));
-
-  if (entries.length === 0) {
-    return undefined;
-  }
-
-  return Object.fromEntries(entries);
+  return normalizeCompanySecretRefMap(value);
 }
 
 export function normalizePluginConfig(value: unknown): GitHubSyncPluginConfig {
-  if (!value || typeof value !== 'object') {
+  if (!isPlainRecord(value)) {
     return {};
   }
 
-  const record = { ...(value as Record<string, unknown>) };
+  const record = { ...value };
   const githubTokenRefs = normalizePluginConfigGitHubTokenRefs(record.githubTokenRefs);
   const paperclipBoardApiTokenRefs = normalizePluginConfigBoardTokenRefs(record.paperclipBoardApiTokenRefs);
   const paperclipApiBaseUrl = normalizePaperclipApiBaseUrl(record.paperclipApiBaseUrl);
@@ -105,7 +139,7 @@ export function resolvePaperclipApiBaseUrlForPluginAction(value: unknown, fallba
 
 export function mergePluginConfig(
   currentValue: unknown,
-  patch: Partial<GitHubSyncPluginConfig>
+  patch: GitHubSyncPluginConfigPatch
 ): GitHubSyncPluginConfig {
   const current = normalizePluginConfig(currentValue);
   const currentGitHubTokenRefs = normalizePluginConfigGitHubTokenRefs(current.githubTokenRefs);
