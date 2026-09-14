@@ -20,7 +20,7 @@ import {
   type ToolRunContext
 } from '@paperclipai/plugin-sdk';
 
-import { getGitHubAgentToolDeclaration } from './github-agent-tools.ts';
+import { getGitHubAgentToolDeclaration, GITHUB_AGENT_TOOLS } from './github-agent-tools.ts';
 import {
   publishLocalBranchForPullRequest,
   type PublishLocalBranchInput,
@@ -12494,6 +12494,13 @@ function getPaperclipAgentWakeupEndpoint(baseUrl: string, agentId: string): stri
   return new URL(`/api/agents/${agentId}/wakeup`, baseUrl).toString();
 }
 
+function getPaperclipEffectiveAgentToolProfilesEndpoint(baseUrl: string, companyId: string, agentId: string): string {
+  return new URL(
+    `/api/companies/${encodeURIComponent(companyId)}/tools/profiles/effective/agents/${encodeURIComponent(agentId)}`,
+    baseUrl
+  ).toString();
+}
+
 function getActivePaperclipApiAuthToken(companyId?: string): string | undefined {
   if (!companyId) {
     return undefined;
@@ -16342,58 +16349,67 @@ async function resolvePaperclipApiAuthTokens(
   const tokensByCompanyId = new Map<string, string>();
 
   for (const companyId of companyIds) {
-    const configuredSecretRef = getConfiguredPaperclipBoardApiTokenRef(config, companyId);
-    const savedSecretRef = getSavedPaperclipBoardApiTokenRef(settings, companyId);
-    const fallbackToken = normalizeGitHubToken(config.paperclipBoardApiTokensByCompanyId?.[companyId]);
-    const secretRef = configuredSecretRef ?? savedSecretRef;
-    if (!secretRef) {
-      continue;
-    }
-
-    if (!configuredSecretRef && savedSecretRef) {
-      if (fallbackToken) {
-        tokensByCompanyId.set(companyId, fallbackToken);
-        continue;
-      }
-
-      ctx.logger.warn(
-        'Paperclip board access is saved in plugin state but has not been mirrored into plugin config yet. Open plugin settings to finish migrating it, or reconnect board access, before retrying sync.',
-        {
-          companyId,
-          secretRef: savedSecretRef
-        }
-      );
-      continue;
-    }
-
-    try {
-      const token = (await resolvePluginSecret(ctx, secretRef, {
-        companyId,
-        configPath: getPaperclipBoardApiTokenRefConfigPath(companyId)
-      })).trim();
-      if (token) {
-        tokensByCompanyId.set(companyId, token);
-      }
-    } catch (error) {
-      if (fallbackToken && isPluginSecretReferenceUnavailableError(error)) {
-        ctx.logger.warn('GitHub Sync is using a worker-local Paperclip board token fallback because plugin secret refs are unavailable in this host.', {
-          companyId,
-          secretRef,
-          error: getErrorMessage(error)
-        });
-        tokensByCompanyId.set(companyId, fallbackToken);
-        continue;
-      }
-
-      ctx.logger.warn('Unable to resolve the saved Paperclip board API token. Direct REST calls will continue without it.', {
-        companyId,
-        secretRef,
-        error: getErrorMessage(error)
-      });
+    const token = await resolvePaperclipApiAuthTokenForCompany(ctx, settings, config, companyId);
+    if (token) {
+      tokensByCompanyId.set(companyId, token);
     }
   }
 
   return tokensByCompanyId;
+}
+
+async function resolvePaperclipApiAuthTokenForCompany(
+  ctx: PluginSetupContext,
+  settings: Pick<GitHubSyncSettings, 'paperclipBoardApiTokenRefs'>,
+  config: Pick<GitHubSyncConfig, 'paperclipBoardApiTokenRefs' | 'paperclipBoardApiTokensByCompanyId'>,
+  companyId: string
+): Promise<string | null> {
+  const configuredSecretRef = getConfiguredPaperclipBoardApiTokenRef(config, companyId);
+  const savedSecretRef = getSavedPaperclipBoardApiTokenRef(settings, companyId);
+  const fallbackToken = normalizeGitHubToken(config.paperclipBoardApiTokensByCompanyId?.[companyId]);
+  const secretRef = configuredSecretRef ?? savedSecretRef;
+  if (!secretRef) {
+    return null;
+  }
+
+  if (!configuredSecretRef && savedSecretRef) {
+    if (fallbackToken) {
+      return fallbackToken;
+    }
+
+    ctx.logger.warn(
+      'Paperclip board access is saved in plugin state but has not been mirrored into plugin config yet. Open plugin settings to finish migrating it, or reconnect board access, before retrying sync.',
+      {
+        companyId,
+        secretRef: savedSecretRef
+      }
+    );
+    return null;
+  }
+
+  try {
+    const token = (await resolvePluginSecret(ctx, secretRef, {
+      companyId,
+      configPath: getPaperclipBoardApiTokenRefConfigPath(companyId)
+    })).trim();
+    return token ? token : null;
+  } catch (error) {
+    if (fallbackToken && isPluginSecretReferenceUnavailableError(error)) {
+      ctx.logger.warn('GitHub Sync is using a worker-local Paperclip board token fallback because plugin secret refs are unavailable in this host.', {
+        companyId,
+        secretRef,
+        error: getErrorMessage(error)
+      });
+      return fallbackToken;
+    }
+
+    ctx.logger.warn('Unable to resolve the saved Paperclip board API token. Direct REST calls will continue without it.', {
+      companyId,
+      secretRef,
+      error: getErrorMessage(error)
+    });
+    return null;
+  }
 }
 
 async function resolveGithubToken(
@@ -19879,6 +19895,200 @@ async function buildProjectPullRequestCountData(
       totalOpenPullRequests: 0,
       message: getErrorMessage(error)
     };
+  }
+}
+
+/**
+ * Paperclip 2026.720 routes agent tool discovery through the MCP tool gateway, whose policy
+ * evaluation ends in `deny_default` (`server/src/services/tool-access-policy.ts:1275`) when no
+ * profile, grant or allow policy matches. Plugin tools carry no connection or catalog id
+ * (`server/src/services/tool-gateway.ts:842`), so only a `tool_name` (or `risk_level`) profile
+ * entry — or a profile with `defaultAction: "allow"` — can make them visible to an agent.
+ *
+ * This read-only probe reports how many `paperclip-github-plugin:*` tool names one of the
+ * company's agents can currently see, so the settings page can warn about a company that never
+ * got a tool profile. It is best-effort: hosts without the route, without board access, or that
+ * refuse the call are reported as unavailable rather than as an error.
+ */
+type AgentToolAccessStatus = 'ready' | 'unavailable' | 'no_agents' | 'not_checked';
+
+interface AgentToolAccessSummary {
+  status: AgentToolAccessStatus;
+  /** Count of GitHub Sync tool names an agent can see, or null when it could not be determined. */
+  toolsVisibleToAgents: number | null;
+  totalToolCount: number;
+  checkedAgentId?: string;
+  message?: string;
+}
+
+const AGENT_TOOL_ACCESS_CACHE_TTL_MS = 120_000;
+const GITHUB_SYNC_AGENT_TOOL_NAME_PREFIX = `${GITHUB_SYNC_PLUGIN_ID}:`;
+const AGENT_TOOL_ACCESS_CHECKABLE_AGENT_STATUSES = new Set(['active', 'idle', 'running', 'error']);
+
+const agentToolAccessSummaryCache = new Map<string, { expiresAt: number; summary: AgentToolAccessSummary }>();
+
+function clearAgentToolAccessSummaryCache(companyId?: string | null) {
+  if (companyId) {
+    agentToolAccessSummaryCache.delete(companyId);
+    return;
+  }
+
+  agentToolAccessSummaryCache.clear();
+}
+
+function buildUnavailableAgentToolAccessSummary(
+  status: AgentToolAccessStatus,
+  message?: string
+): AgentToolAccessSummary {
+  return {
+    status,
+    toolsVisibleToAgents: null,
+    totalToolCount: GITHUB_AGENT_TOOLS.length,
+    ...(message ? { message } : {})
+  };
+}
+
+function countGitHubSyncToolNames(value: unknown): number {
+  if (!Array.isArray(value)) {
+    return 0;
+  }
+
+  return new Set(
+    value.filter((entry): entry is string =>
+      typeof entry === 'string' && entry.startsWith(GITHUB_SYNC_AGENT_TOOL_NAME_PREFIX))
+  ).size;
+}
+
+/**
+ * A profile that allows everything by default, or one that includes tools by risk level, can grant
+ * GitHub Sync tools without naming them, and `allowedToolNames` then lists only catalog-backed MCP
+ * tools. Those cases are reported as "unknown" instead of zero so the settings page never warns
+ * about a company whose agents do have access.
+ */
+function effectiveToolProfilesGrantUnnamedTools(payload: Record<string, unknown>): boolean {
+  const profiles = Array.isArray(payload.profiles) ? payload.profiles : [];
+  if (profiles.some((profile) => isPlainRecord(profile) && profile.defaultAction === 'allow')) {
+    return true;
+  }
+
+  const entries = Array.isArray(payload.entries) ? payload.entries : [];
+  return entries.some((entry) =>
+    isPlainRecord(entry) && entry.selectorType === 'risk_level' && entry.effect === 'include');
+}
+
+async function selectAgentForToolAccessCheck(
+  ctx: PluginSetupContext,
+  companyId: string
+): Promise<string | null> {
+  const agents = await ctx.agents.list({
+    companyId,
+    limit: 100
+  });
+  const checkableAgents = agents.filter((agent) =>
+    !agent.status || AGENT_TOOL_ACCESS_CHECKABLE_AGENT_STATUSES.has(agent.status));
+  const preferredAgent = checkableAgents.find((agent) => agent.status === 'active') ?? checkableAgents[0];
+  return preferredAgent?.id ?? null;
+}
+
+async function buildAgentToolAccessSummary(
+  ctx: PluginSetupContext,
+  companyId: string,
+  settings: Pick<GitHubSyncSettings, 'paperclipApiBaseUrl' | 'paperclipApiBaseUrlByCompanyId' | 'paperclipBoardApiTokenRefs'>,
+  config: GitHubSyncConfig
+): Promise<AgentToolAccessSummary> {
+  const cached = agentToolAccessSummaryCache.get(companyId);
+  if (cached && cached.expiresAt > Date.now()) {
+    return cached.summary;
+  }
+
+  const summary = await loadAgentToolAccessSummary(ctx, companyId, settings, config);
+  agentToolAccessSummaryCache.set(companyId, {
+    expiresAt: Date.now() + AGENT_TOOL_ACCESS_CACHE_TTL_MS,
+    summary
+  });
+  return summary;
+}
+
+async function loadAgentToolAccessSummary(
+  ctx: PluginSetupContext,
+  companyId: string,
+  settings: Pick<GitHubSyncSettings, 'paperclipApiBaseUrl' | 'paperclipApiBaseUrlByCompanyId' | 'paperclipBoardApiTokenRefs'>,
+  config: GitHubSyncConfig
+): Promise<AgentToolAccessSummary> {
+  const paperclipApiBaseUrl = getConfiguredPaperclipApiBaseUrl(settings, config, companyId);
+  if (!paperclipApiBaseUrl) {
+    return buildUnavailableAgentToolAccessSummary('not_checked');
+  }
+
+  const boardApiToken = await resolvePaperclipApiAuthTokenForCompany(ctx, settings, config, companyId);
+  if (!boardApiToken) {
+    return buildUnavailableAgentToolAccessSummary('not_checked');
+  }
+
+  let agentId: string | null = null;
+  try {
+    agentId = await selectAgentForToolAccessCheck(ctx, companyId);
+  } catch (error) {
+    ctx.logger.debug('GitHub Sync could not list company agents for the tool-access check.', {
+      companyId,
+      error: getErrorMessage(error)
+    });
+    return buildUnavailableAgentToolAccessSummary('unavailable');
+  }
+
+  if (!agentId) {
+    return buildUnavailableAgentToolAccessSummary('no_agents');
+  }
+
+  try {
+    const response = await fetchPaperclipApi(
+      getPaperclipEffectiveAgentToolProfilesEndpoint(paperclipApiBaseUrl, companyId, agentId),
+      {
+        method: 'GET',
+        headers: {
+          accept: 'application/json',
+          authorization: `Bearer ${boardApiToken}`
+        }
+      },
+      {
+        companyId
+      }
+    );
+    const payloadResult = await readPaperclipApiJsonResponse<unknown>(response, {
+      operationLabel: 'agent tool access'
+    });
+
+    if (payloadResult.failure || !isPlainRecord(payloadResult.data)) {
+      // Older hosts answer 404, hosts that refuse the board actor answer 403. Neither is an error
+      // the operator has to act on, so the check simply reports itself as unavailable.
+      ctx.logger.debug('GitHub Sync could not read effective agent tool profiles.', {
+        companyId,
+        agentId,
+        ...(payloadResult.failure?.status !== undefined ? { status: payloadResult.failure.status } : {})
+      });
+      return buildUnavailableAgentToolAccessSummary('unavailable');
+    }
+
+    if (effectiveToolProfilesGrantUnnamedTools(payloadResult.data)) {
+      return {
+        ...buildUnavailableAgentToolAccessSummary('ready'),
+        checkedAgentId: agentId
+      };
+    }
+
+    return {
+      status: 'ready',
+      toolsVisibleToAgents: countGitHubSyncToolNames(payloadResult.data.allowedToolNames),
+      totalToolCount: GITHUB_AGENT_TOOLS.length,
+      checkedAgentId: agentId
+    };
+  } catch (error) {
+    ctx.logger.debug('GitHub Sync could not reach the effective agent tool profile route.', {
+      companyId,
+      agentId,
+      error: getErrorMessage(error)
+    });
+    return buildUnavailableAgentToolAccessSummary('unavailable');
   }
 }
 
@@ -24061,6 +24271,7 @@ const plugin = definePlugin({
     rememberTrustedConfig(companyId, newConfig);
     // Token audits are keyed by the resolved token, so a new secret ref must invalidate them.
     clearGitHubRepositoryTokenCapabilityAudits();
+    clearAgentToolAccessSummaryCache(companyId);
     pluginRuntimeContext?.logger.debug('GitHub Sync received company-scoped plugin config.', {
       companyId,
       configKeys: Object.keys(isPlainRecord(newConfig) ? newConfig : {})
@@ -24115,14 +24326,20 @@ const plugin = definePlugin({
       }
 
       const scopedMappings = filterMappingsByCompany(settingsForResponse.mappings, requestedCompanyId);
-      const availableAssignees = includeAssignees && requestedCompanyId
-        ? await listAvailableAssignees(ctx, requestedCompanyId, settingsForResponse)
-        : [];
+      const [availableAssignees, agentToolAccess] = await Promise.all([
+        includeAssignees && requestedCompanyId
+          ? listAvailableAssignees(ctx, requestedCompanyId, settingsForResponse)
+          : Promise.resolve<GitHubSyncAssigneeOption[]>([]),
+        requestedCompanyId
+          ? buildAgentToolAccessSummary(ctx, requestedCompanyId, normalizedSettings, config)
+          : Promise.resolve(buildUnavailableAgentToolAccessSummary('not_checked'))
+      ]);
 
       return {
         ...getPublicSettingsForScope(settingsForResponse, requestedCompanyId),
         ...(includeAssignees ? { availableAssignees } : {}),
         totalSyncedIssuesCount: countImportedIssuesForMappings(importRegistry, scopedMappings),
+        agentToolAccess,
         paperclipApiBaseUrlConfigured: Boolean(normalizePaperclipApiBaseUrl(config.paperclipApiBaseUrl)),
         githubTokenConfigured,
         paperclipBoardAccessConfigured: requestedCompanyId

@@ -12,6 +12,7 @@ import rehypeSanitize, { defaultSchema } from 'rehype-sanitize';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 
+import { GITHUB_SYNC_PLUGIN_ID } from '../kpi-contract.ts';
 import { parseRepositoryReference, type ParsedRepositoryReference } from '../github-repo.ts';
 import { resolvePaperclipAuthControlsPolicy } from '../paperclip-health.ts';
 import { normalizeCompanyAssigneeOptionsResponse, type GitHubSyncAssigneeOption } from './assignees.ts';
@@ -32,6 +33,9 @@ import {
   type ExistingProjectSyncCandidate,
   type ProjectWorkspaceSummary
 } from './project-bindings.ts';
+
+const GITHUB_SYNC_TOOL_ACCESS_DOCS_URL =
+  'https://github.com/alvarosanchez/paperclip-github-plugin#granting-the-tools-to-agents';
 
 const HOST_BUTTON_BASE_CLASSNAME = [
   'inline-flex items-center justify-center whitespace-nowrap text-sm font-medium',
@@ -264,6 +268,14 @@ interface GitHubSyncAdvancedSettings {
   ignoredIssueAuthorUsernames: string[];
 }
 
+interface AgentToolAccessSummary {
+  status: 'ready' | 'unavailable' | 'no_agents' | 'not_checked';
+  toolsVisibleToAgents: number | null;
+  totalToolCount?: number;
+  checkedAgentId?: string;
+  message?: string;
+}
+
 interface GitHubSyncSettings {
   mappings: RepositoryMapping[];
   syncState: SyncRunState;
@@ -281,6 +293,7 @@ interface GitHubSyncSettings {
   paperclipBoardAccessNeedsConfigSync?: boolean;
   paperclipBoardAccessConfigSyncRef?: string;
   totalSyncedIssuesCount?: number;
+  agentToolAccess?: AgentToolAccessSummary;
   updatedAt?: string;
 }
 
@@ -2275,6 +2288,12 @@ const PAGE_STYLES = `
   color: var(--ghsync-muted);
   font-size: 12px;
   line-height: 1.5;
+}
+
+.ghsync__permission-audit-item a {
+  color: var(--ghsync-title);
+  font-size: 12px;
+  text-decoration: underline;
 }
 
 .ghsync__sync-summary--success {
@@ -11628,6 +11647,13 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
     && !tokenPermissionWarningVisible
     && tokenPermissionAuditData?.status === 'ready'
     && tokenPermissionRepositories.length === 0;
+  const agentToolAccess = settings.data?.agentToolAccess;
+  // Only a definite zero is actionable: `null` means the host could not be asked (older host,
+  // no board access, no agents), and warning there would be noise.
+  const agentToolAccessWarningVisible =
+    hasCompanyContext
+    && agentToolAccess?.status === 'ready'
+    && agentToolAccess.toolsVisibleToAgents === 0;
   const boardAccessTone: Tone =
     connectingBoardAccess
       ? 'info'
@@ -12591,6 +12617,32 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
                       {tokenPermissionAuditData?.warnings[0]
                         ?? 'Add a mapped repository in this company so GitHub Sync can verify the token permissions it needs.'}
                     </span>
+                  </div>
+                </div>
+              </div>
+            ) : null}
+
+            {agentToolAccessWarningVisible ? (
+              <div className="ghsync__permission-audit ghsync__permission-audit--warning">
+                <div className="ghsync__permission-audit-header">
+                  <strong>Agents cannot see the GitHub Sync tools</strong>
+                  <span className="ghsync__badge ghsync__badge--warning">Tool access</span>
+                </div>
+                <div className="ghsync__permission-audit-list">
+                  <div className="ghsync__permission-audit-item">
+                    <span>
+                      {`Paperclip's tool gateway is fail-closed, and no tool profile in this company includes any of the `}
+                      {agentToolAccess?.totalToolCount ? `${agentToolAccess.totalToolCount} ` : ''}
+                      {`${GITHUB_SYNC_PLUGIN_ID}:* tools, so agents will not be offered them. `}
+                      {'Bind a tool profile with tool_name include entries for this company.'}
+                    </span>
+                    <a
+                      href={GITHUB_SYNC_TOOL_ACCESS_DOCS_URL}
+                      target="_blank"
+                      rel="noreferrer"
+                    >
+                      How to grant the tools to agents
+                    </a>
                   </div>
                 </div>
               </div>

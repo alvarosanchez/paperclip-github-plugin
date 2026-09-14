@@ -276,6 +276,111 @@ When an agent sends GitHub body content through the plugin, including issue bodi
 
 `update_issue` accepts `stateReason` with GitHub's native values `completed`, `not_planned`, `duplicate`, and `reopened`. Closing uses `state: "closed"` with one of the first three reasons; reopening uses `state: "open"` with `stateReason: "reopened"`. Duplicate closure also requires `duplicateIssueNumber`, which the worker resolves to GitHub's canonical database id in the same repository. GitHub only applies a reason while changing state, so changing the reason of an already-closed issue fails clearly and requires reopening it first.
 
+### Granting the tools to agents
+
+On Paperclip `2026.831` and newer, agent tool discovery and execution go through the host MCP **tool gateway**, and the gateway is **fail-closed**. When no tool profile, explicit grant, or allow policy matches a call, the policy service returns `deny_default` (`server/src/services/tool-access-policy.ts`). That means a freshly installed GitHub Sync sees **zero** `paperclip-github-plugin:*` tools offered to agents until a tool profile includes them — the plugin manifest has no field that can declare default access.
+
+Two details decide the recipe:
+
+- Plugin tools are dispatched with `providerType: "paperclip_plugin"` and carry **no connection id, no catalog entry id and no application id** (`server/src/services/tool-gateway.ts`). A profile entry with `selectorType: "connection"` or `"catalog_entry"` requires a non-null id at write time, so those selectors can never match a plugin tool.
+- The selectors that *can* match are `tool_name` (compared against the fully namespaced name, `paperclip-github-plugin:<tool>`) and `risk_level`. A profile with `defaultAction: "allow"` also matches everything.
+
+The recipe below uses explicit `tool_name` include entries for all 21 tools on a profile whose `defaultAction` stays `deny`, bound at **company** scope. That keeps the profile least-privilege and makes the grant auditable per tool.
+
+#### The 21 tool names
+
+```text
+paperclip-github-plugin:search_repository_items
+paperclip-github-plugin:get_issue
+paperclip-github-plugin:list_issue_comments
+paperclip-github-plugin:update_issue
+paperclip-github-plugin:assign_to_current_user
+paperclip-github-plugin:add_issue_comment
+paperclip-github-plugin:create_pull_request
+paperclip-github-plugin:get_pull_request
+paperclip-github-plugin:update_pull_request
+paperclip-github-plugin:list_pull_request_files
+paperclip-github-plugin:get_pull_request_checks
+paperclip-github-plugin:list_pull_request_review_threads
+paperclip-github-plugin:reply_to_review_thread
+paperclip-github-plugin:resolve_review_thread
+paperclip-github-plugin:unresolve_review_thread
+paperclip-github-plugin:request_pull_request_reviewers
+paperclip-github-plugin:list_organization_projects
+paperclip-github-plugin:add_pull_request_to_project
+paperclip-github-plugin:upload_pull_request_asset
+paperclip-github-plugin:link_github_item
+paperclip-github-plugin:get_issue_interaction_summary
+```
+
+#### Ready-to-run recipe
+
+The script derives the names from the host instead of hard-coding them, so it stays correct across plugin versions. Use a **board API key** as the bearer token: board *session* cookies are additionally subject to the host's board-mutation origin guard, which rejects `POST`s without a trusted `Origin` header.
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+PAPERCLIP_API_URL="${PAPERCLIP_API_URL:-http://localhost:3100}"
+PAPERCLIP_BOARD_API_KEY="${PAPERCLIP_BOARD_API_KEY:?set a board API key}"
+COMPANY_ID="${COMPANY_ID:?set the Paperclip company id}"
+PLUGIN_ID="paperclip-github-plugin"
+
+api() {
+  local method="$1" path="$2"
+  shift 2
+  curl -sS -X "${method}" "${PAPERCLIP_API_URL%/}${path}" \
+    -H "authorization: Bearer ${PAPERCLIP_BOARD_API_KEY}" \
+    -H "content-type: application/json" \
+    -H "accept: application/json" "$@"
+}
+
+# 1. Derive the tool names. As a board actor this route is unfiltered by policy and
+#    `pluginId` must be the plugin key, not the plugin's database UUID.
+#    The response is a bare array whose `name` field is already `<pluginKey>:<tool>`.
+tool_names="$(api GET "/api/plugins/tools?pluginId=${PLUGIN_ID}" | jq -r '.[].name')"
+test -n "${tool_names}" || { echo "No plugin tools returned; is GitHub Sync installed?" >&2; exit 1; }
+
+# 2. Build one include entry per tool.
+entries="$(jq -Rn --arg names "${tool_names}" '
+  ($names | split("\n") | map(select(length > 0)))
+  | map({ selectorType: "tool_name", toolName: ., effect: "include" })
+')"
+
+# 3. Create the profile. `defaultAction` stays "deny": only the listed tools are included.
+profile_id="$(api POST "/api/companies/${COMPANY_ID}/tools/profiles" -d "$(jq -n \
+  --argjson entries "${entries}" '{
+    profileKey: "github-sync-tools",
+    name: "GitHub Sync tools",
+    defaultAction: "deny",
+    status: "active",
+    entries: $entries
+  }')" | jq -r '.id')"
+
+# 4. Bind it to the whole company. `targetId` must equal the company id for company scope.
+api POST "/api/companies/${COMPANY_ID}/tools/profiles/${profile_id}/bind" -d "$(jq -n \
+  --arg targetId "${COMPANY_ID}" '{
+    targetType: "company",
+    targetId: $targetId,
+    priority: 100
+  }')" | jq '{ id, targetType, targetId, priority }'
+
+# 5. Verify for one agent. `allowedToolNames` includes tool_name entries that have no MCP
+#    catalog row, which is exactly how plugin tools show up here.
+agent_id="$(api GET "/api/companies/${COMPANY_ID}/agents" | jq -r '[.[] | select(.status == "active")][0].id')"
+api GET "/api/companies/${COMPANY_ID}/tools/profiles/effective/agents/${agent_id}" \
+  | jq --arg prefix "${PLUGIN_ID}:" '[.allowedToolNames[] | select(startswith($prefix))] | length'
+```
+
+Notes and gotchas:
+
+- Request/response shapes at `2026.831.1`: profile create returns the profile object **at the top level** (so `.id` works), bind returns the binding at the top level, and list returns `{ "profiles": [...] }`. Profile-entry bodies take `selectorType`, `effect`, `toolName`, `riskLevel`, `applicationId`, `connectionId`, `catalogEntryId` and `conditions` — there is no `selectorValue` field, and unknown keys are silently dropped by the validator.
+- `profileKey` must match `^[a-z0-9][a-z0-9._:-]*$`; creating a second profile with the same name in one company is a conflict.
+- Both `POST`s require a board actor with an **active, non-viewer** company membership. Agent API keys are rejected.
+- Binding `targetType: "agent"` narrows the grant to a single agent and wins over a company-scope binding for that agent. `project`, `routine`, `issue` and `gateway` bindings are ignored by the effective-tools view.
+- To revoke, `POST /api/companies/{companyId}/tools/profiles/{profileId}/unbind` with `{"targetType":"company","targetId":"<companyId>"}`.
+- GitHub Sync settings runs this same effective-tools check read-only and shows an **Agents cannot see the GitHub Sync tools** warning when a company's agents can see none of them. The check needs Paperclip board access connected and a reachable **Worker Paperclip API URL**; on hosts that do not expose the route it stays silent.
+
 ### KPI attribution API route
 
 The `create_pull_request` tool automatically records a company-level Paperclip PR creation metric. For delivery flows that use `gh` or another non-plugin GitHub client, post a JSON payload to `/api/plugins/paperclip-github-plugin/api/company-metrics/events` after the PR is created.
@@ -317,7 +422,7 @@ GitHub Sync targets Paperclip `2026.831.1` and adopts the host changes that matt
 
 - **Company-scoped plugin config.** The host now stores one GitHub Sync config row per company and replays each of them to the worker after startup instead of passing a bootstrap config. The worker declares `multiCompanyConfig: true`, keys the delivered config by company, and passes the company id to every config read. Scheduled sync and other proactive paths only get host access for companies that have a saved GitHub Sync config; a company that has mappings but no saved config shows a sync error asking you to open GitHub Sync settings in that company and save once.
 - **Secret refs re-enabled.** Company-scoped secret refs are the normal path again. The settings UI mirrors GitHub tokens and board access tokens into plugin config as `{ "type": "secret_ref", "secretId": "<uuid>" }` bindings, and the worker resolves them with the company id and config path. The worker-local token file remains a compatibility fallback only.
-- **Tool gateway.** Agent tool discovery and execution now run through the host tool gateway, which applies each company's tool-access policy before a GitHub Sync tool runs. Tool names are unchanged (`<pluginId>:<tool>`); if a tool is missing for an agent, check the company's tool-access policy before suspecting the plugin.
+- **Tool gateway.** Agent tool discovery and execution now run through the host tool gateway, which applies each company's tool-access policy before a GitHub Sync tool runs. The gateway is fail-closed, so a company with no matching tool profile sees no GitHub Sync tools at all. Tool names are unchanged (`<pluginId>:<tool>`); see [Granting the tools to agents](#granting-the-tools-to-agents) for the profile recipe and the settings-page warning that detects this.
 - **Optional capabilities not adopted.** `2026.831` adds `issue.interactions.read`, `issue.attachments.read`, `approvals.read`, `issue.comments.create_human_attributed`, `issue.interactions.respond`, and `approvals.respond`. GitHub Sync does not use those host surfaces, so it does not declare them; it keeps its existing capability set.
 - **No strict host-version gate.** The manifest still relies on declared capabilities and runtime fallbacks instead of `minimumHostVersion`, because latest/development hosts can report `0.0.0` during plugin upgrade.
 - **Project sidebar item has no mount point.** `2026.831` made the streamlined main sidebar mandatory (PAP-12472) and no longer renders the per-project list that hosted `projectSidebarItem` contributions. GitHub Sync keeps declaring the slot for hosts that render it, but on `2026.831` the **Pull Requests** entry does not appear; the queue page itself is unaffected and opens at `/<company-prefix>/github-pull-requests?projectId=<project id>`. The e2e harness verifies the sidebar link only when the host renders it and always opens the page by route.
