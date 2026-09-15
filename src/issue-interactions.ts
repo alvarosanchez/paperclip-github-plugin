@@ -28,9 +28,9 @@ const ISSUE_INTERACTION_REASON_CODES = new Set([
   'issue_closed_duplicate', 'issue_ready_for_triage', 'github_sync_status_decision'
 ]);
 export const ISSUE_INTERACTION_MAX_SCAN_ROWS = 5000;
-// Hard ceiling on rows listed while scanning one issue's ledger (200 pages of 100 rows, a few seconds).
-// company-wide ledger (it ignores scope filters), so this bounds the listing, not the per-issue
-// event count, which ISSUE_INTERACTION_MAX_SCAN_ROWS governs.
+// Hard ceiling on rows listed while scanning one issue's ledger (200 pages of 100 rows, a few
+// seconds). The host may return the whole company-wide ledger because it ignores scope filters, so
+// this bounds the listing, not the per-issue event count (ISSUE_INTERACTION_MAX_SCAN_ROWS).
 export const ISSUE_INTERACTION_MAX_LIST_ROWS = 20000;
 export const ISSUE_INTERACTION_MAX_REPEATED_ACTIONS = 10;
 
