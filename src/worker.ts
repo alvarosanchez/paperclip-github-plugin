@@ -15391,7 +15391,11 @@ async function synchronizePaperclipIssueStatuses(
           ? { repositoryUrl: effectiveGate.repositoryUrl, number: effectiveGate.number }
           : undefined;
         if (pendingWake) importedIssue.pendingRemoteActionWake = pendingWake;
-        else delete importedIssue.activationPending;
+        // The activation status and assignee have been applied at this point. Clear the flag even when a
+        // wake is still pending: keeping it made later syncs re-run the first-sync status mapping
+        // (`maintainerAuthoredImportedIssue` -> todo + default assignee) and clobber issues a human or
+        // an agent had already moved on. The pending wake alone carries the retry.
+        delete importedIssue.activationPending;
         await persistImportRegistry();
       };
 
@@ -15415,24 +15419,34 @@ async function synchronizePaperclipIssueStatuses(
               : undefined;
         if (pendingWake) importedIssue.pendingRemoteActionWake = pendingWake;
         if (pendingWake || isPendingInitialActivation) await persistImportRegistry();
-        updateSyncFailureContext(syncFailureContext, {
-          phase: 'updating_paperclip_status',
-          repositoryUrl: repository.url,
-          githubIssueNumber: githubIssue.number
-        });
-        await updatePaperclipIssueState(ctx, {
-          companyId: mapping.companyId,
-          issueId: importedIssue.paperclipIssueId,
-          currentStatus: paperclipIssue.status,
-          syncContext: paperclipIssueSyncContext,
-          nextStatus,
-          ...(nextAssigneeChanged && nextTransitionAssignee ? { nextAssignee: nextTransitionAssignee.principal } : {}),
-          ...(shouldClearTransitionAssignee ? { clearAssignee: true } : {}),
-          ...(shouldPreserveMaintainerWaitRouting || shouldClearCompletedExecutionPolicy ? { clearExecutionPolicy: true } : {}),
-          transitionComment: '',
-          actionFingerprint: actionJournalFingerprint,
-          paperclipApiBaseUrl
-        });
+        const shouldClearExecutionPolicy =
+          (shouldPreserveMaintainerWaitRouting || shouldClearCompletedExecutionPolicy)
+          && Boolean(paperclipIssueSyncContext.executionPolicy);
+        // Nothing to patch: the status is unchanged and no assignee or policy change is due. Skip the
+        // durable status mutation entirely instead of recording an intent/no-op pair in the interaction
+        // ledger for every synced issue on every run (that pair is what grew the ledger by ~2 rows per
+        // issue per sync and, before the scope-aware scan fix, tripped the scan cap for every issue).
+        const hasStatusMutation = nextAssigneeChanged || shouldClearTransitionAssignee || shouldClearExecutionPolicy;
+        if (hasStatusMutation) {
+          updateSyncFailureContext(syncFailureContext, {
+            phase: 'updating_paperclip_status',
+            repositoryUrl: repository.url,
+            githubIssueNumber: githubIssue.number
+          });
+          await updatePaperclipIssueState(ctx, {
+            companyId: mapping.companyId,
+            issueId: importedIssue.paperclipIssueId,
+            currentStatus: paperclipIssue.status,
+            syncContext: paperclipIssueSyncContext,
+            nextStatus,
+            ...(nextAssigneeChanged && nextTransitionAssignee ? { nextAssignee: nextTransitionAssignee.principal } : {}),
+            ...(shouldClearTransitionAssignee ? { clearAssignee: true } : {}),
+            ...(shouldClearExecutionPolicy ? { clearExecutionPolicy: true } : {}),
+            transitionComment: '',
+            actionFingerprint: actionJournalFingerprint,
+            paperclipApiBaseUrl
+          });
+        }
 
         if (pendingWake) {
           await persistObservedRemoteState(pendingWake);
