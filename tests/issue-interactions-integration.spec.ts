@@ -5,7 +5,7 @@ import { createTestHarness } from '@paperclipai/plugin-sdk/testing';
 
 import manifest from '../src/manifest.ts';
 import plugin, { __testing } from '../src/worker.ts';
-import type { IssueInteractionEvent } from '../src/issue-interactions.ts';
+import { ISSUE_INTERACTION_MAX_SCAN_ROWS, type IssueInteractionEvent } from '../src/issue-interactions.ts';
 
 test('applied execution state ignores nullable fields omitted by live normalization', () => {
   assert.deepEqual(
@@ -756,4 +756,79 @@ test('direct-PR status transitions and no-op decisions are captured without issu
     rows.map((row) => (row.data as { outcome?: unknown }).outcome).sort(),
     ['changed', 'changed', 'changed', 'noop', 'observed', 'observed', 'observed', 'observed']
   );
+});
+
+test('ledger scan counts only the issue\'s own rows toward the scan cap when the host ignores scope filters', async () => {
+  const harness = createTestHarness({ manifest });
+  await plugin.definition.setup(harness.ctx);
+  const seed = async (issueId: string, index: number) => {
+    await harness.ctx.entities.upsert({
+      entityType: 'paperclip-github-plugin.issue-interaction-event',
+      scopeKind: 'issue',
+      scopeId: issueId,
+      externalId: `${issueId}:event-${index}`,
+      data: {
+        schemaVersion: 1,
+        companyId: 'company-1',
+        paperclipIssueId: issueId,
+        occurredAt: '2026-07-01T09:00:00.000Z',
+        category: 'sync',
+        action: 'status_decision',
+        source: 'sync',
+        outcome: 'observed',
+        dedupeKey: `${issueId}:event-${index}`
+      }
+    });
+  };
+  // More rows than the per-issue cap, all belonging to another issue.
+  for (let index = 0; index < ISSUE_INTERACTION_MAX_SCAN_ROWS + 5; index += 1) {
+    await seed('issue-crowded', index);
+  }
+  await seed('issue-quiet', 0);
+  await seed('issue-quiet', 1);
+
+  // Mirror the host: `listEntities` drops `scopeKind`/`scopeId` and returns the whole ledger.
+  const originalList = harness.ctx.entities.list;
+  harness.ctx.entities.list = async (input) => {
+    const { scopeId: _scopeId, scopeKind: _scopeKind, ...rest } = input as Record<string, unknown>;
+    return originalList(rest as Parameters<typeof originalList>[0]);
+  };
+
+  const quiet = await __testing.listIssueInteractionEvents(harness.ctx, 'company-1', 'issue-quiet', {
+    from: '1970-01-01T00:00:00.000Z',
+    to: '9999-12-31T23:59:59.999Z'
+  });
+  assert.equal(quiet.integrity.scanTruncated, false);
+  assert.equal(quiet.integrity.scannedRows, 2);
+  assert.equal(quiet.events.length, 2);
+
+  const crowded = await __testing.listIssueInteractionEvents(harness.ctx, 'company-1', 'issue-crowded', {
+    from: '1970-01-01T00:00:00.000Z',
+    to: '9999-12-31T23:59:59.999Z'
+  });
+  assert.equal(crowded.integrity.scanTruncated, true, 'the per-issue cap still fails closed for the crowded issue');
+  assert.equal(crowded.integrity.scannedRows, ISSUE_INTERACTION_MAX_SCAN_ROWS);
+});
+
+test('ledger scan fails closed when the host keeps returning foreign rows past the listing ceiling', async () => {
+  const harness = createTestHarness({ manifest });
+  await plugin.definition.setup(harness.ctx);
+  harness.ctx.entities.list = async (input) => {
+    const { limit = 100 } = input as { limit?: number };
+    return Array.from({ length: limit }, (_, index) => ({
+      id: `foreign-${index}`,
+      pluginId: 'plugin',
+      entityType: 'paperclip-github-plugin.issue-interaction-event',
+      scopeKind: 'issue',
+      scopeId: 'issue-foreign',
+      externalId: `foreign-${index}`,
+      data: {}
+    })) as never;
+  };
+  const result = await __testing.listIssueInteractionEvents(harness.ctx, 'company-1', 'issue-quiet', {
+    from: '1970-01-01T00:00:00.000Z',
+    to: '9999-12-31T23:59:59.999Z'
+  });
+  assert.equal(result.integrity.scanTruncated, true);
+  assert.equal(result.integrity.scannedRows, 0);
 });

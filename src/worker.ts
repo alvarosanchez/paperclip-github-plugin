@@ -30,6 +30,7 @@ import { parseRepositoryReference, type ParsedRepositoryReference } from './gith
 import {
   buildIssueInteractionSummary,
   ISSUE_INTERACTION_ENTITY_TYPE,
+  ISSUE_INTERACTION_MAX_LIST_ROWS,
   ISSUE_INTERACTION_MAX_SCAN_ROWS,
   parseIssueInteractionRange,
   sanitizeIssueInteractionEvent,
@@ -22678,6 +22679,13 @@ async function listIssueInteractionEvents(
   const fromMs = Date.parse(range.from);
   const toMs = Date.parse(range.to);
 
+  // The host's entity list only filters by plugin, entity type, and external id; it ignores
+  // `scopeKind`/`scopeId` (server/src/services/plugin-registry.ts `listEntities`, through
+  // 2026.831.1). Every page may therefore carry rows from other issues. Those rows are skipped
+  // without counting toward the per-issue scan cap: counting them made every issue's scan hit
+  // ISSUE_INTERACTION_MAX_SCAN_ROWS as soon as the company-wide ledger exceeded the cap, which
+  // refused every status transition. A separate hard ceiling still bounds the total listing.
+  let listedRows = 0;
   outer: for (let offset = 0; ; ) {
     const page = await ctx.entities.list({
       entityType: ISSUE_INTERACTION_ENTITY_TYPE,
@@ -22687,14 +22695,19 @@ async function listIssueInteractionEvents(
       offset
     });
     for (const entry of page) {
+      listedRows += 1;
+      if (listedRows > ISSUE_INTERACTION_MAX_LIST_ROWS) {
+        scanTruncated = true;
+        break outer;
+      }
+      if (entry.scopeKind !== 'issue' || entry.scopeId !== paperclipIssueId) continue;
+      const raw = entry.data as Record<string, unknown> | null;
+      if (raw?.companyId !== companyId || raw?.paperclipIssueId !== paperclipIssueId) continue;
       if (scannedRows >= ISSUE_INTERACTION_MAX_SCAN_ROWS) {
         scanTruncated = true;
         break outer;
       }
       scannedRows += 1;
-      if (entry.scopeKind !== 'issue' || entry.scopeId !== paperclipIssueId) continue;
-      const raw = entry.data as Record<string, unknown> | null;
-      if (raw?.companyId !== companyId || raw?.paperclipIssueId !== paperclipIssueId) continue;
       try {
         const event = sanitizeIssueInteractionEvent(raw as unknown as IssueInteractionEvent);
         if (ledgerStartedAt === null || event.occurredAt < ledgerStartedAt) ledgerStartedAt = event.occurredAt;
@@ -24242,6 +24255,7 @@ export function shouldStartWorkerHost(moduleUrl: string, entry = process.argv[1]
 }
 
 export const __testing = {
+  listIssueInteractionEvents,
   buildDirectPullRequestActionFingerprint,
   buildRemoteActionFingerprint,
   canReservePendingWake,
