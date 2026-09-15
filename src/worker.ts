@@ -30,6 +30,7 @@ import { parseRepositoryReference, type ParsedRepositoryReference } from './gith
 import {
   buildIssueInteractionSummary,
   ISSUE_INTERACTION_ENTITY_TYPE,
+  ISSUE_INTERACTION_MAX_LIST_ROWS,
   ISSUE_INTERACTION_MAX_SCAN_ROWS,
   parseIssueInteractionRange,
   sanitizeIssueInteractionEvent,
@@ -15390,7 +15391,11 @@ async function synchronizePaperclipIssueStatuses(
           ? { repositoryUrl: effectiveGate.repositoryUrl, number: effectiveGate.number }
           : undefined;
         if (pendingWake) importedIssue.pendingRemoteActionWake = pendingWake;
-        else delete importedIssue.activationPending;
+        // The activation status and assignee have been applied at this point. Clear the flag even when a
+        // wake is still pending: keeping it made later syncs re-run the first-sync status mapping
+        // (`maintainerAuthoredImportedIssue` -> todo + default assignee) and clobber issues a human or
+        // an agent had already moved on. The pending wake alone carries the retry.
+        delete importedIssue.activationPending;
         await persistImportRegistry();
       };
 
@@ -15414,24 +15419,34 @@ async function synchronizePaperclipIssueStatuses(
               : undefined;
         if (pendingWake) importedIssue.pendingRemoteActionWake = pendingWake;
         if (pendingWake || isPendingInitialActivation) await persistImportRegistry();
-        updateSyncFailureContext(syncFailureContext, {
-          phase: 'updating_paperclip_status',
-          repositoryUrl: repository.url,
-          githubIssueNumber: githubIssue.number
-        });
-        await updatePaperclipIssueState(ctx, {
-          companyId: mapping.companyId,
-          issueId: importedIssue.paperclipIssueId,
-          currentStatus: paperclipIssue.status,
-          syncContext: paperclipIssueSyncContext,
-          nextStatus,
-          ...(nextAssigneeChanged && nextTransitionAssignee ? { nextAssignee: nextTransitionAssignee.principal } : {}),
-          ...(shouldClearTransitionAssignee ? { clearAssignee: true } : {}),
-          ...(shouldPreserveMaintainerWaitRouting || shouldClearCompletedExecutionPolicy ? { clearExecutionPolicy: true } : {}),
-          transitionComment: '',
-          actionFingerprint: actionJournalFingerprint,
-          paperclipApiBaseUrl
-        });
+        const shouldClearExecutionPolicy =
+          (shouldPreserveMaintainerWaitRouting || shouldClearCompletedExecutionPolicy)
+          && Boolean(paperclipIssueSyncContext.executionPolicy);
+        // Nothing to patch: the status is unchanged and no assignee or policy change is due. Skip the
+        // durable status mutation entirely instead of recording an intent/no-op pair in the interaction
+        // ledger for every synced issue on every run (that pair is what grew the ledger by ~2 rows per
+        // issue per sync and, before the scope-aware scan fix, tripped the scan cap for every issue).
+        const hasStatusMutation = nextAssigneeChanged || shouldClearTransitionAssignee || shouldClearExecutionPolicy;
+        if (hasStatusMutation) {
+          updateSyncFailureContext(syncFailureContext, {
+            phase: 'updating_paperclip_status',
+            repositoryUrl: repository.url,
+            githubIssueNumber: githubIssue.number
+          });
+          await updatePaperclipIssueState(ctx, {
+            companyId: mapping.companyId,
+            issueId: importedIssue.paperclipIssueId,
+            currentStatus: paperclipIssue.status,
+            syncContext: paperclipIssueSyncContext,
+            nextStatus,
+            ...(nextAssigneeChanged && nextTransitionAssignee ? { nextAssignee: nextTransitionAssignee.principal } : {}),
+            ...(shouldClearTransitionAssignee ? { clearAssignee: true } : {}),
+            ...(shouldClearExecutionPolicy ? { clearExecutionPolicy: true } : {}),
+            transitionComment: '',
+            actionFingerprint: actionJournalFingerprint,
+            paperclipApiBaseUrl
+          });
+        }
 
         if (pendingWake) {
           await persistObservedRemoteState(pendingWake);
@@ -22678,6 +22693,13 @@ async function listIssueInteractionEvents(
   const fromMs = Date.parse(range.from);
   const toMs = Date.parse(range.to);
 
+  // The host's entity list only filters by plugin, entity type, and external id; it ignores
+  // `scopeKind`/`scopeId` (server/src/services/plugin-registry.ts `listEntities`, through
+  // 2026.831.1). Every page may therefore carry rows from other issues. Those rows are skipped
+  // without counting toward the per-issue scan cap: counting them made every issue's scan hit
+  // ISSUE_INTERACTION_MAX_SCAN_ROWS as soon as the company-wide ledger exceeded the cap, which
+  // refused every status transition. A separate hard ceiling still bounds the total listing.
+  let listedRows = 0;
   outer: for (let offset = 0; ; ) {
     const page = await ctx.entities.list({
       entityType: ISSUE_INTERACTION_ENTITY_TYPE,
@@ -22687,14 +22709,19 @@ async function listIssueInteractionEvents(
       offset
     });
     for (const entry of page) {
+      listedRows += 1;
+      if (listedRows > ISSUE_INTERACTION_MAX_LIST_ROWS) {
+        scanTruncated = true;
+        break outer;
+      }
+      if (entry.scopeKind !== 'issue' || entry.scopeId !== paperclipIssueId) continue;
+      const raw = entry.data as Record<string, unknown> | null;
+      if (raw?.companyId !== companyId || raw?.paperclipIssueId !== paperclipIssueId) continue;
       if (scannedRows >= ISSUE_INTERACTION_MAX_SCAN_ROWS) {
         scanTruncated = true;
         break outer;
       }
       scannedRows += 1;
-      if (entry.scopeKind !== 'issue' || entry.scopeId !== paperclipIssueId) continue;
-      const raw = entry.data as Record<string, unknown> | null;
-      if (raw?.companyId !== companyId || raw?.paperclipIssueId !== paperclipIssueId) continue;
       try {
         const event = sanitizeIssueInteractionEvent(raw as unknown as IssueInteractionEvent);
         if (ledgerStartedAt === null || event.occurredAt < ledgerStartedAt) ledgerStartedAt = event.occurredAt;
@@ -24242,6 +24269,7 @@ export function shouldStartWorkerHost(moduleUrl: string, entry = process.argv[1]
 }
 
 export const __testing = {
+  listIssueInteractionEvents,
   buildDirectPullRequestActionFingerprint,
   buildRemoteActionFingerprint,
   canReservePendingWake,
