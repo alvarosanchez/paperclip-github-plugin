@@ -832,3 +832,93 @@ test('ledger scan fails closed when the host keeps returning foreign rows past t
   assert.equal(result.integrity.scanTruncated, true);
   assert.equal(result.integrity.scannedRows, 0);
 });
+
+test('repeated no-op status decisions reuse their settled attempt instead of growing the ledger', async () => {
+  const harness = createTestHarness({ manifest });
+  harness.seed({
+    issues: [{
+      id: 'issue-noop-ledger', companyId: 'company-1', projectId: 'project-1',
+      title: 'No-op ledger', description: '', status: 'in_review'
+    } as never]
+  });
+  await plugin.definition.setup(harness.ctx);
+
+  // Same status in and out, and nothing else to patch: every pass is a decision to do nothing.
+  const params = {
+    companyId: 'company-1',
+    issueId: 'issue-noop-ledger',
+    currentStatus: 'in_review' as const,
+    syncContext: {} as never,
+    nextStatus: 'in_review' as const,
+    transitionComment: 'GitHub Sync found nothing to change.',
+    actionFingerprint: 'remote-action-noop'
+  };
+
+  const ledgerRows = async () => harness.ctx.entities.list({
+    entityType: 'paperclip-github-plugin.issue-interaction-event',
+    scopeKind: 'issue',
+    scopeId: 'issue-noop-ledger'
+  });
+
+  await __testing.updatePaperclipIssueState(harness.ctx, params);
+  const afterFirst = await ledgerRows();
+  assert.deepEqual(
+    afterFirst.map((row) => (row.data as { outcome?: unknown }).outcome).sort(),
+    ['noop', 'observed'],
+    'the first pass records the decision it reached'
+  );
+
+  for (let pass = 0; pass < 4; pass += 1) {
+    await __testing.updatePaperclipIssueState(harness.ctx, params);
+  }
+
+  const afterRepeats = await ledgerRows();
+  assert.equal(afterRepeats.length, afterFirst.length, 'repeated no-op passes must not append rows');
+  assert.deepEqual(
+    afterRepeats.map((row) => row.externalId).sort(),
+    afterFirst.map((row) => row.externalId).sort(),
+    'the rows are the same content-addressed events, not new ones'
+  );
+  assert.equal((await harness.ctx.issues.get('issue-noop-ledger', 'company-1'))?.status, 'in_review');
+});
+
+test('findSettledNoopAttempt ignores nested phase keys and attempts with no intent', () => {
+  const prefix = 'sync:family:attempt:';
+  const event = (dedupeKey: string, occurredAt: string): IssueInteractionEvent => ({
+    schemaVersion: 1,
+    companyId: 'company-1',
+    paperclipIssueId: 'issue-1',
+    occurredAt,
+    category: 'sync',
+    action: 'status_decision',
+    source: 'sync',
+    outcome: 'noop',
+    dedupeKey
+  } as IssueInteractionEvent);
+
+  // A mutation-phase no-op ends with the same suffix but is not an attempt result.
+  assert.equal(
+    __testing.findSettledNoopAttempt(
+      [event(`${prefix}abc:mutation:result:noop`, '2026-01-01T00:00:00.000Z')],
+      prefix
+    ),
+    undefined
+  );
+
+  // A result with no matching intent cannot be reproduced exactly, so it is not reused.
+  assert.equal(
+    __testing.findSettledNoopAttempt([event(`${prefix}abc:result:noop`, '2026-01-01T00:00:00.000Z')], prefix),
+    undefined
+  );
+
+  // With both halves present, the newest settled attempt wins and the intent supplies the stamp.
+  assert.deepEqual(
+    __testing.findSettledNoopAttempt([
+      event(`${prefix}old:intent`, '2026-01-01T00:00:00.000Z'),
+      event(`${prefix}old:result:noop`, '2026-01-01T00:00:00.000Z'),
+      event(`${prefix}new:intent`, '2026-02-02T00:00:00.000Z'),
+      event(`${prefix}new:result:noop`, '2026-02-02T00:00:00.000Z')
+    ], prefix),
+    { dedupeBase: `${prefix}new`, occurredAt: '2026-02-02T00:00:00.000Z' }
+  );
+});
