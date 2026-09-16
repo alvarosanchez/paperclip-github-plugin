@@ -133,7 +133,7 @@ export const GITHUB_AGENT_TOOLS: PluginToolDeclaration[] = [
   {
     name: 'get_issue',
     displayName: 'Get Issue',
-    description: 'Read one GitHub issue with its metadata, author, assignees, labels, milestone, and linked pull requests.',
+    description: 'Read one GitHub issue with its metadata, author, participants (author plus distinct commenters with their repository association), reviewerCandidates (non-bot owners, members, and collaborators among them, for pull request reviewer routing), assignees, labels, milestone, and linked pull requests.',
     parametersSchema: {
       type: 'object',
       additionalProperties: false,

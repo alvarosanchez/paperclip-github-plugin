@@ -19862,14 +19862,24 @@ test('get_issue resolves imported Paperclip issues from the hidden description m
         body: 'Body imported from GitHub.',
         html_url: 'https://github.com/paperclipai/example-repo/issues/31',
         state: 'open',
-        comments: 0,
+        comments: 3,
         user: {
           login: 'octocat'
         },
+        author_association: 'MEMBER',
         assignees: [],
         labels: [],
         milestone: null
       });
+    }
+
+    if (url.pathname === '/repos/paperclipai/example-repo/issues/31/comments') {
+      return jsonResponse([
+        { id: 1, body: 'Maintainer note', user: { login: 'member-commenter', type: 'User' }, author_association: 'MEMBER' },
+        { id: 2, body: 'Automated note', user: { login: 'helper-bot', type: 'Bot' }, author_association: 'NONE' },
+        { id: 3, body: 'Follow-up from the reporter', user: { login: 'octocat', type: 'User' }, author_association: 'MEMBER' },
+        { id: 4, body: 'Drive-by', user: { login: 'passer-by', type: 'User' }, author_association: 'CONTRIBUTOR' }
+      ]);
     }
 
     if (url.pathname === '/repos/paperclipai/example-repo/pulls/311') {
@@ -20010,7 +20020,19 @@ test('get_issue resolves imported Paperclip issues from the hidden description m
       (result.data as { issue: { url: string } }).issue.url,
       'https://github.com/paperclipai/example-repo/issues/31'
     );
-    assert.deepEqual((result.data as { issue: { author: unknown } }).issue.author, { login: 'octocat' });
+    assert.deepEqual(
+      (result.data as { issue: { author: unknown } }).issue.author,
+      { login: 'octocat', association: 'member', isBot: false }
+    );
+    assert.deepEqual(
+      (result.data as { issue: { participants: Array<{ login: string; role: string }> } }).issue.participants
+        .map((participant) => `${participant.role}:${participant.login}`),
+      ['author:octocat', 'commenter:member-commenter', 'commenter:helper-bot', 'commenter:passer-by']
+    );
+    assert.deepEqual(
+      (result.data as { issue: { reviewerCandidates: string[] } }).issue.reviewerCandidates,
+      ['octocat', 'member-commenter']
+    );
 
     const details = await harness.getData<{
       source: string;
