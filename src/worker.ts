@@ -13843,6 +13843,47 @@ function isPaperclipIssuePatchApplied(params: {
   return true;
 }
 
+/**
+ * Finds a previous attempt in the same interaction family that already settled as a no-op.
+ *
+ * `interactionFamilyBase` hashes every input the status decision depends on - company, issue,
+ * action fingerprint, current and next status, current issue state and the patch - so an
+ * identical family carrying a `noop` result means an earlier pass reached the same conclusion
+ * from the same state.
+ *
+ * Reusing that attempt's dedupe key *and* its timestamp is what makes the intent and result
+ * writes content-identical to the stored rows: interaction events are content-addressed over the
+ * whole sanitized event, so a reused dedupe key with a fresh `occurredAt` would still append a
+ * new row.
+ *
+ * Only call this once the caller has established that the pass is genuinely a no-op.
+ */
+function findSettledNoopAttempt(
+  events: IssueInteractionEvent[],
+  attemptPrefix: string
+): { dedupeBase: string; occurredAt: string } | undefined {
+  const resultSuffix = ':result:noop';
+  const settled = events
+    .filter((candidate) => {
+      if (!candidate.dedupeKey.startsWith(attemptPrefix)) return false;
+      // Attempt ids never contain ':', so this rejects keys from nested phases that merely end
+      // with the same suffix, such as ':mutation:result:noop'.
+      return /^[^:]+:result:noop$/.test(candidate.dedupeKey.slice(attemptPrefix.length));
+    })
+    .sort((left, right) =>
+      right.occurredAt.localeCompare(left.occurredAt)
+      || right.dedupeKey.localeCompare(left.dedupeKey)
+    );
+  for (const event of settled) {
+    const dedupeBase = event.dedupeKey.slice(0, -resultSuffix.length);
+    const intent = events.find((candidate) => candidate.dedupeKey === `${dedupeBase}:intent`);
+    // Without the matching intent the pair could not be reproduced exactly and a new row would be
+    // appended anyway, so fall through to a fresh attempt instead.
+    if (intent) return { dedupeBase, occurredAt: intent.occurredAt };
+  }
+  return undefined;
+}
+
 async function updatePaperclipIssueState(
   ctx: PluginSetupContext,
   params: {
@@ -14012,8 +14053,20 @@ async function updatePaperclipIssueState(
       reconciliationAttemptId = interactionDedupeBase.slice(attemptPrefix.length);
       interactionOccurredAt = latestOpenAttemptIntent.occurredAt;
     } else {
-      reconciliationAttemptId = randomUUID();
-      interactionDedupeBase = `${attemptPrefix}${reconciliationAttemptId}`;
+      // A sync pass with nothing to do still records the decision it reached. Without this, every
+      // pass minted a fresh attempt id and appended a new intent/`noop` pair, so an issue whose
+      // state never changed grew the ledger by two rows per sync, forever.
+      const settledNoopAttempt = !statusWillChange && issuePatchAlreadyApplied
+        ? findSettledNoopAttempt(existingInteractionEvents, attemptPrefix)
+        : undefined;
+      if (settledNoopAttempt) {
+        interactionDedupeBase = settledNoopAttempt.dedupeBase;
+        reconciliationAttemptId = interactionDedupeBase.slice(attemptPrefix.length);
+        interactionOccurredAt = settledNoopAttempt.occurredAt;
+      } else {
+        reconciliationAttemptId = randomUUID();
+        interactionDedupeBase = `${attemptPrefix}${reconciliationAttemptId}`;
+      }
     }
   }
   const mutationPatchBase = `${mutationFamilyBase}${reconciliationAttemptId ? `:attempt:${reconciliationAttemptId}` : ''}:patch:${createHash('sha256')
@@ -24447,6 +24500,7 @@ export const __testing = {
   hasUnresolvedPaperclipIssueBlocker,
   isHealthyMaintainerWaitTransition,
   isPaperclipIssuePatchApplied,
+  findSettledNoopAttempt,
   listTrustedNewLinkedPullRequestCommentSources,
   normalizePaperclipIssueAssigneePrincipal,
   normalizeImportRegistry,
