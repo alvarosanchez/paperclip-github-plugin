@@ -15915,7 +15915,12 @@ async function synchronizePaperclipPullRequestIssueStatuses(
           await persistRemoteActionRegistry();
           remoteAction = remoteActionRegistry.find((record) => record.key === remoteActionKey) ?? remoteAction;
         }
-        if (shouldClearTransitionAssignee || shouldClearCompletedExecutionPolicy || nextAssigneeChanged) {
+        // Only clear a completed policy when one exists; otherwise a done or cancelled PR issue is
+        // re-patched (and its ledger written) on every sync although nothing changes.
+        const shouldClearExistingExecutionPolicy =
+          (shouldPreserveMaintainerWaitRouting || shouldClearCompletedExecutionPolicy)
+          && Boolean(paperclipIssueSyncContext.executionPolicy);
+        if (shouldClearTransitionAssignee || shouldClearExistingExecutionPolicy || nextAssigneeChanged) {
           updateSyncFailureContext(syncFailureContext, {
             phase: 'updating_paperclip_status',
             repositoryUrl: primaryRepository?.url,
@@ -15929,7 +15934,7 @@ async function synchronizePaperclipPullRequestIssueStatuses(
             nextStatus,
             ...(nextAssigneeChanged && nextTransitionAssignee ? { nextAssignee: nextTransitionAssignee.principal } : {}),
             ...(shouldClearTransitionAssignee ? { clearAssignee: true } : {}),
-            ...(shouldPreserveMaintainerWaitRouting || shouldClearCompletedExecutionPolicy ? { clearExecutionPolicy: true } : {}),
+            ...(shouldClearExistingExecutionPolicy ? { clearExecutionPolicy: true } : {}),
             transitionComment: '',
             actionFingerprint: actionJournalFingerprint,
             paperclipApiBaseUrl
