@@ -803,6 +803,7 @@ interface GitHubIssueRecord {
   authorUrl?: string;
   authorAvatarUrl?: string;
   authorAssociation?: string;
+  authorIsBot?: boolean;
   labels: GitHubIssueLabelRecord[];
   state: 'open' | 'closed';
   stateReason?: GitHubIssueStateReason;
@@ -866,6 +867,7 @@ interface GitHubApiIssueRecord {
     login?: string | null;
     html_url?: string | null;
     avatar_url?: string | null;
+    type?: string | null;
   } | null;
   state: string;
   comments?: number;
@@ -1201,6 +1203,7 @@ interface GitHubIssueCommentRecord {
   url?: string;
   authorLogin?: string;
   authorAssociation?: string;
+  authorIsBot?: boolean;
   authorUrl?: string;
   authorAvatarUrl?: string;
   createdAt?: string;
@@ -7413,6 +7416,7 @@ function normalizeGitHubIssueRecord(issue: GitHubApiIssueRecord): GitHubIssueRec
     ...(normalizeGitHubLowercaseString(issue.author_association)
       ? { authorAssociation: normalizeGitHubLowercaseString(issue.author_association) }
       : {}),
+    ...(issue.user?.type === 'Bot' ? { authorIsBot: true } : {}),
     labels: normalizeGitHubIssueLabels(issue.labels),
     state: issue.state === 'closed' ? 'closed' : 'open',
     stateReason: normalizeGitHubIssueStateReason(issue.state_reason),
@@ -17957,6 +17961,55 @@ async function fetchGitHubIssue(
   return normalizeGitHubIssueRecord(response.data as GitHubApiIssueRecord);
 }
 
+const REVIEWER_CANDIDATE_ASSOCIATIONS = new Set(['owner', 'member', 'collaborator']);
+
+interface GitHubIssueParticipant {
+  login: string;
+  role: 'author' | 'commenter';
+  association?: string;
+  isBot: boolean;
+  url?: string;
+}
+
+function buildGitHubIssueParticipants(
+  issue: GitHubIssueRecord,
+  comments: GitHubIssueCommentRecord[]
+): { participants: GitHubIssueParticipant[]; reviewerCandidates: string[] } {
+  const participants: GitHubIssueParticipant[] = [];
+  const seen = new Set<string>();
+  if (issue.authorLogin) {
+    participants.push({
+      login: issue.authorLogin,
+      role: 'author',
+      ...(issue.authorAssociation ? { association: issue.authorAssociation } : {}),
+      isBot: issue.authorIsBot === true,
+      ...(issue.authorUrl ? { url: issue.authorUrl } : {})
+    });
+    seen.add(issue.authorLogin.toLowerCase());
+  }
+  for (const comment of comments) {
+    const login = comment.authorLogin;
+    if (!login || seen.has(login.toLowerCase())) {
+      continue;
+    }
+    seen.add(login.toLowerCase());
+    participants.push({
+      login,
+      role: 'commenter',
+      ...(comment.authorAssociation ? { association: comment.authorAssociation } : {}),
+      isBot: comment.authorIsBot === true,
+      ...(comment.authorUrl ? { url: comment.authorUrl } : {})
+    });
+  }
+  const reviewerCandidates = participants
+    .filter((participant) =>
+      !participant.isBot
+      && participant.association !== undefined
+      && REVIEWER_CANDIDATE_ASSOCIATIONS.has(participant.association))
+    .map((participant) => participant.login);
+  return { participants, reviewerCandidates };
+}
+
 async function listAllGitHubIssueComments(
   octokit: Octokit,
   repository: ParsedRepositoryReference,
@@ -17982,6 +18035,7 @@ async function listAllGitHubIssueComments(
         ...(normalizeGitHubLowercaseString(comment.author_association)
           ? { authorAssociation: normalizeGitHubLowercaseString(comment.author_association) }
           : {}),
+        ...((comment.user as { type?: string | null } | null | undefined)?.type === 'Bot' ? { authorIsBot: true } : {}),
         authorUrl: comment.user?.html_url ?? undefined,
         authorAvatarUrl: comment.user?.avatar_url ?? undefined,
         createdAt: comment.created_at ?? undefined,
@@ -23168,6 +23222,14 @@ function registerGitHubAgentTools(ctx: PluginSetupContext): void {
       });
       const issue = normalizeGitHubIssueRecord(response.data as GitHubApiIssueRecord);
       const linkedPullRequests = await listLinkedPullRequestsForIssue(octokit, target.repository, target.issueNumber);
+      let issueComments: GitHubIssueCommentRecord[] = [];
+      let participantsWarning: string | undefined;
+      try {
+        issueComments = await listAllGitHubIssueComments(octokit, target.repository, target.issueNumber);
+      } catch (error) {
+        participantsWarning = `Issue comments could not be listed, so participants only include the author: ${getErrorMessage(error)}`;
+      }
+      const { participants, reviewerCandidates } = buildGitHubIssueParticipants(issue, issueComments);
       const assignees = (response.data.assignees ?? [])
         .map((assignee) => assignee?.login ?? '')
         .filter(Boolean);
@@ -23197,9 +23259,13 @@ function registerGitHubAgentTools(ctx: PluginSetupContext): void {
               ? {
                   login: issue.authorLogin,
                   ...(issue.authorUrl ? { url: issue.authorUrl } : {}),
-                  ...(issue.authorAssociation ? { association: issue.authorAssociation } : {})
+                  ...(issue.authorAssociation ? { association: issue.authorAssociation } : {}),
+                  isBot: issue.authorIsBot === true
                 }
               : null,
+            participants,
+            reviewerCandidates,
+            ...(participantsWarning ? { participantsWarning } : {}),
             labels: issue.labels,
             assignees,
             milestone,

@@ -5008,6 +5008,69 @@ test('update_pull_request replaces the label set and can clear all labels', asyn
   }
 });
 
+test('get_issue degrades to author-only participants with a warning when issue comments cannot be listed', async () => {
+  const harness = await createGitHubAgentToolHarness();
+  const originalFetch = globalThis.fetch;
+  const originalEntityList = harness.ctx.entities.list.bind(harness.ctx.entities);
+  const importedIssue = await harness.ctx.issues.create({
+    companyId: 'company-1',
+    projectId: 'project-1',
+    title: 'Comments forbidden',
+    description: 'Body imported from GitHub.\n\n<!-- paperclip-github-plugin-imported-from: https://github.com/paperclipai/example-repo/issues/32 -->'
+  });
+
+  globalThis.fetch = async (input) => {
+    const url = new URL(getRequestUrl(input));
+    if (url.pathname === '/repos/paperclipai/example-repo/issues/32') {
+      return jsonResponse({
+        id: 3201,
+        number: 32,
+        title: 'Comments forbidden',
+        body: 'Body imported from GitHub.',
+        html_url: 'https://github.com/paperclipai/example-repo/issues/32',
+        state: 'open',
+        comments: 2,
+        user: { login: 'octocat', type: 'User' },
+        author_association: 'COLLABORATOR',
+        assignees: [],
+        labels: [],
+        milestone: null
+      });
+    }
+    if (url.pathname === '/repos/paperclipai/example-repo/issues/32/comments') {
+      return jsonResponse({ message: 'Resource not accessible by integration' }, 403);
+    }
+    if (url.pathname === '/graphql') {
+      return graphqlResponse({ repository: { issue: { number: 32, state: 'OPEN', stateReason: null, timelineItems: { nodes: [] } } } });
+    }
+    throw new Error(`Unexpected GitHub request: ${url.toString()}`);
+  };
+  harness.ctx.entities.list = async (input) => {
+    if (input && typeof input === 'object' && 'entityType' in input
+      && (input as { entityType?: unknown }).entityType === 'paperclip-github-plugin.issue-link') {
+      return [];
+    }
+    return originalEntityList(input);
+  };
+
+  try {
+    const result = await harness.executeTool('get_issue', {
+      paperclipIssueId: importedIssue.id
+    }, { companyId: 'company-1', projectId: 'project-1' });
+
+    assert.ok(!result.error, result.error);
+    const issue = (result.data as {
+      issue: { participants: Array<{ login: string; role: string }>; reviewerCandidates: string[]; participantsWarning?: string };
+    }).issue;
+    assert.deepEqual(issue.participants.map((participant) => `${participant.role}:${participant.login}`), ['author:octocat']);
+    assert.deepEqual(issue.reviewerCandidates, ['octocat']);
+    assert.match(String(issue.participantsWarning), /could not be listed/i);
+  } finally {
+    globalThis.fetch = originalFetch;
+    harness.ctx.entities.list = originalEntityList;
+  }
+});
+
 test('issue-targeted tools reject repository overrides that do not match the linked GitHub issue repository', async () => {
   const harness = await createGitHubAgentToolHarness();
   harness.seed({
@@ -19862,14 +19925,24 @@ test('get_issue resolves imported Paperclip issues from the hidden description m
         body: 'Body imported from GitHub.',
         html_url: 'https://github.com/paperclipai/example-repo/issues/31',
         state: 'open',
-        comments: 0,
+        comments: 3,
         user: {
           login: 'octocat'
         },
+        author_association: 'MEMBER',
         assignees: [],
         labels: [],
         milestone: null
       });
+    }
+
+    if (url.pathname === '/repos/paperclipai/example-repo/issues/31/comments') {
+      return jsonResponse([
+        { id: 1, body: 'Maintainer note', user: { login: 'member-commenter', type: 'User' }, author_association: 'MEMBER' },
+        { id: 2, body: 'Automated note', user: { login: 'helper-bot', type: 'Bot' }, author_association: 'NONE' },
+        { id: 3, body: 'Follow-up from the reporter', user: { login: 'octocat', type: 'User' }, author_association: 'MEMBER' },
+        { id: 4, body: 'Drive-by', user: { login: 'passer-by', type: 'User' }, author_association: 'CONTRIBUTOR' }
+      ]);
     }
 
     if (url.pathname === '/repos/paperclipai/example-repo/pulls/311') {
@@ -20010,7 +20083,19 @@ test('get_issue resolves imported Paperclip issues from the hidden description m
       (result.data as { issue: { url: string } }).issue.url,
       'https://github.com/paperclipai/example-repo/issues/31'
     );
-    assert.deepEqual((result.data as { issue: { author: unknown } }).issue.author, { login: 'octocat' });
+    assert.deepEqual(
+      (result.data as { issue: { author: unknown } }).issue.author,
+      { login: 'octocat', association: 'member', isBot: false }
+    );
+    assert.deepEqual(
+      (result.data as { issue: { participants: Array<{ login: string; role: string }> } }).issue.participants
+        .map((participant) => `${participant.role}:${participant.login}`),
+      ['author:octocat', 'commenter:member-commenter', 'commenter:helper-bot', 'commenter:passer-by']
+    );
+    assert.deepEqual(
+      (result.data as { issue: { reviewerCandidates: string[] } }).issue.reviewerCandidates,
+      ['octocat', 'member-commenter']
+    );
 
     const details = await harness.getData<{
       source: string;
