@@ -11633,15 +11633,17 @@ async function upsertGitHubIssueLinkRecord(
 ): Promise<void> {
   const record = buildGitHubIssueLinkRecord(target, issueId, githubIssue, linkedPullRequests);
 
-  await ctx.entities.upsert({
-    entityType: ISSUE_LINK_ENTITY_TYPE,
-    scopeKind: 'issue',
-    scopeId: issueId,
-    externalId: record.data.githubIssueUrl,
-    ...(record.title ? { title: record.title } : {}),
-    ...(record.status ? { status: record.status } : {}),
-    data: record.data as unknown as Record<string, unknown>
-  });
+  await withPullRequestLinkMutationLock(issueLinkMutationLockKey(target.companyId, issueId), () =>
+    ctx.entities.upsert({
+      entityType: ISSUE_LINK_ENTITY_TYPE,
+      scopeKind: 'issue',
+      scopeId: issueId,
+      externalId: record.data.githubIssueUrl,
+      ...(record.title ? { title: record.title } : {}),
+      ...(record.status ? { status: record.status } : {}),
+      data: record.data as unknown as Record<string, unknown>
+    })
+  );
 }
 
 const pullRequestLinkMutationTails = new Map<string, Promise<void>>();
@@ -11663,6 +11665,62 @@ async function withPullRequestLinkMutationLock<T>(key: string, mutation: () => P
       pullRequestLinkMutationTails.delete(key);
     }
   }
+}
+
+async function appendPullRequestToGitHubIssueLinkRecords(
+  ctx: PluginSetupContext,
+  input: {
+    companyId: string;
+    issueId: string;
+    repositoryUrl: string;
+    pullRequestNumber: number;
+  }
+): Promise<boolean> {
+  return withPullRequestLinkMutationLock(issueLinkMutationLockKey(input.companyId, input.issueId), async () => {
+  const repositoryUrl = parseRepositoryReference(input.repositoryUrl)?.url ?? input.repositoryUrl.trim();
+  const records = await listGitHubIssueLinkRecords(ctx, { paperclipIssueId: input.issueId });
+  let changed = false;
+
+  for (const record of records) {
+    if (record.data.companyId && record.data.companyId !== input.companyId) {
+      continue;
+    }
+    const alreadyLinked = record.data.linkedPullRequests.some((pullRequest) =>
+      pullRequest.number === input.pullRequestNumber
+      && (parseRepositoryReference(pullRequest.repositoryUrl)?.url ?? pullRequest.repositoryUrl) === repositoryUrl
+    );
+    if (alreadyLinked) {
+      continue;
+    }
+
+    const linkedPullRequests = normalizeLinkedPullRequestReferences(
+      [...record.data.linkedPullRequests, { number: input.pullRequestNumber, repositoryUrl }],
+      record.data.repositoryUrl
+    );
+    await ctx.entities.upsert({
+      entityType: ISSUE_LINK_ENTITY_TYPE,
+      scopeKind: 'issue',
+      scopeId: input.issueId,
+      externalId: record.data.githubIssueUrl,
+      ...(record.title ? { title: record.title } : {}),
+      ...(record.status ? { status: record.status } : {}),
+      data: {
+        ...record.data,
+        linkedPullRequestNumbers: normalizeLinkedPullRequestNumbers(
+          linkedPullRequests.map((pullRequest) => pullRequest.number)
+        ),
+        linkedPullRequests
+      } as unknown as Record<string, unknown>
+    });
+    changed = true;
+  }
+
+  return changed;
+  });
+}
+
+function issueLinkMutationLockKey(companyId: string | undefined, issueId: string): string {
+  return `issue-link:${companyId ?? ''}:${issueId}`;
 }
 
 async function upsertGitHubPullRequestLinkRecord(
@@ -23135,6 +23193,13 @@ function registerGitHubAgentTools(ctx: PluginSetupContext): void {
             url: issue.htmlUrl,
             state: issue.state,
             stateReason: issue.stateReason,
+            author: issue.authorLogin
+              ? {
+                  login: issue.authorLogin,
+                  ...(issue.authorUrl ? { url: issue.authorUrl } : {}),
+                  ...(issue.authorAssociation ? { association: issue.authorAssociation } : {})
+                }
+              : null,
             labels: issue.labels,
             assignees,
             milestone,
@@ -23582,6 +23647,7 @@ function registerGitHubAgentTools(ctx: PluginSetupContext): void {
         pullRequestData = existingPullRequest;
       }
 
+      const postCreationWarnings: string[] = [];
       let persistedFollowThroughAssigneeAgentId = followThroughAssigneeAgentId ?? undefined;
       let persistedFollowThroughAssigneeUpdatedAt: string | undefined;
       if (paperclipIssueId) {
@@ -23610,6 +23676,70 @@ function registerGitHubAgentTools(ctx: PluginSetupContext): void {
           projectId: issueProjectId,
           repository
         });
+        try {
+          await appendPullRequestToGitHubIssueLinkRecords(ctx, {
+            companyId: runCtx.companyId,
+            issueId: paperclipIssueId,
+            repositoryUrl: repository.url,
+            pullRequestNumber: pullRequestData.number
+          });
+        } catch (error) {
+          postCreationWarnings.push(
+            `Pull request #${pullRequestData.number} was created, but the Paperclip issue link could not be refreshed yet: ${getErrorMessage(error)}`
+          );
+        }
+      }
+
+      const requestedLabels = normalizeToolStringArray(input.labels);
+      let appliedLabels: string[] | undefined;
+      if (requestedLabels.length > 0) {
+        try {
+          const labelResponse = await octokit.rest.issues.addLabels({
+            owner: repository.owner,
+            repo: repository.repo,
+            issue_number: pullRequestData.number,
+            labels: requestedLabels,
+            headers: {
+              'X-GitHub-Api-Version': GITHUB_API_VERSION
+            }
+          });
+          appliedLabels = (labelResponse.data ?? [])
+            .map((label) => (typeof label === 'string' ? label : label?.name ?? ''))
+            .filter(Boolean);
+        } catch (error) {
+          postCreationWarnings.push(
+            `Pull request #${pullRequestData.number} was created, but labels could not be applied: ${getErrorMessage(error)}`
+          );
+        }
+      }
+
+      const requestedUserReviewers = normalizeToolStringArray(input.userReviewers);
+      const requestedTeamReviewers = normalizeToolStringArray(input.teamReviewers);
+      let requestedReviewers: string[] | undefined;
+      let requestedTeams: string[] | undefined;
+      if (requestedUserReviewers.length > 0 || requestedTeamReviewers.length > 0) {
+        try {
+          const reviewerResponse = await octokit.rest.pulls.requestReviewers({
+            owner: repository.owner,
+            repo: repository.repo,
+            pull_number: pullRequestData.number,
+            reviewers: requestedUserReviewers,
+            team_reviewers: requestedTeamReviewers,
+            headers: {
+              'X-GitHub-Api-Version': GITHUB_API_VERSION
+            }
+          });
+          requestedReviewers = (reviewerResponse.data.requested_reviewers ?? [])
+            .map((reviewer) => reviewer?.login ?? '')
+            .filter(Boolean);
+          requestedTeams = (reviewerResponse.data.requested_teams ?? [])
+            .map((team) => team?.slug ?? '')
+            .filter(Boolean);
+        } catch (error) {
+          postCreationWarnings.push(
+            `Pull request #${pullRequestData.number} was created, but reviewers could not be requested: ${getErrorMessage(error)}`
+          );
+        }
       }
 
       await persistCompanyActivityMetricEvent(
@@ -23627,9 +23757,15 @@ function registerGitHubAgentTools(ctx: PluginSetupContext): void {
       );
 
       return buildToolSuccessResult(
-        `Created pull request #${pullRequestData.number} in ${formatRepositoryLabel(repository)}.`,
+        postCreationWarnings.length > 0
+          ? `Created pull request #${pullRequestData.number} in ${formatRepositoryLabel(repository)} with follow-up warnings: ${postCreationWarnings.join(' ')}`
+          : `Created pull request #${pullRequestData.number} in ${formatRepositoryLabel(repository)}.`,
         {
           repository: repository.url,
+          ...(appliedLabels ? { labels: appliedLabels } : {}),
+          ...(requestedReviewers ? { requestedReviewers } : {}),
+          ...(requestedTeams ? { requestedTeams } : {}),
+          ...(postCreationWarnings.length > 0 ? { warnings: postCreationWarnings } : {}),
           publishedBranch: {
             name: publishedBranch.branchName,
             commitSha: publishedBranch.commitSha,
@@ -23771,6 +23907,31 @@ function registerGitHubAgentTools(ctx: PluginSetupContext): void {
         });
       }
 
+      let labels: string[] | undefined;
+      if (Array.isArray(input.labels)) {
+        const requestedLabels = normalizeToolStringArray(input.labels);
+        const currentLabels = (currentResponse.data.labels ?? [])
+          .map((label) => (typeof label === 'string' ? label : label?.name ?? ''))
+          .filter(Boolean);
+        if ([...requestedLabels].sort().join('\n') !== [...currentLabels].sort().join('\n')) {
+          const labelResponse = await octokit.rest.issues.setLabels({
+            owner: target.repository.owner,
+            repo: target.repository.repo,
+            issue_number: target.pullRequestNumber,
+            labels: requestedLabels,
+            headers: {
+              'X-GitHub-Api-Version': GITHUB_API_VERSION
+            }
+          });
+          labels = (labelResponse.data ?? [])
+            .map((label) => (typeof label === 'string' ? label : label?.name ?? ''))
+            .filter(Boolean);
+          changed = true;
+        } else {
+          labels = currentLabels;
+        }
+      }
+
       return buildToolSuccessResult(
         changed
           ? `Updated pull request #${currentResponse.data.number} in ${formatRepositoryLabel(target.repository)}.`
@@ -23784,7 +23945,8 @@ function registerGitHubAgentTools(ctx: PluginSetupContext): void {
             url: currentResponse.data.html_url,
             state: currentResponse.data.state,
             isDraft: currentResponse.data.draft,
-            baseRefName: currentResponse.data.base.ref
+            baseRefName: currentResponse.data.base.ref,
+            ...(labels ? { labels } : {})
           }
         }
       );

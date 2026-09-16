@@ -2256,6 +2256,185 @@ test('create_pull_request requires one-call branch publication inputs', () => {
   );
   assert.match(String(properties.repository?.description ?? ''), /outside Paperclip repository mappings/i);
   assert.match(String(properties.workspaceRelativePath?.description ?? ''), /relative to the trusted issue execution workspace/i);
+  assert.match(String(properties.labels?.description ?? ''), /applied after the pull request is created/i);
+  assert.match(String(properties.userReviewers?.description ?? ''), /linked issue author/i);
+  assert.match(String(properties.teamReviewers?.description ?? ''), /team slugs/i);
+  const updateDeclaration = manifest.tools?.find((tool) => tool.name === 'update_pull_request');
+  const updateProperties = updateDeclaration?.parametersSchema.properties as Record<string, { description?: string }>;
+  assert.match(String(updateProperties.labels?.description ?? ''), /exactly these labels/i);
+});
+
+test('create_pull_request applies labels, requests reviewers, and links the pull request to the issue immediately', async () => {
+  const harness = await createGitHubAgentToolHarness();
+  const issue = await harness.ctx.issues.create({
+    companyId: 'company-1',
+    projectId: 'project-1',
+    title: 'Fix the importer',
+    description: 'Publish with labels and reviewers.',
+    status: 'in_progress',
+    assigneeAgentId: 'agent-1',
+    executionWorkspaceId: 'execution-workspace-1'
+  });
+  await harness.ctx.entities.upsert({
+    entityType: 'paperclip-github-plugin.issue-link',
+    scopeKind: 'issue',
+    scopeId: issue.id,
+    externalId: 'https://github.com/paperclipai/example-repo/issues/12',
+    data: {
+      companyId: 'company-1',
+      paperclipProjectId: 'project-1',
+      repositoryUrl: 'https://github.com/paperclipai/example-repo',
+      githubIssueId: 1200,
+      githubIssueNumber: 12,
+      githubIssueUrl: 'https://github.com/paperclipai/example-repo/issues/12',
+      creatorLogin: 'reporter',
+      githubIssueState: 'open',
+      commentsCount: 0,
+      linkedPullRequestNumbers: [],
+      labels: ['type: bug'],
+      syncedAt: '2026-09-16T00:00:00.000Z'
+    }
+  });
+  const originalFetch = globalThis.fetch;
+  const labelRequests: unknown[] = [];
+  const reviewerRequests: unknown[] = [];
+
+  globalThis.fetch = async (input, init) => {
+    const url = new URL(getRequestUrl(input));
+    if (url.pathname === '/repos/paperclipai/example-repo/pulls' && init?.method === 'POST') {
+      return jsonResponse({
+        number: 21,
+        title: 'Fix the importer',
+        body: 'Fixes #12',
+        html_url: 'https://github.com/paperclipai/example-repo/pull/21',
+        state: 'open',
+        draft: false,
+        head: { ref: 'feature/fix-importer' },
+        base: { ref: 'main' }
+      }, 201);
+    }
+    if (url.pathname === '/repos/paperclipai/example-repo/issues/21/labels' && init?.method === 'POST') {
+      labelRequests.push(getJsonRequestBody(init));
+      return jsonResponse([{ name: 'type: bug' }], 200);
+    }
+    if (url.pathname === '/repos/paperclipai/example-repo/pulls/21/requested_reviewers' && init?.method === 'POST') {
+      reviewerRequests.push(getJsonRequestBody(init));
+      return jsonResponse({
+        requested_reviewers: [{ login: 'reporter' }],
+        requested_teams: []
+      }, 201);
+    }
+
+    throw new Error(`Unexpected GitHub request: ${url.toString()}`);
+  };
+
+  try {
+    const result = await harness.executeTool('create_pull_request', {
+      paperclipIssueId: issue.id,
+      head: 'feature/fix-importer',
+      headCommitSha: TEST_HEAD_COMMIT_SHA,
+      base: 'main',
+      title: 'Fix the importer',
+      body: 'Fixes #12',
+      labels: ['type: bug'],
+      userReviewers: ['reporter']
+    }, {
+      agentId: 'agent-1',
+      runId: 'run-1',
+      companyId: 'company-1',
+      projectId: 'project-1'
+    });
+
+    assert.ok(!result.error, result.error);
+    assert.deepEqual(labelRequests, [{ labels: ['type: bug'] }]);
+    assert.deepEqual(reviewerRequests, [{ reviewers: ['reporter'], team_reviewers: [] }]);
+    const data = result.data as {
+      labels?: string[];
+      requestedReviewers?: string[];
+      warnings?: string[];
+      pullRequest: { number: number };
+    };
+    assert.deepEqual(data.labels, ['type: bug']);
+    assert.deepEqual(data.requestedReviewers, ['reporter']);
+    assert.equal(data.warnings, undefined);
+    assert.equal(data.pullRequest.number, 21);
+
+    const details = await harness.getData<{
+      linkedPullRequestNumbers: number[];
+      linkedPullRequests: Array<{ number: number; repositoryUrl: string }>;
+    } | null>('issue.githubDetails', {
+      companyId: 'company-1',
+      issueId: issue.id
+    });
+    assert.deepEqual(details?.linkedPullRequestNumbers, [21]);
+    assert.deepEqual(details?.linkedPullRequests, [
+      { number: 21, repositoryUrl: 'https://github.com/paperclipai/example-repo' }
+    ]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('create_pull_request keeps the created pull request and reports a warning when labels cannot be applied', async () => {
+  const harness = await createGitHubAgentToolHarness();
+  const issue = await harness.ctx.issues.create({
+    companyId: 'company-1',
+    projectId: 'project-1',
+    title: 'Fix the importer',
+    description: 'Publish with a bad label.',
+    status: 'in_progress',
+    assigneeAgentId: 'agent-1',
+    executionWorkspaceId: 'execution-workspace-1'
+  });
+  const originalFetch = globalThis.fetch;
+
+  globalThis.fetch = async (input, init) => {
+    const url = new URL(getRequestUrl(input));
+    if (url.pathname === '/repos/paperclipai/example-repo/pulls' && init?.method === 'POST') {
+      return jsonResponse({
+        number: 22,
+        title: 'Fix the importer',
+        body: 'Fixes #12',
+        html_url: 'https://github.com/paperclipai/example-repo/pull/22',
+        state: 'open',
+        draft: false,
+        head: { ref: 'feature/fix-importer' },
+        base: { ref: 'main' }
+      }, 201);
+    }
+    if (url.pathname === '/repos/paperclipai/example-repo/issues/22/labels' && init?.method === 'POST') {
+      return jsonResponse({ message: 'Validation Failed' }, 422);
+    }
+
+    throw new Error(`Unexpected GitHub request: ${url.toString()}`);
+  };
+
+  try {
+    const result = await harness.executeTool('create_pull_request', {
+      paperclipIssueId: issue.id,
+      head: 'feature/fix-importer',
+      headCommitSha: TEST_HEAD_COMMIT_SHA,
+      base: 'main',
+      title: 'Fix the importer',
+      body: 'Fixes #12',
+      labels: ['type: nonexistent']
+    }, {
+      agentId: 'agent-1',
+      runId: 'run-1',
+      companyId: 'company-1',
+      projectId: 'project-1'
+    });
+
+    assert.ok(!result.error, result.error);
+    const data = result.data as { labels?: string[]; warnings?: string[]; pullRequest: { number: number } };
+    assert.equal(data.pullRequest.number, 22);
+    assert.equal(data.labels, undefined);
+    assert.equal(data.warnings?.length, 1);
+    assert.match(String(data.warnings?.[0]), /labels could not be applied/i);
+    assert.match(String(result.content ?? ''), /follow-up warnings/i);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test('upload_pull_request_asset publishes an image asset with embeddable markdown', async () => {
@@ -4764,6 +4943,66 @@ test('update_pull_request reports a no-op when no fields differ', async () => {
     assert.ok(!result.error);
     assert.match(result.content ?? '', /No GitHub pull request changes were requested/);
     assert.equal(patchCalls, 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('update_pull_request replaces the label set and can clear all labels', async () => {
+  const harness = await createGitHubAgentToolHarness();
+  const originalFetch = globalThis.fetch;
+  const labelPuts: unknown[] = [];
+  let currentLabels: Array<{ name: string }> = [{ name: 'type: docs' }, { name: 'stale' }];
+  globalThis.fetch = async (input, init) => {
+    const url = new URL(getRequestUrl(input));
+    if (url.pathname === '/repos/paperclipai/example-repo/issues/7/labels' && init?.method === 'PUT') {
+      const requestBody = getJsonRequestBody(init);
+      labelPuts.push(requestBody);
+      currentLabels = (Array.isArray(requestBody?.labels) ? requestBody.labels as string[] : []).map((name) => ({ name }));
+      return jsonResponse(currentLabels, 200);
+    }
+    if (url.pathname === '/repos/paperclipai/example-repo/pulls/7' && init?.method !== 'PATCH') {
+      return jsonResponse({
+        number: 7,
+        title: 'Fix the importer',
+        body: 'Existing PR description.',
+        html_url: 'https://github.com/paperclipai/example-repo/pull/7',
+        state: 'open',
+        draft: false,
+        merged: false,
+        mergeable: true,
+        mergeable_state: 'clean',
+        node_id: 'PR_node',
+        labels: currentLabels,
+        head: { ref: 'feature/fix-importer', sha: 'abc123' },
+        base: { ref: 'main' }
+      });
+    }
+    throw new Error(`Unexpected GitHub request: ${url.toString()}`);
+  };
+  try {
+    const replaced = await harness.executeTool('update_pull_request', {
+      pullRequestNumber: 7,
+      labels: ['type: bug']
+    }, { companyId: 'company-1', projectId: 'project-1' });
+    assert.ok(!replaced.error, replaced.error);
+    assert.match(replaced.content ?? '', /Updated pull request #7/);
+    assert.deepEqual((replaced.data as { pullRequest: { labels?: string[] } }).pullRequest.labels, ['type: bug']);
+
+    const unchanged = await harness.executeTool('update_pull_request', {
+      pullRequestNumber: 7,
+      labels: ['type: bug']
+    }, { companyId: 'company-1', projectId: 'project-1' });
+    assert.ok(!unchanged.error, unchanged.error);
+    assert.match(unchanged.content ?? '', /No GitHub pull request changes were requested/);
+
+    const cleared = await harness.executeTool('update_pull_request', {
+      pullRequestNumber: 7,
+      labels: []
+    }, { companyId: 'company-1', projectId: 'project-1' });
+    assert.ok(!cleared.error, cleared.error);
+    assert.deepEqual((cleared.data as { pullRequest: { labels?: string[] } }).pullRequest.labels, []);
+    assert.deepEqual(labelPuts, [{ labels: ['type: bug'] }, { labels: [] }]);
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -19771,6 +20010,7 @@ test('get_issue resolves imported Paperclip issues from the hidden description m
       (result.data as { issue: { url: string } }).issue.url,
       'https://github.com/paperclipai/example-repo/issues/31'
     );
+    assert.deepEqual((result.data as { issue: { author: unknown } }).issue.author, { login: 'octocat' });
 
     const details = await harness.getData<{
       source: string;

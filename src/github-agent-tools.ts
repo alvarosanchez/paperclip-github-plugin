@@ -133,7 +133,7 @@ export const GITHUB_AGENT_TOOLS: PluginToolDeclaration[] = [
   {
     name: 'get_issue',
     displayName: 'Get Issue',
-    description: 'Read one GitHub issue with its metadata, assignees, labels, milestone, and linked pull requests.',
+    description: 'Read one GitHub issue with its metadata, author, assignees, labels, milestone, and linked pull requests.',
     parametersSchema: {
       type: 'object',
       additionalProperties: false,
@@ -278,7 +278,7 @@ export const GITHUB_AGENT_TOOLS: PluginToolDeclaration[] = [
   {
     name: 'create_pull_request',
     displayName: 'Create Pull Request',
-    description: 'Publish the local branch at the exact requested commit, verify the remote branch, then create and link a GitHub pull request in one operation. The GitHub credential remains inside the trusted plugin worker. When a non-empty body is provided, the plugin appends an AI-authorship footer and includes llmModel when supplied.',
+    description: 'Publish the local branch at the exact requested commit, verify the remote branch, then create and link a GitHub pull request in one operation. Optional labels and reviewer requests are applied right after creation and reported back; a failure in those follow-up steps does not undo the pull request. The GitHub credential remains inside the trusted plugin worker. When a non-empty body is provided, the plugin appends an AI-authorship footer and includes llmModel when supplied.',
     parametersSchema: {
       type: 'object',
       additionalProperties: false,
@@ -320,6 +320,27 @@ export const GITHUB_AGENT_TOOLS: PluginToolDeclaration[] = [
         llmModel: llmModelProperty,
         draft: {
           type: 'boolean'
+        },
+        labels: {
+          type: 'array',
+          items: {
+            type: 'string'
+          },
+          description: 'Optional GitHub labels to add to the new pull request, for example the approved `type:` label. Labels are applied after the pull request is created; failures are returned as warnings.'
+        },
+        userReviewers: {
+          type: 'array',
+          items: {
+            type: 'string'
+          },
+          description: 'Optional GitHub user logins to request as reviewers right after creation, for example the linked issue author when they are not the pull request author. Failures are returned as warnings.'
+        },
+        teamReviewers: {
+          type: 'array',
+          items: {
+            type: 'string'
+          },
+          description: 'Optional GitHub team slugs to request as reviewers right after creation. Failures are returned as warnings.'
         }
       }
     }
@@ -342,7 +363,7 @@ export const GITHUB_AGENT_TOOLS: PluginToolDeclaration[] = [
   {
     name: 'update_pull_request',
     displayName: 'Update Pull Request',
-    description: 'Edit pull request title, body, base branch, open or close it, or convert between draft and ready for review. When a non-empty body is provided, the plugin appends an AI-authorship footer and includes llmModel when supplied.',
+    description: 'Edit pull request title, body, base branch, labels, open or close it, or convert between draft and ready for review. When a non-empty body is provided, the plugin appends an AI-authorship footer and includes llmModel when supplied.',
     parametersSchema: {
       type: 'object',
       additionalProperties: false,
@@ -369,6 +390,13 @@ export const GITHUB_AGENT_TOOLS: PluginToolDeclaration[] = [
         isDraft: {
           type: 'boolean',
           description: 'True converts the pull request to draft. False marks it ready for review.'
+        },
+        labels: {
+          type: 'array',
+          items: {
+            type: 'string'
+          },
+          description: 'Optional replacement label set for the pull request. When provided, the pull request ends up with exactly these labels.'
         }
       }
     }
