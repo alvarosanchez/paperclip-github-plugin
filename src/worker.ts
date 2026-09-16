@@ -11633,15 +11633,17 @@ async function upsertGitHubIssueLinkRecord(
 ): Promise<void> {
   const record = buildGitHubIssueLinkRecord(target, issueId, githubIssue, linkedPullRequests);
 
-  await ctx.entities.upsert({
-    entityType: ISSUE_LINK_ENTITY_TYPE,
-    scopeKind: 'issue',
-    scopeId: issueId,
-    externalId: record.data.githubIssueUrl,
-    ...(record.title ? { title: record.title } : {}),
-    ...(record.status ? { status: record.status } : {}),
-    data: record.data as unknown as Record<string, unknown>
-  });
+  await withPullRequestLinkMutationLock(issueLinkMutationLockKey(target.companyId, issueId), () =>
+    ctx.entities.upsert({
+      entityType: ISSUE_LINK_ENTITY_TYPE,
+      scopeKind: 'issue',
+      scopeId: issueId,
+      externalId: record.data.githubIssueUrl,
+      ...(record.title ? { title: record.title } : {}),
+      ...(record.status ? { status: record.status } : {}),
+      data: record.data as unknown as Record<string, unknown>
+    })
+  );
 }
 
 const pullRequestLinkMutationTails = new Map<string, Promise<void>>();
@@ -11674,6 +11676,7 @@ async function appendPullRequestToGitHubIssueLinkRecords(
     pullRequestNumber: number;
   }
 ): Promise<boolean> {
+  return withPullRequestLinkMutationLock(issueLinkMutationLockKey(input.companyId, input.issueId), async () => {
   const repositoryUrl = parseRepositoryReference(input.repositoryUrl)?.url ?? input.repositoryUrl.trim();
   const records = await listGitHubIssueLinkRecords(ctx, { paperclipIssueId: input.issueId });
   let changed = false;
@@ -11713,6 +11716,11 @@ async function appendPullRequestToGitHubIssueLinkRecords(
   }
 
   return changed;
+  });
+}
+
+function issueLinkMutationLockKey(companyId: string | undefined, issueId: string): string {
+  return `issue-link:${companyId ?? ''}:${issueId}`;
 }
 
 async function upsertGitHubPullRequestLinkRecord(

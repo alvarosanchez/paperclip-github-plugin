@@ -4948,6 +4948,66 @@ test('update_pull_request reports a no-op when no fields differ', async () => {
   }
 });
 
+test('update_pull_request replaces the label set and can clear all labels', async () => {
+  const harness = await createGitHubAgentToolHarness();
+  const originalFetch = globalThis.fetch;
+  const labelPuts: unknown[] = [];
+  let currentLabels: Array<{ name: string }> = [{ name: 'type: docs' }, { name: 'stale' }];
+  globalThis.fetch = async (input, init) => {
+    const url = new URL(getRequestUrl(input));
+    if (url.pathname === '/repos/paperclipai/example-repo/issues/7/labels' && init?.method === 'PUT') {
+      const requestBody = getJsonRequestBody(init);
+      labelPuts.push(requestBody);
+      currentLabels = (Array.isArray(requestBody?.labels) ? requestBody.labels as string[] : []).map((name) => ({ name }));
+      return jsonResponse(currentLabels, 200);
+    }
+    if (url.pathname === '/repos/paperclipai/example-repo/pulls/7' && init?.method !== 'PATCH') {
+      return jsonResponse({
+        number: 7,
+        title: 'Fix the importer',
+        body: 'Existing PR description.',
+        html_url: 'https://github.com/paperclipai/example-repo/pull/7',
+        state: 'open',
+        draft: false,
+        merged: false,
+        mergeable: true,
+        mergeable_state: 'clean',
+        node_id: 'PR_node',
+        labels: currentLabels,
+        head: { ref: 'feature/fix-importer', sha: 'abc123' },
+        base: { ref: 'main' }
+      });
+    }
+    throw new Error(`Unexpected GitHub request: ${url.toString()}`);
+  };
+  try {
+    const replaced = await harness.executeTool('update_pull_request', {
+      pullRequestNumber: 7,
+      labels: ['type: bug']
+    }, { companyId: 'company-1', projectId: 'project-1' });
+    assert.ok(!replaced.error, replaced.error);
+    assert.match(replaced.content ?? '', /Updated pull request #7/);
+    assert.deepEqual((replaced.data as { pullRequest: { labels?: string[] } }).pullRequest.labels, ['type: bug']);
+
+    const unchanged = await harness.executeTool('update_pull_request', {
+      pullRequestNumber: 7,
+      labels: ['type: bug']
+    }, { companyId: 'company-1', projectId: 'project-1' });
+    assert.ok(!unchanged.error, unchanged.error);
+    assert.match(unchanged.content ?? '', /No GitHub pull request changes were requested/);
+
+    const cleared = await harness.executeTool('update_pull_request', {
+      pullRequestNumber: 7,
+      labels: []
+    }, { companyId: 'company-1', projectId: 'project-1' });
+    assert.ok(!cleared.error, cleared.error);
+    assert.deepEqual((cleared.data as { pullRequest: { labels?: string[] } }).pullRequest.labels, []);
+    assert.deepEqual(labelPuts, [{ labels: ['type: bug'] }, { labels: [] }]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test('issue-targeted tools reject repository overrides that do not match the linked GitHub issue repository', async () => {
   const harness = await createGitHubAgentToolHarness();
   harness.seed({
