@@ -10813,6 +10813,16 @@ function compareImportedPaperclipIssueCreatedAt(
   return leftTime - rightTime;
 }
 
+/**
+ * `unlinkPaperclipIssueFromGitHub` tombstones the link record (status `unlinked`) and drops the
+ * import-registry entry to say "this Paperclip issue is no longer the one for this GitHub issue".
+ * Nothing used to read that status back, so the registry-repair lookup re-adopted the very issue
+ * an operator had just detached and no fresh issue was ever imported. A tombstone is not a link.
+ */
+function isLiveGitHubIssueLinkRecord(record: Pick<GitHubIssueLinkRecord, 'status'>): boolean {
+  return record.status !== 'unlinked';
+}
+
 async function listImportedPaperclipIssuesForMapping(
   ctx: PluginSetupContext,
   mapping: RepositoryMapping
@@ -10831,6 +10841,10 @@ async function listImportedPaperclipIssuesForMapping(
   const linkedIssueRecords = await listGitHubIssueLinkRecords(ctx);
 
   for (const record of linkedIssueRecords) {
+    if (!isLiveGitHubIssueLinkRecord(record)) {
+      continue;
+    }
+
     if (record.data.repositoryUrl !== normalizedRepositoryUrl) {
       continue;
     }
@@ -24676,6 +24690,7 @@ export function shouldStartWorkerHost(moduleUrl: string, entry = process.argv[1]
 
 export const __testing = {
   listIssueInteractionEvents,
+  isLiveGitHubIssueLinkRecord,
   buildExternalPullRequestStateHash,
   shouldPreserveDeliberateBlockedWait,
   buildDirectPullRequestActionFingerprint,

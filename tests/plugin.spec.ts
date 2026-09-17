@@ -31837,3 +31837,16 @@ test('external PR state hash is order-independent and covers every field sync re
     );
   }
 });
+
+test('a tombstoned GitHub issue link no longer counts as a live link', async () => {
+  const workerModule = await importFreshWorkerModule();
+  const { isLiveGitHubIssueLinkRecord } = workerModule.__testing;
+
+  // `issue.unlinkGitHubItem` tombstones the link and drops the registry entry. The registry-repair
+  // lookup consults link records to answer "is this GitHub issue already imported?", so a tombstone
+  // must not answer yes — otherwise sync re-adopts the issue that was just detached and never
+  // imports a fresh one.
+  assert.equal(isLiveGitHubIssueLinkRecord({ status: 'unlinked' }), false);
+  assert.equal(isLiveGitHubIssueLinkRecord({ status: 'linked' }), true);
+  assert.equal(isLiveGitHubIssueLinkRecord({}), true, 'records written before the status existed are live');
+});
