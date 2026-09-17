@@ -31850,3 +31850,34 @@ test('a tombstoned GitHub issue link no longer counts as a live link', async () 
   assert.equal(isLiveGitHubIssueLinkRecord({ status: 'linked' }), true);
   assert.equal(isLiveGitHubIssueLinkRecord({}), true, 'records written before the status existed are live');
 });
+
+test('the unblock budget is only reset by a real transition into blocked', async () => {
+  const workerModule = await importFreshWorkerModule();
+  const { resolveUnblockedExternalStateHash } = workerModule.__testing;
+
+  // Leaving `blocked`: record what we reacted to, so an identical later pass is a no-op.
+  assert.equal(resolveUnblockedExternalStateHash({
+    currentStatus: 'blocked', nextStatus: 'in_progress',
+    currentExternalStateHash: 'state-a', previousHash: undefined
+  }), 'state-a');
+
+  // Staying `blocked` — another rule preserved it, or this guard did. Keeping the recorded value
+  // is the whole point: clearing it here drops the budget with no external change and the very
+  // next pass re-opens on the same PR state, which is the loop coming back.
+  assert.equal(resolveUnblockedExternalStateHash({
+    currentStatus: 'blocked', nextStatus: 'blocked',
+    currentExternalStateHash: 'state-a', previousHash: 'state-a'
+  }), 'state-a');
+
+  // A genuine transition into `blocked` starts a fresh budget.
+  assert.equal(resolveUnblockedExternalStateHash({
+    currentStatus: 'in_progress', nextStatus: 'blocked',
+    currentExternalStateHash: 'state-b', previousHash: 'state-a'
+  }), undefined);
+
+  // Untouched when the issue was never blocked and is not becoming blocked.
+  assert.equal(resolveUnblockedExternalStateHash({
+    currentStatus: 'in_review', nextStatus: 'in_progress',
+    currentExternalStateHash: 'state-b', previousHash: 'state-a'
+  }), 'state-a');
+});

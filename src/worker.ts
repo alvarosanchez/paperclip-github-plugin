@@ -9516,6 +9516,26 @@ function buildExternalPullRequestStateHash(
  * state it reacted to actually changes. A new head SHA, a CI result, a review, a resolved
  * conflict — anything sync can see — changes the hash and normal routing resumes immediately.
  */
+/**
+ * Next value for the recorded "state sync last unblocked on", given what this pass decided.
+ *
+ * - leaving `blocked`: record the state we reacted to, so an identical later pass is a no-op;
+ * - entering `blocked` from elsewhere: a fresh block starts a fresh budget;
+ * - staying `blocked`: keep the recorded value. Clearing it here would drop the budget with no
+ *   external change and let the next pass re-open on the same PR state.
+ */
+function resolveUnblockedExternalStateHash(params: {
+  currentStatus: PaperclipIssueStatus;
+  nextStatus: PaperclipIssueStatus;
+  currentExternalStateHash?: string;
+  previousHash?: string;
+}): string | undefined {
+  const { currentStatus, nextStatus, currentExternalStateHash, previousHash } = params;
+  if (currentStatus === 'blocked' && nextStatus !== 'blocked') return currentExternalStateHash;
+  if (currentStatus !== 'blocked' && nextStatus === 'blocked') return undefined;
+  return previousHash;
+}
+
 function shouldPreserveDeliberateBlockedWait(params: {
   currentStatus: PaperclipIssueStatus;
   nextStatus: PaperclipIssueStatus;
@@ -15548,15 +15568,21 @@ async function synchronizePaperclipIssueStatuses(
         unblockedExternalStateHash: previousUnblockedExternalStateHash
       })) {
         nextStatus = 'blocked';
-      } else if (paperclipIssue.status === 'blocked' && nextStatus !== 'blocked') {
-        importedIssue.unblockedExternalStateHash = currentExternalStateHash;
-      } else if (nextStatus === 'blocked') {
-        // A fresh block starts a fresh budget: the next external change may unblock again.
+      }
+      const nextUnblockedExternalStateHash = resolveUnblockedExternalStateHash({
+        currentStatus: paperclipIssue.status,
+        nextStatus,
+        currentExternalStateHash,
+        previousHash: previousUnblockedExternalStateHash
+      });
+      if (nextUnblockedExternalStateHash === undefined) {
         delete importedIssue.unblockedExternalStateHash;
+      } else {
+        importedIssue.unblockedExternalStateHash = nextUnblockedExternalStateHash;
       }
       // Persist at the mutation point. The registry writes further down are conditional, so
       // relying on them would lose this and the loop would come straight back.
-      if (importedIssue.unblockedExternalStateHash !== previousUnblockedExternalStateHash) {
+      if (nextUnblockedExternalStateHash !== previousUnblockedExternalStateHash) {
         await persistImportRegistry();
       }
 
@@ -16104,14 +16130,21 @@ async function synchronizePaperclipPullRequestIssueStatuses(
         unblockedExternalStateHash: previousUnblockedExternalStateHash
       })) {
         nextStatus = 'blocked';
-      } else if (paperclipIssue.status === 'blocked' && nextStatus !== 'blocked') {
-        remoteAction.unblockedExternalStateHash = currentExternalStateHash;
-      } else if (nextStatus === 'blocked') {
+      }
+      const nextUnblockedExternalStateHash = resolveUnblockedExternalStateHash({
+        currentStatus: paperclipIssue.status,
+        nextStatus,
+        currentExternalStateHash,
+        previousHash: previousUnblockedExternalStateHash
+      });
+      if (nextUnblockedExternalStateHash === undefined) {
         delete remoteAction.unblockedExternalStateHash;
+      } else {
+        remoteAction.unblockedExternalStateHash = nextUnblockedExternalStateHash;
       }
       // Persist here, and re-resolve the record: `persistRemoteActionRegistry` is followed
       // elsewhere by a registry re-read, which would otherwise discard this write.
-      if (remoteAction.unblockedExternalStateHash !== previousUnblockedExternalStateHash) {
+      if (nextUnblockedExternalStateHash !== previousUnblockedExternalStateHash) {
         await persistRemoteActionRegistry();
         remoteAction = remoteActionRegistry.find((record) => record.key === remoteActionKey) ?? remoteAction;
       }
@@ -24692,6 +24725,7 @@ export const __testing = {
   listIssueInteractionEvents,
   isLiveGitHubIssueLinkRecord,
   buildExternalPullRequestStateHash,
+  resolveUnblockedExternalStateHash,
   shouldPreserveDeliberateBlockedWait,
   buildDirectPullRequestActionFingerprint,
   buildRemoteActionFingerprint,
