@@ -13947,7 +13947,12 @@ async function updatePaperclipIssueState(
     }
   } else if (clearAssignee) {
     issuePatch.assigneeAgentId = null;
-    issuePatch.assigneeUserId = null;
+    // Clearing the assignee means "no agent owns this any more", not "nobody owns this".
+    // A human assignee on an issue parked in maintainer wait is deliberate routing (the
+    // reviewer the work is waiting on), so keep it instead of unassigning the issue on
+    // every sync pass. Patch it explicitly so the already-applied check still recognises
+    // the settled state and does not re-patch (and re-ledger) an unchanged issue.
+    issuePatch.assigneeUserId = syncContext.assignee?.kind === 'user' ? syncContext.assignee.id : null;
   }
 
   if (statusWillChange && !trimmedTransitionComment) {

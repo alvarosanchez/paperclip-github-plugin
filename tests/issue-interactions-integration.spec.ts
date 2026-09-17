@@ -922,3 +922,89 @@ test('findSettledNoopAttempt ignores nested phase keys and attempts with no inte
     { dedupeBase: `${prefix}new`, occurredAt: '2026-02-02T00:00:00.000Z' }
   );
 });
+
+test('parking an issue in maintainer wait keeps a human reviewer and drops only the agent assignee', async () => {
+  const harness = createTestHarness({ manifest });
+  harness.seed({
+    issues: [{
+      id: 'issue-human-maintainer-wait', companyId: 'company-1', projectId: 'project-1',
+      title: 'Human maintainer wait', description: '', status: 'in_review',
+      assigneeAgentId: 'agent-2', assigneeUserId: 'human-reviewer-1'
+    } as never]
+  });
+  await plugin.definition.setup(harness.ctx);
+  const originalUpdate = harness.ctx.issues.update.bind(harness.ctx.issues);
+  let updates = 0;
+  harness.ctx.issues.update = async (...args) => {
+    updates += 1;
+    return originalUpdate(...args);
+  };
+  const params = {
+    companyId: 'company-1',
+    issueId: 'issue-human-maintainer-wait',
+    currentStatus: 'in_review' as const,
+    syncContext: {
+      assignee: { kind: 'user' as const, id: 'human-reviewer-1' },
+      executionPolicy: null,
+      executionState: null
+    },
+    nextStatus: 'in_review' as const,
+    clearAssignee: true,
+    transitionComment: '',
+    actionFingerprint: 'remote-action-human-maintainer-wait'
+  };
+
+  await __testing.updatePaperclipIssueState(harness.ctx, params);
+
+  const parked = await harness.ctx.issues.get('issue-human-maintainer-wait', 'company-1') as unknown as Record<string, unknown>;
+  assert.equal(parked.assigneeAgentId, null);
+  assert.equal(parked.assigneeUserId, 'human-reviewer-1');
+  assert.equal(updates, 1);
+
+  // A second pass over the settled state must not re-patch the issue (and must not append a
+  // fresh ledger pair), or every sync would churn the human-reviewer parking.
+  await __testing.updatePaperclipIssueState(harness.ctx, params);
+  assert.equal(updates, 1);
+
+  const rows = await harness.ctx.entities.list({
+    entityType: 'paperclip-github-plugin.issue-interaction-event',
+    scopeKind: 'issue',
+    scopeId: 'issue-human-maintainer-wait'
+  });
+  const mutationEvents = rows.filter((row) => (row.data as { action?: unknown }).action === 'update_issue');
+  assert.deepEqual(
+    mutationEvents.map((row) => (row.data as { outcome?: unknown }).outcome).sort(),
+    ['changed', 'observed']
+  );
+});
+
+test('parking an issue with no human reviewer still unassigns it completely', async () => {
+  const harness = createTestHarness({ manifest });
+  harness.seed({
+    issues: [{
+      id: 'issue-agent-maintainer-wait', companyId: 'company-1', projectId: 'project-1',
+      title: 'Agent maintainer wait', description: '', status: 'in_review',
+      assigneeAgentId: 'agent-2'
+    } as never]
+  });
+  await plugin.definition.setup(harness.ctx);
+
+  await __testing.updatePaperclipIssueState(harness.ctx, {
+    companyId: 'company-1',
+    issueId: 'issue-agent-maintainer-wait',
+    currentStatus: 'in_review',
+    syncContext: {
+      assignee: { kind: 'agent', id: 'agent-2' },
+      executionPolicy: null,
+      executionState: null
+    },
+    nextStatus: 'in_review',
+    clearAssignee: true,
+    transitionComment: '',
+    actionFingerprint: 'remote-action-agent-maintainer-wait'
+  });
+
+  const parked = await harness.ctx.issues.get('issue-agent-maintainer-wait', 'company-1') as unknown as Record<string, unknown>;
+  assert.equal(parked.assigneeAgentId, null);
+  assert.equal(parked.assigneeUserId, null);
+});
