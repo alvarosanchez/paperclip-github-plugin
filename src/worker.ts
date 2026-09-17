@@ -8403,6 +8403,16 @@ function normalizePaperclipIssueExecutionState(value: unknown): PaperclipIssueEx
   };
 }
 
+/**
+ * The human assignee exactly as the host stores it. `getPaperclipIssueAssigneePrincipal`
+ * answers "who owns this", which resolves to the agent whenever both ids are set; when the
+ * question is "is a person parked here", only the raw field is a safe answer.
+ */
+function readPaperclipIssueAssigneeUserId(issue: Issue | null | undefined): string | null {
+  if (!issue) return null;
+  return normalizeOptionalString((issue as unknown as Record<string, unknown>).assigneeUserId) ?? null;
+}
+
 function getPaperclipIssueAssigneePrincipal(issue: Issue): PaperclipIssueAssigneePrincipal | null {
   const record = issue as unknown as Record<string, unknown>;
   const assigneeAgentId = normalizeOptionalString(record.assigneeAgentId);
@@ -13931,6 +13941,9 @@ async function updatePaperclipIssueState(
     syncContext,
     nextAssignee
   });
+  const liveIssue = await ctx.issues.get(issueId, companyId);
+  const liveCurrentStatus = liveIssue?.status ?? currentStatus;
+  const liveSyncContext = liveIssue ? getPaperclipIssueSyncContext(liveIssue) : syncContext;
   const issuePatch: Record<string, unknown> = {
     status: nextStatus,
     ...(syncExecutionStatePatch !== undefined ? { executionState: syncExecutionStatePatch } : {}),
@@ -13947,7 +13960,15 @@ async function updatePaperclipIssueState(
     }
   } else if (clearAssignee) {
     issuePatch.assigneeAgentId = null;
-    issuePatch.assigneeUserId = null;
+    // Clearing the assignee means "no agent owns this any more", not "nobody owns this".
+    // A human assignee on an issue parked in maintainer wait is deliberate routing (the
+    // reviewer the work is waiting on), so keep it instead of unassigning the issue on
+    // every sync pass. Read the raw field rather than the normalized principal: the
+    // principal collapses to the agent whenever both ids are set, which would silently
+    // wipe the human. Patch it explicitly so the already-applied check still recognises
+    // the settled state and does not re-patch (and re-ledger) an unchanged issue.
+    issuePatch.assigneeUserId = readPaperclipIssueAssigneeUserId(liveIssue)
+      ?? (syncContext.assignee?.kind === 'user' ? syncContext.assignee.id : null);
   }
 
   if (statusWillChange && !trimmedTransitionComment) {
@@ -13957,9 +13978,6 @@ async function updatePaperclipIssueState(
     throw new Error('This Paperclip runtime does not expose issue comment creation, so GitHub Sync refused to update a Paperclip issue status without an explanatory comment.');
   }
 
-  const liveIssue = await ctx.issues.get(issueId, companyId);
-  const liveCurrentStatus = liveIssue?.status ?? currentStatus;
-  const liveSyncContext = liveIssue ? getPaperclipIssueSyncContext(liveIssue) : syncContext;
   const issuePatchAlreadyApplied = isPaperclipIssuePatchApplied({
     currentStatus: liveCurrentStatus,
     syncContext: liveSyncContext,
