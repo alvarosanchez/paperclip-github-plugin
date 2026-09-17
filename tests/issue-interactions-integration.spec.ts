@@ -929,6 +929,8 @@ test('parking an issue in maintainer wait keeps a human reviewer and drops only 
     issues: [{
       id: 'issue-human-maintainer-wait', companyId: 'company-1', projectId: 'project-1',
       title: 'Human maintainer wait', description: '', status: 'in_review',
+      // Both ids set on purpose: the sync context principal collapses to the agent here, so
+      // a preserve that reads the principal instead of the raw field would still wipe the human.
       assigneeAgentId: 'agent-2', assigneeUserId: 'human-reviewer-1'
     } as never]
   });
@@ -944,7 +946,7 @@ test('parking an issue in maintainer wait keeps a human reviewer and drops only 
     issueId: 'issue-human-maintainer-wait',
     currentStatus: 'in_review' as const,
     syncContext: {
-      assignee: { kind: 'user' as const, id: 'human-reviewer-1' },
+      assignee: { kind: 'agent' as const, id: 'agent-2' },
       executionPolicy: null,
       executionState: null
     },
@@ -962,8 +964,12 @@ test('parking an issue in maintainer wait keeps a human reviewer and drops only 
   assert.equal(updates, 1);
 
   // A second pass over the settled state must not re-patch the issue (and must not append a
-  // fresh ledger pair), or every sync would churn the human-reviewer parking.
-  await __testing.updatePaperclipIssueState(harness.ctx, params);
+  // fresh ledger pair), or every sync would churn the human-reviewer parking. The worker now
+  // derives a user principal, which is what a real follow-up sync pass would see.
+  await __testing.updatePaperclipIssueState(harness.ctx, {
+    ...params,
+    syncContext: { ...params.syncContext, assignee: { kind: 'user' as const, id: 'human-reviewer-1' } }
+  });
   assert.equal(updates, 1);
 
   const rows = await harness.ctx.entities.list({
