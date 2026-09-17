@@ -31728,3 +31728,156 @@ test('exposing the GitHub token requires a company and a token', async () => {
     /A GitHub token is required/
   );
 });
+
+test('sync stops re-opening a deliberately blocked issue while the PR state is unchanged', async () => {
+  const workerModule = await importFreshWorkerModule();
+  const { buildExternalPullRequestStateHash, shouldPreserveDeliberateBlockedWait } = workerModule.__testing;
+
+  // The shape that produced 3,233 `blocked -> in progress` comments on this instance: a PR whose
+  // required check is red for a reason nobody in the company can clear (the contributor CLA gate).
+  const claBlockedPullRequest = {
+    repositoryUrl: 'https://github.com/micronaut-projects/micronaut-gradle-plugin',
+    number: 1281,
+    headSha: 'c5378b46',
+    ciState: 'red',
+    mergeability: 'mergeable',
+    mergeStateStatus: 'blocked',
+    reviewDecision: 'review_required',
+    hasUnresolvedReviewThreads: false
+  };
+  const stateHash = buildExternalPullRequestStateHash([claBlockedPullRequest]);
+  assert.ok(stateHash);
+
+  // Pass 1: nothing recorded yet, so sync is free to move the issue back to active work.
+  assert.equal(shouldPreserveDeliberateBlockedWait({
+    currentStatus: 'blocked',
+    nextStatus: 'in_progress',
+    currentExternalStateHash: stateHash,
+    unblockedExternalStateHash: undefined
+  }), false);
+
+  // The agent re-blocks. Pass 2 sees the identical PR and must leave it alone.
+  assert.equal(shouldPreserveDeliberateBlockedWait({
+    currentStatus: 'blocked',
+    nextStatus: 'in_progress',
+    currentExternalStateHash: stateHash,
+    unblockedExternalStateHash: stateHash
+  }), true);
+
+  // A new head SHA is a real external change: routing resumes immediately.
+  const afterPush = buildExternalPullRequestStateHash([{ ...claBlockedPullRequest, headSha: 'deadbeef' }]);
+  assert.notEqual(afterPush, stateHash);
+  assert.equal(shouldPreserveDeliberateBlockedWait({
+    currentStatus: 'blocked',
+    nextStatus: 'in_progress',
+    currentExternalStateHash: afterPush,
+    unblockedExternalStateHash: stateHash
+  }), false);
+
+  // So is the CLA finally being signed (red -> green).
+  const afterCla = buildExternalPullRequestStateHash([{ ...claBlockedPullRequest, ciState: 'green' }]);
+  assert.equal(shouldPreserveDeliberateBlockedWait({
+    currentStatus: 'blocked',
+    nextStatus: 'in_review',
+    currentExternalStateHash: afterCla,
+    unblockedExternalStateHash: stateHash
+  }), false);
+
+  // The guard is only about leaving `blocked`; it never forces an issue into it.
+  assert.equal(shouldPreserveDeliberateBlockedWait({
+    currentStatus: 'in_review',
+    nextStatus: 'in_progress',
+    currentExternalStateHash: stateHash,
+    unblockedExternalStateHash: stateHash
+  }), false);
+
+  // An issue with no linked PR has no external state to compare, so it is never held back.
+  assert.equal(buildExternalPullRequestStateHash([]), undefined);
+  assert.equal(shouldPreserveDeliberateBlockedWait({
+    currentStatus: 'blocked',
+    nextStatus: 'todo',
+    currentExternalStateHash: undefined,
+    unblockedExternalStateHash: undefined
+  }), false);
+});
+
+test('external PR state hash is order-independent and covers every field sync reacts to', async () => {
+  const workerModule = await importFreshWorkerModule();
+  const { buildExternalPullRequestStateHash } = workerModule.__testing;
+  const base = {
+    repositoryUrl: 'https://github.com/micronaut-projects/micronaut-core',
+    number: 7,
+    headSha: 'aaa111',
+    ciState: 'red',
+    mergeability: 'mergeable',
+    mergeStateStatus: 'blocked',
+    reviewDecision: 'review_required',
+    hasUnresolvedReviewThreads: false
+  };
+  const other = { ...base, number: 9, headSha: 'bbb222' };
+
+  assert.equal(
+    buildExternalPullRequestStateHash([base, other]),
+    buildExternalPullRequestStateHash([other, base]),
+    'the hash must not depend on the order GitHub returned the pull requests'
+  );
+
+  for (const [field, value] of [
+    ['headSha', 'ccc333'],
+    ['ciState', 'green'],
+    ['mergeability', 'conflicting'],
+    ['mergeStateStatus', 'clean'],
+    ['reviewDecision', 'approved'],
+    ['hasUnresolvedReviewThreads', true]
+  ] as const) {
+    assert.notEqual(
+      buildExternalPullRequestStateHash([{ ...base, [field]: value }]),
+      buildExternalPullRequestStateHash([base]),
+      `${field} must be part of the external state hash`
+    );
+  }
+});
+
+test('a tombstoned GitHub issue link no longer counts as a live link', async () => {
+  const workerModule = await importFreshWorkerModule();
+  const { isLiveGitHubIssueLinkRecord } = workerModule.__testing;
+
+  // `issue.unlinkGitHubItem` tombstones the link and drops the registry entry. The registry-repair
+  // lookup consults link records to answer "is this GitHub issue already imported?", so a tombstone
+  // must not answer yes — otherwise sync re-adopts the issue that was just detached and never
+  // imports a fresh one.
+  assert.equal(isLiveGitHubIssueLinkRecord({ status: 'unlinked' }), false);
+  assert.equal(isLiveGitHubIssueLinkRecord({ status: 'linked' }), true);
+  assert.equal(isLiveGitHubIssueLinkRecord({}), true, 'records written before the status existed are live');
+});
+
+test('the unblock budget is only reset by a real transition into blocked', async () => {
+  const workerModule = await importFreshWorkerModule();
+  const { resolveUnblockedExternalStateHash } = workerModule.__testing;
+
+  // Leaving `blocked`: record what we reacted to, so an identical later pass is a no-op.
+  assert.equal(resolveUnblockedExternalStateHash({
+    currentStatus: 'blocked', nextStatus: 'in_progress',
+    currentExternalStateHash: 'state-a', previousHash: undefined
+  }), 'state-a');
+
+  // Staying `blocked` — another rule preserved it, or this guard did. Keeping the recorded value
+  // is the whole point: clearing it here drops the budget with no external change and the very
+  // next pass re-opens on the same PR state, which is the loop coming back.
+  assert.equal(resolveUnblockedExternalStateHash({
+    currentStatus: 'blocked', nextStatus: 'blocked',
+    currentExternalStateHash: 'state-a', previousHash: 'state-a'
+  }), 'state-a');
+
+  // A genuine transition into `blocked` starts a fresh budget.
+  assert.equal(resolveUnblockedExternalStateHash({
+    currentStatus: 'in_progress', nextStatus: 'blocked',
+    currentExternalStateHash: 'state-b', previousHash: 'state-a'
+  }), undefined);
+
+  // Untouched when the issue was never blocked and is not becoming blocked.
+  assert.equal(resolveUnblockedExternalStateHash({
+    currentStatus: 'in_review', nextStatus: 'in_progress',
+    currentExternalStateHash: 'state-b', previousHash: 'state-a'
+  }), 'state-a');
+});

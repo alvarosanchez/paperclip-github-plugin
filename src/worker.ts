@@ -429,6 +429,8 @@ interface ImportedIssueRecord {
   remoteActionFingerprint?: string;
   selectedPullRequestGate?: GitHubPullRequestReference;
   pendingRemoteActionWake?: PendingRemoteActionWake;
+  /** External PR state the last time sync pulled this issue out of `blocked`. See shouldPreserveDeliberateBlockedWait. */
+  unblockedExternalStateHash?: string;
   activationPending?: boolean;
   repositoryUrl?: string;
   paperclipProjectId?: string;
@@ -484,6 +486,8 @@ interface RemoteActionRecord {
   pendingWake?: PendingRemoteActionWake;
   linkedPullRequestCommentCounts?: GitHubPullRequestCommentCountRecord[];
   selectedPullRequestGate?: GitHubPullRequestReference;
+  /** External PR state the last time sync pulled this issue out of `blocked`. See shouldPreserveDeliberateBlockedWait. */
+  unblockedExternalStateHash?: string;
 }
 
 function createRemoteActionWakeFingerprint(remoteActionFingerprint: string): string {
@@ -9470,6 +9474,80 @@ function isGitHubPullRequestBlockedMaintainerApprovalWaitForSync(
     && (pullRequest.reviewDecision === 'unknown' || pullRequest.reviewDecision === 'review_required');
 }
 
+/**
+ * Hash of everything about the linked pull requests that sync reacts to. Two passes that produce
+ * the same hash saw the same GitHub, so any status decision they disagree on came from somewhere
+ * else — normally an agent that deliberately re-blocked the issue.
+ */
+function buildExternalPullRequestStateHash(
+  pullRequests: Pick<
+    GitHubPullRequestStatusSnapshot,
+    'repositoryUrl' | 'number' | 'headSha' | 'ciState' | 'mergeability' | 'mergeStateStatus' | 'reviewDecision' | 'hasUnresolvedReviewThreads'
+  >[]
+): string | undefined {
+  if (pullRequests.length === 0) return undefined;
+  const normalized = pullRequests
+    .map((pullRequest) => ({
+      repositoryUrl: pullRequest.repositoryUrl,
+      number: pullRequest.number,
+      headSha: pullRequest.headSha ?? null,
+      ciState: pullRequest.ciState,
+      mergeability: pullRequest.mergeability,
+      mergeStateStatus: pullRequest.mergeStateStatus,
+      reviewDecision: pullRequest.reviewDecision,
+      hasUnresolvedReviewThreads: pullRequest.hasUnresolvedReviewThreads
+    }))
+    .sort((left, right) =>
+      left.repositoryUrl.localeCompare(right.repositoryUrl) || left.number - right.number
+    );
+  return createHash('sha256').update(JSON.stringify(normalized)).digest('hex');
+}
+
+/**
+ * `blocked` is a deliberate decision by an agent or a human, and GitHub Sync owns *changes* in
+ * GitHub, not steady state. Without this guard a PR whose blocking condition nobody in this
+ * company can clear — the contributor CLA gate is the case that bit us, but an upstream baseline
+ * failure or an unreleased dependency behave the same — produced an endless loop: sync sees the
+ * red required check and moves the issue back to active work, the assignee wakes, re-establishes
+ * that it is still blocked externally, and the next sync pass repeats it. That loop wrote 3,233
+ * `blocked -> in progress` transition comments across 40 issues on this instance.
+ *
+ * So: once sync has moved an issue out of `blocked`, it may not do so again until the external
+ * state it reacted to actually changes. A new head SHA, a CI result, a review, a resolved
+ * conflict — anything sync can see — changes the hash and normal routing resumes immediately.
+ */
+/**
+ * Next value for the recorded "state sync last unblocked on", given what this pass decided.
+ *
+ * - leaving `blocked`: record the state we reacted to, so an identical later pass is a no-op;
+ * - entering `blocked` from elsewhere: a fresh block starts a fresh budget;
+ * - staying `blocked`: keep the recorded value. Clearing it here would drop the budget with no
+ *   external change and let the next pass re-open on the same PR state.
+ */
+function resolveUnblockedExternalStateHash(params: {
+  currentStatus: PaperclipIssueStatus;
+  nextStatus: PaperclipIssueStatus;
+  currentExternalStateHash?: string;
+  previousHash?: string;
+}): string | undefined {
+  const { currentStatus, nextStatus, currentExternalStateHash, previousHash } = params;
+  if (currentStatus === 'blocked' && nextStatus !== 'blocked') return currentExternalStateHash;
+  if (currentStatus !== 'blocked' && nextStatus === 'blocked') return undefined;
+  return previousHash;
+}
+
+function shouldPreserveDeliberateBlockedWait(params: {
+  currentStatus: PaperclipIssueStatus;
+  nextStatus: PaperclipIssueStatus;
+  currentExternalStateHash?: string;
+  unblockedExternalStateHash?: string;
+}): boolean {
+  return params.currentStatus === 'blocked'
+    && params.nextStatus !== 'blocked'
+    && params.currentExternalStateHash !== undefined
+    && params.unblockedExternalStateHash === params.currentExternalStateHash;
+}
+
 function shouldPreserveBlockedExternalPullRequestWait(params: {
   currentStatus: PaperclipIssueStatus;
   linkedPullRequests: GitHubPullRequestStatusSnapshot[];
@@ -10755,6 +10833,16 @@ function compareImportedPaperclipIssueCreatedAt(
   return leftTime - rightTime;
 }
 
+/**
+ * `unlinkPaperclipIssueFromGitHub` tombstones the link record (status `unlinked`) and drops the
+ * import-registry entry to say "this Paperclip issue is no longer the one for this GitHub issue".
+ * Nothing used to read that status back, so the registry-repair lookup re-adopted the very issue
+ * an operator had just detached and no fresh issue was ever imported. A tombstone is not a link.
+ */
+function isLiveGitHubIssueLinkRecord(record: Pick<GitHubIssueLinkRecord, 'status'>): boolean {
+  return record.status !== 'unlinked';
+}
+
 async function listImportedPaperclipIssuesForMapping(
   ctx: PluginSetupContext,
   mapping: RepositoryMapping
@@ -10773,6 +10861,10 @@ async function listImportedPaperclipIssuesForMapping(
   const linkedIssueRecords = await listGitHubIssueLinkRecords(ctx);
 
   for (const record of linkedIssueRecords) {
+    if (!isLiveGitHubIssueLinkRecord(record)) {
+      continue;
+    }
+
     if (record.data.repositoryUrl !== normalizedRepositoryUrl) {
       continue;
     }
@@ -15467,6 +15559,32 @@ async function synchronizePaperclipIssueStatuses(
       ) {
         nextStatus = 'blocked';
       }
+      const currentExternalStateHash = buildExternalPullRequestStateHash(snapshot.linkedPullRequests);
+      const previousUnblockedExternalStateHash = importedIssue.unblockedExternalStateHash;
+      if (shouldPreserveDeliberateBlockedWait({
+        currentStatus: paperclipIssue.status,
+        nextStatus,
+        currentExternalStateHash,
+        unblockedExternalStateHash: previousUnblockedExternalStateHash
+      })) {
+        nextStatus = 'blocked';
+      }
+      const nextUnblockedExternalStateHash = resolveUnblockedExternalStateHash({
+        currentStatus: paperclipIssue.status,
+        nextStatus,
+        currentExternalStateHash,
+        previousHash: previousUnblockedExternalStateHash
+      });
+      if (nextUnblockedExternalStateHash === undefined) {
+        delete importedIssue.unblockedExternalStateHash;
+      } else {
+        importedIssue.unblockedExternalStateHash = nextUnblockedExternalStateHash;
+      }
+      // Persist at the mutation point. The registry writes further down are conditional, so
+      // relying on them would lose this and the loop would come straight back.
+      if (nextUnblockedExternalStateHash !== previousUnblockedExternalStateHash) {
+        await persistImportRegistry();
+      }
 
       const shouldPreserveMaintainerWaitRouting = isHealthyMaintainerWaitTransition({
         currentStatus: paperclipIssue.status,
@@ -15998,6 +16116,37 @@ async function synchronizePaperclipPullRequestIssueStatuses(
         && await hasUnresolvedPaperclipIssueBlocker(ctx, paperclipIssue, mapping.companyId)
       ) {
         nextStatus = 'blocked';
+      }
+      const currentExternalStateHash = buildExternalPullRequestStateHash(
+        pullRequestSnapshots
+          .map((entry) => entry.pullRequest)
+          .filter((pullRequest): pullRequest is GitHubPullRequestStatusSnapshot => Boolean(pullRequest))
+      );
+      const previousUnblockedExternalStateHash = remoteAction.unblockedExternalStateHash;
+      if (shouldPreserveDeliberateBlockedWait({
+        currentStatus: paperclipIssue.status,
+        nextStatus,
+        currentExternalStateHash,
+        unblockedExternalStateHash: previousUnblockedExternalStateHash
+      })) {
+        nextStatus = 'blocked';
+      }
+      const nextUnblockedExternalStateHash = resolveUnblockedExternalStateHash({
+        currentStatus: paperclipIssue.status,
+        nextStatus,
+        currentExternalStateHash,
+        previousHash: previousUnblockedExternalStateHash
+      });
+      if (nextUnblockedExternalStateHash === undefined) {
+        delete remoteAction.unblockedExternalStateHash;
+      } else {
+        remoteAction.unblockedExternalStateHash = nextUnblockedExternalStateHash;
+      }
+      // Persist here, and re-resolve the record: `persistRemoteActionRegistry` is followed
+      // elsewhere by a registry re-read, which would otherwise discard this write.
+      if (nextUnblockedExternalStateHash !== previousUnblockedExternalStateHash) {
+        await persistRemoteActionRegistry();
+        remoteAction = remoteActionRegistry.find((record) => record.key === remoteActionKey) ?? remoteAction;
       }
 
       const shouldPreserveMaintainerWaitRouting = isHealthyMaintainerWaitTransition({
@@ -24574,6 +24723,10 @@ export function shouldStartWorkerHost(moduleUrl: string, entry = process.argv[1]
 
 export const __testing = {
   listIssueInteractionEvents,
+  isLiveGitHubIssueLinkRecord,
+  buildExternalPullRequestStateHash,
+  resolveUnblockedExternalStateHash,
+  shouldPreserveDeliberateBlockedWait,
   buildDirectPullRequestActionFingerprint,
   buildRemoteActionFingerprint,
   canReservePendingWake,
