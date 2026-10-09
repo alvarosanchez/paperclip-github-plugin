@@ -170,8 +170,8 @@ importers:
         specifier: ^22.0.1
         version: 22.0.1
       '@paperclipai/plugin-sdk':
-        specifier: ^2026.831.1
-        version: 2026.916.1(react@19.3.0)
+        specifier: ^2026.1005.0
+        version: 2026.1005.0(react@19.3.0)
       react:
         specifier: ^19.3.0
         version: 19.3.0
@@ -423,8 +423,8 @@ packages:
   '@octokit/types@18.0.0':
     resolution: {integrity: sha512-l6bAF43PNxkJp6g+W4PjoUSSkxHomXw2nOum5CTftJz1NlV3vu93NImgOYtLf6CbBUb5j+fiuzW0PPQ5JTSvZA==}
 
-  '@paperclipai/plugin-sdk@2026.916.1':
-    resolution: {integrity: sha512-Q5phElelSaOeMGvEg00mvEej8yFPU8PJv9UZRgelteuwCuEq5k5c5Ze36zsT6nXubbgF24opbFh2mFb0+qMs6Q==}
+  '@paperclipai/plugin-sdk@2026.1005.0':
+    resolution: {integrity: sha512-Ii54ukCFMujaRVGrRV/+RaudPmXka0FnSFF4Q8mTv8Gktb92okbPTtctf3zTlUNe908FG1tKoM90UGF2YwfVWA==}
     engines: {node: '>=24.11.0'}
     hasBin: true
     peerDependencies:
@@ -433,8 +433,8 @@ packages:
       react:
         optional: true
 
-  '@paperclipai/shared@2026.916.1':
-    resolution: {integrity: sha512-SrAuGkqt0hpuTJ82J0Hk6tYao/7I7djp3wzYaYT7rej3se9PnZ5cKT8HI5/du9TM0RLO7+fElhdVG7IDyGuIZg==}
+  '@paperclipai/shared@2026.1005.0':
+    resolution: {integrity: sha512-BHeRJ6L2QcZFYT4NoAmVi7LJwwj/XKxmLqZ9+cFsu6kjzPJvPo8ZsluSDGKhI7tETUCUQirsSTPhUdqzLDaDYg==}
     engines: {node: '>=24.11.0'}
 
   '@types/debug@4.1.13':
@@ -916,6 +916,9 @@ packages:
   style-to-object@1.0.14:
     resolution: {integrity: sha512-LIN7rULI0jBscWQYaSswptyderlarFkjQ+t79nzty8tcIAceVomEVlLzH5VP4Cmsv6MtKhs7qaAiwlcp+Mgaxw==}
 
+  three@0.185.1:
+    resolution: {integrity: sha512-5aojFCXKwnjBRZvUnt3WFfEcvUJgkN5LlijRFN95hMy8WVkG4I0QNcJE+OuWvuJ0bOdStrbfXn0pkd6/QyiAlg==}
+
   trim-lines@3.0.1:
     resolution: {integrity: sha512-kRj8B+YHZCc9kQYdWfJB2/oUl9rA99qbowYYBtr4ui4mZyAQ2JpvVBd/6U2YloATfqBhBTSMhTpgBHtU0Mf3Rg==}
 
@@ -1123,15 +1126,16 @@ snapshots:
     dependencies:
       '@octokit/openapi-types': 29.0.1
 
-  '@paperclipai/plugin-sdk@2026.916.1(react@19.3.0)':
+  '@paperclipai/plugin-sdk@2026.1005.0(react@19.3.0)':
     dependencies:
-      '@paperclipai/shared': 2026.916.1
+      '@paperclipai/shared': 2026.1005.0
       zod: 4.6.5
     optionalDependencies:
       react: 19.3.0
 
-  '@paperclipai/shared@2026.916.1':
+  '@paperclipai/shared@2026.1005.0':
     dependencies:
+      three: 0.185.1
       zod: 4.6.5
 
   '@types/debug@4.1.13':
@@ -1859,6 +1863,8 @@ snapshots:
   style-to-object@1.0.14:
     dependencies:
       inline-style-parser: 0.2.7
+
+  three@0.185.1: {}
 
   trim-lines@3.0.1: {}
 
