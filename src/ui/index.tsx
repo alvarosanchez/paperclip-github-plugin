@@ -216,6 +216,7 @@ interface SyncRunState {
   progress?: SyncProgressState;
   errorDetails?: SyncErrorDetails;
   recentFailures?: SyncFailureLogEntry[];
+  warnings?: string[];
 }
 
 type SyncProgressPhase = 'preparing' | 'importing' | 'syncing';
@@ -881,7 +882,6 @@ function getDisplaySyncState(
   setup: {
     hasToken: boolean;
     hasMappings: boolean;
-    hasBoardAccess: boolean;
   }
 ): SyncRunState {
   const configurationIssue = getSyncConfigurationIssue(syncState);
@@ -897,7 +897,8 @@ function getDisplaySyncState(
     return createIdleSyncState();
   }
 
-  if (configurationIssue === 'missing_board_access' && setup.hasBoardAccess) {
+  // Sync runs without board access, so a persisted `missing_board_access` error is stale.
+  if (configurationIssue === 'missing_board_access') {
     return createIdleSyncState();
   }
 
@@ -907,9 +908,6 @@ function getDisplaySyncState(
 function getSyncSetupIssue(params: {
   tokenStatus: TokenStatus;
   savedMappingCount: number;
-  boardAccessRequired: boolean;
-  boardAccessConfigured: boolean;
-  hasCompanyContext: boolean;
 }): SyncConfigurationIssue | null {
   if (params.tokenStatus !== 'valid') {
     return 'missing_token';
@@ -919,26 +917,15 @@ function getSyncSetupIssue(params: {
     return 'missing_mapping';
   }
 
-  if (params.boardAccessRequired && (!params.hasCompanyContext || !params.boardAccessConfigured)) {
-    return 'missing_board_access';
-  }
-
   return null;
 }
 
-function getSyncSetupMessage(
-  issue: SyncConfigurationIssue | null,
-  hasCompanyContext: boolean
-): string {
+function getSyncSetupMessage(issue: SyncConfigurationIssue | null): string {
   switch (issue) {
     case 'missing_token':
       return 'Add a valid token to enable sync.';
     case 'missing_mapping':
       return 'Save a repository to enable sync.';
-    case 'missing_board_access':
-      return hasCompanyContext
-        ? 'Connect Paperclip board access to enable sync on this authenticated deployment.'
-        : 'Open plugin settings inside a company to connect required Paperclip board access.';
     default:
       return 'Ready to sync.';
   }
@@ -7592,15 +7579,6 @@ function getKpiDashboardSummary(params: {
     };
   }
 
-  if (params.syncIssue === 'missing_board_access') {
-    return {
-      label: 'Board access required',
-      tone: 'warning',
-      title: 'Connect Paperclip board access',
-      body: 'This deployment needs board access before KPI history can refresh.'
-    };
-  }
-
   if (params.metrics.status === 'no_mappings') {
     return {
       label: 'Setup required',
@@ -7638,7 +7616,6 @@ function getKpiDashboardSummary(params: {
 
 function getDashboardSummary(params: {
   syncIssue: SyncConfigurationIssue | null;
-  hasCompanyContext: boolean;
   syncState: SyncRunState;
   runningSync: boolean;
   scheduleFrequencyMinutes: number;
@@ -7661,15 +7638,6 @@ function getDashboardSummary(params: {
         tone: 'warning',
         title: 'Add your first repository',
         body: 'Open settings to connect one repository to a Paperclip project.'
-      };
-    case 'missing_board_access':
-      return {
-        label: 'Board access required',
-        tone: 'warning',
-        title: 'Connect Paperclip board access',
-        body: params.hasCompanyContext
-          ? 'This Paperclip deployment requires board access before worker-side sync can use local REST endpoints.'
-          : 'Open plugin settings inside a company to connect required Paperclip board access for this deployment.'
       };
   }
 
@@ -7711,6 +7679,15 @@ function getDashboardSummary(params: {
       tone: 'neutral',
       title: 'Sync cancelled',
       body: params.syncState.message ?? 'The last GitHub sync was cancelled before it finished.'
+    };
+  }
+
+  if (params.syncState.status === 'success' && params.syncState.warnings?.length) {
+    return {
+      label: 'Limited',
+      tone: 'warning',
+      title: 'Sync ran with reduced features',
+      body: params.syncState.warnings.join(' ')
     };
   }
 
@@ -11644,7 +11621,6 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
   const boardAccessConfigured = Boolean(form.paperclipBoardAccessConfigured);
   const boardAccessRequired = boardAccessRequirement.required;
   const boardAccessSettingsVisible = boardAccessRequirement.settingsVisible;
-  const boardAccessReady = !boardAccessRequired || (hasCompanyContext && boardAccessConfigured);
   const tokenStatus = tokenStatusOverride ?? (hasSavedToken ? 'valid' : 'required');
   const tokenTone: Tone = tokenStatus === 'valid' ? 'success' : tokenStatus === 'invalid' ? 'danger' : 'warning';
   const tokenBannerLabel = tokenStatus === 'valid' ? 'Token valid' : tokenStatus === 'invalid' ? 'Token invalid' : 'Token required';
@@ -11707,7 +11683,7 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
       : boardAccessConfigured
         ? 'Connected'
         : boardAccessRequired
-          ? 'Required'
+          ? 'Recommended'
           : boardAccessRequirement.status === 'loading'
             ? 'Checking'
             : 'Optional';
@@ -11734,17 +11710,13 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
   const repositoriesSectionDescription = '';
   const syncSetupIssue = getSyncSetupIssue({
     tokenStatus,
-    savedMappingCount,
-    boardAccessRequired,
-    boardAccessConfigured,
-    hasCompanyContext
+    savedMappingCount
   });
   const syncUnlocked = syncSetupIssue === null;
-  const syncSetupMessage = getSyncSetupMessage(syncSetupIssue, hasCompanyContext);
+  const syncSetupMessage = getSyncSetupMessage(syncSetupIssue);
   const displaySyncState = getDisplaySyncState(form.syncState, {
     hasToken: tokenStatus === 'valid',
-    hasMappings: savedMappingCount > 0,
-    hasBoardAccess: boardAccessReady
+    hasMappings: savedMappingCount > 0
   });
   const syncPersistedRunning = displaySyncState.status === 'running';
   const syncStartPending = runningSync && !syncPersistedRunning;
@@ -11821,7 +11793,7 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
             ? `Connected as ${boardAccessIdentity}.`
             : 'Connected.'
           : boardAccessRequired
-            ? 'Required for sync.'
+            ? 'Recommended.'
             : boardAccessRequirement.status === 'loading'
               ? 'Checking requirement.'
               : 'Optional.';
@@ -12769,7 +12741,7 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
                           ? `Connected as ${boardAccessIdentity}`
                           : 'Connected'
                         : boardAccessRequired
-                          ? 'Required'
+                          ? 'Recommended'
                           : boardAccessRequirement.status === 'loading'
                             ? 'Checking requirement'
                             : 'Optional'}
@@ -12778,7 +12750,7 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
                       {boardAccessConfigured
                         ? 'Used for Paperclip API calls.'
                         : boardAccessRequired
-                          ? 'Required in authenticated deployments.'
+                          ? 'Sync runs without it. Creating missing labels, assigning users, and the agent tool-access check need it.'
                           : boardAccessRequirement.status === 'loading'
                             ? 'Checking whether it is required.'
                             : 'Only needed when Paperclip API calls require sign-in.'}
@@ -13233,7 +13205,7 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
                 {!syncUnlocked ? (
                   <div className="ghsync__locked">
                     <div>
-                      <strong>{syncSetupIssue === 'missing_board_access' ? 'Paperclip board access is required' : 'Manual sync is locked'}</strong>
+                      <strong>Manual sync is locked</strong>
                       <span>{syncSetupMessage}</span>
                     </div>
                     <span className="ghsync__badge ghsync__badge--neutral">Locked</span>
@@ -13278,6 +13250,16 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
                     </div>
                   </>
                 )}
+
+                {syncUnlocked && !boardAccessConfigured && displaySyncState.warnings?.length ? (
+                  <div className="ghsync__sync-summary ghsync__sync-summary--info">
+                    <div>
+                      <strong>Sync ran with reduced features</strong>
+                      <span>{displaySyncState.warnings.join(' ')}</span>
+                    </div>
+                    <span className="ghsync__badge ghsync__badge--warning">Limited</span>
+                  </div>
+                ) : null}
 
                 <SyncDiagnosticsPanel
                   syncState={displaySyncState}
@@ -13444,7 +13426,6 @@ export function GitHubSyncDashboardWidget(): React.JSX.Element {
   const [settingsHref, setSettingsHref] = useState(SETTINGS_INDEX_HREF);
   const [cachedSettings, setCachedSettings] = useState<GitHubSyncSettings | null>(null);
   const themeMode = useResolvedThemeMode();
-  const boardAccessRequirement = usePaperclipBoardAccessRequirement();
 
   const theme = themeMode === 'light' ? LIGHT_PALETTE : DARK_PALETTE;
   const themeVars = buildThemeVars(theme, themeMode);
@@ -13452,23 +13433,15 @@ export function GitHubSyncDashboardWidget(): React.JSX.Element {
   const showInitialLoadingState = settings.loading && !settings.data && !cachedSettings;
   const syncState = current.syncState ?? EMPTY_SETTINGS.syncState;
   const tokenValid = Boolean(current.githubTokenConfigured);
-  const hasCompanyContext = Boolean(hostContext.companyId);
-  const boardAccessConfigured = Boolean(current.paperclipBoardAccessConfigured);
-  const boardAccessRequired = boardAccessRequirement.required;
-  const boardAccessReady = !boardAccessRequired || (hasCompanyContext && boardAccessConfigured);
   const savedMappingCount = getComparableMappings(current.mappings ?? []).length;
   const syncSetupIssue = getSyncSetupIssue({
     tokenStatus: tokenValid ? 'valid' : 'required',
-    savedMappingCount,
-    boardAccessRequired,
-    boardAccessConfigured,
-    hasCompanyContext
+    savedMappingCount
   });
-  const syncSetupMessage = getSyncSetupMessage(syncSetupIssue, hasCompanyContext);
+  const syncSetupMessage = getSyncSetupMessage(syncSetupIssue);
   const displaySyncState = getDisplaySyncState(syncState, {
     hasToken: tokenValid,
-    hasMappings: savedMappingCount > 0,
-    hasBoardAccess: boardAccessReady
+    hasMappings: savedMappingCount > 0
   });
   const syncUnlocked = syncSetupIssue === null;
   const syncPersistedRunning = displaySyncState.status === 'running';
@@ -13479,7 +13452,6 @@ export function GitHubSyncDashboardWidget(): React.JSX.Element {
   const scheduleDescription = formatScheduleFrequency(scheduleFrequencyMinutes);
   const summary = getDashboardSummary({
     syncIssue: syncSetupIssue,
-    hasCompanyContext,
     syncState: displaySyncState,
     runningSync,
     scheduleFrequencyMinutes
@@ -13506,14 +13478,10 @@ export function GitHubSyncDashboardWidget(): React.JSX.Element {
         ? 'Open settings to validate GitHub access.'
         : syncSetupIssue === 'missing_mapping'
           ? 'Open settings and add a repository. The Paperclip project will be created if it does not exist.'
-          : syncSetupIssue === 'missing_board_access'
-            ? hasCompanyContext
-              ? 'Open settings and connect Paperclip board access before running sync.'
-              : 'Open plugin settings inside a company to connect required Paperclip board access.'
-            : displaySyncState.message
-              ?? (displaySyncState.checkedAt
-                ? `Last checked ${lastSync}.`
-                : `Automatic sync runs ${scheduleDescription}.`);
+          : displaySyncState.message
+            ?? (displaySyncState.checkedAt
+              ? `Last checked ${lastSync}.`
+              : `Automatic sync runs ${scheduleDescription}.`);
 
   useEffect(() => {
     if (settings.data) {
@@ -13807,7 +13775,6 @@ export function GitHubSyncKpiDashboardWidget(): React.JSX.Element {
   const [cachedSettings, setCachedSettings] = useState<GitHubSyncSettings | null>(null);
   const [cachedDashboardMetrics, setCachedDashboardMetrics] = useState<DashboardMetricsData | null>(null);
   const themeMode = useResolvedThemeMode();
-  const boardAccessRequirement = usePaperclipBoardAccessRequirement();
 
   const theme = themeMode === 'light' ? LIGHT_PALETTE : DARK_PALETTE;
   const themeVars = buildThemeVars(theme, themeMode);
@@ -13818,21 +13785,14 @@ export function GitHubSyncKpiDashboardWidget(): React.JSX.Element {
   const tokenValid = Boolean(current.githubTokenConfigured);
   const hasCompanyContext = Boolean(hostContext.companyId);
   const showInitialKpiLoadingState = hasCompanyContext && dashboardMetrics.loading && !dashboardMetrics.data && !cachedDashboardMetrics;
-  const boardAccessConfigured = Boolean(current.paperclipBoardAccessConfigured);
-  const boardAccessRequired = boardAccessRequirement.required;
-  const boardAccessReady = !boardAccessRequired || (hasCompanyContext && boardAccessConfigured);
   const savedMappingCount = getComparableMappings(current.mappings ?? []).length;
   const syncSetupIssue = getSyncSetupIssue({
     tokenStatus: tokenValid ? 'valid' : 'required',
-    savedMappingCount,
-    boardAccessRequired,
-    boardAccessConfigured,
-    hasCompanyContext
+    savedMappingCount
   });
   const displaySyncState = getDisplaySyncState(syncState, {
     hasToken: tokenValid,
-    hasMappings: savedMappingCount > 0,
-    hasBoardAccess: boardAccessReady
+    hasMappings: savedMappingCount > 0
   });
   const syncPersistedRunning = displaySyncState.status === 'running';
   const scheduleDescription = formatScheduleFrequency(normalizeScheduleFrequencyMinutes(current.scheduleFrequencyMinutes));
@@ -13859,8 +13819,6 @@ export function GitHubSyncKpiDashboardWidget(): React.JSX.Element {
             .join(' · ')
       : syncSetupIssue === 'missing_token'
         ? 'Finish setup to refresh KPI history.'
-        : syncSetupIssue === 'missing_board_access'
-          ? 'Connect board access to refresh KPI history.'
       : !hasCompanyContext
         ? 'Open in a company dashboard.'
         : currentDashboardMetrics.status === 'no_mappings'
@@ -14471,7 +14429,6 @@ function useGitHubSyncButtonController(props: {
   const [runningSync, setRunningSync] = useState(false);
   const [cancellingSync, setCancellingSync] = useState(false);
   const [syncStateOverride, setSyncStateOverride] = useState<SyncRunState | null>(null);
-  const boardAccessRequirement = usePaperclipBoardAccessRequirement();
   const state = toolbarState.data ?? {
     kind: props.entityType ?? 'global',
     visible: !props.entityType,
@@ -14496,18 +14453,6 @@ function useGitHubSyncButtonController(props: {
           ? state.syncState
           : syncStateOverride
       : state.syncState;
-  const hasCompanyContext = Boolean(props.companyId);
-  const boardAccessConfigured = Boolean(settingsRegistration.data?.paperclipBoardAccessConfigured);
-  const boardAccessSetupIssue: SyncConfigurationIssue | null =
-    state.canRun && boardAccessRequirement.required && (!hasCompanyContext || !boardAccessConfigured)
-      ? 'missing_board_access'
-      : null;
-  const effectiveCanRun = state.canRun && !boardAccessSetupIssue;
-  const effectiveMessage =
-    boardAccessSetupIssue
-      ? getSyncSetupMessage(boardAccessSetupIssue, hasCompanyContext)
-      : state.message;
-  const effectiveLabel = boardAccessSetupIssue ? 'Board access required' : state.label;
   const allowToolbarCancellation = Boolean(props.entityType);
   const toolbarButtonState = resolveToolbarButtonState({
     loading: toolbarState.loading,
@@ -14515,8 +14460,8 @@ function useGitHubSyncButtonController(props: {
     cancellingSync,
     syncState: effectiveSyncState,
     allowToolbarCancellation,
-    effectiveCanRun,
-    effectiveLabel
+    effectiveCanRun: state.canRun,
+    effectiveLabel: state.label
   });
   const {
     busy: toolbarButtonBusy,
@@ -14612,8 +14557,8 @@ function useGitHubSyncButtonController(props: {
 
   async function handleRunSync(): Promise<void> {
     try {
-      if (!effectiveCanRun) {
-        throw new Error(effectiveMessage ?? 'Unable to run GitHub sync.');
+      if (!state.canRun) {
+        throw new Error(state.message ?? 'Unable to run GitHub sync.');
       }
 
       setRunningSync(true);
@@ -14703,7 +14648,7 @@ function useGitHubSyncButtonController(props: {
 
   return {
     visible: props.forceVisible ? true : state.visible,
-    title: toolbarState.error?.message ?? effectiveMessage ?? 'GitHub sync',
+    title: toolbarState.error?.message ?? state.message ?? 'GitHub sync',
     busy: toolbarButtonBusy,
     disabled: toolbarButtonDisabled,
     label: toolbarButtonLabel,

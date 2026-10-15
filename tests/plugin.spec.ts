@@ -28495,16 +28495,114 @@ test('sync.runNow scopes a company-level manual sync to the requested company', 
   assert.equal(result.syncState.errorDetails?.configurationIssue, 'missing_mapping');
 });
 
-test('worker blocks sync when the Paperclip deployment is authenticated and board access is missing', async () => {
+const BOARDLESS_PAPERCLIP_API_BASE_URL = 'https://paperclip.example.test';
+
+// Serves an authenticated Paperclip health response plus one open pull request with failing CI.
+// Every other request to the Paperclip origin is recorded so tests can assert no REST call happened.
+function createBoardlessPullRequestFollowThroughFetch(params: {
+  repository: string;
+  pullRequestNumber: number;
+  paperclipRequests: string[];
+}): typeof fetch {
+  return async (input, init) => {
+    const requestUrl = getRequestUrl(input);
+    const requestPathname = getDecodedRequestPathname(input);
+
+    if (requestUrl.startsWith(BOARDLESS_PAPERCLIP_API_BASE_URL)) {
+      params.paperclipRequests.push(requestUrl);
+      if (requestUrl === `${BOARDLESS_PAPERCLIP_API_BASE_URL}/api/health`) {
+        return jsonResponse({
+          deploymentMode: 'authenticated',
+          deploymentExposure: 'public',
+          authReady: true
+        });
+      }
+
+      return htmlResponse('<html><body>Sign in</body></html>');
+    }
+
+    if (requestPathname === `/repos/${params.repository}/pulls/${params.pullRequestNumber}`) {
+      return jsonResponse({
+        number: params.pullRequestNumber,
+        title: 'Follow-through PR',
+        body: 'Waiting on review and CI.',
+        html_url: `https://github.com/${params.repository}/pull/${params.pullRequestNumber}`,
+        state: 'open',
+        merged: false
+      });
+    }
+
+    if (requestPathname === '/graphql') {
+      const { query, variables } = getGraphqlRequest(init);
+      if (variables.pullRequestNumber === params.pullRequestNumber) {
+        if (query.includes('query GitHubPullRequestReviewThreads')) {
+          return graphqlResponse({
+            repository: {
+              pullRequest: {
+                reviewThreads: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [] }
+              }
+            }
+          });
+        }
+
+        if (query.includes('query GitHubPullRequestCiContexts')) {
+          return graphqlResponse({
+            repository: {
+              pullRequest: {
+                mergeable: 'MERGEABLE',
+                mergeStateStatus: 'UNSTABLE',
+                statusCheckRollup: {
+                  contexts: {
+                    pageInfo: { hasNextPage: false, endCursor: null },
+                    nodes: [{ __typename: 'CheckRun', status: 'COMPLETED', conclusion: 'FAILURE' }]
+                  }
+                }
+              }
+            }
+          });
+        }
+      }
+    }
+
+    throw new Error(`Unexpected fetch during board-less follow-through test: ${requestUrl}`);
+  };
+}
+
+function recordPaperclipSdkFollowThrough(harness: ReturnType<typeof createTestHarness>) {
+  const statusUpdates: Array<{ issueId: string; status: unknown }> = [];
+  const wakeups: string[] = [];
+  const comments: string[] = [];
+  const originalUpdate = harness.ctx.issues.update.bind(harness.ctx.issues);
+  const originalRequestWakeup = harness.ctx.issues.requestWakeup.bind(harness.ctx.issues);
+  const originalCreateComment = harness.ctx.issues.createComment.bind(harness.ctx.issues);
+
+  harness.ctx.issues.update = async (issueId, patch, companyId) => {
+    if (patch && typeof patch === 'object' && 'status' in patch) {
+      statusUpdates.push({ issueId, status: (patch as { status?: unknown }).status });
+    }
+    return originalUpdate(issueId, patch, companyId);
+  };
+  harness.ctx.issues.requestWakeup = async (issueId, companyId, options) => {
+    wakeups.push(issueId);
+    return originalRequestWakeup(issueId, companyId, options);
+  };
+  harness.ctx.issues.createComment = async (issueId, body, companyId) => {
+    comments.push(body);
+    return originalCreateComment(issueId, body, companyId);
+  };
+
+  return { statusUpdates, wakeups, comments };
+}
+
+test('worker syncs a mapped repository through the SDK when an authenticated deployment has no board access', async () => {
   const harness = createTestHarness({
     manifest,
     config: {
-      githubTokenRef: 'github-secret-ref',
-      paperclipApiBaseUrl: 'https://paperclip.example.test'
+      githubToken: TEST_GITHUB_TOKEN,
+      paperclipApiBaseUrl: BOARDLESS_PAPERCLIP_API_BASE_URL
     }
   });
   await plugin.definition.setup(harness.ctx);
-
   await harness.performAction('settings.saveRegistration', {
     mappings: [
       {
@@ -28519,57 +28617,231 @@ test('worker blocks sync when the Paperclip deployment is authenticated and boar
       status: 'idle'
     }
   });
-
-  harness.ctx.secrets.resolve = async (secretRef) => {
-    assert.equal(secretRefId(secretRef), 'github-secret-ref');
-    return 'github-token';
-  };
-
+  harness.ctx.agents.get = async (agentId, companyId) => agentId === 'engineer-agent' && companyId === 'company-1'
+    ? { id: agentId, companyId, name: 'Engineer' } as never
+    : null;
+  const issue = await harness.ctx.issues.create({
+    companyId: 'company-1',
+    projectId: 'project-1',
+    title: 'Board-less mapped PR follow-through',
+    description: 'Red CI should hand the issue back to the engineer.'
+  });
+  await upsertDirectPullRequestLink(harness, issue.id, 89, { followThroughAssigneeAgentId: 'engineer-agent' });
+  await harness.ctx.issues.update(issue.id, { status: 'in_review' }, 'company-1');
+  const recorded = recordPaperclipSdkFollowThrough(harness);
+  const paperclipRequests: string[] = [];
   const originalFetch = globalThis.fetch;
-  const requestedUrls: string[] = [];
-
-  globalThis.fetch = async (input) => {
-    const url = getRequestUrl(input);
-    requestedUrls.push(url);
-
-    if (url === 'https://paperclip.example.test/api/health') {
-      return jsonResponse({
-        deploymentMode: 'authenticated',
-        deploymentExposure: 'public',
-        authReady: true
-      });
-    }
-
-    throw new Error(`GitHub sync should have been blocked before reaching ${url}`);
-  };
+  globalThis.fetch = createBoardlessPullRequestFollowThroughFetch({
+    repository: 'paperclipai/example-repo',
+    pullRequestNumber: 89,
+    paperclipRequests
+  });
 
   try {
     const result = await harness.performAction('sync.runNow', {
-      waitForCompletion: true,
-      paperclipApiBaseUrl: 'https://paperclip.example.test'
+      companyId: 'company-1',
+      issueId: issue.id,
+      waitForCompletion: true
     }) as {
-      syncState: {
-        status: string;
-        message?: string;
-        lastRunTrigger?: string;
-        errorDetails?: {
-          phase?: string;
-          configurationIssue?: string;
-          suggestedAction?: string;
-        };
-      };
+      syncState: { status: string; warnings?: string[]; errorDetails?: unknown };
     };
 
-    assert.equal(result.syncState.status, 'error');
-    assert.equal(
-      result.syncState.message,
-      'Connect Paperclip board access before running sync on this authenticated deployment.'
+    assert.equal(result.syncState.status, 'success');
+    assert.equal(result.syncState.errorDetails, undefined);
+    assert.equal(result.syncState.warnings?.length, 1);
+    assert.match(result.syncState.warnings?.[0] ?? '', /board access is not connected/i);
+    assert.match(result.syncState.warnings?.[0] ?? '', /labels/);
+    assert.match(result.syncState.warnings?.[0] ?? '', /assigning issues to users/);
+    assert.match(result.syncState.warnings?.[0] ?? '', /tool-access/);
+
+    assert.equal((await harness.ctx.issues.get(issue.id, 'company-1'))?.status, 'in_progress');
+    assert.deepEqual(recorded.statusUpdates, [{ issueId: issue.id, status: 'in_progress' }]);
+    assert.deepEqual(recorded.wakeups, [issue.id]);
+    assert.equal(recorded.comments.length, 1);
+    assert.match(recorded.comments[0] ?? '', /failing CI/);
+    assert.deepEqual(paperclipRequests, [`${BOARDLESS_PAPERCLIP_API_BASE_URL}/api/health`]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('scheduled sync follows a link-only third-party pull request through the SDK when an authenticated deployment has no board access', async () => {
+  const harness = createTestHarness({
+    manifest,
+    config: {
+      githubToken: TEST_GITHUB_TOKEN,
+      paperclipApiBaseUrl: BOARDLESS_PAPERCLIP_API_BASE_URL
+    }
+  });
+  await plugin.definition.setup(harness.ctx);
+  harness.ctx.agents.get = async (agentId, companyId) => agentId === 'engineer-agent' && companyId === 'company-1'
+    ? { id: agentId, companyId, name: 'Engineer' } as never
+    : null;
+  const issue = await harness.ctx.issues.create({
+    companyId: 'company-1',
+    projectId: 'project-1',
+    title: 'Board-less third-party PR follow-through',
+    description: 'No repository mapping, only a linked PR.'
+  });
+  const paperclipRequests: string[] = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = createBoardlessPullRequestFollowThroughFetch({
+    repository: 'third-party/external',
+    pullRequestNumber: 78,
+    paperclipRequests
+  });
+
+  try {
+    const link = await harness.executeTool('link_github_item', {
+      kind: 'pull_request',
+      paperclipIssueId: issue.id,
+      reference: 'https://github.com/third-party/external/pull/78',
+      followThroughAssigneeAgentId: 'engineer-agent'
+    }, {
+      companyId: 'company-1'
+    });
+    assert.ok(!link.error, link.error);
+    await harness.ctx.issues.update(issue.id, { status: 'in_review' }, 'company-1');
+    const recorded = recordPaperclipSdkFollowThrough(harness);
+
+    await harness.runJob('sync.github-issues', {
+      trigger: 'schedule',
+      scheduledAt: '2026-04-27T10:00:00.000Z'
+    });
+
+    const savedSettings = harness.getState({
+      scopeKind: 'instance',
+      stateKey: 'paperclip-github-plugin-settings'
+    }) as {
+      mappings: unknown[];
+      syncStateByCompanyId?: Record<string, { status: string; lastRunTrigger?: string; warnings?: string[] }>;
+    };
+    const syncState = savedSettings.syncStateByCompanyId?.['company-1'];
+
+    assert.deepEqual(savedSettings.mappings, []);
+    assert.equal(syncState?.status, 'success');
+    assert.equal(syncState?.lastRunTrigger, 'schedule');
+    assert.match(syncState?.warnings?.[0] ?? '', /board access is not connected/i);
+    assert.equal((await harness.ctx.issues.get(issue.id, 'company-1'))?.status, 'in_progress');
+    assert.deepEqual(recorded.statusUpdates, [{ issueId: issue.id, status: 'in_progress' }]);
+    assert.deepEqual(recorded.wakeups, [issue.id]);
+    assert.equal(recorded.comments.length, 1);
+    assert.match(recorded.comments[0] ?? '', /failing CI/);
+    assert.deepEqual(paperclipRequests, [`${BOARDLESS_PAPERCLIP_API_BASE_URL}/api/health`]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('worker leaves GitHub labels unmapped without failing imports or status sync when an authenticated deployment has no board access', async () => {
+  const harness = createTestHarness({
+    manifest,
+    config: {
+      githubToken: TEST_GITHUB_TOKEN,
+      paperclipApiBaseUrl: BOARDLESS_PAPERCLIP_API_BASE_URL
+    }
+  });
+  await plugin.definition.setup(harness.ctx);
+  await harness.performAction('settings.saveRegistration', {
+    mappings: [
+      {
+        id: 'mapping-a',
+        repositoryUrl: 'paperclipai/example-repo',
+        paperclipProjectName: 'Engineering',
+        paperclipProjectId: 'project-1',
+        companyId: 'company-1'
+      }
+    ],
+    syncState: {
+      status: 'idle'
+    }
+  });
+  const paperclipRequests: string[] = [];
+  let githubIssueState: 'open' | 'closed' = 'open';
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input, init) => {
+    const requestUrl = getRequestUrl(input);
+    const url = new URL(requestUrl);
+
+    if (requestUrl.startsWith(BOARDLESS_PAPERCLIP_API_BASE_URL)) {
+      paperclipRequests.push(requestUrl);
+      if (url.pathname === '/api/health') {
+        return jsonResponse({ deploymentMode: 'authenticated', deploymentExposure: 'public', authReady: true });
+      }
+
+      return htmlResponse('<html><body>Sign in</body></html>');
+    }
+
+    if (url.pathname === '/repos/paperclipai/example-repo/issues' && ['all', 'open'].includes(url.searchParams.get('state') ?? '')) {
+      return jsonResponse([
+        {
+          id: 2101,
+          number: 21,
+          title: 'Labelled import without board access',
+          body: 'Imported body',
+          html_url: 'https://github.com/paperclipai/example-repo/issues/21',
+          state: githubIssueState,
+          state_reason: githubIssueState === 'closed' ? 'completed' : null,
+          labels: [{ name: 'needs board token', color: '0052cc' }]
+        }
+      ]);
+    }
+
+    if (url.pathname === '/graphql') {
+      const { query, variables } = getGraphqlRequest(init);
+      if (query.includes('query GitHubIssueParentRelationships')) {
+        return graphqlIssueParentRelationshipsResponse([{ issueNumber: 21 }]);
+      }
+
+      if (query.includes('query GitHubRepositoryOpenIssueLinkedPullRequests')) {
+        return graphqlResponse({
+          repository: { issues: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [] } }
+        });
+      }
+
+      if (query.includes('query GitHubIssueStatusSnapshot') && variables.issueNumber === 21) {
+        return graphqlResponse({
+          repository: {
+            issue: {
+              number: 21,
+              state: githubIssueState === 'closed' ? 'CLOSED' : 'OPEN',
+              stateReason: githubIssueState === 'closed' ? 'COMPLETED' : null,
+              comments: { totalCount: 0 },
+              closedByPullRequestsReferences: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [] }
+            }
+          }
+        });
+      }
+    }
+
+    throw new Error(`Unexpected fetch during board-less label test: ${requestUrl}`);
+  };
+
+  try {
+    const imported = await harness.performAction('sync.runNow', {
+      companyId: 'company-1',
+      waitForCompletion: true
+    }) as { syncState: { status: string; createdIssuesCount?: number; warnings?: string[] } };
+
+    assert.equal(imported.syncState.status, 'success');
+    assert.equal(imported.syncState.createdIssuesCount, 1);
+    assert.match(imported.syncState.warnings?.[0] ?? '', /board access is not connected/i);
+    const [paperclipIssue] = await harness.ctx.issues.list({ companyId: 'company-1', projectId: 'project-1' });
+    assert.ok(paperclipIssue);
+    assert.notEqual(paperclipIssue.status, 'done');
+
+    githubIssueState = 'closed';
+    const resynced = await harness.performAction('sync.runNow', {
+      companyId: 'company-1',
+      waitForCompletion: true
+    }) as { syncState: { status: string } };
+
+    assert.equal(resynced.syncState.status, 'success');
+    assert.equal((await harness.ctx.issues.get(paperclipIssue.id, 'company-1'))?.status, 'done');
+    assert.ok(
+      paperclipRequests.every((requestUrl) => requestUrl === `${BOARDLESS_PAPERCLIP_API_BASE_URL}/api/health`),
+      `Expected only health probes, received ${JSON.stringify(paperclipRequests)}`
     );
-    assert.equal(result.syncState.lastRunTrigger, 'manual');
-    assert.equal(result.syncState.errorDetails?.phase, 'configuration');
-    assert.equal(result.syncState.errorDetails?.configurationIssue, 'missing_board_access');
-    assert.match(result.syncState.errorDetails?.suggestedAction ?? '', /connect Paperclip board access/i);
-    assert.deepEqual(requestedUrls, ['https://paperclip.example.test/api/health']);
   } finally {
     globalThis.fetch = originalFetch;
   }
