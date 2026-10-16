@@ -8802,6 +8802,24 @@ function isHealthyMaintainerWaitTransition(params: {
     && isClearableMaintainerWaitExecutionState(syncContext.executionState);
 }
 
+/**
+ * An agent that holds an open issue while its pull request waits on a reviewer or a maintainer is
+ * the one gating that wait (typically the product owner after hand-back), the same way a parked
+ * human assignee is, so moving into or staying in `in_review` must not unassign it. A `done` or
+ * `cancelled` issue carries no live routing, so its stale agent assignee is still cleared.
+ */
+function shouldKeepAgentAssigneeDuringPullRequestWait(params: {
+  currentStatus: PaperclipIssueStatus;
+  assignee: PaperclipIssueAssigneePrincipal | null;
+  effectiveGate: EffectiveDirectPullRequestGate | undefined;
+}): boolean {
+  const { currentStatus, assignee, effectiveGate } = params;
+  return assignee?.kind === 'agent'
+    && currentStatus !== 'done'
+    && currentStatus !== 'cancelled'
+    && (effectiveGate?.condition === 'waiting' || effectiveGate?.condition === 'ready');
+}
+
 function isClearableMaintainerWaitExecutionState(
   executionState: PaperclipIssueExecutionState | null
 ): boolean {
@@ -15648,7 +15666,12 @@ async function synchronizePaperclipIssueStatuses(
           });
       const shouldClearTransitionAssignee =
         nextStatus === 'in_review'
-        && (nextTransitionAssignee === null || shouldPreserveMaintainerWaitRouting);
+        && (nextTransitionAssignee === null || shouldPreserveMaintainerWaitRouting)
+        && !shouldKeepAgentAssigneeDuringPullRequestWait({
+          currentStatus: paperclipIssue.status,
+          assignee: paperclipIssueSyncContext.assignee,
+          effectiveGate
+        });
       const nextAssigneeChanged = nextTransitionAssignee
         ? !doesPaperclipIssueAssigneeMatch(paperclipIssueSyncContext.assignee, nextTransitionAssignee.principal)
         : false;
@@ -16198,7 +16221,12 @@ async function synchronizePaperclipPullRequestIssueStatuses(
       });
       const shouldClearTransitionAssignee =
         nextStatus === 'in_review'
-        && (nextTransitionAssignee === null || shouldPreserveMaintainerWaitRouting);
+        && (nextTransitionAssignee === null || shouldPreserveMaintainerWaitRouting)
+        && !shouldKeepAgentAssigneeDuringPullRequestWait({
+          currentStatus: paperclipIssue.status,
+          assignee: paperclipIssueSyncContext.assignee,
+          effectiveGate
+        });
       const nextAssigneeChanged = nextTransitionAssignee
         ? !doesPaperclipIssueAssigneeMatch(paperclipIssueSyncContext.assignee, nextTransitionAssignee.principal)
         : false;

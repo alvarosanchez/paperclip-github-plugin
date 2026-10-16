@@ -10011,7 +10011,7 @@ test('sync.runNow keeps the non-first direct PR gate selected after trusted comm
       scopeKind: 'instance', stateKey: 'paperclip-github-plugin-remote-action-registry'
     }) as Array<{ fingerprint?: string; selectedPullRequestGate?: { number?: number } }>;
     assert.equal(updatedIssue?.status, 'in_review');
-    assert.equal(updatedIssue?.assigneeAgentId, null);
+    assert.equal(updatedIssue?.assigneeAgentId, 'owner-43', 'a healthy-review wait keeps its current agent assignee');
     assert.equal(registryAfterSecondPoll[0]?.fingerprint, firstFingerprint);
     assert.equal(registryAfterSecondPoll[0]?.selectedPullRequestGate?.number, 43);
     assert.equal(statusUpdates.length, 2, 'the consumed trusted action must converge to the selected healthy-review gate');
@@ -10872,6 +10872,137 @@ test('sync.runNow hands a direct PR to its follow-through owner only when the au
       assert.equal(updatedIssue?.status, 'in_progress', scenario.name);
       assert.equal(updatedIssue?.assigneeAgentId, scenario.expectedAssignee, scenario.name);
       assert.equal(wakeRequests.length, scenario.expectedWakes, `${scenario.name}: ${JSON.stringify(wakeRequests)}`);
+    } finally {
+      harness.ctx.issues.requestWakeup = originalRequestWakeup;
+      globalThis.fetch = originalFetch;
+    }
+  }
+});
+
+test('sync.runNow keeps a product owner on an in_review direct PR ticket while the PR waits', async () => {
+  const scenarios = [
+    {
+      name: 'green CI waiting only on a required review',
+      pullRequestNumber: 491,
+      mergeStateStatus: 'BLOCKED',
+      reviewDecision: 'REVIEW_REQUIRED'
+    },
+    {
+      name: 'clean PR without required reviews',
+      pullRequestNumber: 492,
+      mergeStateStatus: 'CLEAN',
+      reviewDecision: null
+    }
+  ];
+
+  for (const scenario of scenarios) {
+    const pullRequestNumber = scenario.pullRequestNumber;
+    const harness = await createProjectPullRequestsHarness();
+    const originalFetch = globalThis.fetch;
+    const originalRequestWakeup = harness.ctx.issues.requestWakeup.bind(harness.ctx.issues);
+    const wakeRequests: Array<{ issueId: string; options: unknown }> = [];
+    harness.ctx.agents.get = async (agentId, companyId) =>
+      ['engineer-agent', 'po-agent'].includes(agentId) && companyId === 'company-1'
+        ? { id: agentId, companyId, name: agentId } as never
+        : null;
+    harness.ctx.issues.requestWakeup = async (issueId, companyId, options) => {
+      wakeRequests.push({ issueId, options });
+      return originalRequestWakeup(issueId, companyId, options);
+    };
+    const issue = await harness.ctx.issues.create({
+      companyId: 'company-1',
+      projectId: 'project-1',
+      title: `PO gate with ${scenario.name}`,
+      status: 'in_review',
+      assigneeAgentId: 'po-agent'
+    });
+    await upsertDirectPullRequestLink(harness, issue.id, pullRequestNumber, {
+      title: 'Direct PR awaiting review',
+      followThroughAssigneeAgentId: 'engineer-agent'
+    });
+
+    globalThis.fetch = async (input, init) => {
+      const requestUrl = getRequestUrl(input);
+      const requestPathname = getDecodedRequestPathname(input);
+
+      if (requestPathname === `/repos/paperclipai/example-repo/pulls/${pullRequestNumber}`) {
+        return jsonResponse({
+          number: pullRequestNumber,
+          title: 'Direct PR awaiting review',
+          body: 'Ready for a maintainer.',
+          html_url: `https://github.com/paperclipai/example-repo/pull/${pullRequestNumber}`,
+          state: 'open',
+          merged: false
+        });
+      }
+
+      if (requestPathname === '/graphql') {
+        const { query, variables } = getGraphqlRequest(init);
+        const requestedPullRequestNumber =
+          typeof variables.pullRequestNumber === 'number' ? variables.pullRequestNumber : undefined;
+
+        if (query.includes('query GitHubRepositoryOpenPullRequestStatuses')) {
+          return graphqlResponse({
+            repository: {
+              pullRequests: {
+                pageInfo: { hasNextPage: false, endCursor: null },
+                nodes: []
+              }
+            }
+          });
+        }
+
+        if (query.includes('query GitHubPullRequestReviewThreads') && requestedPullRequestNumber === pullRequestNumber) {
+          return graphqlResponse({
+            repository: {
+              pullRequest: {
+                reviewThreads: {
+                  pageInfo: { hasNextPage: false, endCursor: null },
+                  nodes: []
+                }
+              }
+            }
+          });
+        }
+
+        if (query.includes('query GitHubPullRequestCiContexts') && requestedPullRequestNumber === pullRequestNumber) {
+          return graphqlResponse({
+            repository: {
+              pullRequest: {
+                mergeable: 'MERGEABLE',
+                mergeStateStatus: scenario.mergeStateStatus,
+                reviewDecision: scenario.reviewDecision,
+                statusCheckRollup: {
+                  contexts: {
+                    pageInfo: { hasNextPage: false, endCursor: null },
+                    nodes: [{ __typename: 'CheckRun', status: 'COMPLETED', conclusion: 'SUCCESS' }]
+                  }
+                }
+              }
+            }
+          });
+        }
+      }
+
+      throw new Error(`Unexpected fetch during PO gate test (${scenario.name}): ${requestUrl}`);
+    };
+
+    try {
+      for (const pass of ['first', 'second']) {
+        const sync = await harness.performAction('sync.runNow', {
+          companyId: 'company-1',
+          issueId: issue.id,
+          waitForCompletion: true
+        }) as {
+          syncState: { status: string };
+        };
+
+        assert.equal(sync.syncState.status, 'success', `${scenario.name}, ${pass} pass`);
+        const updatedIssue = await harness.ctx.issues.get(issue.id, 'company-1');
+        assert.equal(updatedIssue?.status, 'in_review', `${scenario.name}, ${pass} pass`);
+        assert.equal(updatedIssue?.assigneeAgentId, 'po-agent', `${scenario.name}, ${pass} pass`);
+        assert.equal(wakeRequests.length, 0, `${scenario.name}, ${pass} pass: ${JSON.stringify(wakeRequests)}`);
+      }
     } finally {
       harness.ctx.issues.requestWakeup = originalRequestWakeup;
       globalThis.fetch = originalFetch;
@@ -24065,7 +24196,7 @@ test('worker routes sync-driven review handoffs to execution-policy assignees an
   }
 });
 
-test('worker routes execution-policy review handoffs to saved reviewers, executor fallback to saved executors, and healthy PR waits to an unassigned in_review state without waking agents', async () => {
+test('worker routes execution-policy review handoffs to saved reviewers, executor fallback to saved executors, and healthy PR waits to in_review with their current agent and without waking agents', async () => {
   const harness = createTestHarness({
     manifest,
     config: {
@@ -24564,8 +24695,8 @@ test('worker routes execution-policy review handoffs to saved reviewers, executo
       statusPatchRequests.some((request) =>
         request.issueId === healthyWaitIssue.id
         && request.body?.status === 'in_review'
-        && request.body?.assigneeAgentId === null
-        && request.body?.assigneeUserId === null
+        && request.body?.assigneeAgentId === undefined
+        && request.body?.assigneeUserId === undefined
       )
     );
 
@@ -24581,7 +24712,7 @@ test('worker routes execution-policy review handoffs to saved reviewers, executo
     assert.equal(updatedExecutorIssue?.status, 'in_progress');
     assert.equal(updatedExecutorIssue?.assigneeUserId, 'user-executor');
     assert.equal(updatedHealthyWaitIssue?.status, 'in_review');
-    assert.equal(updatedHealthyWaitIssue?.assigneeAgentId ?? null, null);
+    assert.equal(updatedHealthyWaitIssue?.assigneeAgentId, 'agent-previous-owner');
     assert.equal(updatedHealthyWaitIssue?.assigneeUserId ?? null, null);
   } finally {
     globalThis.fetch = originalFetch;
