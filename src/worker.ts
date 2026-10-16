@@ -915,6 +915,13 @@ interface GitHubLinkedPullRequestRecord extends GitHubPullRequestReference {
 interface GitHubPullRequestStatusSnapshot extends GitHubPullRequestReference {
   headSha?: string;
   hasUnresolvedReviewThreads: boolean;
+  /**
+   * The pull request author has the last word on every unresolved review thread and no reviewer
+   * has asked for anything since, so those threads wait on the reviewer, not on the author.
+   */
+  unresolvedReviewThreadsAwaitReviewer?: boolean;
+  /** Loaded together with {@link GitHubPullRequestStatusSnapshot.unresolvedReviewThreadsAwaitReviewer}. */
+  authorLogin?: string;
   ciState: GitHubPullRequestCiState;
   mergeability: GitHubPullRequestMergeability;
   mergeStateStatus: GitHubPullRequestMergeStateStatus;
@@ -968,6 +975,45 @@ interface GitHubIssueStatusSnapshotQueryResult {
         } | null> | null;
       } | null;
     } | null;
+  } | null;
+}
+
+interface GitHubPullRequestReviewReplyStateQueryResult {
+  repository?: {
+    pullRequest?: {
+      author?: {
+        login?: string | null;
+      } | null;
+      reviews?: {
+        nodes?: Array<GitHubPullRequestReviewReplyStateReviewNode | null> | null;
+      } | null;
+      reviewThreads?: {
+        pageInfo?: GitHubPageInfo | null;
+        nodes?: Array<GitHubPullRequestReviewReplyStateThreadNode | null> | null;
+      } | null;
+    } | null;
+  } | null;
+}
+
+interface GitHubPullRequestReviewReplyStateReviewNode {
+  state?: string | null;
+  body?: string | null;
+  submittedAt?: string | null;
+  author?: {
+    login?: string | null;
+  } | null;
+}
+
+interface GitHubPullRequestReviewReplyStateThreadNode {
+  isResolved?: boolean | null;
+  comments?: {
+    nodes?: Array<{
+      state?: string | null;
+      createdAt?: string | null;
+      author?: {
+        login?: string | null;
+      } | null;
+    } | null> | null;
   } | null;
 }
 
@@ -1615,6 +1661,46 @@ const GITHUB_PULL_REQUEST_REVIEW_THREADS_QUERY = `
           }
           nodes {
             isResolved
+          }
+        }
+      }
+    }
+  }
+`;
+
+const GITHUB_PULL_REQUEST_REVIEW_REPLY_STATE_QUERY = `
+  query GitHubPullRequestReviewThreadsReplyState($owner: String!, $repo: String!, $pullRequestNumber: Int!, $after: String) {
+    repository(owner: $owner, name: $repo) {
+      pullRequest(number: $pullRequestNumber) {
+        author {
+          login
+        }
+        reviews(last: 20) {
+          nodes {
+            state
+            body
+            submittedAt
+            author {
+              login
+            }
+          }
+        }
+        reviewThreads(first: 100, after: $after) {
+          pageInfo {
+            hasNextPage
+            endCursor
+          }
+          nodes {
+            isResolved
+            comments(last: 1) {
+              nodes {
+                state
+                createdAt
+                author {
+                  login
+                }
+              }
+            }
           }
         }
       }
@@ -8043,7 +8129,7 @@ function resolvePaperclipStatusFromLinkedPullRequests(
   if (
     linkedPullRequests.some(
       (pullRequest) =>
-        pullRequest.hasUnresolvedReviewThreads
+        hasGitHubPullRequestReviewThreadsAwaitingAuthor(pullRequest)
         || pullRequest.ciState === 'red'
         || isGitHubPullRequestActionRequiredForSync(pullRequest)
     )
@@ -8107,13 +8193,15 @@ function getEffectiveDirectPullRequestGateCondition(
   remoteCondition: Exclude<EffectiveDirectPullRequestGateCondition, 'trusted_comment'>;
 } {
   const baseCondition = getEffectivePullRequestActionCondition(pullRequest);
-  // A merge state that only waits on pending CI or a required human review gives the author
-  // nothing to do, so it must not hand the issue to the follow-through owner.
+  // A merge state that only waits on pending CI, a required human review, or a reviewer reading
+  // the author's answers gives the author nothing to do, so it must not hand the issue to the
+  // follow-through owner.
   const remoteCondition: Exclude<EffectiveDirectPullRequestGateCondition, 'trusted_comment'> =
     baseCondition === 'conflict' || baseCondition === 'ci_failed' || baseCondition === 'review_actionable'
       ? baseCondition
       : isGitHubPullRequestPendingExternalWaitForSync(pullRequest)
         || isGitHubPullRequestRequiredReviewWaitForSync(pullRequest)
+        || isGitHubPullRequestAnsweredReviewWaitForSync(pullRequest)
         ? 'waiting'
         : isGitHubPullRequestActionRequiredForSync(pullRequest)
           ? 'action_required'
@@ -9179,6 +9267,7 @@ function resolvePaperclipIssueStatus(params: {
         && (
           isGitHubPullRequestTransientUnknownMergeabilityWait(effectiveGate.pullRequest)
           || isGitHubPullRequestRequiredReviewWaitForSync(effectiveGate.pullRequest)
+          || isGitHubPullRequestAnsweredReviewWaitForSync(effectiveGate.pullRequest)
         )
         ? 'in_review'
         : 'in_progress';
@@ -9258,6 +9347,7 @@ function resolvePaperclipDirectPullRequestIssueStatus(params: {
         && (
           isGitHubPullRequestTransientUnknownMergeabilityWait(effectiveGate.pullRequest)
           || isGitHubPullRequestRequiredReviewWaitForSync(effectiveGate.pullRequest)
+          || isGitHubPullRequestAnsweredReviewWaitForSync(effectiveGate.pullRequest)
         )
         ? 'in_review'
         : 'in_progress';
@@ -9497,19 +9587,19 @@ function isGitHubPullRequestActionRequiredForSync(
 }
 
 function isGitHubPullRequestPendingExternalWaitForSync(
-  pullRequest: Pick<GitHubPullRequestStatusSnapshot, 'ciState' | 'hasUnresolvedReviewThreads' | 'mergeability' | 'mergeStateStatus'>
+  pullRequest: Pick<GitHubPullRequestStatusSnapshot, 'ciState' | 'hasUnresolvedReviewThreads' | 'unresolvedReviewThreadsAwaitReviewer' | 'mergeability' | 'mergeStateStatus'>
 ): boolean {
   return pullRequest.ciState === 'unfinished'
-    && !pullRequest.hasUnresolvedReviewThreads
+    && !hasGitHubPullRequestReviewThreadsAwaitingAuthor(pullRequest)
     && pullRequest.mergeability !== 'conflicting'
     && (pullRequest.mergeStateStatus === 'blocked' || pullRequest.mergeStateStatus === 'unstable');
 }
 
 function isGitHubPullRequestBlockedMaintainerApprovalWaitForSync(
-  pullRequest: Pick<GitHubPullRequestStatusSnapshot, 'ciState' | 'hasUnresolvedReviewThreads' | 'mergeability' | 'mergeStateStatus' | 'reviewDecision'>
+  pullRequest: Pick<GitHubPullRequestStatusSnapshot, 'ciState' | 'hasUnresolvedReviewThreads' | 'unresolvedReviewThreadsAwaitReviewer' | 'mergeability' | 'mergeStateStatus' | 'reviewDecision'>
 ): boolean {
   return pullRequest.ciState === 'green'
-    && !pullRequest.hasUnresolvedReviewThreads
+    && !hasGitHubPullRequestReviewThreadsAwaitingAuthor(pullRequest)
     && pullRequest.mergeability !== 'conflicting'
     && pullRequest.mergeStateStatus === 'blocked'
     && (pullRequest.reviewDecision === 'unknown' || pullRequest.reviewDecision === 'review_required');
@@ -9526,6 +9616,135 @@ function isGitHubPullRequestRequiredReviewWaitForSync(
     && isGitHubPullRequestBlockedMaintainerApprovalWaitForSync(pullRequest);
 }
 
+function hasGitHubPullRequestReviewThreadsAwaitingAuthor(
+  pullRequest: Pick<GitHubPullRequestStatusSnapshot, 'hasUnresolvedReviewThreads' | 'unresolvedReviewThreadsAwaitReviewer'>
+): boolean {
+  return pullRequest.hasUnresolvedReviewThreads && pullRequest.unresolvedReviewThreadsAwaitReviewer !== true;
+}
+
+/**
+ * The author answered every review thread and the reviewer has not looked again. The aggregate
+ * `CHANGES_REQUESTED` decision stays until the reviewer re-reviews, so a `BLOCKED` merge state
+ * here waits on the reviewer whatever the review decision says.
+ */
+function isGitHubPullRequestAnsweredReviewWaitForSync(
+  pullRequest: Pick<
+    GitHubPullRequestStatusSnapshot,
+    'ciState' | 'hasUnresolvedReviewThreads' | 'unresolvedReviewThreadsAwaitReviewer' | 'mergeability' | 'mergeStateStatus'
+  >
+): boolean {
+  return pullRequest.hasUnresolvedReviewThreads
+    && pullRequest.unresolvedReviewThreadsAwaitReviewer === true
+    && pullRequest.ciState === 'green'
+    && pullRequest.mergeability !== 'conflicting'
+    && pullRequest.mergeStateStatus === 'blocked';
+}
+
+/**
+ * Whether every unresolved review thread ends with a submitted reply from the pull request author
+ * and no reviewer acted after the author's latest reply or review. A reply answers a thread on its
+ * own: the author may answer a change request by disagreeing, without pushing. A reviewer acts by
+ * requesting changes, approving (the author then resolves the threads and finishes), or leaving a
+ * review with a summary body; an empty `COMMENTED` review only wraps thread comments, which the
+ * threads already show.
+ */
+function areUnresolvedReviewThreadsAnsweredByAuthor(params: {
+  authorLogin?: string | null;
+  reviews: GitHubPullRequestReviewReplyStateReviewNode[];
+  threads: GitHubPullRequestReviewReplyStateThreadNode[];
+}): boolean {
+  const authorLogin = normalizeGitHubUserLogin(params.authorLogin);
+  const unresolvedThreads = params.threads.filter((thread) => thread.isResolved === false);
+  if (!authorLogin || unresolvedThreads.length === 0) {
+    return false;
+  }
+
+  let latestAuthorActivityAt = Number.NEGATIVE_INFINITY;
+  for (const thread of unresolvedThreads) {
+    const lastComment = (thread.comments?.nodes ?? []).filter(Boolean).at(-1);
+    const lastCommentAt = Date.parse(lastComment?.createdAt ?? '');
+    if (
+      normalizeGitHubUserLogin(lastComment?.author?.login) !== authorLogin
+      || lastComment?.state?.toUpperCase() === 'PENDING'
+      || Number.isNaN(lastCommentAt)
+    ) {
+      return false;
+    }
+    latestAuthorActivityAt = Math.max(latestAuthorActivityAt, lastCommentAt);
+  }
+
+  for (const review of params.reviews) {
+    const submittedAt = Date.parse(review.submittedAt ?? '');
+    if (normalizeGitHubUserLogin(review.author?.login) === authorLogin && !Number.isNaN(submittedAt)) {
+      latestAuthorActivityAt = Math.max(latestAuthorActivityAt, submittedAt);
+    }
+  }
+
+  return !params.reviews.some((review) => {
+    const submittedAt = Date.parse(review.submittedAt ?? '');
+    const state = review.state?.toUpperCase();
+    const isReviewerAction = state === 'CHANGES_REQUESTED'
+      || state === 'APPROVED'
+      || (state === 'COMMENTED' && Boolean(review.body?.trim()));
+    return isReviewerAction
+      && normalizeGitHubUserLogin(review.author?.login) !== authorLogin
+      && !Number.isNaN(submittedAt)
+      && submittedAt > latestAuthorActivityAt;
+  });
+}
+
+async function loadGitHubPullRequestReviewReplyState(
+  octokit: Octokit,
+  repository: ParsedRepositoryReference,
+  pullRequestNumber: number
+): Promise<Pick<GitHubPullRequestStatusSnapshot, 'unresolvedReviewThreadsAwaitReviewer' | 'authorLogin'>> {
+  let authorLogin: string | null | undefined;
+  const reviews: GitHubPullRequestReviewReplyStateReviewNode[] = [];
+  const threads: GitHubPullRequestReviewReplyStateThreadNode[] = [];
+  let after: string | undefined;
+
+  do {
+    const response = await octokit.graphql<GitHubPullRequestReviewReplyStateQueryResult>(
+      GITHUB_PULL_REQUEST_REVIEW_REPLY_STATE_QUERY,
+      {
+        owner: repository.owner,
+        repo: repository.repo,
+        pullRequestNumber,
+        after
+      }
+    );
+    const pullRequest = response.repository?.pullRequest;
+    if (!after) {
+      authorLogin = pullRequest?.author?.login;
+      reviews.push(...(pullRequest?.reviews?.nodes ?? []).filter((node): node is GitHubPullRequestReviewReplyStateReviewNode => Boolean(node)));
+    }
+    threads.push(...(pullRequest?.reviewThreads?.nodes ?? []).filter((node): node is GitHubPullRequestReviewReplyStateThreadNode => Boolean(node)));
+    after = getPageCursor(pullRequest?.reviewThreads?.pageInfo);
+  } while (after);
+
+  const normalizedAuthorLogin = normalizeGitHubUserLogin(authorLogin);
+  return {
+    unresolvedReviewThreadsAwaitReviewer: areUnresolvedReviewThreadsAnsweredByAuthor({ authorLogin, reviews, threads }),
+    ...(normalizedAuthorLogin ? { authorLogin: normalizedAuthorLogin } : {})
+  };
+}
+
+/**
+ * While a pull request's review threads wait on the reviewer, new comments from its author are
+ * the answers that put it there, so they must not re-arm the work for that same author.
+ */
+function listReviewAnswerAuthorLogins(
+  pullRequests: Array<GitHubPullRequestStatusSnapshot | undefined>
+): Map<string, string> {
+  const authorLogins = new Map<string, string>();
+  for (const pullRequest of pullRequests) {
+    if (pullRequest?.unresolvedReviewThreadsAwaitReviewer && pullRequest.authorLogin) {
+      authorLogins.set(buildGitHubPullRequestReferenceKey(pullRequest), pullRequest.authorLogin);
+    }
+  }
+  return authorLogins;
+}
+
 /**
  * Hash of everything about the linked pull requests that sync reacts to. Two passes that produce
  * the same hash saw the same GitHub, so any status decision they disagree on came from somewhere
@@ -9534,7 +9753,15 @@ function isGitHubPullRequestRequiredReviewWaitForSync(
 function buildExternalPullRequestStateHash(
   pullRequests: Pick<
     GitHubPullRequestStatusSnapshot,
-    'repositoryUrl' | 'number' | 'headSha' | 'ciState' | 'mergeability' | 'mergeStateStatus' | 'reviewDecision' | 'hasUnresolvedReviewThreads'
+    | 'repositoryUrl'
+    | 'number'
+    | 'headSha'
+    | 'ciState'
+    | 'mergeability'
+    | 'mergeStateStatus'
+    | 'reviewDecision'
+    | 'hasUnresolvedReviewThreads'
+    | 'unresolvedReviewThreadsAwaitReviewer'
   >[]
 ): string | undefined {
   if (pullRequests.length === 0) return undefined;
@@ -9547,7 +9774,9 @@ function buildExternalPullRequestStateHash(
       mergeability: pullRequest.mergeability,
       mergeStateStatus: pullRequest.mergeStateStatus,
       reviewDecision: pullRequest.reviewDecision,
-      hasUnresolvedReviewThreads: pullRequest.hasUnresolvedReviewThreads
+      hasUnresolvedReviewThreads: pullRequest.hasUnresolvedReviewThreads,
+      // Omitted unless set, so a pull request without answered threads keeps the hash already persisted for it.
+      ...(pullRequest.unresolvedReviewThreadsAwaitReviewer ? { unresolvedReviewThreadsAwaitReviewer: true } : {})
     }))
     .sort((left, right) =>
       left.repositoryUrl.localeCompare(right.repositoryUrl) || left.number - right.number
@@ -9609,24 +9838,25 @@ function shouldPreserveBlockedExternalPullRequestWait(params: {
     && params.linkedPullRequests.every((pullRequest) =>
       isGitHubPullRequestPendingExternalWaitForSync(pullRequest)
       || isGitHubPullRequestBlockedMaintainerApprovalWaitForSync(pullRequest)
+      || isGitHubPullRequestAnsweredReviewWaitForSync(pullRequest)
     );
 }
 
 function isGitHubPullRequestTransientUnknownMergeabilityWait(
-  pullRequest: Pick<GitHubPullRequestStatusSnapshot, 'ciState' | 'hasUnresolvedReviewThreads' | 'mergeability' | 'mergeStateStatus'>
+  pullRequest: Pick<GitHubPullRequestStatusSnapshot, 'ciState' | 'hasUnresolvedReviewThreads' | 'unresolvedReviewThreadsAwaitReviewer' | 'mergeability' | 'mergeStateStatus'>
 ): boolean {
   return pullRequest.ciState === 'green'
-    && !pullRequest.hasUnresolvedReviewThreads
+    && !hasGitHubPullRequestReviewThreadsAwaitingAuthor(pullRequest)
     && pullRequest.mergeability !== 'conflicting'
     && pullRequest.mergeStateStatus === 'unknown';
 }
 
 function isGitHubPullRequestReviewReadyForSync(
-  pullRequest: Pick<GitHubPullRequestStatusSnapshot, 'ciState' | 'hasUnresolvedReviewThreads' | 'mergeability' | 'mergeStateStatus' | 'reviewDecision'>
+  pullRequest: Pick<GitHubPullRequestStatusSnapshot, 'ciState' | 'hasUnresolvedReviewThreads' | 'unresolvedReviewThreadsAwaitReviewer' | 'mergeability' | 'mergeStateStatus' | 'reviewDecision'>
 ): boolean {
   if (
     pullRequest.ciState !== 'green'
-    || pullRequest.hasUnresolvedReviewThreads
+    || hasGitHubPullRequestReviewThreadsAwaitingAuthor(pullRequest)
   ) {
     return false;
   }
@@ -9635,7 +9865,7 @@ function isGitHubPullRequestReviewReadyForSync(
 }
 
 function listGitHubPullRequestSyncBlockingConditions(
-  pullRequest: Pick<GitHubPullRequestStatusSnapshot, 'ciState' | 'hasUnresolvedReviewThreads' | 'mergeability' | 'mergeStateStatus' | 'reviewDecision'>
+  pullRequest: Pick<GitHubPullRequestStatusSnapshot, 'ciState' | 'hasUnresolvedReviewThreads' | 'unresolvedReviewThreadsAwaitReviewer' | 'mergeability' | 'mergeStateStatus' | 'reviewDecision'>
 ): string[] {
   const conditions: string[] = [];
 
@@ -9664,7 +9894,7 @@ function listGitHubPullRequestSyncBlockingConditions(
     }
   }
 
-  if (pullRequest.hasUnresolvedReviewThreads) {
+  if (hasGitHubPullRequestReviewThreadsAwaitingAuthor(pullRequest)) {
     conditions.push('unresolved review threads');
   }
 
@@ -9935,6 +10165,29 @@ async function getGitHubPullRequestStatusSnapshot(
   }
 }
 
+/**
+ * The status snapshot sync decides on. For unresolved review threads it also loads whether they
+ * wait on the reviewer; only sync routing needs that, so other readers skip the extra query.
+ */
+async function getGitHubPullRequestSyncStatusSnapshot(
+  octokit: Octokit,
+  repository: ParsedRepositoryReference,
+  pullRequestNumber: number,
+  pullRequestStatusCache: GitHubPullRequestStatusSnapshotCache
+): Promise<GitHubPullRequestStatusSnapshot> {
+  const snapshot = await getGitHubPullRequestStatusSnapshot(octokit, repository, pullRequestNumber, pullRequestStatusCache);
+  if (!snapshot.hasUnresolvedReviewThreads || snapshot.unresolvedReviewThreadsAwaitReviewer !== undefined) {
+    return snapshot;
+  }
+
+  const syncSnapshot = {
+    ...snapshot,
+    ...await loadGitHubPullRequestReviewReplyState(octokit, repository, pullRequestNumber)
+  };
+  setCachedGitHubPullRequestStatusSnapshot(pullRequestStatusCache, syncSnapshot);
+  return syncSnapshot;
+}
+
 async function getGitHubIssueStatusSnapshot(
   octokit: Octokit,
   repository: ParsedRepositoryReference,
@@ -9978,7 +10231,7 @@ async function getGitHubIssueStatusSnapshot(
 
     const linkedPullRequestRepository = requireRepositoryReference(pullRequest.repositoryUrl);
     linkedPullRequestSnapshots.push(
-      await getGitHubPullRequestStatusSnapshot(
+      await getGitHubPullRequestSyncStatusSnapshot(
         octokit,
         linkedPullRequestRepository,
         pullRequest.number,
@@ -10218,14 +10471,16 @@ async function hasTrustedGitHubCommentRecords(params: {
   repository: ParsedRepositoryReference;
   comments: GitHubIssueCommentRecord[];
   originalPosterLogin?: string;
+  ignoredAuthorLogin?: string;
   maintainerCache: Map<string, boolean>;
 }): Promise<boolean> {
   const originalPosterLogin = normalizeGitHubUserLogin(params.originalPosterLogin);
+  const ignoredAuthorLogin = normalizeGitHubUserLogin(params.ignoredAuthorLogin);
   const unseenAuthors = new Set<string>();
 
   for (const comment of params.comments) {
     const authorLogin = normalizeGitHubUserLogin(comment.authorLogin);
-    if (!authorLogin) {
+    if (!authorLogin || authorLogin === ignoredAuthorLogin) {
       continue;
     }
 
@@ -10365,6 +10620,7 @@ async function listTrustedNewLinkedPullRequestCommentSources(params: {
   originalPosterLogin?: string;
   previousCommentCounts?: GitHubPullRequestCommentCountRecord[];
   currentCommentCounts: GitHubPullRequestCommentCountRecord[];
+  reviewAnswerAuthorLogins?: Map<string, string>;
   maintainerCache: Map<string, boolean>;
 }): Promise<GitHubTrustedPullRequestCommentSource[]> {
   if ((params.currentCommentCounts?.length ?? 0) === 0 || (params.previousCommentCounts?.length ?? 0) === 0) {
@@ -10384,6 +10640,7 @@ async function listTrustedNewLinkedPullRequestCommentSources(params: {
 
     const pullRequestRepository = requireRepositoryReference(currentCommentCount.repositoryUrl);
     const repositoryUrl = getNormalizedMappingRepositoryUrl({ repositoryUrl: currentCommentCount.repositoryUrl });
+    const ignoredAuthorLogin = params.reviewAnswerAuthorLogins?.get(buildGitHubPullRequestReferenceKey(currentCommentCount));
 
     if (currentCommentCount.topLevelCommentCount > previousCommentCount.topLevelCommentCount) {
       const newTopLevelComments = await listNewGitHubIssueCommentsSinceCount(
@@ -10398,6 +10655,7 @@ async function listTrustedNewLinkedPullRequestCommentSources(params: {
         repository: pullRequestRepository,
         comments: newTopLevelComments,
         originalPosterLogin: params.originalPosterLogin,
+        ignoredAuthorLogin,
         maintainerCache: params.maintainerCache
       })) {
         sources.push({ repositoryUrl, number: currentCommentCount.number, kind: 'top_level' });
@@ -10417,6 +10675,7 @@ async function listTrustedNewLinkedPullRequestCommentSources(params: {
         repository: pullRequestRepository,
         comments: newReviewComments,
         originalPosterLogin: params.originalPosterLogin,
+        ignoredAuthorLogin,
         maintainerCache: params.maintainerCache
       })) {
         sources.push({ repositoryUrl, number: currentCommentCount.number, kind: 'review' });
@@ -13893,7 +14152,7 @@ function getEffectivePullRequestActionCondition(
 ): 'conflict' | 'ci_failed' | 'review_actionable' | 'ready' | 'waiting' {
   if (pullRequest.mergeability === 'conflicting' || pullRequest.mergeStateStatus === 'dirty') return 'conflict';
   if (pullRequest.ciState === 'red') return 'ci_failed';
-  if (pullRequest.hasUnresolvedReviewThreads) return 'review_actionable';
+  if (hasGitHubPullRequestReviewThreadsAwaitingAuthor(pullRequest)) return 'review_actionable';
   if (pullRequest.ciState === 'green' && pullRequest.mergeability === 'mergeable') return 'ready';
   return 'waiting';
 }
@@ -15512,6 +15771,7 @@ async function synchronizePaperclipIssueStatuses(
               originalPosterLogin: githubIssue.authorLogin,
               previousCommentCounts: importedIssue.linkedPullRequestCommentCounts,
               currentCommentCounts: currentLinkedPullRequestCommentCounts,
+              reviewAnswerAuthorLogins: listReviewAnswerAuthorLogins(snapshot.linkedPullRequests),
               maintainerCache: repositoryMaintainerCache
             });
       const hasTrustedNewLinkedPullRequestComment = trustedNewLinkedPullRequestCommentSources.length > 0;
@@ -16028,7 +16288,7 @@ async function synchronizePaperclipPullRequestIssueStatuses(
           }
         };
         if (livePullRequestLifecycleState === 'open') {
-          const pullRequest = await getGitHubPullRequestStatusSnapshot(
+          const pullRequest = await getGitHubPullRequestSyncStatusSnapshot(
             octokit,
             pullRequestRepository,
             pullRequestLink.data.githubPullRequestNumber,
@@ -16127,6 +16387,7 @@ async function synchronizePaperclipPullRequestIssueStatuses(
             originalPosterLogin: snapshot.authorLogin,
             previousCommentCounts: remoteAction.linkedPullRequestCommentCounts,
             currentCommentCounts: [snapshot.commentCounts],
+            reviewAnswerAuthorLogins: listReviewAnswerAuthorLogins([snapshot.pullRequest]),
             maintainerCache
           }));
         }
@@ -24784,6 +25045,7 @@ export function shouldStartWorkerHost(moduleUrl: string, entry = process.argv[1]
 }
 
 export const __testing = {
+  areUnresolvedReviewThreadsAnsweredByAuthor,
   listIssueInteractionEvents,
   isLiveGitHubIssueLinkRecord,
   buildExternalPullRequestStateHash,
