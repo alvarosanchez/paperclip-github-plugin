@@ -473,6 +473,63 @@ test('issue-linked remote fingerprints distinguish waiting from action-required'
   );
 });
 
+test('a PR blocked only on a required review is a waiting gate, not follow-through work', async () => {
+  const workerModule = await importFreshWorkerModule();
+  const pullRequest = (reviewDecision: 'review_required' | 'changes_requested' | 'unknown') => ({
+    number: 89,
+    repositoryUrl: 'https://github.com/paperclipai/example-repo',
+    headSha: 'same-head',
+    hasUnresolvedReviewThreads: false,
+    ciState: 'green',
+    mergeability: 'mergeable',
+    mergeStateStatus: 'blocked',
+    reviewDecision
+  });
+  const links = [{
+    data: {
+      repositoryUrl: 'https://github.com/paperclipai/example-repo',
+      githubPullRequestNumber: 89,
+      followThroughAssigneeAgentId: 'owner-89'
+    }
+  }];
+  const gateFor = (linkedPullRequest: ReturnType<typeof pullRequest>) =>
+    workerModule.__testing.selectEffectiveIssueLinkedPullRequestGate([linkedPullRequest] as never, [], false, links as never);
+  const snapshot = (linkedPullRequest: ReturnType<typeof pullRequest>) => ({
+    issueNumber: 7,
+    state: 'open',
+    commentCount: 0,
+    linkedPullRequests: [linkedPullRequest]
+  });
+  const statusFor = (currentStatus: string, linkedPullRequest: ReturnType<typeof pullRequest>) =>
+    workerModule.__testing.resolvePaperclipIssueStatus({
+      currentStatus,
+      snapshot: snapshot(linkedPullRequest),
+      effectiveGate: gateFor(linkedPullRequest),
+      wasImportedThisRun: false,
+      defaultImportedStatus: 'backlog',
+      hasExecutorHandoffTarget: true
+    } as never);
+
+  const reviewWait = pullRequest('review_required');
+  assert.equal(gateFor(reviewWait)?.condition, 'waiting');
+  assert.equal(gateFor(reviewWait)?.remoteCondition, 'waiting');
+  assert.equal(statusFor('in_progress', reviewWait), 'in_progress');
+  assert.equal(statusFor('in_review', reviewWait), 'in_review');
+  assert.equal(statusFor('blocked', reviewWait), 'blocked');
+
+  const changesRequested = pullRequest('changes_requested');
+  assert.equal(gateFor(changesRequested)?.remoteCondition, 'action_required');
+  assert.equal(statusFor('in_review', changesRequested), 'in_progress');
+  assert.notEqual(
+    workerModule.__testing.buildRemoteActionFingerprint(snapshot(reviewWait) as never, gateFor(reviewWait) as never),
+    workerModule.__testing.buildRemoteActionFingerprint(snapshot(changesRequested) as never, gateFor(changesRequested) as never),
+    'a changes-requested review must re-arm follow-through routing'
+  );
+
+  // GitHub reports no review decision when no review is required, so the block is something else.
+  assert.equal(gateFor(pullRequest('unknown'))?.remoteCondition, 'action_required');
+});
+
 test('issue-linked effective gate aligns status, owner, fingerprint, and wake routing', async () => {
   const workerModule = await importFreshWorkerModule();
   const pullRequest = (number: number, repositoryUrl = 'https://github.com/paperclipai/example-repo') => ({
@@ -10650,6 +10707,175 @@ test('sync.runNow preserves and deduplicates durable direct-PR ownership across 
     harness.ctx.issues.createComment = originalCreateComment;
     harness.ctx.issues.requestWakeup = originalRequestWakeup;
     globalThis.fetch = originalFetch;
+  }
+});
+
+test('sync.runNow hands a direct PR to its follow-through owner only when the author has work to do', async () => {
+  const scenarios = [
+    {
+      name: 'green CI waiting only on a required review',
+      pullRequestNumber: 481,
+      reviewDecision: 'REVIEW_REQUIRED',
+      unresolvedReviewThread: false,
+      checkConclusion: 'SUCCESS',
+      expectedAssignee: 'po-agent',
+      expectedWakes: 0
+    },
+    {
+      name: 'summary-only changes-requested review',
+      pullRequestNumber: 482,
+      reviewDecision: 'CHANGES_REQUESTED',
+      unresolvedReviewThread: false,
+      checkConclusion: 'SUCCESS',
+      expectedAssignee: 'engineer-agent',
+      expectedWakes: 1
+    },
+    {
+      name: 'unresolved review thread',
+      pullRequestNumber: 483,
+      reviewDecision: 'REVIEW_REQUIRED',
+      unresolvedReviewThread: true,
+      checkConclusion: 'SUCCESS',
+      expectedAssignee: 'engineer-agent',
+      expectedWakes: 1
+    },
+    {
+      name: 'red CI',
+      pullRequestNumber: 484,
+      reviewDecision: 'REVIEW_REQUIRED',
+      unresolvedReviewThread: false,
+      checkConclusion: 'FAILURE',
+      expectedAssignee: 'engineer-agent',
+      expectedWakes: 1
+    }
+  ];
+
+  // Each scenario uses its own PR number: the worker caches PR review and CI reads per PR.
+  for (const scenario of scenarios) {
+    const pullRequestNumber = scenario.pullRequestNumber;
+    const harness = await createProjectPullRequestsHarness();
+    const originalFetch = globalThis.fetch;
+    const originalRequestWakeup = harness.ctx.issues.requestWakeup.bind(harness.ctx.issues);
+    const wakeRequests: Array<{ issueId: string; options: unknown }> = [];
+    harness.ctx.agents.get = async (agentId, companyId) =>
+      ['engineer-agent', 'po-agent'].includes(agentId) && companyId === 'company-1'
+        ? { id: agentId, companyId, name: agentId } as never
+        : null;
+    harness.ctx.issues.requestWakeup = async (issueId, companyId, options) => {
+      wakeRequests.push({ issueId, options });
+      return originalRequestWakeup(issueId, companyId, options);
+    };
+    const issue = await harness.ctx.issues.create({
+      companyId: 'company-1',
+      projectId: 'project-1',
+      title: `Direct PR with ${scenario.name}`,
+      status: 'in_progress',
+      assigneeAgentId: 'po-agent'
+    });
+    await upsertDirectPullRequestLink(harness, issue.id, pullRequestNumber, {
+      title: 'Direct PR awaiting review',
+      followThroughAssigneeAgentId: 'engineer-agent'
+    });
+
+    globalThis.fetch = async (input, init) => {
+      const requestUrl = getRequestUrl(input);
+      const requestPathname = getDecodedRequestPathname(input);
+
+      if (requestPathname === `/repos/paperclipai/example-repo/pulls/${pullRequestNumber}`) {
+        return jsonResponse({
+          number: pullRequestNumber,
+          title: 'Direct PR awaiting review',
+          body: 'Ready for a maintainer.',
+          html_url: `https://github.com/paperclipai/example-repo/pull/${pullRequestNumber}`,
+          state: 'open',
+          merged: false
+        });
+      }
+
+      if (requestPathname === '/graphql') {
+        const { query, variables } = getGraphqlRequest(init);
+        const requestedPullRequestNumber =
+          typeof variables.pullRequestNumber === 'number' ? variables.pullRequestNumber : undefined;
+
+        if (query.includes('query GitHubRepositoryOpenPullRequestStatuses')) {
+          return graphqlResponse({
+            repository: {
+              pullRequests: {
+                pageInfo: { hasNextPage: false, endCursor: null },
+                nodes: []
+              }
+            }
+          });
+        }
+
+        if (query.includes('query GitHubPullRequestReviewThreads') && requestedPullRequestNumber === pullRequestNumber) {
+          return graphqlResponse({
+            repository: {
+              pullRequest: {
+                reviewThreads: {
+                  pageInfo: { hasNextPage: false, endCursor: null },
+                  nodes: scenario.unresolvedReviewThread
+                    ? [{
+                        id: 'PRRT_1',
+                        isResolved: false,
+                        comments: {
+                          totalCount: 1,
+                          nodes: [{ id: 'PRRC_1', author: { login: 'reviewer' } }]
+                        }
+                      }]
+                    : []
+                }
+              }
+            }
+          });
+        }
+
+        if (query.includes('query GitHubPullRequestCiContexts') && requestedPullRequestNumber === pullRequestNumber) {
+          return graphqlResponse({
+            repository: {
+              pullRequest: {
+                mergeable: 'MERGEABLE',
+                mergeStateStatus: 'BLOCKED',
+                reviewDecision: scenario.reviewDecision,
+                statusCheckRollup: {
+                  contexts: {
+                    pageInfo: { hasNextPage: false, endCursor: null },
+                    nodes: [
+                      {
+                        __typename: 'CheckRun',
+                        status: 'COMPLETED',
+                        conclusion: scenario.checkConclusion
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          });
+        }
+      }
+
+      throw new Error(`Unexpected fetch during direct PR follow-through test (${scenario.name}): ${requestUrl}`);
+    };
+
+    try {
+      const sync = await harness.performAction('sync.runNow', {
+        companyId: 'company-1',
+        issueId: issue.id,
+        waitForCompletion: true
+      }) as {
+        syncState: { status: string };
+      };
+
+      assert.equal(sync.syncState.status, 'success', scenario.name);
+      const updatedIssue = await harness.ctx.issues.get(issue.id, 'company-1');
+      assert.equal(updatedIssue?.status, 'in_progress', scenario.name);
+      assert.equal(updatedIssue?.assigneeAgentId, scenario.expectedAssignee, scenario.name);
+      assert.equal(wakeRequests.length, scenario.expectedWakes, `${scenario.name}: ${JSON.stringify(wakeRequests)}`);
+    } finally {
+      harness.ctx.issues.requestWakeup = originalRequestWakeup;
+      globalThis.fetch = originalFetch;
+    }
   }
 });
 
