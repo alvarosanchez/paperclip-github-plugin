@@ -160,7 +160,7 @@ npx paperclipai plugin install --local "$PWD"
 
 1. Open the plugin settings for **GitHub Sync** from inside the Paperclip company you want to configure.
 2. Paste a GitHub token, validate it, and save it.
-3. If the deployment is authenticated or local trusted, connect Paperclip board access from the same settings page and complete the approval flow when host API calls need board credentials.
+3. If the deployment is authenticated or local trusted, optionally connect Paperclip board access from the same settings page and complete the approval flow. Sync runs without it; see [Security and authentication](#security-and-authentication) for what it adds.
 4. Add one or more repository mappings for the current company.
 5. For each mapping, either choose an existing GitHub-linked Paperclip project or enter the project name that should receive synced issues.
 6. Optionally configure company-wide defaults for imported issues, including the default assignee, the default Paperclip status, executor/reviewer/approver handoff assignees for sync-driven transitions, and ignored GitHub usernames. When Paperclip board access is connected, each assignee dropdown also offers `Me` for the connected board user. `Automatic routing` means GitHub Sync follows the issue's Paperclip execution policy first and only uses the saved fallback when Paperclip does not expose the next reviewer, approver, or return assignee yet. Bot aliases such as `renovate[bot]` are matched when you save `renovate`.
@@ -223,8 +223,23 @@ The plugin is designed to avoid persisting raw credentials in plugin state.
 - Agents use Paperclip's plugin tool dispatcher for GitHub Sync tools; the settings UI no longer propagates the saved GitHub token into agent environment variables.
 - The worker resolves those secret references at runtime instead of storing raw tokens in plugin state.
 - When the host cannot resolve a saved secret ref (a pre-`2026.831` host that rejected plugin secret refs, or a plugin config row that still holds a pre-`2026.831` bare secret id the host will not bind), GitHub Sync keeps company-scoped worker-local compatibility copies for GitHub tokens and Paperclip board-access tokens in `${PAPERCLIP_HOME:-~/.paperclip}/plugins/github-sync/config.json`. On `2026.831` the settings page detects bare-id refs and re-mirrors them as bindings on the next visit; reconnect board access once after upgrading if sync still cannot authenticate Paperclip label or issue REST calls.
-- On authenticated Paperclip deployments, sync is blocked until the relevant company has connected Paperclip board access. On local trusted deployments, board access setup remains visible so operators can configure it for host API paths that still require board credentials, but missing board access does not by itself block sync preflight.
+- Board access gives the worker the rights of a board user for direct Paperclip REST calls. Sync does not require it. On an authenticated Paperclip deployment, a company without board access syncs through the plugin SDK only: status transitions, agent assignment, execution-policy updates, description repair, comments, and assignee wakeups all work. Three features need board access and stay unavailable without it: creating missing Paperclip labels (GitHub labels without a matching Paperclip label stay unmapped), assigning issues to human users (default assignee or user handoff; the current assignee is kept), and the agent tool-access check in settings. Each such sync run records a warning in its sync state that names them. On local trusted deployments the worker can reach the Paperclip REST API without board access, so these features work either way.
 - KPI API route requests must include `Authorization: Bearer <PAPERCLIP_API_KEY>` from an agent run; the Paperclip host authenticates the token and supplies the agent company before the worker records any metric event.
+
+#### Minimal setup for PR follow-through
+
+To have GitHub Sync wake the assignee when review feedback or red CI arrives on a linked pull request, and to grant nothing beyond that, connect a read-only fine-grained GitHub token and no Paperclip board token. Sync only reads from GitHub; write permissions are needed only by agent tools that comment, review, merge, or push.
+
+Repository permissions for the fine-grained token, all **Read-only**:
+
+| Permission | Sync uses it for |
+| --- | --- |
+| Metadata | repository access and the maintainer check behind trusted-comment routing |
+| Pull requests | the pull request, its review threads and review comments, top-level PR comments, review decision, and mergeability |
+| Commit statuses | commit status contexts in the PR status rollup |
+| Issues | mapped repositories and linked GitHub issues: listing and reading issues and their comments (not needed for pull-request links alone) |
+
+Check runs arrive through the same GraphQL status rollup as commit statuses; GitHub lists no separate fine-grained permission for reading them.
 
 #### Sharing the token with Paperclip's own GitHub features
 
@@ -507,7 +522,7 @@ Example tool payload:
 
 - If an older GitHub Sync build fails upgrade with `requires host version 2026.427.0 or newer, but this server is running 0.0.0`, upgrade to a build that removes the strict manifest host-version gate. The host is reporting a development-version sentinel, so the plugin now relies on declared capabilities and runtime fallbacks instead.
 - If setup is reported as incomplete, confirm that a GitHub token has been saved or that `${PAPERCLIP_HOME:-~/.paperclip}/plugins/github-sync/config.json` contains `githubToken`, and make sure at least one mapping has a created Paperclip project or at least one Paperclip issue has been linked to GitHub.
-- If Paperclip says board access is required, open plugin settings inside the affected company and complete the Paperclip board access flow before retrying sync.
+- A sync warning that Paperclip board access is not connected does not by itself mean the sync failed; check the sync status and recorded failures separately. Connect board access inside the affected company only if you need missing Paperclip labels created, issues assigned to users, or the agent tool-access check.
 - If GitHub Sync agent tools fail on `/api/plugins/tools` or `/api/plugins/tools/execute`, confirm the Paperclip host is `2026.831.1` or newer, that the tool request includes the agent run context required by Paperclip, and that the company's tool-access policy allows the `paperclip-github-plugin:*` tools for that agent.
 - If the worker logs `Secret is not bound to plugin` or `Invalid secret reference for plugin`, that company's plugin config still holds a pre-`2026.831` bare secret id. Open GitHub Sync settings inside that company so the UI re-mirrors the ref as a `secret_ref` binding, or reconnect the token; until then the worker uses the worker-local fallback copy if one exists.
 - If a scheduled sync reports that Paperclip denied worker access for a company, that company has GitHub Sync mappings but no saved plugin config row. Open GitHub Sync settings inside that company and save settings once so the host registers it.
