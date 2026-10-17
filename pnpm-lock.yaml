@@ -171,13 +171,13 @@ importers:
         version: 22.0.1
       '@paperclipai/plugin-sdk':
         specifier: ^2026.831.1
-        version: 2026.1005.0(react@19.3.0)
+        version: 2026.1005.0(react@19.3.1)
       react:
-        specifier: ^19.3.0
-        version: 19.3.0
+        specifier: ^19.3.1
+        version: 19.3.1
       react-markdown:
         specifier: ^10.1.0
-        version: 10.1.0(@types/react@19.3.0)(react@19.3.0)
+        version: 10.1.0(@types/react@19.3.0)(react@19.3.1)
       rehype-raw:
         specifier: ^7.0.0
         version: 7.0.0
@@ -882,8 +882,8 @@ packages:
       '@types/react': '>=18'
       react: '>=18'
 
-  react@19.3.0:
-    resolution: {integrity: sha512-E8LUcbtBWt20bbl2YoHfx4ZDBdxVTfOKtCZn9cDSJ4l6/nuoApcpIBcj47t2wZoVX8g2ZHuMHbiShgCR1T5Sog==}
+  react@19.3.1:
+    resolution: {integrity: sha512-QNhWdt7nrgVWWQG58QuGsAR3jv3Hbe4mb4vz7w2csnHavciZJgda1CPNaldF6eVxv90ud3jUXpKlHL69gO38yw==}
     engines: {node: '>=0.10.0'}
 
   rehype-raw@7.0.0:
@@ -1126,12 +1126,12 @@ snapshots:
     dependencies:
       '@octokit/openapi-types': 29.0.1
 
-  '@paperclipai/plugin-sdk@2026.1005.0(react@19.3.0)':
+  '@paperclipai/plugin-sdk@2026.1005.0(react@19.3.1)':
     dependencies:
       '@paperclipai/shared': 2026.1005.0
       zod: 4.6.5
     optionalDependencies:
-      react: 19.3.0
+      react: 19.3.1
 
   '@paperclipai/shared@2026.1005.0':
     dependencies:
@@ -1786,7 +1786,7 @@ snapshots:
 
   property-information@7.2.0: {}
 
-  react-markdown@10.1.0(@types/react@19.3.0)(react@19.3.0):
+  react-markdown@10.1.0(@types/react@19.3.0)(react@19.3.1):
     dependencies:
       '@types/hast': 3.0.5
       '@types/mdast': 4.0.4
@@ -1795,7 +1795,7 @@ snapshots:
       hast-util-to-jsx-runtime: 2.3.6
       html-url-attributes: 3.0.1
       mdast-util-to-hast: 13.2.1
-      react: 19.3.0
+      react: 19.3.1
       remark-parse: 11.0.0
       remark-rehype: 11.1.2
       unified: 11.0.5
@@ -1804,7 +1804,7 @@ snapshots:
     transitivePeerDependencies:
       - supports-color
 
-  react@19.3.0: {}
+  react@19.3.1: {}
 
   rehype-raw@7.0.0:
     dependencies:
