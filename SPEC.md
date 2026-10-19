@@ -8,7 +8,7 @@ The plugin MUST provide a settings page inside Paperclip where an operator can c
 
 - a GitHub token stored as a company-scoped Paperclip secret reference
 - an optional external config file at `${PAPERCLIP_HOME:-~/.paperclip}/plugins/github-sync/config.json` for worker-only global values such as a raw `githubToken`
-- Paperclip board access, which is optional but configurable on `deploymentMode: "local_trusted"` deployments and required when the Paperclip deployment reports `deploymentMode: "authenticated"`
+- Paperclip board access, which is optional on both `deploymentMode: "local_trusted"` and `deploymentMode: "authenticated"` deployments and recommended on authenticated deployments, where label creation, user assignment, and the agent tool-access check depend on it
 - one or more GitHub repository mappings
 - company-scoped advanced defaults for imported issues: default assignee, default Paperclip status, executor/reviewer/approver handoff assignees for sync-driven status transitions, and ignored GitHub issue authors, where a saved username such as `renovate` also matches GitHub bot logins such as `renovate[bot]`
 - the frequency for automatic scheduled sync runs for that company
@@ -20,7 +20,7 @@ The settings page MUST allow saving mappings and triggering a manual sync.
 - The settings page SHOULD clearly label company-scoped setup and defaults, including sync cadence, for the active company.
 - When a company context is present, the settings page SHOULD show the active company name prominently using a human-friendly label instead of a raw identifier.
 - When a company already has Paperclip projects bound to GitHub repository workspaces, the settings page SHOULD surface those projects so an operator can enable sync without recreating the project.
-- The settings page MUST render the Paperclip board-access connect controls when the current Paperclip deployment reports `deploymentMode: "authenticated"` or `deploymentMode: "local_trusted"`, while only treating board access as required for sync when the deployment reports `deploymentMode: "authenticated"`.
+- The settings page MUST render the Paperclip board-access connect controls when the current Paperclip deployment reports `deploymentMode: "authenticated"` or `deploymentMode: "local_trusted"`, and MUST present board access as recommended rather than required on `deploymentMode: "authenticated"` deployments.
 - When the settings page successfully validates a saved GitHub token, it SHOULD persist the validated GitHub login as non-secret display metadata so later visits can continue showing `Authenticated as ...` instead of falling back to a generic ready state.
 - When the settings page successfully connects Paperclip board access for a company, it SHOULD persist a company-scoped non-secret identity label so later visits can continue showing `Connected as ...` instead of falling back to a generic connected state.
 - When the active company has a saved Paperclip board-access user id, every advanced-settings assignee dropdown MUST include a `Me` option that maps to that connected board user alongside the available agents.
@@ -29,7 +29,7 @@ The settings page MUST allow saving mappings and triggering a manual sync.
 - When a manual sync will outlive a quick action response, the worker MUST persist a `running` sync state immediately and complete the sync asynchronously.
 - Once a sync is running, the settings page, dashboard widget, and toolbar sync entry points MUST provide a way to request cancellation, and the worker MUST stop cooperatively after the current repository or issue step finishes.
 - If a worker restart or similar interruption leaves a persisted sync state in `running` without a live in-memory sync behind it, the next worker-visible read or control path MUST reconcile that orphaned run into an interrupted error or cancelled result instead of leaving the UI stuck in `running` or silently restarting the abandoned run.
-- The settings page, dashboard widget, and sync toolbar surfaces SHOULD detect authenticated deployments from `/api/health` and MUST require connected Paperclip board access before enabling sync for the affected company.
+- The settings page, dashboard widget, and sync toolbar surfaces MUST NOT lock sync because Paperclip board access is missing. When the latest sync state carries warnings, the settings page and dashboard widget SHOULD show them alongside the sync summary.
 
 ## Secret handling
 
@@ -105,7 +105,9 @@ The plugin MUST persist repository mappings, company-scoped advanced issue defau
 - The worker MUST treat the plugin-configured Paperclip API origin as the trusted source for direct authenticated Paperclip REST calls, and MUST reject ad hoc action inputs that point at a different origin.
 - The worker MUST NOT rely on a Paperclip process environment variable named `PAPERCLIP_API_URL`; release-target e2e verification uses an explicit Worker Paperclip API URL because plugin worker runtime environments do not guarantee that process variable.
 - Direct Paperclip REST fetch failures MUST preserve method, URL, primary error, nested cause message, and cause code in diagnostics when available so TLS and routing problems remain actionable.
-- Before a manual or scheduled sync touches any mapping whose company is missing board access, the worker MUST probe `/api/health` on the resolved Paperclip API origin and fail fast with configuration guidance when that deployment reports `deploymentMode: "authenticated"`.
+- Before a manual, scheduled, or issue-scoped sync touches any mapping or external link whose company is missing board access, the worker MUST probe `/api/health` on the resolved Paperclip API origin. When that deployment reports `deploymentMode: "authenticated"`, the sync MUST still run, MUST NOT make any direct Paperclip REST call for those companies, and MUST route their issue updates, comments, and wakeups through the plugin SDK. The resulting sync state MUST carry a non-fatal `warnings` entry naming the features that need board access: creating missing Paperclip labels, assigning issues to users, and the agent tool-access check.
+- For a company synced without board access, a GitHub label with no matching Paperclip label MUST stay unmapped without failing that issue's import, label, description, or status sync.
+- A persisted `missing_board_access` configuration error MUST be treated as stale and displayed as idle.
 - When a company has connected Paperclip board access, the worker MUST attach `Authorization: Bearer <board-token>` to direct Paperclip REST issue and label calls for that company, using the saved secret ref when resolvable and the company-scoped worker-local board-token fallback when plugin secret refs are disabled.
 - When the Paperclip runtime exposes existing issue labels for the target company, the sync flow MUST map GitHub labels onto matching Paperclip labels by name and SHOULD prefer an exact color match when multiple Paperclip labels share the same name.
 - When no matching Paperclip label exists and the local Paperclip label API is reachable, the sync flow MUST create the missing Paperclip label using the GitHub label color when available before attaching it to the imported issue.

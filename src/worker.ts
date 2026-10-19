@@ -132,6 +132,8 @@ const MISSING_BOARD_ACCESS_SYNC_MESSAGE =
   'Connect Paperclip board access before running sync on this authenticated deployment.';
 const MISSING_BOARD_ACCESS_SYNC_ACTION =
   'Open plugin settings for each mapped company that sync will touch, connect Paperclip board access, approve the flow, and then run sync again.';
+const MISSING_BOARD_ACCESS_SYNC_WARNING =
+  'Paperclip board access is not connected on this authenticated deployment, so sync used the plugin SDK only. Creating missing Paperclip labels, assigning issues to users, and the agent tool-access check stay unavailable until board access is connected in plugin settings.';
 const IMPORTED_ISSUE_WAKE_REASON = 'GitHub Sync imported an assigned issue that is ready for work.';
 const STATUS_TRANSITION_WAKE_REASON = 'GitHub Sync moved an assigned issue into its next active state.';
 const ISSUE_LINK_ENTITY_TYPE = 'paperclip-github-plugin.issue-link';
@@ -362,6 +364,7 @@ interface SyncRunState {
   progress?: SyncProgressState;
   errorDetails?: SyncErrorDetails;
   recentFailures?: SyncFailureLogEntry[];
+  warnings?: string[];
 }
 
 type SyncFailurePhase =
@@ -715,6 +718,7 @@ let activeSyncPromise: Promise<GitHubSyncSettings> | null = null;
 let activeRunningSyncState: GitHubSyncSettings | null = null;
 let activeRunningSyncCompanyId: string | undefined;
 let activePaperclipApiAuthTokensByCompanyId: Map<string, string> | null = null;
+let activeCompanyIdsWithoutBoardAccess: Set<string> | null = null;
 let activeExternalConfigWarningKey: string | null = null;
 const activeProjectPullRequestPageCache = new Map<string, CacheEntry<Record<string, unknown>>>();
 const activeProjectPullRequestCountCache = new Map<string, CacheEntry<number>>();
@@ -4844,7 +4848,6 @@ function clearResolvedSetupConfigurationSyncState(
   setup: {
     hasToken: boolean;
     hasMappings: boolean;
-    hasBoardAccess?: boolean;
   }
 ): SyncRunState {
   const configurationIssue = getSyncConfigurationIssue(syncState);
@@ -4860,7 +4863,8 @@ function clearResolvedSetupConfigurationSyncState(
     return createIdleSyncState();
   }
 
-  if (configurationIssue === 'missing_board_access' && setup.hasBoardAccess) {
+  // Sync runs without board access, so a persisted `missing_board_access` error is stale.
+  if (configurationIssue === 'missing_board_access') {
     return createIdleSyncState();
   }
 
@@ -4872,7 +4876,6 @@ function sanitizeSettingsForCurrentSetup(
   setup: {
     hasToken: boolean;
     hasMappings: boolean;
-    hasBoardAccess?: boolean;
   }
 ): GitHubSyncSettings {
   const syncState = clearResolvedSetupConfigurationSyncState(settings.syncState, setup);
@@ -5175,7 +5178,7 @@ async function buildProjectPullRequestPaperclipIssueData(
 }
 
 function createSetupConfigurationErrorSyncState(
-  issue: SyncConfigurationIssue,
+  issue: Exclude<SyncConfigurationIssue, 'missing_board_access'>,
   trigger: 'manual' | 'schedule' | 'retry'
 ): SyncRunState {
   switch (issue) {
@@ -5222,29 +5225,6 @@ function createSetupConfigurationErrorSyncState(
             phase: 'configuration',
             configurationIssue: 'missing_mapping',
             suggestedAction: MISSING_MAPPING_SYNC_ACTION
-          }
-        ]
-      });
-    case 'missing_board_access':
-      return createErrorSyncState({
-        message: MISSING_BOARD_ACCESS_SYNC_MESSAGE,
-        trigger,
-        syncedIssuesCount: 0,
-        createdIssuesCount: 0,
-        skippedIssuesCount: 0,
-        erroredIssuesCount: 0,
-        errorDetails: {
-          phase: 'configuration',
-          configurationIssue: 'missing_board_access',
-          suggestedAction: MISSING_BOARD_ACCESS_SYNC_ACTION
-        },
-        recentFailures: [
-          {
-            message: MISSING_BOARD_ACCESS_SYNC_MESSAGE,
-            occurredAt: new Date().toISOString(),
-            phase: 'configuration',
-            configurationIssue: 'missing_board_access',
-            suggestedAction: MISSING_BOARD_ACCESS_SYNC_ACTION
           }
         ]
       });
@@ -5946,6 +5926,9 @@ function normalizeSyncState(value: unknown): SyncRunState {
   const progress = normalizeSyncProgress(record.progress);
   const errorDetails = normalizeSyncErrorDetails(record.errorDetails);
   const recentFailures = normalizeSyncFailureLogEntries(record.recentFailures);
+  const warnings = Array.isArray(record.warnings)
+    ? record.warnings.filter((warning): warning is string => typeof warning === 'string' && warning.trim().length > 0)
+    : [];
 
   return {
     status: status === 'running' || status === 'success' || status === 'error' || status === 'cancelled' ? status : 'idle',
@@ -5961,7 +5944,8 @@ function normalizeSyncState(value: unknown): SyncRunState {
     ...(typeof record.cancelRequestedAt === 'string' ? { cancelRequestedAt: record.cancelRequestedAt } : {}),
     ...(progress ? { progress } : {}),
     ...(errorDetails ? { errorDetails } : {}),
-    ...(recentFailures ? { recentFailures } : {})
+    ...(recentFailures ? { recentFailures } : {}),
+    ...(warnings.length > 0 ? { warnings } : {})
   };
 }
 
@@ -12666,6 +12650,13 @@ function getPaperclipEffectiveAgentToolProfilesEndpoint(baseUrl: string, company
   ).toString();
 }
 
+// Without board access the worker cannot create Paperclip labels, so unresolved GitHub labels are
+// left unmapped instead of failing the issue and blocking its status sync.
+function isPaperclipLabelCreationUnavailable(companyId?: string): boolean {
+  const normalizedCompanyId = normalizeCompanyId(companyId);
+  return Boolean(normalizedCompanyId && activeCompanyIdsWithoutBoardAccess?.has(normalizedCompanyId));
+}
+
 function getActivePaperclipApiAuthToken(companyId?: string): string | undefined {
   if (!companyId) {
     return undefined;
@@ -13649,7 +13640,7 @@ async function synchronizePaperclipIssueLabels(
     paperclipApiBaseUrl
   );
 
-  if (labelResolution.unresolvedGitHubLabels.length > 0) {
+  if (labelResolution.unresolvedGitHubLabels.length > 0 && !isPaperclipLabelCreationUnavailable(companyId)) {
     throw new PaperclipLabelSyncError({
       labelNames: labelResolution.unresolvedGitHubLabels.map((label) => label.name),
       paperclipApiBaseUrl,
@@ -14843,7 +14834,7 @@ async function ensurePaperclipIssueImported(
   ensuredPaperclipIssueIds.set(issue.id, createdIssue.id);
   createdIssueIds.add(issue.id);
 
-  if (createdIssue.unresolvedGitHubLabels.length > 0) {
+  if (createdIssue.unresolvedGitHubLabels.length > 0 && !isPaperclipLabelCreationUnavailable(mapping.companyId)) {
     throw new PaperclipLabelSyncError({
       labelNames: createdIssue.unresolvedGitHubLabels.map((label) => label.name),
       paperclipApiBaseUrl,
@@ -21808,6 +21799,7 @@ async function performSync(
   const externalLinkAuthMappings = buildExternalLinkAuthMappings(externalSyncWork);
   const externalLinkCount = externalSyncWork.issueLinks.length + externalSyncWork.pullRequestLinks.length;
   activePaperclipApiAuthTokensByCompanyId = null;
+  activeCompanyIdsWithoutBoardAccess = null;
   // Synchronization decisions must observe current remote action signals. The
   // longer-lived UI insight caches are useful within a run, but reusing them
   // across runs can hide a new head, check result, or review action.
@@ -21840,16 +21832,25 @@ async function performSync(
     config,
     [...mappings, ...externalLinkAuthMappings]
   );
-  if (
-    mappingsMissingBoardAccess.length > 0
-    && await detectPaperclipBoardAccessRequirement(paperclipApiBaseUrl)
-  ) {
-    const next = {
-      ...settings,
-      syncState: createSetupConfigurationErrorSyncState('missing_board_access', trigger)
-    };
-    return saveSettingsSyncState(ctx, settings, next.syncState, targetCompanyId);
-  }
+  // An authenticated deployment rejects unauthenticated worker REST calls. Companies without board
+  // access get no Paperclip API URL, so every Paperclip mutation takes its plugin SDK path instead.
+  const companyIdsWithoutBoardAccess = new Set<string>(
+    mappingsMissingBoardAccess.length > 0 && await detectPaperclipBoardAccessRequirement(paperclipApiBaseUrl)
+      ? mappingsMissingBoardAccess
+          .map((mapping) => normalizeCompanyId(mapping.companyId))
+          .filter((companyId): companyId is string => Boolean(companyId))
+      : []
+  );
+  activeCompanyIdsWithoutBoardAccess = companyIdsWithoutBoardAccess;
+  const getCompanyPaperclipApiBaseUrl = (companyId?: string): string | undefined => {
+    const normalizedCompanyId = normalizeCompanyId(companyId);
+    return normalizedCompanyId && companyIdsWithoutBoardAccess.has(normalizedCompanyId)
+      ? undefined
+      : paperclipApiBaseUrl;
+  };
+  const syncWarnings = companyIdsWithoutBoardAccess.size > 0 ? [MISSING_BOARD_ACCESS_SYNC_WARNING] : [];
+  const withSyncWarnings = (syncState: SyncRunState): SyncRunState =>
+    syncWarnings.length > 0 ? { ...syncState, warnings: syncWarnings } : syncState;
 
   if (mappings.length > 0 && (!ctx.issues || typeof ctx.issues.create !== 'function')) {
     const errorDetails: SyncErrorDetails = {
@@ -22097,7 +22098,7 @@ async function performSync(
           });
           availableLabels =
             supportsPaperclipLabelMapping && companyId
-              ? await buildPaperclipLabelDirectory(ctx, companyId, paperclipApiBaseUrl)
+              ? await buildPaperclipLabelDirectory(ctx, companyId, getCompanyPaperclipApiBaseUrl(companyId))
               : new Map();
           if (companyId) {
             companyLabelDirectoryCache.set(companyId, availableLabels);
@@ -22237,7 +22238,7 @@ async function performSync(
           });
           availableLabels =
             supportsPaperclipLabelMapping && companyId
-              ? await buildPaperclipLabelDirectory(ctx, companyId, paperclipApiBaseUrl)
+              ? await buildPaperclipLabelDirectory(ctx, companyId, getCompanyPaperclipApiBaseUrl(companyId))
               : new Map();
           if (companyId) {
             companyLabelDirectoryCache.set(companyId, availableLabels);
@@ -22347,7 +22348,7 @@ async function performSync(
               advancedSettings,
               issue,
               availableLabels,
-              paperclipApiBaseUrl,
+              getCompanyPaperclipApiBaseUrl(mapping.companyId),
               importRegistryByIssueId,
               existingImportedPaperclipIssuesByUrl,
               nextRegistry,
@@ -22385,7 +22386,7 @@ async function performSync(
           ),
           allIssuesById,
           nextRegistry,
-          paperclipApiBaseUrl,
+          paperclipApiBaseUrl: getCompanyPaperclipApiBaseUrl(mapping.companyId),
           syncFailureContext: failureContext,
           failures: recoverableFailures
         });
@@ -22443,7 +22444,7 @@ async function performSync(
           importedIssuesForSynchronization,
           createdIssueIds,
           availableLabels,
-          paperclipApiBaseUrl,
+          getCompanyPaperclipApiBaseUrl(mapping.companyId),
           linkedPullRequestsByIssueNumber,
           issueStatusSnapshotCache,
           pullRequestStatusCache,
@@ -22489,7 +22490,7 @@ async function performSync(
           mapping,
           advancedSettings,
           pullRequestLinks,
-          paperclipApiBaseUrl,
+          getCompanyPaperclipApiBaseUrl(mapping.companyId),
           pullRequestStatusCache,
           failureContext,
           recoverableFailures,
@@ -22547,7 +22548,7 @@ async function performSync(
           });
           availableLabels =
             supportsPaperclipLabelMapping
-              ? await buildPaperclipLabelDirectory(ctx, companyId, paperclipApiBaseUrl)
+              ? await buildPaperclipLabelDirectory(ctx, companyId, getCompanyPaperclipApiBaseUrl(companyId))
               : new Map();
           companyLabelDirectoryCache.set(companyId, availableLabels);
         }
@@ -22622,7 +22623,7 @@ async function performSync(
           [importedIssue],
           new Set(),
           availableLabels,
-          paperclipApiBaseUrl,
+          getCompanyPaperclipApiBaseUrl(companyId),
           new Map(),
           new Map(),
           new Map(),
@@ -22714,7 +22715,7 @@ async function performSync(
           },
           getCompanyAdvancedSettings(settings, companyId),
           pullRequestLinks,
-          paperclipApiBaseUrl,
+          getCompanyPaperclipApiBaseUrl(companyId),
           pullRequestStatusCache,
           failureContext,
           recoverableFailures,
@@ -22755,7 +22756,7 @@ async function performSync(
       const errorDetails = buildSyncErrorDetails(primaryFailure.error, primaryFailure.context);
       const next = {
         ...currentSettings,
-        syncState: createErrorSyncState({
+        syncState: withSyncWarnings(createErrorSyncState({
           message: buildRecoverableSyncFailureMessage(
             primaryFailure.error,
             primaryFailure.context,
@@ -22769,7 +22770,7 @@ async function performSync(
           progress: currentProgress,
           errorDetails,
           recentFailures: buildRecentSyncFailureLogEntries(recoverableFailures)
-        })
+        }))
       };
       await saveSettingsSyncState(ctx, currentSettings, next.syncState, targetCompanyId);
       await ctx.state.set(IMPORT_REGISTRY_SCOPE, nextRegistry);
@@ -22786,7 +22787,7 @@ async function performSync(
       erroredIssuesCount: 0,
       lastRunTrigger: trigger
     };
-    const next = await saveSettingsSyncState(ctx, currentSettings, nextSyncState, targetCompanyId);
+    const next = await saveSettingsSyncState(ctx, currentSettings, withSyncWarnings(nextSyncState), targetCompanyId);
     await ctx.state.set(IMPORT_REGISTRY_SCOPE, nextRegistry);
     return next;
   } catch (error) {
@@ -22794,7 +22795,7 @@ async function performSync(
       const next = await saveSettingsSyncState(
         ctx,
         currentSettings,
-        createCancelledSyncState({
+        withSyncWarnings(createCancelledSyncState({
           message: buildCancelledSyncMessage(options.target, currentProgress),
           trigger,
           syncedIssuesCount,
@@ -22802,7 +22803,7 @@ async function performSync(
           skippedIssuesCount,
           erroredIssuesCount: recoverableFailures.length,
           progress: currentProgress
-        }),
+        })),
         targetCompanyId
       );
       await ctx.state.set(IMPORT_REGISTRY_SCOPE, nextRegistry);
@@ -22812,7 +22813,7 @@ async function performSync(
     const errorDetails = buildSyncErrorDetails(error, failureContext);
     const next = {
       ...currentSettings,
-      syncState: createErrorSyncState({
+      syncState: withSyncWarnings(createErrorSyncState({
         message: buildSyncFailureMessage(error, failureContext),
         trigger,
         syncedIssuesCount,
@@ -22825,7 +22826,7 @@ async function performSync(
           buildRecentSyncFailureLogEntries(recoverableFailures),
           buildSyncFailureLogEntry(error, failureContext)
         )
-      })
+      }))
     };
     await saveSettingsSyncState(ctx, currentSettings, next.syncState, targetCompanyId);
     await ctx.state.set(IMPORT_REGISTRY_SCOPE, nextRegistry);
@@ -22964,6 +22965,7 @@ async function startSync(
     } finally {
       await setSyncCancellationRequest(ctx, null);
       activePaperclipApiAuthTokensByCompanyId = null;
+      activeCompanyIdsWithoutBoardAccess = null;
       activeRunningSyncState = null;
       activeRunningSyncCompanyId = undefined;
       activeSyncPromise = null;
