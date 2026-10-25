@@ -15,6 +15,7 @@ import remarkGfm from 'remark-gfm';
 import { GITHUB_SYNC_PLUGIN_ID } from '../kpi-contract.ts';
 import { parseRepositoryReference, type ParsedRepositoryReference } from '../github-repo.ts';
 import { resolvePaperclipAuthControlsPolicy } from '../paperclip-health.ts';
+import { normalizeRequiredLabels, normalizeTriggerHandles } from '../sync-filters.ts';
 import { normalizeCompanyAssigneeOptionsResponse, type GitHubSyncAssigneeOption } from './assignees.ts';
 import { buildPaperclipUrl, fetchJson, fetchPaperclipHealth, resolveCliAuthPollUrl } from './http.ts';
 import {
@@ -272,6 +273,8 @@ interface GitHubSyncAdvancedSettings {
   approverAssigneeUserId?: string;
   defaultStatus: PaperclipIssueStatus;
   ignoredIssueAuthorUsernames: string[];
+  triggerHandles: string[];
+  requiredLabels: string[];
 }
 
 /**
@@ -797,7 +800,9 @@ const DEFAULT_IGNORED_GITHUB_ISSUE_USERNAMES = ['renovate'];
 
 const DEFAULT_ADVANCED_SETTINGS: GitHubSyncAdvancedSettings = {
   defaultStatus: 'backlog',
-  ignoredIssueAuthorUsernames: DEFAULT_IGNORED_GITHUB_ISSUE_USERNAMES
+  ignoredIssueAuthorUsernames: DEFAULT_IGNORED_GITHUB_ISSUE_USERNAMES,
+  triggerHandles: [],
+  requiredLabels: []
 };
 
 const PAPERCLIP_STATUS_OPTIONS: Array<{ value: PaperclipIssueStatus; label: string; tone: SelectTone }> = [
@@ -4991,7 +4996,15 @@ function normalizeAdvancedSettings(value: unknown): GitHubSyncAdvancedSettings {
     ignoredIssueAuthorUsernames:
       'ignoredIssueAuthorUsernames' in record
         ? normalizeIgnoredIssueAuthorUsernames(record.ignoredIssueAuthorUsernames)
-        : DEFAULT_ADVANCED_SETTINGS.ignoredIssueAuthorUsernames
+        : DEFAULT_ADVANCED_SETTINGS.ignoredIssueAuthorUsernames,
+    triggerHandles:
+      'triggerHandles' in record
+        ? normalizeTriggerHandles(record.triggerHandles)
+        : DEFAULT_ADVANCED_SETTINGS.triggerHandles,
+    requiredLabels:
+      'requiredLabels' in record
+        ? normalizeRequiredLabels(record.requiredLabels)
+        : DEFAULT_ADVANCED_SETTINGS.requiredLabels
   };
 }
 
@@ -5020,7 +5033,9 @@ function getComparableAdvancedSettings(value: GitHubSyncAdvancedSettings | null 
     ...(settings.approverAssigneeAgentId ? { approverAssigneeAgentId: settings.approverAssigneeAgentId } : {}),
     ...(settings.approverAssigneeUserId ? { approverAssigneeUserId: settings.approverAssigneeUserId } : {}),
     defaultStatus: settings.defaultStatus,
-    ignoredIssueAuthorUsernames: [...settings.ignoredIssueAuthorUsernames].sort((left, right) => left.localeCompare(right))
+    ignoredIssueAuthorUsernames: [...settings.ignoredIssueAuthorUsernames].sort((left, right) => left.localeCompare(right)),
+    triggerHandles: [...settings.triggerHandles].sort((left, right) => left.localeCompare(right)),
+    requiredLabels: [...settings.requiredLabels].sort((left, right) => left.localeCompare(right))
   };
 }
 
@@ -5193,7 +5208,13 @@ function formatAdvancedSettingsSummary(
       ? advancedSettings.ignoredIssueAuthorUsernames.join(', ')
       : 'none';
   const handoffLabel = `Back to work: ${executorLabel} · Review: ${reviewerLabel} · Approval: ${approverLabel}`;
-  return `Import: ${assigneeLabel} · ${handoffLabel} · Status: ${statusLabel} · Ignore: ${ignoredAuthorsLabel}`;
+  const mentionLabel = advancedSettings.triggerHandles.length > 0
+    ? ` · Wake on mentions of: ${advancedSettings.triggerHandles.map((handle) => `@${handle}`).join(', ')}`
+    : '';
+  const labelsLabel = advancedSettings.requiredLabels.length > 0
+    ? ` · Import only labels: ${advancedSettings.requiredLabels.join(', ')}`
+    : '';
+  return `Import: ${assigneeLabel} · ${handoffLabel} · Status: ${statusLabel} · Ignore: ${ignoredAuthorsLabel}${mentionLabel}${labelsLabel}`;
 }
 
 export function resolveSavedTokenUiState(params: {
@@ -11248,6 +11269,8 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
   const [scheduleFrequencyDraft, setScheduleFrequencyDraft] = useState(String(DEFAULT_SCHEDULE_FREQUENCY_MINUTES));
   const [paperclipApiBaseUrlDraft, setPaperclipApiBaseUrlDraft] = useState('');
   const [ignoredAuthorsDraft, setIgnoredAuthorsDraft] = useState(DEFAULT_ADVANCED_SETTINGS.ignoredIssueAuthorUsernames.join(', '));
+  const [triggerHandlesDraft, setTriggerHandlesDraft] = useState(DEFAULT_ADVANCED_SETTINGS.triggerHandles.join(', '));
+  const [requiredLabelsDraft, setRequiredLabelsDraft] = useState(DEFAULT_ADVANCED_SETTINGS.requiredLabels.join(', '));
   const [tokenStatusOverride, setTokenStatusOverride] = useState<TokenStatus | null>(null);
   const [validatedLogin, setValidatedLogin] = useState<string | null>(null);
   const [boardAccessIdentity, setBoardAccessIdentity] = useState<string | null>(null);
@@ -11316,6 +11339,8 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
         : getPaperclipApiBrowserOrigin() ?? ''
     );
     setIgnoredAuthorsDraft(normalizeAdvancedSettings(settings.data.advancedSettings).ignoredIssueAuthorUsernames.join(', '));
+    setTriggerHandlesDraft(normalizeAdvancedSettings(settings.data.advancedSettings).triggerHandles.join(', '));
+    setRequiredLabelsDraft(normalizeAdvancedSettings(settings.data.advancedSettings).requiredLabels.join(', '));
     setTokenDraft('');
     setValidatedLogin(tokenUiState.validatedLogin);
     setBoardAccessIdentity(settings.data.paperclipBoardAccessConfigured ? savedBoardAccessIdentity : null);
@@ -13143,6 +13168,61 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
                     placeholder="renovate"
                   />
                   <p className="ghsync__hint">Comma or newline separated.</p>
+                </div>
+
+                <div className="ghsync__field">
+                  <label htmlFor="advanced-trigger-handles">Wake on comments that mention</label>
+                  <textarea
+                    id="advanced-trigger-handles"
+                    className="ghsync__input ghsync__textarea"
+                    value={triggerHandlesDraft}
+                    disabled={settingsMutationsLocked}
+                    onChange={(event) => {
+                      const nextDraft = event.currentTarget.value;
+                      const triggerHandles = normalizeTriggerHandles(nextDraft);
+                      setTriggerHandlesDraft(nextDraft);
+                      setForm((current) => ({
+                        ...current,
+                        advancedSettings: {
+                          ...current.advancedSettings,
+                          triggerHandles
+                        }
+                      }));
+                    }}
+                    placeholder="my-agent-handle"
+                  />
+                  <p className="ghsync__hint">
+                    Comma, space, or newline separated. Leave empty to keep today&apos;s behavior where any trusted comment
+                    counts. When set, a trusted comment only sends the issue back to active execution and wakes its assignee
+                    if the comment body mentions one of these handles. The leading `@` is optional.
+                  </p>
+                </div>
+
+                <div className="ghsync__field">
+                  <label htmlFor="advanced-required-labels">Import only issues labeled</label>
+                  <textarea
+                    id="advanced-required-labels"
+                    className="ghsync__input ghsync__textarea"
+                    value={requiredLabelsDraft}
+                    disabled={settingsMutationsLocked}
+                    onChange={(event) => {
+                      const nextDraft = event.currentTarget.value;
+                      const requiredLabels = normalizeRequiredLabels(nextDraft);
+                      setRequiredLabelsDraft(nextDraft);
+                      setForm((current) => ({
+                        ...current,
+                        advancedSettings: {
+                          ...current.advancedSettings,
+                          requiredLabels
+                        }
+                      }));
+                    }}
+                    placeholder="agent-ready, bug"
+                  />
+                  <p className="ghsync__hint">
+                    Comma or newline separated. Leave empty to import every open issue. When set, only open issues carrying at
+                    least one of these labels are imported. Issues that were imported before you added labels keep syncing.
+                  </p>
                 </div>
 
               </div>

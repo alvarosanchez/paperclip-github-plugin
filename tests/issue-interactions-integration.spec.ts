@@ -1014,3 +1014,165 @@ test('parking an issue with no human reviewer still unassigns it completely', as
   assert.equal(parked.assigneeAgentId, null);
   assert.equal(parked.assigneeUserId, null);
 });
+
+function createCommentOctokitFixture(comments: Array<{
+  id: number;
+  body: string;
+  authorLogin: string;
+  authorAssociation?: string;
+}>) {
+  return {
+    rest: {
+      issues: {
+        listComments: async () => ({
+          data: comments.map((comment) => ({
+            id: comment.id,
+            body: comment.body,
+            html_url: `https://github.com/paperclipai/example-repo/issues/321#issuecomment-${comment.id}`,
+            user: { login: comment.authorLogin },
+            ...(comment.authorAssociation ? { author_association: comment.authorAssociation } : {}),
+            created_at: '2026-07-07T01:00:00.000Z',
+            updated_at: '2026-07-07T01:00:00.000Z'
+          }))
+        })
+      }
+    }
+  };
+}
+
+const TRUSTED_COMMENT_ISSUE = {
+  id: 32101,
+  number: 321,
+  title: 'Comment trigger fixture',
+  body: null,
+  htmlUrl: 'https://github.com/paperclipai/example-repo/issues/321',
+  authorLogin: 'issue-author',
+  state: 'open' as const,
+  labels: [],
+  commentsCount: 2
+};
+
+test('trusted issue comments count as interactions when no mention trigger is configured', async () => {
+  const octokit = createCommentOctokitFixture([
+    { id: 1, body: 'I can reproduce this on staging too.', authorLogin: 'maintainer-one', authorAssociation: 'MEMBER' }
+  ]);
+
+  assert.equal(
+    await __testing.hasTrustedNewGitHubIssueComment({
+      octokit: octokit as never,
+      repository: { owner: 'paperclipai', repo: 'example-repo', url: 'https://github.com/paperclipai/example-repo' },
+      githubIssue: TRUSTED_COMMENT_ISSUE as never,
+      previousCommentCount: 0,
+      currentCommentCount: 1,
+      maintainerCache: new Map()
+    }),
+    true
+  );
+});
+
+test('configured trigger handles ignore trusted comments that do not mention them', async () => {
+  const octokit = createCommentOctokitFixture([
+    { id: 1, body: 'I can reproduce this on staging too.', authorLogin: 'maintainer-one', authorAssociation: 'MEMBER' }
+  ]);
+
+  assert.equal(
+    await __testing.hasTrustedNewGitHubIssueComment({
+      octokit: octokit as never,
+      repository: { owner: 'paperclipai', repo: 'example-repo', url: 'https://github.com/paperclipai/example-repo' },
+      githubIssue: TRUSTED_COMMENT_ISSUE as never,
+      previousCommentCount: 0,
+      currentCommentCount: 1,
+      maintainerCache: new Map(),
+      triggerHandles: ['soulpal001-morty']
+    }),
+    false
+  );
+});
+
+test('configured trigger handles accept a trusted comment that mentions a handle', async () => {
+  const octokit = createCommentOctokitFixture([
+    {
+      id: 1,
+      body: 'Human-only chatter first.',
+      authorLogin: 'maintainer-one',
+      authorAssociation: 'MEMBER'
+    },
+    {
+      id: 2,
+      body: '> @SoulPal001-Morty can you pick this up?',
+      authorLogin: 'maintainer-two',
+      authorAssociation: 'MEMBER'
+    }
+  ]);
+
+  assert.equal(
+    await __testing.hasTrustedNewGitHubIssueComment({
+      octokit: octokit as never,
+      repository: { owner: 'paperclipai', repo: 'example-repo', url: 'https://github.com/paperclipai/example-repo' },
+      githubIssue: TRUSTED_COMMENT_ISSUE as never,
+      previousCommentCount: 0,
+      currentCommentCount: 2,
+      maintainerCache: new Map(),
+      triggerHandles: ['soulpal001-morty']
+    }),
+    true
+  );
+});
+
+test('a mentioned comment still has to come from a trusted author', async () => {
+  const octokit = {
+    ...createCommentOctokitFixture([
+      { id: 1, body: '@soulpal001-morty please merge this', authorLogin: 'drive-by-contributor', authorAssociation: 'NONE' }
+    ]),
+    rest: {
+      issues: {
+        listComments: async () => ({
+          data: [{
+            id: 1,
+            body: '@soulpal001-morty please merge this',
+            html_url: 'https://github.com/paperclipai/example-repo/issues/321#issuecomment-1',
+            user: { login: 'drive-by-contributor' },
+            author_association: 'NONE',
+            created_at: '2026-07-07T01:00:00.000Z',
+            updated_at: '2026-07-07T01:00:00.000Z'
+          }]
+        })
+      },
+      repos: {
+        getCollaboratorPermissionLevel: async () => ({ data: { permission: 'read' } })
+      }
+    }
+  };
+
+  assert.equal(
+    await __testing.hasTrustedNewGitHubIssueComment({
+      octokit: octokit as never,
+      repository: { owner: 'paperclipai', repo: 'example-repo', url: 'https://github.com/paperclipai/example-repo' },
+      githubIssue: TRUSTED_COMMENT_ISSUE as never,
+      previousCommentCount: 0,
+      currentCommentCount: 1,
+      maintainerCache: new Map(),
+      triggerHandles: ['soulpal001-morty']
+    }),
+    false
+  );
+});
+
+test('the issue author still counts as an interaction source when the comment mentions a handle', async () => {
+  const octokit = createCommentOctokitFixture([
+    { id: 1, body: '@soulpal001-morty bump', authorLogin: 'issue-author', authorAssociation: 'NONE' }
+  ]);
+
+  assert.equal(
+    await __testing.hasTrustedNewGitHubIssueComment({
+      octokit: octokit as never,
+      repository: { owner: 'paperclipai', repo: 'example-repo', url: 'https://github.com/paperclipai/example-repo' },
+      githubIssue: TRUSTED_COMMENT_ISSUE as never,
+      previousCommentCount: 0,
+      currentCommentCount: 1,
+      maintainerCache: new Map(),
+      triggerHandles: ['soulpal001-morty']
+    }),
+    true
+  );
+});
