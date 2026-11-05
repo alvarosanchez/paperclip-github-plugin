@@ -28,6 +28,12 @@ import {
 } from './git-branch-publisher.ts';
 import { parseRepositoryReference, type ParsedRepositoryReference } from './github-repo.ts';
 import {
+  containsTriggerHandleMention,
+  matchesRequiredLabels,
+  normalizeRequiredLabels,
+  normalizeTriggerHandles
+} from './sync-filters.ts';
+import {
   buildIssueInteractionSummary,
   ISSUE_INTERACTION_ENTITY_TYPE,
   ISSUE_INTERACTION_MAX_LIST_ROWS,
@@ -282,6 +288,16 @@ interface GitHubSyncAdvancedSettings {
   approverAssigneeUserId?: string;
   defaultStatus: PaperclipIssueStatus;
   ignoredIssueAuthorUsernames: string[];
+  /**
+   * When non-empty, a comment only counts as an agent interaction when its body mentions one of
+   * these handles. Empty keeps the historical behaviour where any trusted comment counts.
+   */
+  triggerHandles: string[];
+  /**
+   * When non-empty, only GitHub issues carrying at least one of these labels are imported into
+   * Paperclip. Empty keeps the historical behaviour where every open issue is imported.
+   */
+  requiredLabels: string[];
 }
 
 interface GitHubSyncAssigneeOption {
@@ -2324,7 +2340,9 @@ const PAPERCLIP_ISSUE_STATUSES: PaperclipIssueStatus[] = [
 
 const DEFAULT_ADVANCED_SETTINGS: GitHubSyncAdvancedSettings = {
   defaultStatus: DEFAULT_IMPORTED_ISSUE_STATUS,
-  ignoredIssueAuthorUsernames: DEFAULT_IGNORED_GITHUB_ISSUE_USERNAMES
+  ignoredIssueAuthorUsernames: DEFAULT_IGNORED_GITHUB_ISSUE_USERNAMES,
+  triggerHandles: [],
+  requiredLabels: []
 };
 
 function createMappingId(index: number): string {
@@ -6088,6 +6106,14 @@ function normalizeAdvancedSettings(value: unknown): GitHubSyncAdvancedSettings {
     'ignoredIssueAuthorUsernames' in record
       ? normalizeIgnoredIssueAuthorUsernames(record.ignoredIssueAuthorUsernames)
       : DEFAULT_ADVANCED_SETTINGS.ignoredIssueAuthorUsernames;
+  const triggerHandles =
+    'triggerHandles' in record
+      ? normalizeTriggerHandles(record.triggerHandles)
+      : DEFAULT_ADVANCED_SETTINGS.triggerHandles;
+  const requiredLabels =
+    'requiredLabels' in record
+      ? normalizeRequiredLabels(record.requiredLabels)
+      : DEFAULT_ADVANCED_SETTINGS.requiredLabels;
   return {
     ...normalizeAdvancedSettingsAssigneeOverride(record, {
       agentId: 'defaultAssigneeAgentId',
@@ -6106,7 +6132,9 @@ function normalizeAdvancedSettings(value: unknown): GitHubSyncAdvancedSettings {
       userId: 'approverAssigneeUserId'
     }),
     defaultStatus,
-    ignoredIssueAuthorUsernames
+    ignoredIssueAuthorUsernames,
+    triggerHandles,
+    requiredLabels
   };
 }
 
@@ -10167,11 +10195,20 @@ async function hasTrustedGitHubCommentRecords(params: {
   comments: GitHubIssueCommentRecord[];
   originalPosterLogin?: string;
   maintainerCache: Map<string, boolean>;
+  triggerHandles?: string[];
 }): Promise<boolean> {
   const originalPosterLogin = normalizeGitHubUserLogin(params.originalPosterLogin);
+  const triggerHandles = params.triggerHandles ?? [];
   const unseenAuthors = new Set<string>();
 
   for (const comment of params.comments) {
+    // A configured mention trigger narrows "needs agent attention" to comments that address the
+    // agent. Trust still has to hold for the comment to count, but an unmentioned comment must not
+    // roll an issue back or wake its assignee, no matter who wrote it.
+    if (!containsTriggerHandleMention(comment.body, triggerHandles)) {
+      continue;
+    }
+
     const authorLogin = normalizeGitHubUserLogin(comment.authorLogin);
     if (!authorLogin) {
       continue;
@@ -10218,6 +10255,7 @@ async function hasTrustedNewGitHubIssueComment(params: {
   previousCommentCount?: number;
   currentCommentCount: number;
   maintainerCache: Map<string, boolean>;
+  triggerHandles?: string[];
 }): Promise<boolean> {
   const normalizedPreviousCommentCount =
     typeof params.previousCommentCount === 'number' && params.previousCommentCount >= 0
@@ -10244,7 +10282,8 @@ async function hasTrustedNewGitHubIssueComment(params: {
     repository: params.repository,
     comments: newComments,
     originalPosterLogin: params.githubIssue.authorLogin,
-    maintainerCache: params.maintainerCache
+    maintainerCache: params.maintainerCache,
+    triggerHandles: params.triggerHandles
   });
 }
 
@@ -10314,6 +10353,7 @@ async function listTrustedNewLinkedPullRequestCommentSources(params: {
   previousCommentCounts?: GitHubPullRequestCommentCountRecord[];
   currentCommentCounts: GitHubPullRequestCommentCountRecord[];
   maintainerCache: Map<string, boolean>;
+  triggerHandles?: string[];
 }): Promise<GitHubTrustedPullRequestCommentSource[]> {
   if ((params.currentCommentCounts?.length ?? 0) === 0 || (params.previousCommentCounts?.length ?? 0) === 0) {
     return [];
@@ -10346,7 +10386,8 @@ async function listTrustedNewLinkedPullRequestCommentSources(params: {
         repository: pullRequestRepository,
         comments: newTopLevelComments,
         originalPosterLogin: params.originalPosterLogin,
-        maintainerCache: params.maintainerCache
+        maintainerCache: params.maintainerCache,
+        triggerHandles: params.triggerHandles
       })) {
         sources.push({ repositoryUrl, number: currentCommentCount.number, kind: 'top_level' });
       }
@@ -10365,7 +10406,8 @@ async function listTrustedNewLinkedPullRequestCommentSources(params: {
         repository: pullRequestRepository,
         comments: newReviewComments,
         originalPosterLogin: params.originalPosterLogin,
-        maintainerCache: params.maintainerCache
+        maintainerCache: params.maintainerCache,
+        triggerHandles: params.triggerHandles
       })) {
         sources.push({ repositoryUrl, number: currentCommentCount.number, kind: 'review' });
       }
@@ -15434,7 +15476,8 @@ async function synchronizePaperclipIssueStatuses(
               githubIssue,
               previousCommentCount,
               currentCommentCount: snapshot.commentCount,
-              maintainerCache: repositoryMaintainerCache
+              maintainerCache: repositoryMaintainerCache,
+              triggerHandles: advancedSettings.triggerHandles
             });
       let currentLinkedPullRequestCommentCounts = snapshot.linkedPullRequests.length === 0
         ? []
@@ -15460,7 +15503,8 @@ async function synchronizePaperclipIssueStatuses(
               originalPosterLogin: githubIssue.authorLogin,
               previousCommentCounts: importedIssue.linkedPullRequestCommentCounts,
               currentCommentCounts: currentLinkedPullRequestCommentCounts,
-              maintainerCache: repositoryMaintainerCache
+              maintainerCache: repositoryMaintainerCache,
+              triggerHandles: advancedSettings.triggerHandles
             });
       const hasTrustedNewLinkedPullRequestComment = trustedNewLinkedPullRequestCommentSources.length > 0;
       const hasTrustedNewComment = hasTrustedNewIssueComment || hasTrustedNewLinkedPullRequestComment;
@@ -16070,7 +16114,8 @@ async function synchronizePaperclipPullRequestIssueStatuses(
             originalPosterLogin: snapshot.authorLogin,
             previousCommentCounts: remoteAction.linkedPullRequestCommentCounts,
             currentCommentCounts: [snapshot.commentCounts],
-            maintainerCache
+            maintainerCache,
+            triggerHandles: advancedSettings.triggerHandles
           }));
         }
       }
@@ -22131,9 +22176,20 @@ async function performSync(
         });
         const advancedSettings = getCompanyAdvancedSettings(settings, mapping.companyId);
         const eligibleIssues = allIssues.filter((issue) => !shouldIgnoreGitHubIssue(issue, advancedSettings));
-        const issues = (await listRepositoryIssuesForImport(eligibleIssues)).filter((issue) =>
-          doesGitHubIssueMatchTarget(issue, options.target)
+        const previouslyImportedGithubIssueIds = new Set(
+          importedIssueRecords.map((entry) => entry.githubIssueId)
         );
+        // `requiredLabels` only gates *new* imports. Anything already in the import registry keeps
+        // its place in the plan, so tightening the label filter never freezes, orphans, or deletes
+        // work that Paperclip already tracks. Note that this filter is applied to the import
+        // candidates only: `allIssuesById` below still carries every non-ignored issue, which is the
+        // map the status sync loop resolves already-imported issues from.
+        const issues = (await listRepositoryIssuesForImport(eligibleIssues))
+          .filter((issue) => doesGitHubIssueMatchTarget(issue, options.target))
+          .filter((issue) =>
+            previouslyImportedGithubIssueIds.has(issue.id)
+            || matchesRequiredLabels(issue.labels, advancedSettings.requiredLabels)
+          );
         const allIssuesById = new Map(eligibleIssues.map((issue) => [issue.id, issue] as const));
         const importRegistryByIssueId = new Map(
           importedIssueRecords.map((entry) => [entry.githubIssueId, entry])
@@ -24738,7 +24794,10 @@ export const __testing = {
   isHealthyMaintainerWaitTransition,
   isPaperclipIssuePatchApplied,
   findSettledNoopAttempt,
+  hasTrustedGitHubCommentRecords,
+  hasTrustedNewGitHubIssueComment,
   listTrustedNewLinkedPullRequestCommentSources,
+  normalizeAdvancedSettings,
   normalizePaperclipIssueAssigneePrincipal,
   normalizeImportRegistry,
   normalizeRemoteActionRegistry,

@@ -14761,7 +14761,9 @@ test('worker saves normalized mappings with resolved project identifiers supplie
     scheduleFrequencyMinutes: 15,
     advancedSettings: {
       defaultStatus: 'backlog',
-      ignoredIssueAuthorUsernames: ['renovate']
+      ignoredIssueAuthorUsernames: ['renovate'],
+      triggerHandles: [],
+      requiredLabels: [],
     },
     availableAssignees: [],
     updatedAt: (result as { updatedAt: string }).updatedAt
@@ -14883,7 +14885,9 @@ test('worker scopes mapping saves and settings reads to the requested company', 
   ]);
   assert.deepEqual(companyOneBefore.advancedSettings, {
     defaultStatus: 'backlog',
-    ignoredIssueAuthorUsernames: ['renovate']
+    ignoredIssueAuthorUsernames: ['renovate'],
+    triggerHandles: [],
+    requiredLabels: [],
   });
   assert.deepEqual(companyOneBefore.availableAssignees, [
     {
@@ -14896,7 +14900,9 @@ test('worker scopes mapping saves and settings reads to the requested company', 
   ]);
   assert.deepEqual(companyTwoBefore.advancedSettings, {
     defaultStatus: 'backlog',
-    ignoredIssueAuthorUsernames: ['renovate']
+    ignoredIssueAuthorUsernames: ['renovate'],
+    triggerHandles: [],
+    requiredLabels: [],
   });
   assert.equal('availableAssignees' in companyTwoBefore, false);
 
@@ -14958,7 +14964,9 @@ test('worker scopes mapping saves and settings reads to the requested company', 
     reviewerAssigneeAgentId: 'agent-1',
     approverAssigneeUserId: 'user-3',
     defaultStatus: 'todo',
-    ignoredIssueAuthorUsernames: ['renovate', 'dependabot']
+    ignoredIssueAuthorUsernames: ['renovate', 'dependabot'],
+    triggerHandles: [],
+    requiredLabels: [],
   });
 
   const savedSettings = harness.getState({
@@ -15009,7 +15017,9 @@ test('worker scopes mapping saves and settings reads to the requested company', 
       reviewerAssigneeAgentId: 'agent-1',
       approverAssigneeUserId: 'user-3',
       defaultStatus: 'todo',
-      ignoredIssueAuthorUsernames: ['renovate', 'dependabot']
+      ignoredIssueAuthorUsernames: ['renovate', 'dependabot'],
+      triggerHandles: [],
+      requiredLabels: [],
     }
   });
 });
@@ -15081,7 +15091,9 @@ test('worker uses the host-authorized company scope for settings save actions', 
   assert.deepEqual(result.advancedSettings, {
     defaultAssigneeUserId: 'user-1',
     defaultStatus: 'todo',
-    ignoredIssueAuthorUsernames: ['renovate', 'dependabot']
+    ignoredIssueAuthorUsernames: ['renovate', 'dependabot'],
+    triggerHandles: [],
+    requiredLabels: [],
   });
 
   const savedSettings = harness.getState({
@@ -15122,7 +15134,9 @@ test('worker uses the host-authorized company scope for settings save actions', 
     'company-1': {
       defaultAssigneeUserId: 'user-1',
       defaultStatus: 'todo',
-      ignoredIssueAuthorUsernames: ['renovate', 'dependabot']
+      ignoredIssueAuthorUsernames: ['renovate', 'dependabot'],
+      triggerHandles: [],
+      requiredLabels: [],
     }
   });
 });
@@ -15162,7 +15176,9 @@ test('worker normalizes owner/repo slugs to canonical GitHub URLs when saving ma
     scheduleFrequencyMinutes: 15,
     advancedSettings: {
       defaultStatus: 'backlog',
-      ignoredIssueAuthorUsernames: ['renovate']
+      ignoredIssueAuthorUsernames: ['renovate'],
+      triggerHandles: [],
+      requiredLabels: [],
     },
     availableAssignees: [],
     updatedAt: (result as { updatedAt: string }).updatedAt
@@ -31880,4 +31896,301 @@ test('the unblock budget is only reset by a real transition into blocked', async
     currentStatus: 'in_review', nextStatus: 'in_progress',
     currentExternalStateHash: 'state-b', previousHash: 'state-a'
   }), 'state-a');
+});
+
+test('triggerHandles gate linked pull request comments before they count as interactions', async () => {
+  const workerModule = await importFreshWorkerModule();
+  const octokit = {
+    rest: {
+      issues: {
+        listComments: async () => ({
+          data: [{
+            id: 2001,
+            body: 'Human to human: I will handle the release notes.',
+            html_url: 'https://github.com/paperclipai/example-repo/pull/20#issuecomment-2001',
+            user: { login: 'pr-author' },
+            author_association: 'MEMBER',
+            created_at: '2026-07-07T01:00:00.000Z',
+            updated_at: '2026-07-07T01:00:00.000Z'
+          }]
+        })
+      },
+      pulls: {
+        listReviewComments: async () => ({
+          data: [{
+            id: 3001,
+            body: '> @soulpal001-morty please re-run the failing suite',
+            html_url: 'https://github.com/paperclipai/example-repo/pull/20#discussion_r3001',
+            user: { login: 'pr-reviewer' },
+            author_association: 'MEMBER',
+            created_at: '2026-07-07T01:00:00.000Z',
+            updated_at: '2026-07-07T01:00:00.000Z'
+          }]
+        })
+      }
+    }
+  };
+  const previous = [{
+    repositoryUrl: 'https://github.com/paperclipai/example-repo',
+    number: 20,
+    topLevelCommentCount: 0,
+    reviewCommentCount: 0
+  }];
+  const current = [{
+    repositoryUrl: 'https://github.com/paperclipai/example-repo',
+    number: 20,
+    topLevelCommentCount: 1,
+    reviewCommentCount: 1
+  }];
+  const params = {
+    octokit: octokit as never,
+    originalPosterLogin: 'pr-author',
+    previousCommentCounts: previous,
+    currentCommentCounts: current,
+    maintainerCache: new Map<string, boolean>()
+  };
+
+  // Default behavior: both the top-level comment and the review comment are trusted evidence.
+  assert.deepEqual(
+    await workerModule.__testing.listTrustedNewLinkedPullRequestCommentSources(params),
+    [
+      { repositoryUrl: 'https://github.com/paperclipai/example-repo', number: 20, kind: 'review' },
+      { repositoryUrl: 'https://github.com/paperclipai/example-repo', number: 20, kind: 'top_level' }
+    ]
+  );
+
+  // With a mention trigger, only the review comment that mentions a handle survives.
+  assert.deepEqual(
+    await workerModule.__testing.listTrustedNewLinkedPullRequestCommentSources({
+      ...params,
+      triggerHandles: ['soulpal001-morty']
+    }),
+    [
+      { repositoryUrl: 'https://github.com/paperclipai/example-repo', number: 20, kind: 'review' }
+    ]
+  );
+
+  // A configured trigger that is never mentioned leaves no interaction evidence at all.
+  assert.deepEqual(
+    await workerModule.__testing.listTrustedNewLinkedPullRequestCommentSources({
+      ...params,
+      triggerHandles: ['unrelated-agent']
+    }),
+    []
+  );
+});
+
+test('requiredLabels gate new imports while previously imported issues keep syncing', async () => {
+  const harness = createTestHarness({
+    manifest,
+    config: {
+      githubTokenRef: 'github-secret-ref',
+      paperclipApiBaseUrl: 'http://127.0.0.1:63675'
+    }
+  });
+  await plugin.definition.setup(harness.ctx);
+
+  await harness.performAction('settings.saveRegistration', {
+    companyId: 'company-1',
+    mappings: [
+      {
+        id: 'mapping-a',
+        repositoryUrl: 'paperclipai/example-repo',
+        paperclipProjectName: 'Engineering',
+        paperclipProjectId: 'project-1',
+        companyId: 'company-1'
+      }
+    ],
+    advancedSettings: {
+      requiredLabels: ['agent-ready']
+    },
+    syncState: {
+      status: 'idle'
+    }
+  });
+
+  // Imported before the label filter existed: it carries no required label and is already closed.
+  const previouslyImportedIssue = await harness.ctx.issues.create({
+    companyId: 'company-1',
+    projectId: 'project-1',
+    title: 'Unlabeled issue imported earlier',
+    status: 'todo'
+  });
+  await harness.ctx.state.set(
+    {
+      scopeKind: 'instance',
+      stateKey: 'paperclip-github-plugin-import-registry'
+    },
+    [
+      {
+        mappingId: 'mapping-a',
+        githubIssueId: 30301,
+        githubIssueNumber: 303,
+        paperclipIssueId: previouslyImportedIssue.id,
+        importedAt: '2026-04-09T09:00:00.000Z',
+        lastSeenCommentCount: 0,
+        lastSeenGitHubState: 'open',
+        repositoryUrl: 'https://github.com/paperclipai/example-repo',
+        paperclipProjectId: 'project-1',
+        companyId: 'company-1'
+      }
+    ]
+  );
+
+  const originalUpdate = harness.ctx.issues.update.bind(harness.ctx.issues);
+  const originalFetch = globalThis.fetch;
+  const githubIssues = [
+    {
+      id: 30101,
+      number: 301,
+      title: 'Labeled issue',
+      body: null,
+      html_url: 'https://github.com/paperclipai/example-repo/issues/301',
+      state: 'open',
+      comments: 0,
+      labels: [{ name: 'agent-ready', color: 'ededed' }]
+    },
+    {
+      id: 30201,
+      number: 302,
+      title: 'Unlabeled issue',
+      body: null,
+      html_url: 'https://github.com/paperclipai/example-repo/issues/302',
+      state: 'open',
+      comments: 0,
+      labels: [{ name: 'documentation', color: 'ededed' }]
+    },
+    {
+      id: 30301,
+      number: 303,
+      title: 'Unlabeled issue imported earlier',
+      body: null,
+      html_url: 'https://github.com/paperclipai/example-repo/issues/303',
+      state: 'closed',
+      state_reason: 'completed',
+      comments: 0,
+      labels: []
+    }
+  ];
+
+  globalThis.fetch = async (input, init) => {
+    const url = new URL(getRequestUrl(input));
+    const method = (init?.method ?? 'GET').toUpperCase();
+
+    if (url.origin === 'http://127.0.0.1:63675' && url.pathname === '/api/health') {
+      return jsonResponse({ deploymentMode: 'local_trusted' });
+    }
+
+    if (url.origin === 'http://127.0.0.1:63675' && method === 'GET' && url.pathname === '/api/companies/company-1/labels') {
+      return jsonResponse([
+        { id: 'label-agent-ready', companyId: 'company-1', name: 'agent-ready', color: '#6366f1' },
+        { id: 'label-documentation', companyId: 'company-1', name: 'documentation', color: '#6366f1' }
+      ]);
+    }
+
+    if (url.origin === 'http://127.0.0.1:63675' && method === 'PATCH' && url.pathname.startsWith('/api/issues/')) {
+      const issueId = url.pathname.split('/').pop() ?? '';
+      const body = getJsonRequestBody(init) ?? {};
+      const patch: Record<string, unknown> = {};
+      if (typeof body.status === 'string') {
+        patch.status = body.status;
+      }
+      await originalUpdate(issueId, patch as never, 'company-1');
+      return jsonResponse({ id: issueId, status: body.status ?? null });
+    }
+
+    if (url.pathname === '/repos/paperclipai/example-repo/issues' && ['all', 'open'].includes(url.searchParams.get('state') ?? '')) {
+      return jsonResponse(githubIssues);
+    }
+
+    if (url.pathname === '/graphql') {
+      const { query, variables } = getGraphqlRequest(init);
+      const issueNumber = typeof variables.issueNumber === 'number' ? variables.issueNumber : undefined;
+
+      if (query.includes('query GitHubIssueParentRelationships')) {
+        return graphqlIssueParentRelationshipsResponse([
+          { issueNumber: 301 },
+          { issueNumber: 302 },
+          { issueNumber: 303 }
+        ]);
+      }
+
+      if (query.includes('query GitHubRepositoryOpenIssueLinkedPullRequests')) {
+        return graphqlResponse({
+          repository: {
+            issues: {
+              pageInfo: { hasNextPage: false, endCursor: null },
+              nodes: [301, 302, 303].map((number) => ({
+                number,
+                closedByPullRequestsReferences: {
+                  pageInfo: { hasNextPage: false, endCursor: null },
+                  nodes: []
+                }
+              }))
+            }
+          }
+        });
+      }
+
+      if (query.includes('query GitHubIssueStatusSnapshot') && issueNumber !== undefined) {
+        const githubIssue = githubIssues.find((entry) => entry.number === issueNumber);
+        if (!githubIssue) {
+          throw new Error(`Unexpected GraphQL issue number: ${issueNumber}`);
+        }
+        return graphqlResponse({
+          repository: {
+            issue: {
+              number: issueNumber,
+              state: githubIssue.state === 'closed' ? 'CLOSED' : 'OPEN',
+              stateReason: githubIssue.state_reason?.toUpperCase() ?? null,
+              comments: { totalCount: githubIssue.comments },
+              closedByPullRequestsReferences: {
+                pageInfo: { hasNextPage: false, endCursor: null },
+                nodes: []
+              }
+            }
+          }
+        });
+      }
+    }
+
+    throw new Error(`Unexpected request during requiredLabels sync test: ${url.toString()}`);
+  };
+
+  try {
+    const sync = await harness.performAction('sync.runNow', {
+      companyId: 'company-1',
+      waitForCompletion: true
+    }) as {
+      syncState: {
+        status: string;
+        createdIssuesCount?: number;
+        syncedIssuesCount?: number;
+      };
+    };
+
+    assert.equal(sync.syncState.status, 'success');
+
+    const importedIssues = await harness.ctx.issues.list({ companyId: 'company-1' });
+    assert.deepEqual(
+      importedIssues.map((issue) => issue.title).sort(),
+      ['Labeled issue', 'Unlabeled issue imported earlier']
+    );
+    assert.equal(importedIssues.find((issue) => issue.title === 'Unlabeled issue')?.id, undefined);
+
+    const importRegistry = harness.getState({
+      scopeKind: 'instance',
+      stateKey: 'paperclip-github-plugin-import-registry'
+    }) as Array<{ githubIssueId?: number; paperclipIssueId?: string }>;
+    assert.deepEqual(
+      importRegistry.map((entry) => entry.githubIssueId).sort((left, right) => (left ?? 0) - (right ?? 0)),
+      [30101, 30301]
+    );
+
+    // The unlabeled issue that was imported before the filter existed keeps being synced: closing
+    // it on GitHub still moved its Paperclip issue to `done`.
+    assert.equal((await harness.ctx.issues.get(previouslyImportedIssue.id, 'company-1'))?.status, 'done');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
