@@ -134,6 +134,10 @@ const MISSING_BOARD_ACCESS_SYNC_ACTION =
   'Open plugin settings for each mapped company that sync will touch, connect Paperclip board access, approve the flow, and then run sync again.';
 const IMPORTED_ISSUE_WAKE_REASON = 'GitHub Sync imported an assigned issue that is ready for work.';
 const STATUS_TRANSITION_WAKE_REASON = 'GitHub Sync moved an assigned issue into its next active state.';
+const PULL_REQUEST_MERGED_WAKE_REASON =
+  'GitHub Sync: the linked pull request was merged. Finish the post-merge work and the merge handover, then close the issue.';
+const PULL_REQUEST_CLOSED_WAKE_REASON =
+  'GitHub Sync: the linked pull request was closed without merge. Decide how the issue continues.';
 const ISSUE_LINK_ENTITY_TYPE = 'paperclip-github-plugin.issue-link';
 const PULL_REQUEST_LINK_ENTITY_TYPE = 'paperclip-github-plugin.pull-request-link';
 const COMMENT_ANNOTATION_ENTITY_TYPE = 'paperclip-github-plugin.comment-annotation';
@@ -465,6 +469,7 @@ function reuseOrCreatePendingWake<T extends Omit<PendingRemoteActionWake, 'finge
     existing
     && existing.assigneeAgentId === next.assigneeAgentId
     && existing.mutation === next.mutation
+    && existing.reason === next.reason
     && existing.nextStatus === next.nextStatus
   ) {
     return existing as T & { fingerprint: string };
@@ -8230,6 +8235,28 @@ function selectEffectiveIssueLinkedPullRequestAction(
     trustedCommentSources,
     hasTrustedIssueComment
   )?.pullRequest;
+}
+
+/**
+ * The PR group's terminal outcome once no linked PR is open, with the follow-through owner of a PR
+ * that decided it: any merged PR decides a merge, otherwise every PR was closed without merge.
+ */
+function selectClosedDirectPullRequestHandoff(
+  snapshots: GitHubDirectPullRequestSyncSnapshot[]
+): { outcome: 'merged' | 'closed'; ownerCandidate?: string } | undefined {
+  if (snapshots.length === 0 || snapshots.some((entry) => entry.lifecycleState === 'open')) {
+    return undefined;
+  }
+  const outcome = snapshots.some((entry) => entry.lifecycleState === 'merged') ? 'merged' : 'closed';
+  const ownerCandidate = snapshots
+    .filter((entry) => entry.lifecycleState === outcome)
+    .map((entry) => entry.pullRequestLink.data)
+    .sort((left, right) =>
+      left.repositoryUrl.localeCompare(right.repositoryUrl)
+      || left.githubPullRequestNumber - right.githubPullRequestNumber
+    )
+    .find((link) => link.followThroughAssigneeAgentId)?.followThroughAssigneeAgentId;
+  return { outcome, ...(ownerCandidate ? { ownerCandidate } : {}) };
 }
 
 function isActionableDirectPullRequestGate(
@@ -16080,10 +16107,13 @@ async function synchronizePaperclipPullRequestIssueStatuses(
         remoteAction.selectedPullRequestGate
       );
       const hasTrustedNewComment = Boolean(effectiveGate?.trustedCommentKinds.length);
+      const closedPullRequestHandoff = effectiveGate
+        ? undefined
+        : selectClosedDirectPullRequestHandoff(pullRequestSnapshots);
       const followThroughAssigneeAgentId = await resolveValidFollowThroughAssigneeAgentId(
         ctx,
         mapping.companyId,
-        effectiveGate?.ownerCandidate
+        effectiveGate?.ownerCandidate ?? closedPullRequestHandoff?.ownerCandidate
       );
       const transitionFollowThroughAssigneeAgentId = isActionableDirectPullRequestGate(effectiveGate)
         ? followThroughAssigneeAgentId
@@ -16097,18 +16127,47 @@ async function synchronizePaperclipPullRequestIssueStatuses(
         commentCounts: canonicalizeGitHubPullRequestCommentCounts(currentCommentCounts)
       })).digest('hex');
       const createWakeFingerprint = () => createRemoteActionWakeFingerprint(remoteActionFingerprint);
+      // A merged or closed PR with a follow-through owner leaves work for that owner (closing out
+      // the work product, the merge handover), so sync hands the issue to that owner once and
+      // leaves closing it to them. The fingerprint marks the handoff as done; afterwards the issue
+      // is the owner's. An issue already `done` or `cancelled` when sync first sees the outcome
+      // stays closed: sync does not reopen a closed issue for an outcome it never handed over.
+      if (closedPullRequestHandoff && followThroughAssigneeAgentId) {
+        const isNewClosedOutcome = remoteAction.fingerprint !== remoteActionFingerprint;
+        if (!isNewClosedOutcome || paperclipIssue.status === 'done' || paperclipIssue.status === 'cancelled') {
+          if (isNewClosedOutcome) {
+            remoteAction.fingerprint = remoteActionFingerprint;
+            remoteAction.linkedPullRequestCommentCounts = currentCommentCounts;
+            remoteAction.selectedPullRequestGate = undefined;
+            await persistRemoteActionRegistry();
+          }
+          continue;
+        }
+      }
+      const closedPullRequestOwnerHandoff = closedPullRequestHandoff && followThroughAssigneeAgentId
+        ? {
+            principal: { kind: 'agent' as const, id: followThroughAssigneeAgentId },
+            role: 'executor' as const,
+            wakeReason: closedPullRequestHandoff.outcome === 'merged'
+              ? PULL_REQUEST_MERGED_WAKE_REASON
+              : PULL_REQUEST_CLOSED_WAKE_REASON
+          }
+        : undefined;
+      const transitionWakeReason = closedPullRequestOwnerHandoff?.wakeReason ?? STATUS_TRANSITION_WAKE_REASON;
       const paperclipIssueSyncContext = getPaperclipIssueSyncContext(paperclipIssue);
       const executorTransitionAssignee = resolvePaperclipIssueExecutorAssignee(
         paperclipIssueSyncContext,
         advancedSettings,
         transitionFollowThroughAssigneeAgentId
       );
-      let nextStatus = resolvePaperclipDirectPullRequestIssueStatus({
-        currentStatus: paperclipIssue.status,
-        pullRequests: pullRequestSnapshots,
-        effectiveGate,
-        hasExecutorHandoffTarget: Boolean(executorTransitionAssignee)
-      });
+      let nextStatus = closedPullRequestOwnerHandoff
+        ? 'in_progress'
+        : resolvePaperclipDirectPullRequestIssueStatus({
+            currentStatus: paperclipIssue.status,
+            pullRequests: pullRequestSnapshots,
+            effectiveGate,
+            hasExecutorHandoffTarget: Boolean(executorTransitionAssignee)
+          });
       if (
         paperclipIssue.status === 'blocked'
         && nextStatus !== 'blocked'
@@ -16155,7 +16214,7 @@ async function synchronizePaperclipPullRequestIssueStatuses(
         syncContext: paperclipIssueSyncContext
       });
       const shouldClearCompletedExecutionPolicy = nextStatus === 'done' || nextStatus === 'cancelled';
-      const nextTransitionAssignee = resolveSyncTransitionAssignee({
+      const nextTransitionAssignee = closedPullRequestOwnerHandoff ?? resolveSyncTransitionAssignee({
         currentStatus: paperclipIssue.status,
         nextStatus,
         syncContext: paperclipIssueSyncContext,
@@ -16171,7 +16230,7 @@ async function synchronizePaperclipPullRequestIssueStatuses(
       const shouldWakeTransitionAssignee =
         nextTransitionAssignee?.principal.kind === 'agent'
         && isActionablePaperclipIssueStatus(nextStatus)
-        && (nextAssigneeChanged || paperclipIssue.status !== nextStatus);
+        && (nextAssigneeChanged || paperclipIssue.status !== nextStatus || Boolean(closedPullRequestOwnerHandoff));
 
       if (paperclipIssue.status === nextStatus) {
         if (
@@ -16186,7 +16245,7 @@ async function synchronizePaperclipPullRequestIssueStatuses(
         const pendingWake = shouldWakeTransitionAssignee && nextTransitionAssignee?.principal.kind === 'agent'
           ? reuseOrCreatePendingWake(remoteAction.pendingWake, {
               assigneeAgentId: nextTransitionAssignee.principal.id,
-              reason: STATUS_TRANSITION_WAKE_REASON,
+              reason: transitionWakeReason,
               mutation: 'status_transition',
               previousStatus: paperclipIssue.status,
               nextStatus
@@ -16273,7 +16332,7 @@ async function synchronizePaperclipPullRequestIssueStatuses(
       const pendingWake = shouldWakeTransitionAssignee && nextTransitionAssignee?.principal.kind === 'agent'
         ? reuseOrCreatePendingWake(remoteAction.pendingWake, {
             assigneeAgentId: nextTransitionAssignee.principal.id,
-            reason: STATUS_TRANSITION_WAKE_REASON,
+            reason: transitionWakeReason,
             mutation: 'status_transition',
             previousStatus: paperclipIssue.status,
             nextStatus
