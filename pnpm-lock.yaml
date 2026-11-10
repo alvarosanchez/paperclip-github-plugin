@@ -170,8 +170,8 @@ importers:
         specifier: ^22.0.1
         version: 22.0.1
       '@paperclipai/plugin-sdk':
-        specifier: ^2026.831.1
-        version: 2026.1023.0(react@19.3.1)
+        specifier: ^2026.1106.0
+        version: 2026.1106.0(react@19.3.1)
       react:
         specifier: ^19.3.1
         version: 19.3.1
@@ -423,8 +423,8 @@ packages:
   '@octokit/types@18.0.0':
     resolution: {integrity: sha512-l6bAF43PNxkJp6g+W4PjoUSSkxHomXw2nOum5CTftJz1NlV3vu93NImgOYtLf6CbBUb5j+fiuzW0PPQ5JTSvZA==}
 
-  '@paperclipai/plugin-sdk@2026.1023.0':
-    resolution: {integrity: sha512-n0kNdEbFekD675ElKOhbV4wYowcxpwCNU8/Jtkl2WeAqIVgdxUyih4i9pAcbiIX67e21Jzpl1jMSgIjKZ5VIvw==}
+  '@paperclipai/plugin-sdk@2026.1106.0':
+    resolution: {integrity: sha512-dmRBcyEIsqKAxBfrqwVGNxnARCwsGCt2bhrch49E0jhGzo0wwn501W9B3YADggSTSbm81FxMu8/G9z/jDrNeKA==}
     engines: {node: '>=24.11.0'}
     hasBin: true
     peerDependencies:
@@ -433,8 +433,8 @@ packages:
       react:
         optional: true
 
-  '@paperclipai/shared@2026.1023.0':
-    resolution: {integrity: sha512-IWW78idhIw2MDM41tznnN83Fi/O8WlTIS6Sa6eoQYG1COQDEXaTTKsRO7+ekDd0DhNDuPNpi5Dzrc4ocUREmWQ==}
+  '@paperclipai/shared@2026.1106.0':
+    resolution: {integrity: sha512-fleBeHYbmnwdvEuzyQ4ABUFbHzqft47ni/ZktF1jWQsFkyfHmHBz5xFm3nfD3WZQ9UGnVZmXfEhfk+nizpeGEQ==}
     engines: {node: '>=24.11.0'}
 
   '@types/debug@4.1.13':
@@ -1126,14 +1126,14 @@ snapshots:
     dependencies:
       '@octokit/openapi-types': 29.0.1
 
-  '@paperclipai/plugin-sdk@2026.1023.0(react@19.3.1)':
+  '@paperclipai/plugin-sdk@2026.1106.0(react@19.3.1)':
     dependencies:
-      '@paperclipai/shared': 2026.1023.0
+      '@paperclipai/shared': 2026.1106.0
       zod: 4.6.7
     optionalDependencies:
       react: 19.3.1
 
-  '@paperclipai/shared@2026.1023.0':
+  '@paperclipai/shared@2026.1106.0':
     dependencies:
       three: 0.185.1
       zod: 4.6.7
