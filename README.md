@@ -65,6 +65,14 @@ The plugin does more than mirror issue text. It looks at linked pull requests, m
 
 Sync-driven transitions use a phase-aware durable action journal keyed by a fixed-length hash of the Paperclip issue, effective remote action, comment watermarks, and target state. A retry reuses an already completed explanatory comment or issue mutation instead of repeating it. If the worker can see an intent but cannot prove whether the corresponding side effect completed, it fails closed for operator reconciliation rather than risking a duplicate comment or status write.
 
+### Company dashboard visibility
+
+In **GitHub Sync settings → Dashboard visibility**, uncheck **Show GitHub on this company’s dashboard** to hide both GitHub dashboard cards and the global **Sync GitHub** button for the selected company. This preference is saved immediately and defaults to shown for existing and new companies. It does not require GitHub credentials or repository mappings, and the settings page remains available to show the surfaces again.
+
+This is a presentation preference: credentials, mappings, historical metrics, linked issues/PRs, project-specific controls, and automatic sync cadence are unchanged. Other companies on the instance keep their own preference. To stop automatic syncing as well, change the company's sync schedule separately.
+
+Paperclip wraps React dashboard slots in host-owned cards. The plugin uses a narrowly scoped CSS `:has()` rule on its own hidden marker to remove the immediate card wrapper too, without matching host class names. The global toolbar surface hides only itself, preserving neighbouring actions. Supported browsers must support CSS `:has()` (as already used by Paperclip); if the host changes its slot wrapper structure, rerun `pnpm test:dashboard-visibility` and validate in that host.
+
 ### Company KPI dashboard
 
 GitHub Sync exposes a dedicated KPI dashboard widget alongside the operational sync widget. During full company syncs, the worker snapshots the current open GitHub backlog and records when already-imported GitHub issues move from open to closed. The KPI widget turns that worker-owned state into backlog, issue-closure, and Paperclip PR-creation cards with recent history and comparisons against older periods.
@@ -561,3 +569,7 @@ If you want the seeded `CEO` agent used in manual verification to opt into Codex
 ## License
 
 Apache License 2.0. See [LICENSE](LICENSE).
+
+### Isolated dashboard visibility regression
+
+`pnpm exec playwright install chromium --only-shell` followed by `pnpm test:dashboard-visibility` exercises the built plugin exports in Chromium with the real worker's SDK test harness and Paperclip's React card-wrapper shape. It covers hiding complete cards, preserving neighbouring toolbar actions and unrelated widgets, restoring visibility, reloading saved state, switching companies, stale responses, and read-error recovery. All page network requests are blocked; no GitHub token or running Paperclip service is needed. This complements the full host-install smoke (`pnpm test:e2e`); it does not replace real-host compatibility qualification.
