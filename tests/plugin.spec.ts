@@ -31881,3 +31881,51 @@ test('the unblock budget is only reset by a real transition into blocked', async
     currentExternalStateHash: 'state-b', previousHash: 'state-a'
   }), 'state-a');
 });
+
+test('dashboard visibility defaults to visible and persists independently per company without setup', async () => {
+  const harness = createTestHarness({ manifest });
+  await plugin.definition.setup(harness.ctx);
+  assert.deepEqual(await harness.getData('ui.dashboardVisibility', { companyId: 'marketing' }), {
+    companyId: 'marketing', visible: true
+  });
+  const existingSettings = { mappings: [{ id: 'existing-mapping' }], scheduleFrequencyMinutes: 60,
+    githubTokenRefs: { platform: TEST_GITHUB_SECRET_ID }, syncState: { status: 'idle' } };
+  await harness.ctx.state.set({ scopeKind: 'instance', stateKey: 'paperclip-github-plugin-settings' }, existingSettings);
+  const before = structuredClone(existingSettings);
+  await Promise.all([
+    harness.performAction('ui.setDashboardVisibility', { companyId: 'marketing', visible: false }),
+    harness.performAction('ui.setDashboardVisibility', { companyId: 'platform', visible: true })
+  ]);
+  assert.deepEqual(await harness.getData('ui.dashboardVisibility', { companyId: 'marketing' }), {
+    companyId: 'marketing', visible: false
+  });
+  assert.deepEqual(await harness.getData('ui.dashboardVisibility', { companyId: 'platform' }), {
+    companyId: 'platform', visible: true
+  });
+  assert.deepEqual(await harness.ctx.state.get({ scopeKind: 'instance', stateKey: 'paperclip-github-plugin-settings' }), before);
+  // A new worker setup must read the persisted preference, rather than reset it.
+  const restarted = await importFreshWorker();
+  await restarted.definition.setup(harness.ctx);
+  assert.equal((await harness.getData<{ visible: boolean }>('ui.dashboardVisibility', { companyId: 'marketing' })).visible, false);
+  await harness.performAction('ui.setDashboardVisibility', { companyId: 'marketing', visible: true });
+  assert.equal((await harness.getData<{ visible: boolean }>('ui.dashboardVisibility', { companyId: 'marketing' })).visible, true);
+});
+
+test('dashboard visibility rejects missing company and non-boolean preferences', async () => {
+  const harness = createTestHarness({ manifest });
+  await plugin.definition.setup(harness.ctx);
+  await assert.rejects(harness.getData('ui.dashboardVisibility', {}), /companyId is required/);
+  await assert.rejects(harness.performAction('ui.setDashboardVisibility', { visible: false }), /companyId is required/);
+  await assert.rejects(harness.performAction('ui.setDashboardVisibility', { companyId: 'marketing', visible: 'false' }), /visible must be a boolean/);
+});
+
+
+test('dashboard visibility uses the host-authorized company instead of a spoofed payload', async () => {
+  const harness = createTestHarness({ manifest });
+  await plugin.definition.setup(harness.ctx);
+  await harness.performAction('ui.setDashboardVisibility', {
+    companyId: 'platform', visible: false
+  }, { companyId: 'marketing' });
+  assert.equal((await harness.getData<{ visible: boolean }>('ui.dashboardVisibility', { companyId: 'marketing' })).visible, false);
+  assert.equal((await harness.getData<{ visible: boolean }>('ui.dashboardVisibility', { companyId: 'platform' })).visible, true);
+});
