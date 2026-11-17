@@ -12,6 +12,8 @@ import rehypeSanitize, { defaultSchema } from 'rehype-sanitize';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 
+import { GitHubCompanyDashboardSurface, GitHubDashboardVisibilitySettings } from './dashboard-visibility.tsx';
+
 import { GITHUB_SYNC_PLUGIN_ID } from '../kpi-contract.ts';
 import { parseRepositoryReference, type ParsedRepositoryReference } from '../github-repo.ts';
 import { resolvePaperclipAuthControlsPolicy } from '../paperclip-health.ts';
@@ -12524,6 +12526,8 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
         </div>
       </section>
 
+      <GitHubDashboardVisibilitySettings key={hostContext.companyId} />
+
       <div className="ghsync__layout">
         <section className="ghsync__card">
           <div className="ghsync__card-header">
@@ -13428,7 +13432,7 @@ export function GitHubSyncSettingsPage(): React.JSX.Element {
   );
 }
 
-export function GitHubSyncDashboardWidget(): React.JSX.Element {
+function GitHubSyncDashboardWidgetContent(): React.JSX.Element {
   const hostContext = useHostContext();
   const toast = usePluginToast();
   const pluginIdFromLocation = getPluginIdFromLocation();
@@ -13793,7 +13797,7 @@ export function GitHubSyncDashboardWidget(): React.JSX.Element {
   );
 }
 
-export function GitHubSyncKpiDashboardWidget(): React.JSX.Element {
+function GitHubSyncKpiDashboardWidgetContent(): React.JSX.Element {
   const hostContext = useHostContext();
   const settings = usePluginData<GitHubSyncSettings>(
     'settings.registration',
@@ -14712,7 +14716,7 @@ function useGitHubSyncButtonController(props: {
   };
 }
 
-export function GitHubSyncGlobalToolbarButton(): React.JSX.Element | null {
+function GitHubSyncGlobalToolbarButtonContent(): React.JSX.Element | null {
   const context = useHostContext();
   return <GitHubSyncToolbarButtonSurface companyId={context.companyId} />;
 }
@@ -15323,3 +15327,15 @@ export function GitHubSyncIssueTaskDetailView(props?: PluginDetailTabProps): Rea
 export const GitHubSyncIssueDetailTab = GitHubSyncIssueTaskDetailView;
 
 export default GitHubSyncSettingsPage;
+
+export function GitHubSyncDashboardWidget(): React.JSX.Element {
+  return <GitHubCompanyDashboardSurface hideCardFrame><GitHubSyncDashboardWidgetContent /></GitHubCompanyDashboardSurface>;
+}
+
+export function GitHubSyncKpiDashboardWidget(): React.JSX.Element {
+  return <GitHubCompanyDashboardSurface hideCardFrame><GitHubSyncKpiDashboardWidgetContent /></GitHubCompanyDashboardSurface>;
+}
+
+export function GitHubSyncGlobalToolbarButton(): React.JSX.Element {
+  return <GitHubCompanyDashboardSurface><GitHubSyncGlobalToolbarButtonContent /></GitHubCompanyDashboardSurface>;
+}

@@ -37,7 +37,8 @@
     "test": "node --test tests/build-script.spec.mjs && tsx --test tests/git-branch-publisher.spec.ts tests/issue-interactions.spec.ts tests/issue-interactions-integration.spec.ts tests/plugin.spec.ts",
     "test:e2e": "pnpm build && pnpm exec playwright install chromium && node ./scripts/e2e/run-paperclip-smoke.mjs",
     "typecheck": "tsc --noEmit",
-    "verify:manual": "pnpm build && node ./scripts/e2e/manual-paperclip-verify.mjs"
+    "verify:manual": "pnpm build && node ./scripts/e2e/manual-paperclip-verify.mjs",
+    "test:dashboard-visibility": "pnpm build && node scripts/e2e/dashboard-visibility.mjs"
   },
   "dependencies": {
     "@octokit/rest": "^22.0.1",
@@ -53,6 +54,7 @@
     "@types/react": "19.3.0",
     "esbuild": "0.28.2",
     "playwright": "1.63.0",
+    "react-dom": "19.3.1",
     "tsx": "4.23.15",
     "typescript": "7.0.2"
   }

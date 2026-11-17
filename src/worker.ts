@@ -24785,6 +24785,25 @@ const plugin = definePlugin({
     // A fresh worker must not inherit a previous process's tool-access probe results.
     clearAgentToolAccessSummaryCache();
 
+    // Presentation-only, stored in a separate company scope so concurrent companies cannot
+    // overwrite each other's preference or registration/configuration state.
+    ctx.data.register('ui.dashboardVisibility', async (input) => {
+      const record = input && typeof input === 'object' ? input as Record<string, unknown> : {};
+      const companyId = normalizeCompanyId(record.companyId);
+      if (!companyId) throw new Error('companyId is required.');
+      const saved = await ctx.state.get({ scopeKind: 'company', scopeId: companyId, stateKey: 'dashboard-visibility' });
+      return { companyId, visible: saved !== false };
+    });
+
+    ctx.actions.register('ui.setDashboardVisibility', async (input, actionContext) => {
+      const record = normalizeActionRecord(input, actionContext);
+      const companyId = normalizeCompanyId(record.companyId);
+      if (!companyId) throw new Error('companyId is required.');
+      if (typeof record.visible !== 'boolean') throw new Error('visible must be a boolean.');
+      await ctx.state.set({ scopeKind: 'company', scopeId: companyId, stateKey: 'dashboard-visibility' }, record.visible);
+      return { companyId, visible: record.visible };
+    });
+
     ctx.data.register('settings.registration', async (input) => {
       const record = input && typeof input === 'object' ? input as Record<string, unknown> : {};
       const requestedCompanyId = normalizeCompanyId(record.companyId);
