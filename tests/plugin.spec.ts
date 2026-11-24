@@ -10653,6 +10653,148 @@ test('sync.runNow preserves and deduplicates durable direct-PR ownership across 
   }
 });
 
+test('sync.runNow hands a merged or closed direct PR to its follow-through owner instead of closing the issue', async () => {
+  const scenarios = [
+    {
+      name: 'merged with a follow-through owner',
+      pullRequestNumber: 501,
+      merged: true,
+      owner: 'engineer-agent',
+      initialStatus: 'in_review',
+      expectedStatus: 'in_progress',
+      expectedAssignee: 'engineer-agent',
+      expectedWakeReason: /pull request was merged/
+    },
+    {
+      name: 'merged without a follow-through owner',
+      pullRequestNumber: 502,
+      merged: true,
+      owner: undefined,
+      initialStatus: 'in_review',
+      expectedStatus: 'done',
+      expectedAssignee: 'po-agent',
+      expectedWakeReason: undefined
+    },
+    {
+      name: 'closed without merge with a follow-through owner',
+      pullRequestNumber: 503,
+      merged: false,
+      owner: 'engineer-agent',
+      initialStatus: 'in_review',
+      expectedStatus: 'in_progress',
+      expectedAssignee: 'engineer-agent',
+      expectedWakeReason: /closed without merge/
+    },
+    {
+      name: 'merged after the issue was already closed',
+      pullRequestNumber: 504,
+      merged: true,
+      owner: 'engineer-agent',
+      initialStatus: 'done',
+      expectedStatus: 'done',
+      expectedAssignee: 'po-agent',
+      expectedWakeReason: undefined
+    }
+  ];
+
+  for (const scenario of scenarios) {
+    const pullRequestNumber = scenario.pullRequestNumber;
+    const harness = await createProjectPullRequestsHarness();
+    const originalFetch = globalThis.fetch;
+    const originalRequestWakeup = harness.ctx.issues.requestWakeup.bind(harness.ctx.issues);
+    const wakeRequests: Array<{ issueId: string; options: { reason?: string } }> = [];
+    harness.ctx.agents.get = async (agentId, companyId) =>
+      ['engineer-agent', 'po-agent'].includes(agentId) && companyId === 'company-1'
+        ? { id: agentId, companyId, name: agentId } as never
+        : null;
+    harness.ctx.issues.requestWakeup = async (issueId, companyId, options) => {
+      wakeRequests.push({ issueId, options: options as { reason?: string } });
+      return originalRequestWakeup(issueId, companyId, options);
+    };
+    const issue = await harness.ctx.issues.create({
+      companyId: 'company-1',
+      projectId: 'project-1',
+      title: `Direct PR ${scenario.name}`,
+      status: scenario.initialStatus,
+      assigneeAgentId: 'po-agent'
+    } as never);
+    await upsertDirectPullRequestLink(harness, issue.id, pullRequestNumber, {
+      title: 'Terminal direct PR',
+      ...(scenario.owner ? { followThroughAssigneeAgentId: scenario.owner } : {})
+    });
+
+    globalThis.fetch = async (input, init) => {
+      const requestUrl = getRequestUrl(input);
+      const requestPathname = getDecodedRequestPathname(input);
+
+      if (requestPathname === `/repos/paperclipai/example-repo/pulls/${pullRequestNumber}`) {
+        return jsonResponse({
+          number: pullRequestNumber,
+          title: 'Terminal direct PR',
+          body: 'Done on GitHub.',
+          html_url: `https://github.com/paperclipai/example-repo/pull/${pullRequestNumber}`,
+          state: 'closed',
+          merged: scenario.merged
+        });
+      }
+
+      if (requestPathname === '/graphql') {
+        const { query } = getGraphqlRequest(init);
+        if (query.includes('query GitHubRepositoryOpenPullRequestStatuses')) {
+          return graphqlResponse({
+            repository: {
+              pullRequests: {
+                pageInfo: { hasNextPage: false, endCursor: null },
+                nodes: []
+              }
+            }
+          });
+        }
+      }
+
+      throw new Error(`Unexpected fetch during terminal direct PR test (${scenario.name}): ${requestUrl}`);
+    };
+
+    const runSync = async () => {
+      const sync = await harness.performAction('sync.runNow', {
+        companyId: 'company-1',
+        issueId: issue.id,
+        waitForCompletion: true
+      }) as {
+        syncState: { status: string };
+      };
+      assert.equal(sync.syncState.status, 'success', scenario.name);
+    };
+
+    try {
+      await runSync();
+      let updatedIssue = await harness.ctx.issues.get(issue.id, 'company-1');
+      assert.equal(updatedIssue?.status, scenario.expectedStatus, scenario.name);
+      assert.equal(updatedIssue?.assigneeAgentId, scenario.expectedAssignee, scenario.name);
+      const expectedWakes = scenario.expectedWakeReason ? 1 : 0;
+      assert.equal(wakeRequests.length, expectedWakes, `${scenario.name}: ${JSON.stringify(wakeRequests)}`);
+      if (scenario.expectedWakeReason) {
+        assert.match(wakeRequests[0]?.options.reason ?? '', scenario.expectedWakeReason, scenario.name);
+      }
+
+      await runSync();
+      assert.equal(wakeRequests.length, expectedWakes, `${scenario.name}: an unchanged outcome must not wake again`);
+
+      if (scenario.expectedStatus === 'in_progress') {
+        // The owner's run closes the issue; the same merged or closed PR must not reopen it.
+        await harness.ctx.issues.update(issue.id, { status: 'done' }, 'company-1');
+        await runSync();
+        updatedIssue = await harness.ctx.issues.get(issue.id, 'company-1');
+        assert.equal(updatedIssue?.status, 'done', `${scenario.name}: the owner's close must stick`);
+        assert.equal(wakeRequests.length, expectedWakes, scenario.name);
+      }
+    } finally {
+      harness.ctx.issues.requestWakeup = originalRequestWakeup;
+      globalThis.fetch = originalFetch;
+    }
+  }
+});
+
 test('sync.runNow does not let stale direct PR links close open GitHub issue-linked work', async () => {
   const harness = await createProjectPullRequestsHarness();
   const originalFetch = globalThis.fetch;
