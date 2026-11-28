@@ -170,14 +170,14 @@ importers:
         specifier: ^22.0.1
         version: 22.0.1
       '@paperclipai/plugin-sdk':
-        specifier: ^2026.831.1
+        specifier: ^2026.1117.0
         version: 2026.1117.0(react@19.3.1)
       react:
         specifier: ^19.3.1
         version: 19.3.1
       react-markdown:
         specifier: ^10.1.0
-        version: 10.1.0(@types/react@19.3.0)(react@19.3.1)
+        version: 10.1.0(@types/react@19.3.3)(react@19.3.1)
       rehype-raw:
         specifier: ^7.0.0
         version: 7.0.0
@@ -192,8 +192,8 @@ importers:
         specifier: 24.13.5
         version: 24.13.5
       '@types/react':
-        specifier: 19.3.0
-        version: 19.3.0
+        specifier: 19.3.3
+        version: 19.3.3
       esbuild:
         specifier: 0.28.2
         version: 0.28.2
@@ -458,8 +458,8 @@ packages:
   '@types/node@24.13.5':
     resolution: {integrity: sha512-TXyindR+lBr22aJIdMQzCFHPHR6cR4js838mRDCSz5hOKWZvZwsXSSiXDmjRj4iJmgl+sR9O+1mkoVBSMadNug==}
 
-  '@types/react@19.3.0':
-    resolution: {integrity: sha512-N0rFCuH9YoxG9/m61l9MfpJKfmLOVU0em7ipIz6TRgSSkvReLB9vL85GB+yr8Bs5leqpvg96JSwF4ZS1s4viQg==}
+  '@types/react@19.3.3':
+    resolution: {integrity: sha512-K8uWpJc4teiuOPdiP1umjeA9rGMgVPiXuoL66fcS1QlwBT1WMqY8PORmub9FadopIs+RCW6siYEs7Lpq+vDlog==}
 
   '@types/unist@2.0.11':
     resolution: {integrity: sha512-CmBKiL6NNo/OqgmMn95Fk9Whlp2mtvIv+KNpQKN2F4SjvrEesubTRWGYSg+BnWZOnlCaSTU1sMpsBOzgbYhnsA==}
@@ -1159,7 +1159,7 @@ snapshots:
     dependencies:
       undici-types: 7.18.2
 
-  '@types/react@19.3.0':
+  '@types/react@19.3.3':
     dependencies:
       csstype: 3.2.4
 
@@ -1785,11 +1785,11 @@ snapshots:
 
   property-information@7.2.0: {}
 
-  react-markdown@10.1.0(@types/react@19.3.0)(react@19.3.1):
+  react-markdown@10.1.0(@types/react@19.3.3)(react@19.3.1):
     dependencies:
       '@types/hast': 3.0.5
       '@types/mdast': 4.0.4
-      '@types/react': 19.3.0
+      '@types/react': 19.3.3
       devlop: 1.1.0
       hast-util-to-jsx-runtime: 2.3.7
       html-url-attributes: 3.0.1
